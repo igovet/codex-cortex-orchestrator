@@ -80,6 +80,11 @@ clarifications, escalations, blockers, and handoffs return to the main chat.
 The classification receipt is authoritative for initial complexity,
 requirements, and pipeline. The main orchestrator must choose the complete
 optional gate list from the available gates and pass it as `classify_task.pipeline`.
+Use canonical IDs only: `plan`, `discover`, `architecture`,
+`database_architecture`, `implementation`, `qa`, `security`, `performance`,
+`accessibility`, `ux`, `review`, `documentation`, and `close`. Cortex accepts
+the bounded compatibility aliases `planning`, `discovery`, and
+`verification`, but the orchestrator must not emit those human labels.
 When independent gates have no dependency or resource conflict, also pass
 ordered `classify_task.parallel_groups` waves; gates in one wave may execute
 concurrently and the next wave waits until every gate in the current wave is

@@ -71,6 +71,23 @@ AVAILABLE_GATES = {
     "qa", "security", "performance", "accessibility", "ux", "review",
     "documentation", "close",
 }
+# Gate IDs are part of the MCP contract.  The orchestrator sometimes emits
+# human-facing labels (for example, ``planning``) even though the durable
+# ledger uses the canonical IDs above.  Keep this compatibility map explicit
+# and bounded: unknown IDs must still fail closed instead of being guessed.
+PIPELINE_GATE_ALIASES = {
+    "planning": "plan",
+    "discovery": "discover",
+    "architecture_design": "architecture",
+    "database_design": "database_architecture",
+    "testing": "qa",
+    "verification": "qa",
+    "quality_assurance": "qa",
+    "code_review": "review",
+    "documentation_sync": "documentation",
+    "finalization": "close",
+    "closing": "close",
+}
 MANDATORY_PIPELINE_GATES = {
     "C1": ["documentation", "close"],
     "C2": ["documentation", "close"],
@@ -1404,8 +1421,20 @@ def normalize_parallel_groups(groups: Any, pipeline: list[str]) -> list[list[str
     return normalized
 
 
+def canonical_pipeline_gate(gate: Any) -> str:
+    """Return the canonical ledger ID for a gate label.
+
+    Only documented aliases are rewritten.  This is intentionally performed
+    before the syntax and availability checks so aliases work consistently in
+    both ``pipeline`` and ``parallel_groups`` without weakening validation.
+    """
+    value = str(gate).strip().lower()
+    value = re.sub(r"[\s-]+", "_", value)
+    return PIPELINE_GATE_ALIASES.get(value, value)
+
+
 def normalize_pipeline(pipeline: list[Any]) -> list[str]:
-    result = [str(gate).strip().lower() for gate in pipeline]
+    result = [canonical_pipeline_gate(gate) for gate in pipeline]
     if not result or len(result) != len(set(result)) or any(not GATE_RE.fullmatch(gate) for gate in result):
         raise ValueError("pipeline gates must be unique lowercase ids matching [a-z][a-z0-9_-]{0,63}")
     return result
@@ -1884,6 +1913,16 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
     pipeline_corrections = []
     if proposed_pipeline is not None:
         pipeline = normalize_pipeline(proposed_pipeline)
+        if isinstance(proposed_pipeline, list):
+            for raw_gate, canonical_gate in zip(proposed_pipeline, pipeline):
+                raw_label = str(raw_gate).strip().lower()
+                normalized_label = re.sub(r"[\s-]+", "_", raw_label)
+                if normalized_label != canonical_gate:
+                    pipeline_corrections.append({
+                        "from": str(raw_gate),
+                        "to": canonical_gate,
+                        "reason": "canonical gate alias",
+                    })
         unknown = sorted(set(pipeline) - AVAILABLE_GATES)
         if unknown:
             raise ValueError("pipeline contains unsupported gate ids: " + ", ".join(unknown))

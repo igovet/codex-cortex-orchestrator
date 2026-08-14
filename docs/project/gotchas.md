@@ -122,6 +122,12 @@
   `reassess_pipeline` accepts a new full list and applies additions, removals,
   or reordering under a revision guard; removing a completed gate requires
   explicit `allow_rework=true`.
+- Pipeline gate IDs are canonical lowercase identifiers (`plan`, `discover`,
+  `architecture`, `database_architecture`, `implementation`, `qa`, `security`,
+  `performance`, `accessibility`, `ux`, `review`, `documentation`, `close`).
+  The MCP boundary normalizes a bounded set of human labels such as
+  `planning`, `discovery`, and `verification` for adapter compatibility, but
+  still rejects unknown IDs instead of guessing.
 - Independent gates can be grouped into ordered `parallel_groups` waves. Only
   gates in the first unfinished wave are executable; each gate is completed
   and evidenced independently, and the next wave cannot start until all gates

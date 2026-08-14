@@ -43,6 +43,11 @@ also covers principal-bound classification and recoverable stale status/revision
 manifest reconciliation, global resource claims, numbered task/hook resolution,
 and lane lifecycle safety.
 
+Pipeline classification regressions prove that the bounded compatibility aliases
+`planning`, `discovery`, and `verification` normalize to the canonical `plan`,
+`discover`, and `qa` gate IDs in both the pipeline and parallel-group waves;
+unrecognized gate IDs remain hard validation errors.
+
 The isolated route regressions parse the canonical bundled skill contract and
 exercise fixture documentation trees. They prove help is read-only, an
 incremental harvest changes only evidence-justified generated facts while

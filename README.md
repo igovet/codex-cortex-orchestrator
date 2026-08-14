@@ -148,6 +148,12 @@ The classification receipt is also authoritative for the initial pipeline:
 the main orchestrator chooses the complete optional gate list from
 `available_gates` and passes it as `classify_task.pipeline`. Cortex validates
 those ids and appends only the mandatory `documentation` and `close` gates;
+the canonical gate IDs are `plan`, `discover`, `architecture`,
+`database_architecture`, `implementation`, `qa`, `security`, `performance`,
+`accessibility`, `ux`, `review`, `documentation`, and `close`. For adapter
+compatibility, bounded aliases such as `planning`, `discovery`, and
+`verification` are normalized to `plan`, `discover`, and `qa`; unknown IDs
+still fail closed.
 duplicate, truncated, malformed, or reordered `init_task.pipeline` input is
 ignored and reported through `pipeline_correction`, so mandatory gates cannot
 disappear because of a model-generated duplicate field. Calls that omit

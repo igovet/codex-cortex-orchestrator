@@ -274,6 +274,38 @@ class ControlPlaneTests(unittest.TestCase):
             {"gate": "close", "reason": "mandatory C3 audit gate"},
         ])
 
+    def test_classify_canonicalizes_human_pipeline_aliases(self):
+        self.activate()
+        classified = control.classify_task({
+            "complexity": "C3",
+            "requirements": ["The orchestrator selected the gates from the task shape"],
+            "pipeline": ["discovery", "planning", "verification"],
+            "parallel_groups": [["discovery"], ["planning", "verification"]],
+            "principal": "thread-a",
+        })
+        self.assertEqual(classified["pipeline_source"], "orchestrator")
+        self.assertEqual(classified["pipeline"], [
+            "discover", "plan", "qa", "documentation", "close",
+        ])
+        self.assertEqual(classified["parallel_groups"], [
+            ["discover"], ["plan", "qa"], ["documentation"], ["close"],
+        ])
+        self.assertEqual(classified["pipeline_corrections"][:3], [
+            {"from": "discovery", "to": "discover", "reason": "canonical gate alias"},
+            {"from": "planning", "to": "plan", "reason": "canonical gate alias"},
+            {"from": "verification", "to": "qa", "reason": "canonical gate alias"},
+        ])
+
+    def test_classify_still_rejects_unknown_pipeline_gate_ids(self):
+        self.activate()
+        with self.assertRaisesRegex(ValueError, "pipeline contains unsupported gate ids: mystery"):
+            control.classify_task({
+                "complexity": "C2",
+                "requirements": ["unknown gate should fail closed"],
+                "pipeline": ["mystery"],
+                "principal": "thread-a",
+            })
+
     def test_reassessment_accepts_orchestrator_selected_full_replacement(self):
         state = self.init(task_id="explicit-reassessment", complexity="C2")["state"]
         revised = control.reassess_pipeline({
