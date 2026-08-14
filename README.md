@@ -229,11 +229,16 @@ becomes `low`, and Sol uses at least `high`.
 
 Each delegation first produces an `awaiting_host_spawn` intent plus a complete
 native `spawn_agent` request. The main Codex agent calls that host tool, then
-records its returned child id with `confirm_host_spawn`; only then may the
-attempt publish reports or evidence. A native spawn failure is finalized as a
-non-success attempt rather than being represented as a running worker. The
-recorded child id is coordinator-supplied correlation, while Desktop/CLI host
-activity remains the source of truth for the actual worker. Each worker
+records its returned child id, actual `host_model`, and actual
+`host_reasoning_effort` with `confirm_host_spawn`; only model-verified
+confirmation may make the attempt running or allow successful completion. A
+missing host model is recoverable, while a requested/actual model mismatch
+(such as Luna requested but Terra started) terminalizes the attempt as failed
+with `host_model_mismatch` and cannot be reported as a successful Luna worker.
+A native spawn failure is finalized as a non-success attempt rather than being
+represented as a running worker. The recorded child id is coordinator-supplied
+correlation, while Desktop/CLI host activity remains the source of truth for
+the actual worker. Each worker
 publishes exactly the `cortex/report/v1` fields: `summary`,
 `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
 and `next_action`. `record_report` stores sanitized authoritative JSON, creates

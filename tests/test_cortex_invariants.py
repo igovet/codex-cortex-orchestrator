@@ -52,6 +52,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "task_id": task_id, "principal": "owner", "expected_revision": delegated["state"]["revision"],
             "attempt_id": delegated["attempt_id"], "host_agent_id": f"test-host-{delegated['attempt_id']}",
             "host_task_name": delegated["spawn_request"]["task_name"],
+            "host_model": delegated["spawn_request"]["model"],
         })
         return {**delegated, "state": confirmed["state"], "host_spawn": confirmed["host_spawn"]}
 
@@ -127,6 +128,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "expected_revision": state["revision"],
             "host_agent_id": "test-host-stale-revision",
             "host_task_name": delegated["spawn_request"]["task_name"],
+            "host_model": delegated["spawn_request"]["model"],
         })
         self.assertEqual(confirmed["revision_correction"], {
             "requested": state["revision"],

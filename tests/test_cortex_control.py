@@ -781,7 +781,7 @@ class ControlPlaneTests(unittest.TestCase):
                 "task_id": "host-name-contract", "principal": "thread-a",
                 "expected_revision": delegated["state"]["revision"],
                 "attempt_id": delegated["attempt_id"], "host_agent_id": "desktop-child-123",
-                "host_task_name": "cortex_discover_01",
+                "host_task_name": "cortex_discover_01", "host_model": delegated["spawn_request"]["model"],
             })
         self.assertEqual(corrected["task_name_correction"], {"requested": "cortex_discover_01", "used": "explorer"})
         self.assertEqual(corrected["host_spawn"]["task_name"], "explorer")
@@ -804,6 +804,54 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(recovered["recoverable"])
         self.assertIn("host_agent_id", recovered["next_action"])
 
+    def test_host_spawn_confirmation_requires_the_actual_host_model(self):
+        state = self.init(task_id="host-model-required")["state"]
+        observed = control.status({"task_id": "host-model-required", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "host-model-required", "principal": "thread-a", "expected_revision": state["revision"],
+            "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
+            "task_kind": "discover", "risk": "low", "objective": "inspect",
+            "ownership": "Read-only discovery", "allowed_paths": ["."],
+            "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
+        })
+        recovered = control.confirm_host_spawn({
+            "task_id": "host-model-required", "principal": "thread-a",
+            "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
+            "host_agent_id": "desktop-child-model-required",
+            "host_task_name": delegated["spawn_request"]["task_name"],
+        })
+        self.assertFalse(recovered["confirmed"])
+        self.assertTrue(recovered["recoverable"])
+        self.assertEqual(recovered["reason"], "host_model_required")
+        self.assertEqual(recovered["required_fields"], ["host_model"])
+        self.assertEqual(recovered["state"]["attempts"][-1]["status"], control.AWAITING_HOST_SPAWN)
+
+    def test_host_model_mismatch_fails_attempt_without_accepting_report(self):
+        state = self.init(task_id="host-model-mismatch")["state"]
+        observed = control.status({"task_id": "host-model-mismatch", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "host-model-mismatch", "principal": "thread-a", "expected_revision": state["revision"],
+            "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
+            "task_kind": "discover", "risk": "low", "objective": "inspect",
+            "ownership": "Read-only discovery", "allowed_paths": ["."],
+            "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
+        })
+        self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
+        mismatch = control.confirm_host_spawn({
+            "task_id": "host-model-mismatch", "principal": "thread-a",
+            "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
+            "host_agent_id": "desktop-child-terra-fallback",
+            "host_task_name": delegated["spawn_request"]["task_name"],
+            "host_model": "gpt-5.6-terra",
+        })
+        self.assertFalse(mismatch["confirmed"])
+        self.assertTrue(mismatch["failed"])
+        self.assertEqual(mismatch["reason"], "host_model_mismatch")
+        self.assertEqual(mismatch["expected_model"], "gpt-5.6-luna")
+        self.assertEqual(mismatch["actual_model"], "gpt-5.6-terra")
+        self.assertEqual(mismatch["state"]["attempts"][-1]["status"], "failed")
+        self.assertEqual(mismatch["state"]["attempts"][-1]["model_verification"], "mismatch")
+
     def test_worker_profile_alias_can_publish_its_own_report_with_correction(self):
         state = self.init(task_id="worker-report-alias")["state"]
         observed = control.status({"task_id": "worker-report-alias", "principal": "thread-a"})
@@ -817,7 +865,7 @@ class ControlPlaneTests(unittest.TestCase):
         confirmed = control.confirm_host_spawn({
             "task_id": "worker-report-alias", "principal": "thread-a",
             "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
-            "host_agent_id": "planner", "host_task_name": "planner",
+            "host_agent_id": "planner", "host_task_name": "planner", "host_model": delegated["spawn_request"]["model"],
         })
         report = control.record_report({
             "task_id": "worker-report-alias", "principal": "planner", "attempt_id": delegated["attempt_id"],
@@ -871,7 +919,7 @@ class ControlPlaneTests(unittest.TestCase):
         confirmed = control.confirm_host_spawn({
             "task_id": "host-spawn", "principal": "thread-a", "expected_revision": delegated["state"]["revision"],
             "attempt_id": delegated["attempt_id"], "host_agent_id": "desktop-child-123",
-            "host_task_name": delegated["spawn_request"]["task_name"],
+            "host_task_name": delegated["spawn_request"]["task_name"], "host_model": delegated["spawn_request"]["model"],
         })
         self.assertEqual(confirmed["state"]["attempts"][-1]["status"], "running")
         self.assertEqual(confirmed["host_spawn"]["agent_id"], "desktop-child-123")
@@ -930,6 +978,7 @@ class ControlPlaneTests(unittest.TestCase):
             "task_id": "recoverable-sequence", "principal": "thread-a",
             "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
             "host_agent_id": "luna-medium-worker", "host_task_name": delegated["spawn_request"]["task_name"],
+            "host_model": delegated["spawn_request"]["model"],
         })
         report = self.report("recoverable-sequence", delegated["attempt_id"])
         inferred = control.record_evidence({

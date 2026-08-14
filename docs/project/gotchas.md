@@ -84,6 +84,11 @@
   Every delegation is evaluated separately; Luna handles lightweight work at
   low or moderate risk regardless of the task's C1/C2/C3 classification, and
   all other non-security work uses Terra.
+- Host model confirmation is strict: `confirm_host_spawn` requires the actual
+  `host_model`, verifies it against the requested dispatch model, and marks a
+  mismatch such as requested Luna/actual Terra as `host_model_mismatch` rather
+  than allowing a false successful Luna result. A missing host model is a
+  recoverable response that must be retried with the host's actual model.
 - Classification receipts are authoritative. `init_task` ignores duplicate
   model-generated `complexity` and `requirements` fields instead of comparing
   them byte-for-byte.

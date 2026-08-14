@@ -96,6 +96,13 @@ weakening mandatory gates.
 3. Classify by shape: C1 is local and low-risk; C2 spans a component or has uncertainty; C3 crosses systems, data, security, infrastructure, or has high rollback cost.
 4. Choose models and reasoning effort per dispatch. Use one writer for overlapping paths, parallelize independent read-only work, and run independent verification before completion.
 
+After every native `spawn_agent` call, confirm the returned child with the
+actual `host_model` and `host_reasoning_effort`, not only the child id. Cortex
+requires the actual host model for model-routed attempts; a missing model is
+recoverable, while a requested/actual mismatch (for example Luna requested but
+Terra started) records `host_model_mismatch` and must not be reported as a
+successful worker.
+
 Use only the 21 profiles declared in `plugins/cortex/profiles.json`;
 `task_formatter` is retired. Record task kind, risk, complexity, requested
 capability, and the resolved capability. With multi-agent v2 enabled, every

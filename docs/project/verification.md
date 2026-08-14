@@ -52,6 +52,10 @@ an idempotent second pass.
 The v7 report regressions cover strict shape and redaction, task/attempt scope,
 one-use evidence receipts, explicit context grants, idempotent submissions,
 concurrent publishers, generated-Markdown repair, and capability-aware routing.
+Host-spawn binding regressions also prove that a model-routed attempt cannot
+become `running` without the host's actual `host_model`, and that a requested
+model mismatch (for example, Luna requested but Terra started) is terminalized
+as `host_model_mismatch` instead of being accepted as a successful dispatch.
 The repository validator additionally checks that all installable sources live
 under `plugins/cortex/`, `profiles.json` matches exactly 21 profile files,
 exactly 10 skills ship, all eight report fields are required, and the retired

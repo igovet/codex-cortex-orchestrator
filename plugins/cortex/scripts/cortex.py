@@ -3127,22 +3127,74 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             {"requested": host_task_name, "used": expected_task_name}
             if host_task_name != expected_task_name else None
         )
+        requested_model = str(
+            attempt.get("selected_model")
+            or (attempt.get("spawn_request") or {}).get("model")
+            or ""
+        ).strip()
+        host_model = redact(str(params.get("host_model", "")).strip(), 128) or None
+        if requested_model and not host_model:
+            return {
+                "confirmed": False,
+                "attempt_id": attempt_id,
+                "reason": "host_model_required",
+                "next_action": "retry confirm_host_spawn with the actual host_model returned by native spawn_agent",
+                "required_fields": ["host_model"],
+                "recoverable": True,
+                "task_name_correction": task_name_correction,
+                "revision_correction": revision_correction,
+                "state": state,
+            }
         host_spawn = {
             "tool": "spawn_agent",
             "agent_id": host_agent_id,
             "task_name": expected_task_name,
-            "model": redact(str(params.get("host_model", "")).strip(), 128) or None,
+            "model": host_model,
             "reasoning_effort": redact(str(params.get("host_reasoning_effort", "")).strip(), 64) or None,
+            "requested_model": requested_model or None,
             "confirmed_at": now(),
         }
+        model_verification = "not_requested"
+        if requested_model:
+            model_verification = "verified" if host_model == requested_model else "mismatch"
+        host_spawn["model_verification"] = model_verification
         if attempt.get("status") == "running":
             existing = attempt.get("host_spawn") or {}
-            if all(existing.get(key) == host_spawn.get(key) for key in ("tool", "agent_id", "task_name", "model", "reasoning_effort")):
+            if all(existing.get(key) == host_spawn.get(key) for key in ("tool", "agent_id", "task_name", "model", "reasoning_effort", "requested_model", "model_verification")):
                 return {"attempt_id": attempt_id, "idempotent": True, "revision_correction": revision_correction, "state": state}
             raise ValueError("running attempt already has a different host spawn binding")
         if attempt.get("status") != AWAITING_HOST_SPAWN or attempt.get("invalidated"):
             raise ValueError("only an active attempt awaiting host spawn can be confirmed")
+        if model_verification == "mismatch":
+            mismatch_reason = f"host_model_mismatch: requested {requested_model}, actual {host_model}"
+            attempt["host_spawn"] = host_spawn
+            attempt["model_verification"] = model_verification
+            attempt["status"] = "failed"
+            attempt["finalized_at"] = host_spawn["confirmed_at"]
+            attempt["finalization_reason"] = mismatch_reason
+            package_path = task_dir / "delegations" / f"{attempt_id}.json"
+            package = _read_private_json(package_path, "delegation package")
+            package["spawn_status"] = "confirmed_model_mismatch"
+            package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
+            package["host_spawn"] = host_spawn
+            package["model_verification"] = model_verification
+            write_json(package_path, package)
+            save_state(task_dir, task_dir / "current.json", state, "host_spawn_model_mismatch", f"{attempt_id}: {mismatch_reason}")
+            return {
+                "confirmed": False,
+                "failed": True,
+                "attempt_id": attempt_id,
+                "reason": "host_model_mismatch",
+                "detail": mismatch_reason,
+                "expected_model": requested_model,
+                "actual_model": host_model,
+                "host_spawn": host_spawn,
+                "task_name_correction": task_name_correction,
+                "revision_correction": revision_correction,
+                "state": state,
+            }
         attempt["host_spawn"] = host_spawn
+        attempt["model_verification"] = model_verification
         attempt["dispatch_correlation"] = "coordinator_recorded_host_spawn"
         attempt["status"] = "running"
         attempt["started_at"] = host_spawn["confirmed_at"]
@@ -3153,7 +3205,7 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
         package["host_spawn"] = host_spawn
         write_json(package_path, package)
         save_state(task_dir, task_dir / "current.json", state, "host_spawn", f"{attempt_id}: {expected_task_name}")
-        return {"attempt_id": attempt_id, "idempotent": False, "host_spawn": host_spawn, "task_name_correction": task_name_correction, "revision_correction": revision_correction, "state": state}
+        return {"confirmed": True, "attempt_id": attempt_id, "idempotent": False, "host_spawn": host_spawn, "task_name_correction": task_name_correction, "revision_correction": revision_correction, "state": state}
 
 
 def _attempt_evidence(state: dict[str, Any], attempt_id: str) -> list[dict[str, Any]]:
@@ -3266,6 +3318,15 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
         confirmed = None
         if params.get("host_agent_id") or params.get("host_task_name"):
             confirmed = confirm_host_spawn({**params, "attempt_id": attempt_id})
+            if confirmed.get("confirmed") is False:
+                return {
+                    "atomic": False,
+                    "attempt_id": attempt_id,
+                    "confirmed": confirmed,
+                    "report": None,
+                    "finalized": None,
+                    "state": confirmed["state"],
+                }
         report_result = None
         if isinstance(params.get("report"), dict):
             report_result = record_report({**params, "attempt_id": attempt_id, "report": params["report"]})
