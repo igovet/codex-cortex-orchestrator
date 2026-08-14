@@ -3,10 +3,10 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**3.2.2**. The public MCP surface has exactly five tools: three coordinator
+**3.3.0**. The public MCP surface has exactly six tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`—plus worker `record_report` and coordinator
+`manage_orchestration`—plus worker `worker_question` and `record_report`, and coordinator
 `read_worker_report`; existing v7 ledgers remain readable through a private
 compatibility adapter. Ledgers older than v7 have no compatibility reader and
 must be recreated.
@@ -168,10 +168,10 @@ for the new installation.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 3.2.2
+and secret-prone paths before validating the package again. The Cortex 3.3.0
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` still validates the
-previous `HEAD` and fails its 3.2.2 package contract. Commit only with explicit
+previous `HEAD` and fails its 3.3.0 package contract. Commit only with explicit
 authorization, then rerun the blocking check against that committed tree before
 any push, tag, or catalog submission.
 
@@ -255,7 +255,11 @@ and `build_verification` maps to the final `close` phase, avoiding repeated
 correction/retry loops around those common labels. `continue_orchestration` is called once per completed
 wave with the prior relative `step` and worker results. A sequential result
 needs no worker reference; a parallel wave uses only the returned slots
-`worker: 1..N`. Workers persist all eight report sections with `record_report`,
+`worker: 1..N`. Any worker can persist a material user decision through
+`worker_question`, pause without completing its attempt, receive the answer on
+the same `question_ref`, and resume the same native worker. Open blocking
+questions reject both report publication and wave continuation. Workers then
+persist all eight report sections with `record_report`,
 return only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
 summary (or the exact report-tool error), and the coordinator reads each ref
 with `read_worker_report`. If a native acknowledgement is interrupted after
@@ -266,7 +270,8 @@ before lifecycle state is written.
 Every task-bound lifecycle response returns an opaque `task_ref`. Preserve it
 on every later `continue_orchestration`, `manage_orchestration`, and
 `read_worker_report` call. Different task contracts may run concurrently below
-one project root; an exact duplicate active start is idempotent, while changed
+one project root; an exact duplicate active start is idempotent and explicitly
+returns `replayed: true` with no dispatches, while changed
 task or wave content creates a distinct task. If a later call omits the ref
 while several tasks are selectable, Cortex returns `needs_selection` with
 opaque refs and objectives instead of guessing.
@@ -275,7 +280,8 @@ Caller-generated submission, task, wave, attempt, coordinator, and host IDs
 do not cross the normal-flow boundary. Cortex owns transaction idempotency:
 an identical retry replays, a changed payload conflicts, and a stale relative
 step is rejected. `manage_orchestration` keeps inspect, resume, deactivate,
-lane, resource, and durable-question recovery outside the common path.
+lane, resource, durable-question recovery, and confirmed `prune` maintenance
+outside the common path.
 The coordinator owns the pipeline: it builds or consciously accepts the
 initial waves, follows the returned `pipeline` snapshot by default, and alone
 decides whether verified evidence justifies changing `future_waves`, with a
@@ -287,8 +293,10 @@ run merely to rediscover terminal proof.
 Existing `cortex/v7` ledgers remain inspectable and resumable through this v3
 adapter; the legacy `orchestrate` facade is not published in `tools/list`.
 
-Workers never call Cortex lifecycle operations. They use the native parent/child
-channel for questions, call only scoped `record_report` for their strict
+Workers never call Cortex lifecycle operations. They call scoped
+`worker_question` for unresolved material user decisions, use the native
+parent/child channel only to return its compact ref and receive the resume
+signal, and call scoped `record_report` for their strict
 eight-field `cortex/report/v1`, and never paste that JSON into the native final
 response. Expected validation
 and recovery outcomes return `ok: false`, bounded diagnostics, and an exact
@@ -458,12 +466,35 @@ symlink.
 
 ## Questions in the main chat
 
-Questions normally travel through the native parent/child channel and the main
-agent surfaces them to the user. Use
-`manage_orchestration(intent="question")` only when a pause must be durable
-across interruption. Its private payload commands remain `ask`, `publish`,
+Questions are durable for every worker profile. A worker calls
+`worker_question(action="ask")`, returns only `QUESTION_RECORDED` with the
+`question_ref` and a concise summary, remains available, and does not record a
+report. The main agent surfaces that exact ref with
+`manage_orchestration(intent="question")`, collects the user's answer, then
+signals the same worker to call `worker_question(action="poll")` and resume the
+same attempt. Its private payload commands remain `ask`, `publish`,
 `list`, `answer`, and `updates`; server-owned management transactions hide
 their lifecycle identifiers from the normal coordinator path.
+
+Every worker classifies an unknown before acting. Repository-answerable facts
+are investigated; low-impact reversible details may be chosen and documented;
+material product intent, behavior, audience, design direction, security,
+irreversibility, or external commitments must be asked. Existing source proves
+the current system, not the user's desired outcome. Cortex fails closed if a
+worker tries to report or the coordinator tries to continue while a blocking
+question remains open.
+
+## Prune maintenance
+
+The explicit `$cortex:orchestrator prune` route calls
+`manage_orchestration(intent="prune",
+payload={"confirmation":"PRUNE","older_than_days":7})` without a task ref.
+It removes only task-scoped `.codex/cortex` records last updated at least seven
+days ago, including abandoned active tasks, and reconciles task/v3 indexes,
+activations, transaction and classification receipts, task resource claims,
+and lane bindings. It preserves recent tasks, lanes themselves, project source,
+documentation, and plugin files. This bounded weekly prune replaces the unsafe
+idea of clearing the whole ledger.
 
 The native form supports one-choice options, multi-choice checkboxes via
 `multiple: true`, and always appends a final `custom_response` field for free
@@ -489,14 +520,14 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 3.2.2 source candidate has 234 passing Python tests in 15.481
-seconds; skill quick validation, plugin and marketplace validation, Python
-compilation, and shell syntax also pass. Cachebuster
-`3.2.2+codex.20260814215722` is installed and content-verified; installer check
+The current 3.3.0 source candidate has 237 passing Python tests in 15.491
+seconds; quick validation for the changed skills, plugin and marketplace
+validation, Python compilation, and shell syntax also pass. Cachebuster
+`3.3.0+codex.20260814224159` is installed and content-verified; installer check
 and dry-run pass with `agents.default_subagent_model=gpt-5.6-luna`. Cold-boot
 smoke, all three deterministic Luna-high fixtures, the eight-worker/five-wave
-benchmark target, and the isolated fresh-plugin probe also pass for 3.2.2.
-The earlier `3.2.1+codex.20260814203024` candidate remains historical evidence
+benchmark target, and the isolated fresh-plugin probe also pass for 3.3.0.
+The earlier 3.2.x candidates remain historical evidence
 for historical comparison only. The live Luna-high route, tracked release,
 commit, tag, push, catalog publication, and
 public release remain unverified.

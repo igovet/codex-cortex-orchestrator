@@ -2128,6 +2128,171 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(changed["ok"])
         self.assertNotEqual(changed["task_ref"], first["task_ref"])
         self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 2)
+        self.assertFalse(first["replayed"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["dispatches"], [])
+        self.assertIn("Do not invoke or repeat any worker dispatch", replay["next_action"])
+
+    def test_v3_worker_question_pauses_report_and_continue_then_resumes_same_attempt(self):
+        started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+        asked = control.worker_question({
+            **identity,
+            "action": "ask",
+            "question": "Which product outcome should this landing page optimize for?",
+            "header": "Primary goal",
+            "options": ["Sales", "Lead generation"],
+            "context": {"reason": "The repository cannot establish desired user intent."},
+        })
+        self.assertEqual(asked["outcome"], "question_recorded")
+        question_ref = asked["question_ref"]
+        rejected_report = control.publish_worker_report({**identity, "report": self.v3_report("premature")})
+        self.assertFalse(rejected_report["ok"])
+        self.assertEqual(rejected_report["code"], "blocking_question_open")
+        blocked = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"report": self.v3_report("premature")}],
+        })
+        self.assertFalse(blocked["ok"])
+        self.assertIn(question_ref, blocked["diagnostics"][0]["message"])
+        answered = control.answer_worker_question({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "thread_id": state["thread_id"],
+            "question_id": question_ref,
+            "submission_id": "user-answer-primary-goal",
+            "answer": "Lead generation",
+            "resume_context": {"source": "main_chat", "same_attempt": attempt["attempt_id"]},
+        })
+        self.assertEqual(answered["question"]["status"], "answered")
+        polled = control.worker_question({**identity, "action": "poll", "question_ref": question_ref})
+        self.assertEqual(polled["outcome"], "question_answered")
+        self.assertEqual(polled["answer_text"], "Lead generation")
+        after = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(after["attempts"][0]["attempt_id"], attempt["attempt_id"])
+        published = control.publish_worker_report({**identity, "report": self.v3_report("planned after answer")})
+        self.assertTrue(published["ok"])
+
+    def test_v3_non_planner_worker_question_is_answered_through_coordinator_management(self):
+        started = self.v3_start("backend behavior needs product choice", waves=[{
+            "workers": [{"phase": "implementation", "profile": "backend_dev"}],
+        }])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": "backend_dev",
+        }
+        asked = control.worker_question({
+            **identity,
+            "action": "ask",
+            "question": "Should the conflicting update fail or use last-write-wins semantics?",
+            "options": ["Fail on conflict", "Last write wins"],
+        })
+        managed = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "question",
+            "payload": {
+                "command": "answer",
+                "question_id": asked["question_ref"],
+                "answer": "Fail on conflict",
+                "resume_context": {"source": "main_chat", "same_attempt": attempt["attempt_id"]},
+            },
+        })
+        self.assertTrue(managed["ok"])
+        self.assertEqual(managed["result"]["question"]["status"], "answered")
+        polled = control.worker_question({**identity, "action": "poll", "question_ref": asked["question_ref"]})
+        self.assertEqual(polled["outcome"], "question_answered")
+        self.assertEqual(polled["answer_text"], "Fail on conflict")
+
+    def test_v3_prune_removes_only_confirmed_stale_task_state_and_is_idempotent(self):
+        old = self.v3_start("abandoned old task", waves=[{"workers": [{"phase": "discover"}]}])
+        recent = self.v3_start("recent active task", waves=[{"workers": [{"phase": "discover"}]}])
+        index = json.loads((self.ledger / "task-index.json").read_text(encoding="utf-8"))
+        old_task_id = next(task_id for task_id in index if control._v3_task_ref(task_id) == old["task_ref"])
+        old_dir = self.ledger / "tasks" / index[old_task_id]["directory"]
+        old_state_path = old_dir / "current.json"
+        old_state = json.loads(old_state_path.read_text(encoding="utf-8"))
+        old_state["updated_at"] = "2000-01-01T00:00:00+00:00"
+        old_state_path.write_text(json.dumps(old_state), encoding="utf-8")
+        old_task = json.loads((old_dir / "task.json").read_text(encoding="utf-8"))
+        classification_path = self.ledger / "classification-receipts" / f"{old_task['classification_id']}.json"
+        self.assertTrue(classification_path.is_file())
+        claims_path = self.ledger / "resource-claims.json"
+        claims_path.write_text(json.dumps({
+            "old": {"scope_kind": "task", "scope_id": old_task_id},
+            "lane": {"scope_kind": "lane", "scope_id": "shared-lane"},
+        }), encoding="utf-8")
+        lane_dir = self.ledger / "lanes" / "shared-lane"
+        lane_dir.mkdir(parents=True)
+        lane_state_path = lane_dir / "current.json"
+        lane_state_path.write_text(json.dumps({
+            "schema": control.SCHEMA,
+            "lane_id": "shared-lane",
+            "bound_tasks": [old_task_id, next(task_id for task_id in index if task_id != old_task_id)],
+        }), encoding="utf-8")
+        keep = self.project / "keep.txt"
+        keep.write_text("project data", encoding="utf-8")
+
+        rejected = control.manage_orchestration({
+            "project_root": str(self.project), "intent": "prune", "payload": {"older_than_days": 7},
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertTrue(old_dir.exists())
+        pruned = control.manage_orchestration({
+            "project_root": str(self.project),
+            "intent": "prune",
+            "payload": {"confirmation": "PRUNE", "older_than_days": 7},
+        })
+        self.assertTrue(pruned["ok"])
+        self.assertEqual(pruned["pruned_task_refs"], [old["task_ref"]])
+        self.assertFalse(old_dir.exists())
+        self.assertTrue(keep.is_file())
+        remaining_index = json.loads((self.ledger / "task-index.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(remaining_index), 1)
+        recent_task_id = next(iter(remaining_index))
+        self.assertEqual(control._v3_task_ref(recent_task_id), recent["task_ref"])
+        registry = json.loads((self.ledger / "v3-operations.json").read_text(encoding="utf-8"))
+        self.assertNotIn(old_task_id, registry["tasks"])
+        self.assertTrue(all(item.get("task_id") != old_task_id for item in registry["starts"].values()))
+        self.assertFalse(classification_path.exists())
+        claims = json.loads(claims_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(claims), {"lane"})
+        lane_state = json.loads(lane_state_path.read_text(encoding="utf-8"))
+        self.assertEqual(lane_state["bound_tasks"], [recent_task_id])
+        if (self.ledger / "active-tasks.json").exists():
+            active = json.loads((self.ledger / "active-tasks.json").read_text(encoding="utf-8"))
+            self.assertNotIn(old_task_id, active.values())
+        if (self.ledger / "activations.json").exists():
+            activations = json.loads((self.ledger / "activations.json").read_text(encoding="utf-8"))
+            self.assertTrue(all(item.get("task_id") != old_task_id for item in activations.values()))
+        if (self.ledger / "operations").exists():
+            operation_task_ids = {
+                json.loads(path.read_text(encoding="utf-8")).get("task_id")
+                for path in (self.ledger / "operations").glob("*.json")
+            }
+            self.assertNotIn(old_task_id, operation_task_ids)
+        replay = control.manage_orchestration({
+            "project_root": str(self.project),
+            "intent": "prune",
+            "payload": {"confirmation": "PRUNE", "older_than_days": 7},
+        })
+        self.assertEqual(replay["pruned_count"], 0)
 
     def test_v3_multiple_same_project_tasks_are_isolated_by_task_ref(self):
         starts = [
@@ -3572,13 +3737,14 @@ class ControlPlaneTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"})
+        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"})
         self.assertNotIn("orchestrate", names)
-        self.assertEqual(len(tools), 5)
+        self.assertEqual(len(tools), 6)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
         by_name = {item["name"]: item for item in tools}
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["required"], ["project_root", "task"])
         self.assertEqual(by_name["continue_orchestration"]["inputSchema"]["required"], ["project_root", "step", "results"])
+        self.assertEqual(by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
         forbidden = {"operation", "submission_id", "task_id", "wave_id", "attempt_id", "host_tool", "host_model", "host_reasoning_effort"}
         for name in ("start_orchestration", "continue_orchestration"):
             self.assertFalse(forbidden & set(by_name[name]["inputSchema"]["properties"]))
@@ -3748,7 +3914,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.2.2")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.3.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

@@ -18,19 +18,31 @@ commands. Do not use the deprecated `/prompts` mechanism.
 | `help` | `help` | Explain Cortex without writes. |
 | `harvest` | `harvest` | Incrementally synchronize knowledge docs. |
 | `harvest-refresh` | `harvest-refresh` | Fully re-audit knowledge docs. |
+| `prune` | `prune` | Remove project-local Cortex task state stale for at least seven days. |
 | `normal` | `normal` | Exit the active Cortex session. |
 
 Do not guess unknown arguments. Show help and ask the user to choose.
 
 The help route explains invocation, opt-in behavior, the project-local
-`.codex/cortex` ledger, the five v3 public tools, internal workers, and that
+`.codex/cortex` ledger, the six v3 public tools, internal workers, and that
 source/tests outrank generated docs. Help performs no activation, dispatch, or
 write.
 
-Non-help, non-`normal` routes explicitly authorize durable orchestration.
+The empty, `harvest`, and `harvest-refresh` routes explicitly authorize durable
+orchestration; `prune` authorizes only the bounded maintenance call below.
 Ordinary work never activates Cortex. The normal route uses
 `manage_orchestration` with intent `deactivate` only when a Cortex task is
 active.
+
+The `prune` route is maintenance, not a coding pipeline. After explicit user
+selection, call `manage_orchestration` once with exact absolute `project_root`,
+intent `prune`, no `task_ref`, and
+`payload: {"confirmation":"PRUNE","older_than_days":7}`. It removes only
+task-scoped `.codex/cortex` state last updated at least seven days ago,
+including abandoned active tasks, and reconciles task indexes, v3 starts,
+activations, operation receipts, classification receipts, task resource
+claims, and lane bindings. It preserves recent tasks, lanes, source,
+documentation, and plugin files. Never reinterpret `prune` as clear-all.
 
 ## Harvest route contract
 
@@ -193,8 +205,11 @@ should use canonical phases from the returned snapshot rather than guessing.
 
 ## Relative one-call-per-wave workflow
 
-1. Form the task objective, success criteria, constraints, paths, approval
-   boundaries, and user language. The coordinator owns the initial plan: it
+1. Form the task objective from what the user actually said. Preserve material
+   ambiguity: do not fabricate product intent, requirements, audience, design
+   direction, behavior, or acceptance merely to make the dispatch look
+   complete. Include success criteria, constraints, paths, approval boundaries,
+   and user language only when supplied or already established. The coordinator owns the initial plan: it
    may supply compact waves or consciously accept Cortex's safe standard C2
    proposal. In either case, treat the returned `pipeline` snapshot as the
    authoritative current coordinator plan.
@@ -205,7 +220,13 @@ should use canonical phases from the returned snapshot rather than guessing.
    are already filtered. Do not add IDs or turn expected model metadata into a
    native model override.
 4. Wait idly for the complete wave. Do not inspect or modify the project while
-   any worker is active. Each worker publishes its strict eight-section
+   any worker is active. Any profile may first publish a material question with
+   `worker_question(action="ask")`. The worker returns only its `question_ref`
+   and a concise summary, remains available, and does not publish a report.
+   Surface that exact ref with `manage_orchestration(intent="question")`, ask
+   the user, then signal the same native worker to poll the answer and resume
+   the same attempt. Do not dispatch a replacement or advance the wave. Once
+   complete, each worker publishes its strict eight-section
    `cortex/report/v1` through the scoped public `record_report` tool, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
@@ -233,6 +254,14 @@ report-read call. Use `manage_orchestration` for inspect, resume, deactivate,
 lane, resource, or a durable MCP UI question. Different task contracts may run
 concurrently in one project; an exact duplicate start remains an idempotent
 replay of the existing active task.
+
+`start_orchestration` is called exactly once per task contract. Its response
+contains `replayed`. A fresh start returns the only authorized dispatches; a
+replay returns no dispatches and must never launch a second wave. If the
+original response was lost before dispatch, use `manage_orchestration` inspect
+once and invoke only its still-awaiting recovery dispatches. Preparing native
+arguments, translating commentary, or recovering an acknowledgement is not a
+reason to restart.
 
 ## Model and dispatch contract
 
@@ -291,10 +320,17 @@ in report evidence. `record_report` rejects missing acknowledgements. Omitted
 selects only those dependencies. Cortex fails closed instead of silently
 dropping reports when the count or context budget would be exceeded.
 
-Questions normally return through the native parent channel. For a durable UI
-prompt, call `manage_orchestration` with intent `question`; Cortex projects it
-through MCP `elicitation/create` when the host advertises support. Never answer
-on the user's behalf if the host cannot render elicitation.
+Questions are a general worker lifecycle, not a Planner-only report field.
+Every worker distinguishes repository-resolvable facts, low-impact reversible
+choices, and material user decisions. Only the last category uses
+`worker_question`; never convert it into an assumption. Existing code describes
+the current system, not the user's desired outcome. The durable ref returns
+through the native parent channel; call `manage_orchestration` with intent
+`question` and that ref so Cortex projects it through MCP
+`elicitation/create`. After the answer, resume the same worker and let it poll.
+Open blocking questions make `record_report` and `continue_orchestration` fail
+closed. Never answer on the user's behalf if the host cannot render
+elicitation.
 
 Finish only after `outcome` is `completed` and report the verified handoff and
 any live-evaluation limitations plainly.

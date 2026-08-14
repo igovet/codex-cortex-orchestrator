@@ -22,7 +22,20 @@ same base version.
   only a compact `report_ref` plus at most a two-sentence summary, and the
   coordinator advances by ref. Persisted refs remain recoverable after a
   native worker acknowledgement is interrupted. Together with the three
-  coordinator lifecycle operations, these make the public surface five tools.
+  coordinator lifecycle operations and worker `worker_question`, these make
+  the public surface six tools.
+- Add a durable ask/poll protocol for every worker profile. Material questions
+  pause the same attempt, are surfaced by the main coordinator, and resume the
+  same native worker after the user answers. Report publication and wave
+  continuation now fail closed while a blocking question is open; Planner and
+  shared prompts explicitly forbid inventing missing product intent.
+- Add the explicit project-scoped `prune` maintenance route with exact
+  confirmation and a seven-day default. It removes stale task-scoped ledgers
+  and reconciles registry, receipt, claim, activation, and lane references
+  while preserving recent tasks and all project/plugin content.
+- Mark every start response as fresh or replayed and instruct the coordinator
+  that start is terminal for dispatch preparation, preventing a second
+  lifecycle call and duplicate worker invocation for the same task contract.
 - Require every worker to review all embedded predecessor handoffs and include
   the generated `Predecessor review:` acknowledgement in report evidence.
   Add phase-level `depends_on` selection and fail closed on predecessor-context

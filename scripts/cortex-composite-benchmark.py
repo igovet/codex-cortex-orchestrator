@@ -34,7 +34,7 @@ def main() -> int:
         "relative_v3_mcp_calls": facade,
         "reduction": round(reduction, 4),
         "target_met": facade == 1 + args.waves + args.workers * 2 and facade < legacy,
-        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"],
+        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"],
         "normal_operations": ["start_orchestration", "record_report", "read_worker_report", "continue_orchestration"],
         "note": "Call-count contract benchmark; durable worker report writes and coordinator reads are included, native host spawn calls are excluded.",
     }

@@ -677,7 +677,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         context = json.loads(completed.stdout)["additionalContext"]
         self.assertIn("internal worker, never user-facing", context)
         self.assertIn("native parent channel", context)
-        self.assertIn("call only the public record_report operation once", context)
+        self.assertIn("public worker_question when needed", context)
+        self.assertIn("public record_report once after all blocking questions are answered", context)
         self.assertIn("REPORT_RECORDED report_ref=<value>", context)
         self.assertIn("never paste the report JSON", context)
         self.assertIn("Never call Cortex lifecycle", context)
@@ -742,7 +743,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Cortex v3 exposes three coordinator lifecycle operations plus scoped report", skill)
+        self.assertIn("Cortex v3 exposes three coordinator lifecycle operations plus scoped worker", skill)
         self.assertIn("Coordinators use `start_orchestration`", skill)
         self.assertIn("`continue_orchestration` for normal work", skill)
         self.assertIn("Invoke each returned dispatch", skill)
@@ -890,6 +891,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "help": "help",
             "harvest": "harvest",
             "harvest-refresh": "harvest-refresh",
+            "prune": "prune",
             "normal": "normal",
         })
         help_section = skill.split("## Invocation and routes", 1)[1].split("## Relative one-call-per-wave workflow", 1)[0]

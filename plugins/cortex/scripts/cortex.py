@@ -11,13 +11,14 @@ import math
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import tomllib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -1708,6 +1709,24 @@ def _question_sequence(records: list[dict[str, Any]]) -> int:
     )
 
 
+def _open_blocking_questions(
+    task_dir: Path,
+    state: dict[str, Any],
+    attempt_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return unanswered material questions that pause an attempt or wave."""
+    question_root = task_dir / "questions"
+    if not question_root.exists():
+        return []
+    records = _question_records(question_bus_paths(task_dir), state)
+    return [
+        item for item in records
+        if item.get("status") == "open"
+        and bool(item.get("blocking", True))
+        and (attempt_id is None or item.get("attempt_id") == attempt_id)
+    ]
+
+
 def _read_private_json(path: Path, label: str) -> Any:
     path = _reject_symlink_ancestry(path, label)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -2962,7 +2981,13 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         lifecycle_contract = (
             "The main coordinator owns the complete Cortex lifecycle. Do not call start_orchestration, "
             "continue_orchestration, manage_orchestration, or any pipeline/gate/delegation operation. "
-            "Before finishing, call the public `record_report` tool exactly once with the exact project_root, "
+            "For a material question, call the public `worker_question` tool with action=ask and the exact "
+            "project_root, task_id, attempt_id, and profile above. Return only "
+            "`QUESTION_RECORDED question_ref=<value>` plus a concise question summary to the parent, remain "
+            "available, and do not publish a report. The main coordinator will ask the user and signal this same "
+            "worker; then call `worker_question` with action=poll and question_ref, consume the answer, and resume "
+            "this same attempt. Never ask through a worker-local UI and never replace an unanswered material "
+            "decision with an assumption. Before finishing, call the public `record_report` tool exactly once with the exact project_root, "
             "task_id, attempt_id, and profile above. Its report object must contain exactly: summary, findings, "
             "questions, changed_files, tests, evidence, uncertainty, and next_action. Use empty lists where needed. "
             "Every changed_files item must be a safe project-relative path such as "
@@ -2970,7 +2995,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Put descriptive details in findings or evidence instead. "
             "After a successful tool call, do not paste or reproduce that JSON in the parent channel. Return only "
             "`REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary. If the tool fails, return only "
-            "the exact error and a short blocker description. Use the native parent channel for questions. "
+            "the exact error and a short blocker description. "
             "Do not subdelegate unless the coordinator explicitly authorizes it."
         )
     else:
@@ -3115,6 +3140,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Use the fewest useful tool loops, but do not trade away correctness or required validation. Stop when the gate criteria are met; "
         "if a material decision or required fact remains unavailable, return the smallest concrete question or blocker instead of guessing.",
         "Use only tools actually available in this worker context. Record a limitation and use a safe fallback rather than inventing a tool, identifier, or mode.",
+        "Classify every unknown before acting: resolve repository-answerable facts from evidence; choose and document only low-impact, reversible implementation details; ask the user about any material intent, product behavior, security posture, irreversible action, external commitment, or trade-off that changes what should be built. Existing code describes the current state, not the user's desired outcome. If the user's objective is materially underspecified, preserve that ambiguity and ask instead of fabricating requirements, acceptance criteria, audience, design direction, or scope.",
         "",
         "## Worker protocol",
         task_context_line,
@@ -3202,6 +3228,13 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
         host_confirmation_pending = attempt.get("status") == AWAITING_HOST_SPAWN
         if attempt.get("invalidated") or attempt.get("status") not in {"running", AWAITING_HOST_SPAWN}:
             raise ValueError("cannot publish a report for an invalidated or terminal attempt")
+        open_questions = _open_blocking_questions(task_dir, state, attempt_id)
+        if open_questions:
+            refs = ", ".join(str(item["question_id"]) for item in open_questions)
+            raise ValueError(
+                f"cannot publish a report while blocking worker question(s) remain unanswered: {refs}; "
+                "resume this same worker after the coordinator records the user answer"
+            )
         report = sanitize_report_payload(params.get("report"))
         if params.get("_require_predecessor_review"):
             _validate_predecessor_review(report, list(attempt.get("context_report_ids") or []))
@@ -3286,16 +3319,32 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     profile = canonical_profile(params.get("profile") or "")
     if profile not in AGENTS:
         raise ValueError("profile must be an exact Cortex worker profile")
-    result = record_report({
-        "project_root": params.get("project_root"),
-        "task_id": params.get("task_id"),
-        "attempt_id": params.get("attempt_id"),
-        "principal": profile,
-        "report": params.get("report"),
-        "_require_predecessor_review": True,
-        "_require_knowledge_review": True,
-        "_require_harvest_manifest": True,
-    })
+    try:
+        result = record_report({
+            "project_root": params.get("project_root"),
+            "task_id": params.get("task_id"),
+            "attempt_id": params.get("attempt_id"),
+            "principal": profile,
+            "report": params.get("report"),
+            "_require_predecessor_review": True,
+            "_require_knowledge_review": True,
+            "_require_harvest_manifest": True,
+        })
+    except ValueError as exc:
+        message = str(exc)
+        if "blocking worker question(s) remain unanswered" not in message:
+            raise
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "awaiting_user",
+            "code": "blocking_question_open",
+            "diagnostics": [{"code": "blocking_question_open", "message": redact(message, 1000)}],
+            "next_action": (
+                "Return this exact blocker to the parent coordinator, remain available, poll the question answer "
+                "on this same attempt after the coordinator signals it, then resume before recording a report."
+            ),
+        }
     if result.get("recorded") is False:
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -3452,11 +3501,25 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
-        authorize(state, params)
+        facade_worker = bool(params.get("_facade_worker"))
+        if facade_worker:
+            authorize(state, {
+                "project_root": params.get("project_root"),
+                "principal": state.get("principal"),
+                "thread_id": state.get("thread_id"),
+            })
+        else:
+            authorize(state, params)
         preflight_journal(task_dir)
         attempt_id = safe_id(str(params.get("attempt_id", "")))
         attempt = _attempt(state, attempt_id)
-        if attempt.get("invalidated") or attempt.get("status") != "running":
+        allowed_statuses = {AWAITING_HOST_SPAWN, "running"} if facade_worker else {"running"}
+        if facade_worker and (
+            not attempt.get("facade_managed")
+            or canonical_profile(params.get("profile") or "") != attempt.get("profile")
+        ):
+            raise ValueError("worker question identity does not match this facade-managed attempt")
+        if attempt.get("invalidated") or attempt.get("status") not in allowed_statuses:
             raise ValueError("cannot publish a question for an invalidated or terminal attempt")
         submission_id = safe_id(str(params.get("submission_id", "")))
         question, context, blocking, config, content_digest = _question_payload(params)
@@ -3506,6 +3569,93 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         write_json_exclusive(paths["records"] / f"{question_id}.json", record)
         append_journal_best_effort(task_dir, "worker_question", f"{attempt_id} published {question_id}")
         return {"idempotent": False, "question": record, "cursor": sequence}
+
+
+def worker_question(params: dict[str, Any]) -> dict[str, Any]:
+    """Public facade adapter for durable ask/poll on one exact worker attempt."""
+    action = str(params.get("action") or "").strip().lower()
+    if action not in {"ask", "poll"}:
+        raise ValueError("worker question action must be ask or poll")
+    profile = canonical_profile(params.get("profile") or "")
+    if profile not in AGENTS:
+        raise ValueError("profile must be an exact Cortex worker profile")
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params.get("task_id") or ""), params)
+        attempt_id = safe_id(str(params.get("attempt_id") or ""))
+        attempt = _attempt(state, attempt_id)
+        if (
+            not attempt.get("facade_managed")
+            or attempt.get("profile") != profile
+            or attempt.get("invalidated")
+            or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running"}
+        ):
+            raise ValueError("worker question identity does not match an active facade-managed attempt")
+        if action == "ask":
+            if str(params.get("question_ref") or "").strip():
+                raise ValueError("ask must omit question_ref")
+            question = str(params.get("question") or "").strip()
+            if not question:
+                raise ValueError("ask requires question")
+            submission_id = safe_id(
+                f"public-{attempt_id}-question-"
+                + digest_text(json.dumps({
+                    "question": question,
+                    "context": params.get("context"),
+                    "header": params.get("header"),
+                    "options": params.get("options"),
+                    "multiple": bool(params.get("multiple", False)),
+                    "custom_label": params.get("custom_label"),
+                }, ensure_ascii=False, sort_keys=True, default=str))[:16]
+            )
+            result = publish_worker_question({
+                **params,
+                "submission_id": submission_id,
+                "blocking": True,
+                "_facade_worker": True,
+            })
+            record = result["question"]
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "outcome": "question_recorded",
+                "question_ref": record["question_id"],
+                "status": record["status"],
+                "idempotent": bool(result.get("idempotent")),
+                "next_action": (
+                    "Return only QUESTION_RECORDED question_ref=<value> plus a concise question summary to the "
+                    "parent coordinator; remain available and do not record a report until this question is answered."
+                ),
+            }
+        question_ref = safe_id(str(params.get("question_ref") or ""))
+        if any(params.get(field) not in (None, "", [], {}) for field in (
+            "question", "header", "options", "multiple", "custom_label", "context"
+        )):
+            raise ValueError("poll accepts only the question_ref and worker identity fields")
+        records = _question_records(question_bus_paths(task_dir), state)
+        record = next((item for item in records if item.get("question_id") == question_ref), None)
+        if record is None or record.get("attempt_id") != attempt_id or record.get("profile") != profile:
+            raise ValueError("question_ref does not belong to this worker attempt")
+        if record.get("status") != "answered":
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "outcome": "awaiting_user",
+                "question_ref": question_ref,
+                "status": record.get("status"),
+                "next_action": "Remain available; the parent coordinator must surface and answer this question.",
+            }
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "question_answered",
+            "question_ref": question_ref,
+            "status": "answered",
+            "answer": record.get("answer"),
+            "answer_text": record.get("answer_text"),
+            "resume_context": record.get("resume_context"),
+            "next_action": "Resume this same worker attempt with the user's answer; record the report only after the mission is complete.",
+        }
 
 
 def _question_record_view(record: dict[str, Any]) -> dict[str, Any]:
@@ -6355,6 +6505,13 @@ def _preflight_orchestrate_completion(
         if attempt.get("status") != requested_status:
             raise ValueError("completion status does not match the terminal ledger attempt")
         return
+    open_questions = _open_blocking_questions(task_dir, state, attempt_id)
+    if open_questions:
+        refs = ", ".join(str(item["question_id"]) for item in open_questions)
+        raise ValueError(
+            f"attempt has unanswered blocking worker question(s): {refs}; "
+            "answer the question and resume the same worker before completion"
+        )
     observation_source = str(completion.get("host_observation_source") or "").strip()
     if observation_source != "unattested_parent_result":
         required_host_fields = ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort")
@@ -7023,6 +7180,204 @@ def _write_v3_registry(root: Path, registry: dict[str, Any]) -> None:
     write_json(_v3_registry_path(root), registry)
 
 
+def _prune_timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _write_or_remove_json(path: Path, value: dict[str, Any]) -> None:
+    if value:
+        write_json(path, value)
+        return
+    if not path.exists():
+        return
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"prune target must be a regular file: {path.name}")
+    path.unlink()
+
+
+def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
+    """Delete only task-scoped Cortex state older than a confirmed age floor."""
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    unknown = sorted(set(payload) - {"confirmation", "older_than_days"})
+    if unknown:
+        raise ValueError("unsupported prune payload fields: " + ", ".join(unknown))
+    if payload.get("confirmation") != "PRUNE":
+        raise ValueError("prune requires payload.confirmation='PRUNE'")
+    days = payload.get("older_than_days", 7)
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650:
+        raise ValueError("prune older_than_days must be an integer from 1 through 3650")
+    if str(params.get("task_ref") or "").strip():
+        raise ValueError("prune is project-scoped and must omit task_ref")
+    root = ledger_root(params)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    with state_lock(root):
+        task_index = read_task_index(root)
+        stale: dict[str, Path] = {}
+        classification_ids: set[str] = set()
+        statuses: dict[str, str] = {}
+        for raw_task_id, entry in task_index.items():
+            task_id = safe_id(str(raw_task_id))
+            directory = entry.get("directory") if isinstance(entry, dict) else None
+            if not isinstance(directory, str) or Path(directory).name != directory or directory in {"", ".", ".."}:
+                raise ValueError(f"task index contains an unsafe directory for {task_id}")
+            task_dir = _contained_path(root / "tasks", root / "tasks" / directory, "prune task directory")
+            if not task_dir.exists():
+                continue
+            info = task_dir.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ValueError(f"prune task target is not a real directory: {directory}")
+            state_path = task_dir / "current.json"
+            task_path = task_dir / "task.json"
+            if not state_path.is_file() or state_path.is_symlink() or not task_path.is_file() or task_path.is_symlink():
+                raise ValueError(f"prune task ledger is incomplete or unsafe: {directory}")
+            state = _read_private_json(state_path, "prune task state")
+            task = _read_private_json(task_path, "prune task definition")
+            if state.get("task_id") != task_id or task.get("task_id") != task_id:
+                raise ValueError(f"prune task identity mismatch: {directory}")
+            updated = (
+                _prune_timestamp(state.get("updated_at"))
+                or _prune_timestamp(task.get("created_at"))
+                or datetime.fromtimestamp(task_dir.stat().st_mtime, timezone.utc)
+            )
+            if updated > cutoff:
+                continue
+            stale[task_id] = task_dir
+            statuses[task_id] = str(state.get("status") or "unknown")
+            for value in (state.get("classification_receipt"), task.get("classification_id")):
+                if str(value or "").strip():
+                    classification_ids.add(safe_id(str(value)))
+
+        stale_ids = set(stale)
+        if not stale_ids:
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "outcome": "pruned",
+                "older_than_days": days,
+                "cutoff": cutoff.isoformat(),
+                "pruned_count": 0,
+                "pruned_task_refs": [],
+                "retained_count": len(task_index),
+                "next_action": "No stale task-scoped Cortex state matched the age threshold.",
+            }
+
+        active_path = root / "active-tasks.json"
+        active = _read_private_json(active_path, "active task index") if active_path.exists() else {}
+        if not isinstance(active, dict):
+            raise ValueError("active task index is invalid")
+        active = {key: value for key, value in active.items() if value not in stale_ids}
+
+        activations_file = activation_path(root)
+        activations = _read_private_json(activations_file, "activation registry") if activations_file.exists() else {}
+        if not isinstance(activations, dict):
+            raise ValueError("activation registry is invalid")
+        activations = {
+            key: value for key, value in activations.items()
+            if not isinstance(value, dict) or value.get("task_id") not in stale_ids
+        }
+
+        registry = _v3_registry(root)
+        registry["tasks"] = {
+            key: value for key, value in registry["tasks"].items() if key not in stale_ids
+        }
+        registry["starts"] = {
+            key: value for key, value in registry["starts"].items()
+            if not isinstance(value, dict) or value.get("task_id") not in stale_ids
+        }
+
+        claims_path = root / "resource-claims.json"
+        claims = _read_private_json(claims_path, "resource claims") if claims_path.exists() else {}
+        if not isinstance(claims, dict):
+            raise ValueError("resource claims are invalid")
+        claims = {
+            key: value for key, value in claims.items()
+            if not (
+                isinstance(value, dict)
+                and value.get("scope_kind") == "task"
+                and value.get("scope_id") in stale_ids
+            )
+        }
+
+        lane_updates = 0
+        lanes_root = root / "lanes"
+        if lanes_root.exists():
+            if lanes_root.is_symlink() or not lanes_root.is_dir():
+                raise ValueError("lane registry must be a real directory")
+            for lane_dir in sorted(lanes_root.iterdir()):
+                if lane_dir.is_symlink() or not lane_dir.is_dir():
+                    raise ValueError("lane registry contains an unsafe entry")
+                lane_path = lane_dir / "current.json"
+                if not lane_path.exists():
+                    continue
+                lane = _read_private_json(lane_path, "lane state")
+                bound = lane.get("bound_tasks", [])
+                if not isinstance(bound, list):
+                    raise ValueError("lane bound_tasks is invalid")
+                filtered = [item for item in bound if item not in stale_ids]
+                if filtered != bound:
+                    lane["bound_tasks"] = filtered
+                    lane["updated_at"] = now()
+                    write_json(lane_path, lane)
+                    lane_updates += 1
+
+        operation_removals: list[Path] = []
+        operations_root = root / "operations"
+        if operations_root.exists():
+            if operations_root.is_symlink() or not operations_root.is_dir():
+                raise ValueError("operation registry must be a real directory")
+            for path in sorted(operations_root.glob("*.json")):
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("operation registry contains an unsafe entry")
+                record = _read_private_json(path, "operation record")
+                if isinstance(record, dict) and record.get("task_id") in stale_ids:
+                    operation_removals.append(path)
+
+        for task_id in stale_ids:
+            task_index.pop(task_id, None)
+        _write_or_remove_json(task_index_path(root), task_index)
+        _write_or_remove_json(active_path, active)
+        _write_or_remove_json(activations_file, activations)
+        _write_or_remove_json(claims_path, claims)
+        _write_v3_registry(root, registry)
+
+        removed_classifications = 0
+        classifications_root = root / "classification-receipts"
+        for classification_id in sorted(classification_ids):
+            path = classifications_root / f"{classification_id}.json"
+            if path.exists():
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("classification receipt prune target is unsafe")
+                path.unlink()
+                removed_classifications += 1
+        for path in operation_removals:
+            path.unlink()
+        for task_dir in stale.values():
+            shutil.rmtree(task_dir)
+
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "pruned",
+            "older_than_days": days,
+            "cutoff": cutoff.isoformat(),
+            "pruned_count": len(stale_ids),
+            "pruned_task_refs": [_v3_task_ref(task_id) for task_id in sorted(stale_ids)],
+            "pruned_statuses": {status: list(statuses.values()).count(status) for status in sorted(set(statuses.values()))},
+            "removed_operations": len(operation_removals),
+            "removed_classification_receipts": removed_classifications,
+            "updated_lanes": lane_updates,
+            "retained_count": len(task_index),
+            "next_action": "Prune completed; recent Cortex tasks and all project source/documentation were preserved.",
+        }
+
+
 def _v3_task_state(root: Path, task_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
     indexed = read_task_index(root).get(task_id)
     directory = indexed.get("directory") if isinstance(indexed, dict) else None
@@ -7303,7 +7658,13 @@ def _v3_native_arguments(request: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in arguments.items() if value is not None}
 
 
-def _v3_response(old: dict[str, Any], task_ref: str, *, include_result: bool = False) -> dict[str, Any]:
+def _v3_response(
+    old: dict[str, Any],
+    task_ref: str,
+    *,
+    include_result: bool = False,
+    start_replayed: bool | None = None,
+) -> dict[str, Any]:
     wave_label = str(old.get("wave_id") or "")
     wave_match = re.search(r"(\d+)$", wave_label)
     step = int(wave_match.group(1)) if wave_match else None
@@ -7329,7 +7690,7 @@ def _v3_response(old: dict[str, Any], task_ref: str, *, include_result: bool = F
             response["pipeline"] = old["pipeline"]
         return response
     requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
-    dispatches = [
+    prepared_dispatches = [
         {
             "worker": index,
             "phase": request.get("phase"),
@@ -7342,10 +7703,28 @@ def _v3_response(old: dict[str, Any], task_ref: str, *, include_result: bool = F
         }
         for index, request in enumerate(requests, 1)
     ]
+    # A replay is a lifecycle receipt, never a second host-dispatch grant. If
+    # the original response was lost before any native call was made, inspect
+    # can recover only the still-awaiting requests without making every exact
+    # duplicate start capable of spawning a duplicate worker wave.
+    dispatches = [] if start_replayed is True else prepared_dispatches
     outcome = old.get("state")
-    if dispatches:
+    if start_replayed is True:
         next_action = (
-            f"{COORDINATOR_LOCK} Run every dispatch exactly and wait idly. Each successful worker must publish "
+            f"{COORDINATOR_LOCK} start_orchestration was already completed for task_ref={task_ref}. "
+            "Do not invoke or repeat any worker dispatch from this replay. If the original start response was "
+            "lost before its native dispatches were invoked, call manage_orchestration with intent inspect once "
+            "and invoke only the still-awaiting dispatches returned by that recovery call."
+        )
+    elif dispatches:
+        start_transition = (
+            f" start_orchestration is complete for task_ref={task_ref}; never call it again for this task."
+            if start_replayed is not None else ""
+        )
+        next_action = (
+            f"{COORDINATOR_LOCK}{start_transition} Run every dispatch exactly and wait idly. "
+            "Do not repeat a completed lifecycle call while preparing the native dispatch. "
+            "Each successful worker must publish "
             "through record_report and return only a report_ref plus a short summary. Read every report_ref with "
             "read_worker_report, decide whether the coordinator-owned pipeline still fits, then call "
             f"continue_orchestration with task_ref={task_ref}, the report_ref values, and this step."
@@ -7368,6 +7747,8 @@ def _v3_response(old: dict[str, Any], task_ref: str, *, include_result: bool = F
         "dispatches": dispatches,
         "next_action": next_action,
     }
+    if start_replayed is not None:
+        response["replayed"] = start_replayed
     if isinstance(old.get("pipeline"), dict):
         response["pipeline"] = old["pipeline"]
     if outcome == "completed":
@@ -7381,7 +7762,7 @@ def _v3_response(old: dict[str, Any], task_ref: str, *, include_result: bool = F
     return response
 
 
-def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple[str, str, str, str]:
+def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple[str, str, str, str, bool]:
     root = ledger_root(params)
     start_digest = _orchestrate_request_digest({"task": task, "waves": params.get("waves")})
     with state_lock(root):
@@ -7395,7 +7776,13 @@ def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple
             # but before orchestrate() creates the task ledger; allocating a
             # second task here would split one idempotent start across sessions.
             if loaded is None or loaded[1].get("status") in {"active", "blocked"}:
-                return task_id, str(prior["task_ref"]), str(prior["principal"]), str(prior["submission_id"])
+                return (
+                    task_id,
+                    str(prior["task_ref"]),
+                    str(prior["principal"]),
+                    str(prior["submission_id"]),
+                    True,
+                )
         objective_slug = re.sub(r"[^a-z0-9]+", "-", str(task["objective"]).lower()).strip("-")[:48] or "task"
         task_id = safe_id(f"{objective_slug}-{secrets.token_hex(4)}")
         task_ref = _v3_task_ref(task_id)
@@ -7411,7 +7798,7 @@ def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple
         registry["starts"][start_digest] = reservation
         registry["tasks"].setdefault(task_id, {})["start"] = {"digest": start_digest, **reservation}
         _write_v3_registry(root, registry)
-        return task_id, task_ref, principal, submission_id
+        return task_id, task_ref, principal, submission_id, False
 
 
 def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
@@ -7446,7 +7833,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             _v3_compact_waves(params["waves"], task, project_root=selected_project_root)
             if params.get("waves") is not None else _v3_auto_waves(task)
         )
-        task_id, task_ref, principal, submission_id = _v3_start_reservation(params, task)
+        task_id, task_ref, principal, submission_id, replayed = _v3_start_reservation(params, task)
         old = orchestrate({
             "operation": "start",
             "submission_id": submission_id,
@@ -7457,7 +7844,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "waves": waves,
             "host_capabilities": _v3_host_capabilities(),
         })
-        return _v3_response(old, task_ref)
+        return _v3_response(old, task_ref, start_replayed=replayed)
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         return _v3_error("start_validation_failed", exc)
 
@@ -7600,6 +7987,16 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         if active_replay is not None:
             return active_replay
         _, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
+        open_questions = [
+            item for item in _open_blocking_questions(task_dir, state)
+            if item.get("attempt_id") in set(attempt_ids)
+        ]
+        if open_questions:
+            refs = ", ".join(str(item["question_id"]) for item in open_questions)
+            raise ValueError(
+                f"active wave has unanswered blocking worker question(s): {refs}; "
+                "surface each question to the user and resume the same worker before continue_orchestration"
+            )
         if params.get("future_waves") is not None and not str(params.get("reason") or "").strip():
             raise ValueError(
                 "future_waves requires a concise reason identifying the new evidence or coordinator decision"
@@ -7731,11 +8128,14 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "resume": "resume", "retry": "resume", "continue_blocked": "resume",
             "deactivate": "deactivate", "normal": "deactivate", "stop_session": "deactivate",
             "lane": "lane", "resource": "resource", "question": "question",
+            "prune": "prune", "cleanup": "prune",
         }
         intent = aliases.get(intent_raw)
         if not intent:
             suggestions = difflib.get_close_matches(intent_raw, sorted(aliases), n=3)
             raise ValueError("management intent is not recognized" + (f"; try {', '.join(suggestions)}" if suggestions else ""))
+        if intent == "prune":
+            return prune_orchestration_state(params)
         resolved = _v3_resolve_task(
             params,
             include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "deactivate"},
@@ -8067,6 +8467,25 @@ WORKER_RECORD_REPORT_SCHEMA = {
     },
     "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
 }
+WORKER_QUESTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "project_root": {"type": "string", "minLength": 1},
+        "task_id": {"type": "string", "minLength": 1},
+        "attempt_id": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "enum": sorted(AGENTS)},
+        "action": {"type": "string", "enum": ["ask", "poll"]},
+        "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
+        "question": {"type": "string", "minLength": 1, "description": "Material user decision; required for ask."},
+        "header": {"type": "string"},
+        "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA},
+        "multiple": {"type": "boolean"},
+        "custom_label": {"type": "string"},
+        "context": {},
+    },
+    "required": ["project_root", "task_id", "attempt_id", "profile", "action"],
+}
 READ_WORKER_REPORT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -8082,10 +8501,10 @@ MANAGE_ORCHESTRATION_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-        "intent": {"type": "string", "description": "Recovery intent such as inspect, resume, deactivate, lane, resource, or question; common aliases are normalized."},
+        "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, lane, resource, question, or prune; common aliases are normalized."},
         "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
         "reason": {"type": "string"},
-        "payload": {"type": "object", "description": "Rare-operation payload. Normal wave progression never uses this field."},
+        "payload": {"type": "object", "description": "Rare-operation payload. Prune requires confirmation='PRUNE' and accepts older_than_days (default 7). Normal wave progression never uses this field."},
     },
     "required": ["project_root"],
 }
@@ -8199,18 +8618,20 @@ for _field in ("allowed_paths", "acceptance_criteria", "verification"):
 
 # Cortex v3 keeps the v7 ledger and v2 facade as private compatibility
 # primitives. Coordinators see relative lifecycle operations plus a bounded
-# report read; workers get one scoped report-publish operation.
+# report read; workers get scoped question and report-publish operations.
 PUBLIC_TOOLS = {
     "start_orchestration": TOOLS["start_orchestration"],
     "continue_orchestration": TOOLS["continue_orchestration"],
     "manage_orchestration": TOOLS["manage_orchestration"],
+    "worker_question": (worker_question, WORKER_QUESTION_SCHEMA),
     "record_report": (publish_worker_report, WORKER_RECORD_REPORT_SCHEMA),
     "read_worker_report": (read_worker_report, READ_WORKER_REPORT_SCHEMA),
 }
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from its objective. Cortex creates internal identifiers and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover a Cortex task, or use an uncommon lane, resource, or durable question operation.",
+    "manage_orchestration": "Inspect, recover, prune stale task state, or use an uncommon lane, resource, or coordinator-side durable question operation.",
+    "worker_question": "Worker-only operation: persist a material question or poll its answer while keeping the same attempt alive. Ask before guessing; do not record a report while a blocking question is open.",
     "record_report": "Worker-only operation: persist the active attempt's strict report and return a compact report_ref. Do not paste the report body into the parent channel after success.",
     "read_worker_report": "Coordinator operation: read one persisted worker report by report_ref before evaluating the gate or changing the pipeline.",
 }

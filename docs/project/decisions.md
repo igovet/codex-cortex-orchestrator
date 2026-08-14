@@ -9,11 +9,11 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative five-tool public facade
+## Relative six-tool public facade
 
-The public API exposes exactly five tools. Coordinators use the three lifecycle
+The public API exposes exactly six tools. Coordinators use the three lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; workers use only `record_report`, and coordinators read
+`manage_orchestration`; workers use only `worker_question` and `record_report`, and coordinators read
 the resulting refs with `read_worker_report`. A coordinator starts a task with
 the compact task contract, then continues once per completed wave.
 The active-wave cursor is a relative `step`; parallel results use only
@@ -26,6 +26,13 @@ final. The coordinator reads each ref, then Continue validates all parallel
 refs before state writes, records evidence and gates, and returns the next
 step. Interrupted native acknowledgement is recoverable because inspect lists
 persisted `available_reports`.
+
+The separate worker question operation exists because a native parent-channel
+message alone cannot enforce a pause. Every profile may persist a material
+question, return its compact ref, remain alive, and poll the answer on the same
+attempt. Report intake and continuation fail closed while a blocking question
+is open. This preserves dialogue without treating Planner as a special case or
+forcing a replacement worker after every user response.
 
 The coordinator is the sole pipeline authority: it builds or consciously
 accepts the initial waves, follows the returned pipeline snapshot by default,
@@ -45,6 +52,13 @@ nested operations of the same facade. Legacy v7 primitives remain internal;
 existing v7 task data stays inspectable and resumable. This reduces public
 lifecycle coupling while retaining the durable ledger's auditability.
 
+Project cleanup is a bounded `prune` management operation rather than clear.
+It requires explicit confirmation and an age threshold (seven days by default),
+then removes stale task-scoped state and its secondary references while keeping
+recent tasks, durable lanes, and all project/plugin content. Age is the only
+safe cross-session liveness boundary because several sessions may use one
+project ledger concurrently.
+
 Each mutating request uses server-owned digest receipts. Identical retries
 replay safely; changed payloads and stale steps conflict before partial writes.
 This is deliberately per project root: every call carries an absolute
@@ -56,7 +70,9 @@ The public exception is the opaque `task_ref` returned by Cortex. The
 coordinator preserves it on every later lifecycle and report-read call so
 different task contracts can run concurrently below one project root without
 cross-session ambiguity. A byte-identical active start replays the same task;
-changed task or wave content creates a distinct task. If a ref is omitted while
+the replay returns no native dispatches and therefore cannot launch a duplicate
+wave. If the original response was lost before dispatch, management inspect
+recovers only still-awaiting requests. Changed task or wave content creates a distinct task. If a ref is omitted while
 several tasks are selectable, Cortex returns `needs_selection` with bounded
 objective/ref candidates instead of relying on a process-wide "active task."
 

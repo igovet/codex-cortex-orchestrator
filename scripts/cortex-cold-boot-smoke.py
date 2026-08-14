@@ -74,11 +74,18 @@ def run(base: Path) -> dict[str, object]:
     with JsonRpcHarness(SERVER, project, ledger) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"]:
+        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"]:
             raise AssertionError(f"unexpected Cortex v3 public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
-        if not current.get("ok") or replay != current:
+        if (
+            not current.get("ok")
+            or current.get("replayed") is not False
+            or replay.get("replayed") is not True
+            or replay.get("task_ref") != current.get("task_ref")
+            or not current.get("dispatches")
+            or replay.get("dispatches") != []
+        ):
             raise AssertionError("identical start did not replay its committed response")
         task_ref = str(current["task_ref"])
         task_directory = next((ledger / "tasks").iterdir()).name

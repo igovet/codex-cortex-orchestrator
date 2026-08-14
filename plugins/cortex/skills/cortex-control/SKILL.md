@@ -5,11 +5,11 @@ description: Use this skill when coordinating a non-trivial task across Codex ag
 
 # Cortex Control
 
-Cortex v3 exposes three coordinator lifecycle operations plus scoped report
-transport. Coordinators use `start_orchestration` and
+Cortex v3 exposes three coordinator lifecycle operations plus scoped worker
+question/report transport. Coordinators use `start_orchestration` and
 `continue_orchestration` for normal work, `read_worker_report` to evaluate a
 persisted report, and `manage_orchestration` only for recovery or rare
-subsystems. Workers use only `record_report`; they must not call lifecycle
+subsystems. Workers use only `worker_question` and `record_report`; they must not call lifecycle
 operations. The private v7 ledger API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
 opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
@@ -28,9 +28,12 @@ signal, never permission for the root to perform the work directly.
 ## Normal flow
 
 1. Call `start_orchestration` once with the exact absolute `project_root` and
-   `task.objective`. Add requirements, acceptance criteria, scope, allowed
-   paths, verification, budget, pause conditions, language, or complexity only
-   when useful. Complexity defaults to C2 and accepts aliases.
+   the user's actual `task.objective`. Add requirements, acceptance criteria,
+   scope, allowed paths, verification, budget, pause conditions, language, or
+   complexity only when the user supplied them or they are established facts.
+   Do not make an abstract request look decision-complete by inventing product
+   intent, audience, design direction, behavior, or acceptance. Complexity
+   defaults to C2 and accepts aliases.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
    returns, and validates that plan and enforces documentation and close. An override uses only
@@ -47,9 +50,18 @@ signal, never permission for the root to perform the work directly.
    the canonical roster in `cortex:orchestrator`. Arguments contain only
    native host parameters. Never add ledger IDs or copy an expected model into
    a missing native `model` field.
-4. Workers do not call lifecycle operations. They use the native parent channel
-   for questions, publish one strict `cortex/report/v1` through `record_report`,
-   and return only `REPORT_RECORDED report_ref=<value>` plus at most a
+4. Workers do not call lifecycle operations. Any worker may call
+   `worker_question(action="ask")` when repository evidence cannot resolve a
+   material user decision. It returns a compact `question_ref`; the worker
+   sends only that ref and a concise question summary through the native parent
+   channel, remains available, and does not publish a report. The coordinator
+   surfaces the durable question with `manage_orchestration(intent="question")`,
+   obtains the user's answer, signals the same native worker, and that worker
+   calls `worker_question(action="poll")` with the same attempt and ref before
+   resuming. Never replace the worker or advance the wave for a question.
+   After work completes, the worker publishes one strict `cortex/report/v1`
+   through `record_report` and returns only
+   `REPORT_RECORDED report_ref=<value>` plus at most a
    two-sentence summary. They must never paste the report JSON into the parent
    channel. When predecessor handoffs are supplied, they review all of them and
    include the generated `Predecessor review:` acknowledgement in report
@@ -78,6 +90,13 @@ distinguishes identical report content used on successive waves without
 exposing durable identity. Parallel worker slots are complete, unique, and
 validated atomically before task state changes.
 
+Every successful start response says whether it is a replay. Once start
+returns dispatches, it is complete: invoke those dispatches and never call
+`start_orchestration` again for that `task_ref`, including while translating
+or preparing native arguments. A replay returns no dispatches and cannot
+authorize a second worker wave. If the first response was lost before native
+dispatch, recover still-awaiting requests once through management inspect.
+
 Preserve the `task_ref` returned by start and pass it on later lifecycle and
 report-read calls. Different task contracts can run concurrently below one
 project root; the project registry is lock-serialized and task records remain
@@ -99,11 +118,22 @@ writer. Repeating a completed phase requires `rework: true`. Use
 `resource`, or `question`; these intents do not belong in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
-The question intent can request MCP UI elicitation through
-`elicitation/create`. Worker questions normally use the native parent channel;
-use management when a durable main-UI question is required. Lack of advertised
-host elicitation support is a host limitation, not permission to invent an
-answer.
+The question intent requests main-chat MCP UI elicitation through
+`elicitation/create` for the exact `question_ref` published by a worker. Every
+worker classifies unknowns as repository-resolvable, low-impact reversible, or
+material user decisions. Only the last class pauses through `worker_question`;
+existing code is current-state evidence, not evidence of desired product
+intent. Cortex rejects `record_report` and `continue_orchestration` while a
+blocking question remains open. Lack of advertised host elicitation support is
+a host limitation, not permission to invent an answer.
+
+Project maintenance uses `manage_orchestration(intent="prune",
+payload={"confirmation":"PRUNE","older_than_days":7})` only after the user
+explicitly selects the `prune` route. It removes task-scoped Cortex ledger
+state whose last update is at least seven days old, including abandoned active
+tasks, while preserving recent tasks, lanes, plugin files, project source, and
+documentation. It is project-scoped, must omit `task_ref`, and is safe to run
+weekly; do not use an unbounded clear operation.
 
 ## Dispatch and evidence policy
 

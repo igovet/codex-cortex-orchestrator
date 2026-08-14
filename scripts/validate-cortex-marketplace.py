@@ -110,8 +110,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "3.2.2":
-        fail("plugin manifest must identify cortex at release version 3.2.2")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "3.3.0":
+        fail("plugin manifest must identify cortex at release version 3.3.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:
@@ -160,12 +160,12 @@ def main() -> int:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
     expected_public_operations = {
         "start_orchestration", "continue_orchestration", "manage_orchestration",
-        "record_report", "read_worker_report",
+        "worker_question", "record_report", "read_worker_report",
     }
     if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the five public Cortex operations")
-    if shared.get("worker_operations") != ["record_report"]:
-        fail("workers must receive only the scoped record_report operation")
+        fail("shared worker contract must declare the six public Cortex operations")
+    if shared.get("worker_operations") != ["worker_question", "record_report"]:
+        fail("workers must receive only the scoped worker_question and record_report operations")
     if set(shared.get("coordinator_operations", [])) != {
         "start_orchestration", "continue_orchestration", "manage_orchestration", "read_worker_report",
     }:

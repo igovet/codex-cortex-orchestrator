@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "3.2.2+codex.20260814215722",
+  "version": "3.3.0+codex.20260814224159",
   "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"
@@ -10,18 +10,19 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, three coordinator lifecycle operations, and scoped worker report transport over the local Cortex v7 ledger. Coordinators own and adapt the pipeline, workers persist compactly referenced reports, and Cortex preserves receipt-backed gates, verification, and handoff state.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, three coordinator lifecycle operations, and scoped worker question/report transport over the local Cortex v7 ledger. Coordinators own and adapt the pipeline, every worker can pause for a material user decision and resume the same attempt, and Cortex preserves receipt-backed gates, verification, maintenance, and handoff state.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [
       "Local MCP control plane",
       "Task ledger",
       "Scoped worker report bus",
+      "Durable worker question bus",
       "Agent profiles",
       "Knowledge harvest routes",
       "Lifecycle hooks"
     ],
     "logo": "./assets/logo.png",
-    "defaultPrompt": "Coordinate this task with Cortex. Use help, harvest, or harvest-refresh when that exact route is requested."
+    "defaultPrompt": "Coordinate this task with Cortex. Use help, harvest, harvest-refresh, or prune when that exact route is requested."
   }
 }

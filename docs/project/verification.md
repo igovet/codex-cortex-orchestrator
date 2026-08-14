@@ -15,13 +15,13 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Current Cortex 3.2.2 source evidence:
+Current Cortex 3.3.0 source evidence:
 
-- The full Python suite passed 234 tests in 15.481 seconds.
-- Quick validation passed for `knowledge-harvest`, `orchestrator`, and
-  `cortex-control`; plugin and marketplace validation also passed.
+- The full Python suite passed 237 tests in 15.491 seconds.
+- Quick validation passed for the changed `orchestrator` and `cortex-control`
+  skills; plugin and marketplace validation also passed.
 - Python compilation and shell syntax passed.
-- Cachebuster `3.2.2+codex.20260814215722` was generated, installed from this
+- Cachebuster `3.3.0+codex.20260814224159` was generated, installed from this
   repository, and content-verified. Installer check and dry-run pass with
   `agents.default_subagent_model=gpt-5.6-luna`.
 - Cold boot passed with seven continues, eight reports, and a parallel wave;
@@ -35,11 +35,11 @@ Historical 3.2.1 evidence includes installed cachebuster
 `3.2.1+codex.20260814203024`, content-verified installer check with the Luna
 default, 220 tests, marketplace validation, cold boot, deterministic fixtures,
 the composite benchmark, isolated fresh-plugin probe, compilation, shell
-syntax, and installer dry-run. These results do not attest 3.2.2.
+syntax, and installer dry-run. These results do not attest 3.3.0.
 
 `cortex-cold-boot-smoke.py` is the v3 cold-boot smoke. It creates a fresh
 temporary Git project, drives the stdio JSON-RPC server through the public
-lifecycle and scoped `record_report`/`read_worker_report` tools, restarts the
+lifecycle and scoped `worker_question`/`record_report`/`read_worker_report` tools, restarts the
 server mid-lifecycle, and proves one start/continue per wave plus compact report
 transport.
 It covers server-owned idempotent replay, relative steps and parallel worker
@@ -50,7 +50,7 @@ regressions cover changed-payload conflicts, validation before writes,
 future-wave replacement/rework protection, every transaction checkpoint,
 multi-root isolation, and expected `ok: false` results that do not enter the
 exception log.
-For the current 3.2.2 candidate it completed successfully with seven continue
+For the current 3.3.0 candidate it completed successfully with seven continue
 calls, eight reports, and a parallel wave.
 
 Coordinator-isolation regressions assert that `SessionStart` reasserts the
@@ -81,7 +81,7 @@ finished with one active task, public v3 tools only, strict reports, server-
 observed close evidence, and handoff. The Codex JSON event stream did not expose
 an independent effective-model field, so the exact launch configuration is
 evidence of the requested runtime route, not a separate host-model attestation.
-This is historical runtime evidence and was not rerun for the current 3.2.2
+This is historical runtime evidence and was not rerun for the current 3.3.0
 candidate.
 
 `cortex-composite-benchmark.py` is a call-count contract benchmark, not a
@@ -110,8 +110,8 @@ temporary directory, uses temporary `HOME` and `CODEX_HOME`, installs it with fr
 processes, and checks that `cortex` is exposed. It reports
 `SKIP` when the Codex CLI is unavailable; treat that as an environment
 limitation, not plugin-registration evidence.
-The 3.2.2 isolated probe passed and observed installed version
-`3.2.2+codex.20260814215722`.
+The 3.3.0 isolated probe passed and observed installed version
+`3.3.0+codex.20260814224159`.
 
 The lane regression creates a real temporary Git repository, materializes a
 declared branch/worktree, reconciles branch and dirty state, and retires the
@@ -141,13 +141,15 @@ Pipeline classification regressions prove that the bounded compatibility aliases
 `close`. Cross-wave duplicates of one canonical phase are rejected, while
 unrecognized gate IDs remain hard validation errors.
 
-Public-facade regressions require exactly five listed tools: the three
-coordinator lifecycle operations, worker `record_report`, and coordinator
+Public-facade regressions require exactly six listed tools: the three
+coordinator lifecycle operations, worker `worker_question` and `record_report`, and coordinator
 `read_worker_report`. They verify that the public continue schema advertises
 `report_ref` rather than an inline report body, that the coordinator can read
 and advance with a persisted exact eight-field report, and that inspect returns
 `available_reports` when native acknowledgement is interrupted after
-persistence. Prompt-contract regressions require the worker's compact
+persistence. They also prove that a blocking material question rejects report
+publication and continuation, resumes the same attempt after an answer, and
+that confirmed prune removes only stale task-scoped state. Prompt-contract regressions require the worker's compact
 `REPORT_RECORDED report_ref=<value>` final and report-tool error fallback.
 Pipeline regressions also require coordinator authority in the returned
 snapshot and an explicit reason for a future-wave replacement; planner and
@@ -235,7 +237,7 @@ child's persisted `thread_settings_applied` snapshot records
 `model=gpt-5.6-luna` and `reasoning_effort=high`. This runtime metadata, rather
 than worker self-report, is the acceptance evidence. The worker returned to
 the parent and no user-owned visible task was created.
-This proof predates the current 3.2.2 candidate and is not a fresh-install or
+This proof predates the current 3.3.0 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
@@ -251,7 +253,7 @@ It requires a committed `HEAD`. Without one, the non-blocking command reports
 `SKIP` and `--require-tracked` fails intentionally; neither result validates a
 release archive. Create the initial commit only with authorization and rerun
 the blocking command against the committed tree before publication.
-The tracked-release command has not been rerun for 3.2.2. The historical 3.2.1
+The tracked-release command has not been rerun for 3.3.0. The historical 3.2.1
 run was blocked because committed `HEAD` did not contain that uncommitted
 package contract; this is not release or publication evidence.
 

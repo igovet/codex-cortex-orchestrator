@@ -7,8 +7,8 @@
   `manage_orchestration` is only for inspect/resume/deactivate and rare
   lane/resource/durable-question work. The legacy `orchestrate` facade and v7
   primitives below are private compatibility internals. Together with
-  worker-only `record_report` and coordinator-only `read_worker_report`, the
-  public surface is exactly five tools.
+  worker-only `worker_question`/`record_report` and coordinator-only
+  `read_worker_report`, the public surface is exactly six tools.
 - Every public call requires the exact absolute `project_root`. Start needs
   only `task.objective`; complexity defaults to C2. Compact wave overrides use
   `waves[].workers[]`, with only `phase` required.
@@ -27,6 +27,12 @@
   only the exact report-tool error. If persistence succeeds
   but the native acknowledgement is interrupted, inspect with
   `manage_orchestration` and recover the ref from `available_reports`.
+- Any profile may call `worker_question(action="ask")` for a material user
+  decision that repository evidence cannot resolve. It returns only a compact
+  question ref to the parent and stays alive; the coordinator surfaces the ref
+  through management, obtains the user answer, then resumes that same worker,
+  which polls the ref. Open blocking questions reject both `record_report` and
+  `continue_orchestration`. Do not encode missing product intent as assumptions.
 - Embedded predecessor handoffs are mandatory input. Read and reconcile every
   supplied report before project work, then include the generated
   `Predecessor review:` entry naming every supplied report ref in report
@@ -52,6 +58,14 @@
   tasks below the same project root. Omitting the ref while several tasks are
   selectable returns `needs_selection` with opaque candidates instead of a
   guessed active task.
+- A successful start response includes `replayed`. Once start returns
+  dispatches, never call it again for that `task_ref`; a replay is a receipt,
+  contains no dispatches, and cannot authorize a duplicate wave. A genuinely
+  lost first response is recovered once through management inspect.
+- `prune` is the only cleanup route. It requires exact confirmation `PRUNE`,
+  defaults to seven days, omits `task_ref`, and removes only stale task-scoped
+  Cortex state while preserving recent tasks, lanes, source, docs, and plugin
+  files. There is no clear-all operation.
 - Human-readable language names normalize before ledger creation. Repeating a
   semantically unchanged `future_waves` assessment is valid and keeps the next
   relative step monotonic; it must not fail after committing the current gate.
