@@ -3,10 +3,11 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 2.0 task ledger, staged waves,
-worker reports, and optional execution lanes through exactly one public tool:
-`orchestrate`. The private `cortex/v7` primitives remain implementation
-details; existing v7 tasks are inspectable and resumable.
+The local MCP server implements the Cortex 3.0 task ledger, staged waves,
+worker reports, and optional execution lanes through three public tools:
+`start_orchestration`, `continue_orchestration`, and `manage_orchestration`.
+The private `cortex/v7` primitives and legacy v2 facade remain compatibility
+details; existing v7 tasks are inspectable and resumable through the v3 adapter.
 
 ## Key files and dependencies
 
@@ -16,17 +17,22 @@ details; existing v7 tasks are inspectable and resumable.
 
 ## Behavior and status
 
-`orchestrate(start)` activates, classifies, initializes, persists the full plan,
-and prepares the first wave. Each `orchestrate(advance)` accepts all completed
-parallel work for the current wave, validates it before durable writes,
-confirms actual host fields, stores strict eight-field `cortex/report/v1`
-reports, evidence, and gate outcomes, then returns the next wave. It may
-replace future waves; modifying completed work requires `allow_rework`. The
-final advance reconciles reports and the project manifest, records the
-documentation decision and server-observed close verification, creates the
-handoff and audit record, and completes the task. Host `spawn_agent` and
-user-authorized `create_thread` are still performed by Codex; they are never
-public MCP lifecycle calls.
+`start_orchestration` accepts an absolute `project_root` and compact task
+contract, defaults complexity to safe C2, builds the standard pipeline when
+waves are omitted, and prepares the first wave. Each
+`continue_orchestration` call supplies the relative active-wave `step` and
+strict worker reports. A single-worker wave needs no slot; a parallel wave
+uses short relative `worker: 1..N` slots. The server validates completeness,
+uniqueness, and ownership atomically before state writes, then returns the
+next step and native dispatch arguments. Future-wave replacement and explicit
+rework retain invalidation semantics; a semantically unchanged replacement is
+recorded as `unchanged` instead of failing after gate writes, and relative
+future steps remain monotonic. Human-readable language aliases such as
+`English` normalize before ledger creation. `manage_orchestration` is reserved for
+inspect/resume/deactivate, lanes, resources, and durable questions; it is not
+part of normal wave progression. Host `spawn_agent` and user-authorized
+`create_thread` are still performed by Codex, never by public MCP lifecycle
+calls.
 
 Reports are sanitized, task- and attempt-bound, and use one-use receipts.
 Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
@@ -34,10 +40,13 @@ so reconciliation can repair derived receipts, indexes, and Markdown but
 cannot replay consumed evidence. A report is capped at 64 KiB and 100 list
 items per field; an attempt at 32 reports; a task at 256 reports and 1 MiB
 total; and an attempt at 256 context grants. Every call includes an absolute
-`project_root`; the same server process may serve multiple roots. Mutating
-operations use `operations/<submission_id>.json` request-digest receipts, so
-identical retries replay and changed payloads conflict. Expected façade
-validation failures return `ok: false` and do not enter the exception log.
+`project_root`; the same server process may serve multiple roots. Mutating v3
+operations use server-owned request-digest receipts tied to the internal
+active wave, so identical retries replay and changed or stale payloads
+conflict before partial writes. Expected facade validation failures return
+`ok: false` and do not enter the exception log. Host model/tool/effort values
+are selected routing metadata; v3 does not claim actual host attestation
+unless the host supplies observable evidence.
 Profiles are preloaded and validated at MCP startup. Recovery and nested
 operations are `inspect`, `resume`, `deactivate`, `lane`, `resource`, and
 `question`.

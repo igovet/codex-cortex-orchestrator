@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the Cortex v2 one-call-per-wave facade through MCP JSON-RPC."""
+"""Exercise Cortex v3 relative one-call-per-wave orchestration over JSON-RPC."""
 from __future__ import annotations
 
 import argparse
@@ -14,8 +14,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 from jsonrpc_harness import JsonRpcHarness  # noqa: E402
 
 SERVER = ROOT / "plugins/cortex/scripts/cortex.py"
-PRINCIPAL = "cold-boot"
-TASK_ID = "cold-boot"
 
 
 def git(project: Path, *args: str) -> None:
@@ -39,72 +37,51 @@ def fixture(base: Path) -> tuple[Path, Path]:
 
 def waves() -> list[dict[str, object]]:
     return [
-        {"wave_id": "plan", "delegations": [{"gate": "plan", "agent": "planner"}]},
-        {
-            "wave_id": "discovery",
-            "delegations": [
-                {"gate": "discover", "agent": "explorer"},
-                {"gate": "architecture", "agent": "architect"},
-            ],
-        },
-        {"wave_id": "implementation", "delegations": [{"gate": "implementation", "agent": "general"}]},
-        {"wave_id": "qa", "delegations": [{"gate": "qa", "agent": "qa_engineer"}]},
-        {"wave_id": "review", "delegations": [{"gate": "review", "agent": "code_reviewer"}]},
+        {"workers": [{"phase": "planning"}]},
+        {"workers": [{"phase": "research"}, {"phase": "architecture"}]},
+        {"workers": [{"phase": "implementation"}]},
+        {"workers": [{"phase": "testing"}]},
+        {"workers": [{"phase": "code_review"}]},
     ]
 
 
-def completion(request: dict[str, object], wave_id: str) -> dict[str, object]:
-    return {
-        "attempt_id": request["attempt_id"],
-        "host_tool": request["host_tool"],
-        "host_agent_id": f"smoke-host-{request['attempt_id']}",
-        "host_task_name": request["task_name"],
-        "host_model": request.get("model") or request["expected_model"],
-        "host_reasoning_effort": request["reasoning_effort"],
-        "status": "passed",
+def result(worker: int, step: int, parallel: bool) -> dict[str, object]:
+    value: dict[str, object] = {
         "report": {
-            "summary": f"{wave_id} worker completed",
-            "findings": [],
-            "questions": [],
-            "changed_files": [],
-            "tests": ["cold-boot facade simulation"],
-            "evidence": [f"{wave_id} evidence"],
-            "uncertainty": [],
-            "next_action": "advance the facade",
-        },
+            "summary": f"relative step {step} worker {worker} completed",
+            "findings": [], "questions": [], "changed_files": [],
+            "tests": ["cold-boot v3 simulation"],
+            "evidence": [f"step {step} worker {worker} evidence"],
+            "uncertainty": [], "next_action": "advance",
+        }
     }
+    if parallel:
+        value["worker"] = worker
+    return value
 
 
 def run(base: Path) -> dict[str, object]:
     project, ledger = fixture(base)
     start_request = {
-        "operation": "start",
-        "submission_id": "cold-boot-start",
-        "principal": PRINCIPAL,
-        "thread_id": PRINCIPAL,
         "task": {
-            "task_id": TASK_ID,
-            "objective": "prove a fresh JSON-RPC process can complete Cortex v2 by waves",
-            "complexity": "C2",
+            "objective": "prove a fresh JSON-RPC process can complete Cortex v3 by relative waves",
+            "complexity": "standard",
             "requirements": ["implementation, verification, documentation, and close invariants"],
             "acceptance_criteria": ["complete every planned wave"],
             "allowed_paths": ["."],
             "verification": ["preserve report, evidence, handoff, and manifest receipts"],
         },
         "waves": waves(),
-        "host_capabilities": {
-            "spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
-            "create_thread_models": ["gpt-5.6-luna"],
-        },
     }
     with JsonRpcHarness(SERVER, project, ledger) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
-        if [item["name"] for item in listed] != ["orchestrate"]:
-            raise AssertionError("Cortex v2 must publish exactly one MCP tool")
-        current = rpc.tool("orchestrate", start_request)
-        replay = rpc.tool("orchestrate", start_request)
-        if not current.get("ok") or replay != {**current, "idempotent": True}:
-            raise AssertionError("identical start submission did not replay its committed response")
+        names = [item["name"] for item in listed]
+        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration"]:
+            raise AssertionError(f"unexpected Cortex v3 public tools: {names}")
+        current = rpc.tool("start_orchestration", start_request)
+        replay = rpc.tool("start_orchestration", start_request)
+        if not current.get("ok") or replay != current:
+            raise AssertionError("identical start did not replay its committed response")
         task_directory = next((ledger / "tasks").iterdir()).name
 
     (project / "tracked.txt").write_text("after\n", encoding="utf-8")
@@ -112,33 +89,31 @@ def run(base: Path) -> dict[str, object]:
     (project / "old.txt").rename(project / "new.txt")
     (project / "added.txt").write_text("untracked\n", encoding="utf-8")
 
-    # A fresh MCP process must reconstruct the same active wave without a write.
+    # A fresh process must reconstruct the active relative step read-only.
     with JsonRpcHarness(SERVER, project, ledger) as rpc:
-        current = rpc.tool("orchestrate", {
-            "operation": "inspect", "task_id": TASK_ID, "principal": PRINCIPAL, "thread_id": PRINCIPAL,
-        })
-        advance_calls = 0
+        current = rpc.tool("manage_orchestration", {"intent": "inspect"})
+        continue_calls = 0
         parallel_wave_seen = False
-        while current["state"] != "completed":
-            requests = current.get("spawn_requests", [])
-            if not requests:
-                raise AssertionError(f"active wave {current.get('wave_id')} produced no spawn requests")
-            parallel_wave_seen |= len(requests) > 1
-            wave_id = str(current["wave_id"])
-            advance_calls += 1
-            current = rpc.tool("orchestrate", {
-                "operation": "advance",
-                "submission_id": f"cold-boot-advance-{advance_calls:02d}",
-                "task_id": TASK_ID,
-                "wave_id": wave_id,
-                "principal": PRINCIPAL,
-                "thread_id": PRINCIPAL,
-                "completions": [completion(request, wave_id) for request in requests],
-            })
+        last_payload = None
+        while current["outcome"] != "completed":
+            dispatches = current.get("dispatches", [])
+            if not dispatches:
+                raise AssertionError(f"active relative step {current.get('step')} has no dispatches")
+            parallel = len(dispatches) > 1
+            parallel_wave_seen |= parallel
+            continue_calls += 1
+            last_payload = {
+                "step": current["step"],
+                "results": [result(index, int(current["step"]), parallel) for index in range(1, len(dispatches) + 1)],
+            }
+            current = rpc.tool("continue_orchestration", last_payload)
             if not current.get("ok"):
-                raise AssertionError(f"advance failed: {current}")
+                raise AssertionError(f"continue failed: {current}")
+        replay = rpc.tool("continue_orchestration", last_payload)
+        if replay != current:
+            raise AssertionError("final continue retry did not replay after completion")
         if not parallel_wave_seen:
-            raise AssertionError("the smoke plan did not return a parallel spawn_requests array")
+            raise AssertionError("the smoke plan did not return a parallel dispatch wave")
 
     task_path = ledger / "tasks" / task_directory
     state = json.loads((task_path / "current.json").read_text(encoding="utf-8"))
@@ -146,33 +121,28 @@ def run(base: Path) -> dict[str, object]:
     receipts = [json.loads(path.read_text(encoding="utf-8")) for path in (task_path / "reports/receipts").glob("*.json")]
     operations = [json.loads(path.read_text(encoding="utf-8")) for path in (ledger / "operations").glob("*.json")]
     if task.get("schema") != "cortex/v7" or state.get("status") != "completed":
-        raise AssertionError("facade did not preserve the cortex/v7 ledger or complete the task")
+        raise AssertionError("v3 did not preserve the cortex/v7 ledger or complete the task")
     if not receipts or any(not item.get("consumed_at") for item in receipts):
         raise AssertionError("every passed worker report must be consumed by evidence")
     if not state.get("handoff_created") or not all(item.get("status") == "committed" for item in operations):
         raise AssertionError("handoff or durable transaction commit is missing")
     return {
-        "status": "PASS",
-        "fixture": str(base),
-        "task_directory": str(task_path),
-        "advance_calls": advance_calls,
-        "worker_attempts": len(state.get("attempts", [])),
-        "report_count": len(receipts),
-        "parallel_wave_seen": parallel_wave_seen,
+        "status": "PASS", "fixture": str(base), "task_directory": str(task_path),
+        "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
+        "report_count": len(receipts), "parallel_wave_seen": parallel_wave_seen,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--keep", action="store_true", help="preserve and print the isolated fixture directory")
+    parser.add_argument("--keep", action="store_true")
     arguments = parser.parse_args()
     if arguments.keep:
-        base = Path(tempfile.mkdtemp(prefix="cortex-boot-"))
-        result = run(base)
+        result_value = run(Path(tempfile.mkdtemp(prefix="cortex-boot-")))
     else:
         with tempfile.TemporaryDirectory(prefix="cortex-boot-") as directory:
-            result = run(Path(directory))
-    print("cold-boot smoke: " + json.dumps(result, sort_keys=True))
+            result_value = run(Path(directory))
+    print("cold-boot smoke: " + json.dumps(result_value, sort_keys=True))
     return 0
 
 

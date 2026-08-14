@@ -14,9 +14,9 @@
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
     "user_facing_language": "task_language_or_explicit_user_language",
-    "public_operation": "orchestrate",
-    "normal_flow": ["start", "advance"],
-    "recovery_operations": ["inspect", "resume", "deactivate", "lane", "resource", "question"],
+    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration"],
+    "normal_flow": ["start_orchestration", "continue_orchestration"],
+    "recovery_operations": ["manage_orchestration"],
     "required_report_fields": [
       "summary",
       "findings",

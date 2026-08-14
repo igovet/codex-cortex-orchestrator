@@ -9,16 +9,20 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## One-tool public coordinator facade
+## Relative three-tool public coordinator facade
 
-The breaking 2.0 public API exposes only `orchestrate`. A coordinator starts a
-task with one `start` operation, then advances exactly once for each completed
-parallel wave. Start owns activation, classification, ledger initialization,
-full-plan persistence, and first-wave preparation. Advance validates all
+The breaking 3.0 public API exposes `start_orchestration`,
+`continue_orchestration`, and `manage_orchestration`. A coordinator starts a
+task with the compact task contract, then continues once per completed wave.
+The active-wave cursor is a relative `step`; parallel results use only
+relative worker slots. Start owns classification, ledger initialization,
+full-plan persistence, and first-wave preparation. Continue validates all
 parallel completions before state writes, records strict eight-field
-`cortex/report/v1` reports, evidence, gates, and actual host fields, and
-returns the next wave. It can replace future waves; changing a completed gate
-requires explicit `allow_rework`.
+`cortex/report/v1` reports, evidence, gates, and returns the next step. It can
+replace future waves; changing a completed gate requires explicit rework.
+Semantically unchanged future-wave reassessment records an unchanged receipt
+and continues, while v3 future waves are internally renumbered so public
+relative steps never move backward or collide.
 
 The final advance reconciles reports and the project manifest, records the
 documentation decision, verifies close evidence observed by the server,
@@ -28,10 +32,18 @@ nested operations of the same facade. Legacy v7 primitives remain internal;
 existing v7 task data stays inspectable and resumable. This reduces public
 lifecycle coupling while retaining the durable ledger's auditability.
 
-Each mutating request is keyed by a durable `operations/<submission_id>.json`
-digest receipt. Identical retries replay safely; reusing the id with changed
-payload conflicts. This is deliberately per project root: every call carries
-an absolute `project_root`, and one server process can serve multiple roots.
+Each mutating request uses server-owned digest receipts. Identical retries
+replay safely; changed payloads and stale steps conflict before partial writes.
+This is deliberately per project root: every call carries an absolute
+`project_root`, and one server process can serve multiple roots. Internal task,
+wave, attempt, report, evidence, and receipt IDs remain durable for audit but
+are not normal-flow input.
+
+Human-readable complexity, phase, profile, status, and common language aliases
+are normalized before task-state creation. This keeps the public schema small
+without pushing fragile enums or BCP-47 spelling repairs onto a Luna parent;
+unknown phase/profile values still fail before ledger writes with bounded
+suggestions.
 
 ## Atomic records, repairable projections, best-effort telemetry
 
@@ -122,8 +134,8 @@ deliberate trade-off and requires serializing writers.
 ## Project-local runtime state
 
 Production orchestration is fail-closed for each supplied absolute
-`project_root`; one MCP server process can serve multiple roots. `orchestrate`
-validates the selected root before it prepares work, and an unavailable server
+`project_root`; one MCP server process can serve multiple roots. The v3 public
+tools validate the selected root before preparing work, and an unavailable server
 or failed, unwritable, or mismatched root ends that task's workflow with a
 blocker. Ordinary/unledgered subagent work is not a substitute.
 
@@ -171,9 +183,9 @@ Automatic visible-thread fallback is not part of model routing.
 ## Scoped worker report bus
 
 Workers publish a strict eight-field `cortex/report/v1` payload through public
-`advance` completions; the private v7 report primitive stores the canonical
-sanitized JSON record, which is task- and attempt-bound;
-submission ids make retries idempotent. A receipt links one report to one C2/C3
+`continue_orchestration` results; the private v7 report primitive stores the canonical
+sanitized JSON record, which is task- and attempt-bound; server-owned receipts
+make retries idempotent. A receipt links one report to one C2/C3
 evidence record and is consumed once. Its `reports/consumptions/` tombstone is
 irreversible and prevents replay even if reconciliation repairs derived files.
 The task index exposes metadata only.

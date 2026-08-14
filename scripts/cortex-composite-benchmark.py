@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report the Cortex v2 MCP round-trip reduction for a wave plan."""
+"""Report the Cortex v3 MCP round-trip reduction for a wave plan."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ def counts(workers: int, waves: int) -> tuple[int, int]:
     # status, delegation, confirmation, report, finalization, evidence, gate,
     # reconciliation, handoff, close, and final status round-trips.
     legacy = 4 + workers * 4 + waves * 2 + 4
-    # Cortex v2 needs one start and one advance per wave. Native spawn_agent
+    # Cortex v3 needs one start and one continue per wave. Native spawn_agent
     # calls are deliberately outside this MCP-call budget.
     facade = 1 + waves
     return legacy, facade
@@ -30,11 +30,11 @@ def main() -> int:
         "workers": args.workers,
         "waves": args.waves,
         "legacy_mcp_calls": legacy,
-        "orchestrate_mcp_calls": facade,
+        "relative_v3_mcp_calls": facade,
         "reduction": round(reduction, 4),
         "target_met": facade == args.waves + 1,
-        "public_tools": ["orchestrate"],
-        "normal_operations": ["start", "advance"],
+        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration"],
+        "normal_operations": ["start_orchestration", "continue_orchestration"],
         "note": "Call-count contract benchmark; native host spawn calls are excluded.",
     }
     print(json.dumps(result, sort_keys=True))

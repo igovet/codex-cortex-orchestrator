@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import difflib
 import html
 import hashlib
 import json
@@ -94,6 +95,8 @@ AVAILABLE_GATES = {
 PIPELINE_GATE_ALIASES = {
     "planning": "plan",
     "discovery": "discover",
+    "research": "discover",
+    "exploration": "discover",
     "architecture_design": "architecture",
     "database_design": "database_architecture",
     "testing": "qa",
@@ -109,6 +112,9 @@ PIPELINE_GATE_ALIASES = {
 # these aliases at the MCP boundary so a harmless naming variation cannot
 # create a failed attempt (or, worse, leave a task half-dispatched).
 PROFILE_ALIASES = {
+    "exploration": "explorer",
+    "researcher": "explorer",
+    "planner_agent": "planner",
     "performance": "performance_engineer",
     "accessibility": "accessibility_engineer",
     "ux": "ux_designer",
@@ -273,6 +279,13 @@ def normalize_user_language(value: object, fallback_text: object = "") -> str:
     """Return a bounded language tag for user-facing coordinator messages."""
     requested = str(value or "").strip().lower().replace("_", "-")
     if requested:
+        requested = {
+            "english": "en", "russian": "ru", "русский": "ru",
+            "romanian": "ro", "română": "ro", "german": "de",
+            "french": "fr", "spanish": "es", "italian": "it",
+            "portuguese": "pt", "ukrainian": "uk", "українська": "uk",
+            "polish": "pl", "chinese": "zh", "japanese": "ja", "korean": "ko",
+        }.get(requested, requested)
         if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z]{2,4})?", requested):
             raise ValueError("user_language must be a BCP-47-like lowercase language tag")
         return requested
@@ -2609,9 +2622,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "in the primary chat."
     )
     if package.get("facade_managed"):
+        task_context_line = "This worker belongs to the active coordinator-managed Cortex wave; internal ledger identifiers are intentionally hidden."
         identity_contract = (
-            f"Project root: {package.get('project_root')!r}. This attempt is managed by the coordinator through "
-            "the unified Cortex facade; do not reuse coordinator identity fields in worker tool calls."
+            f"Project root: {package.get('project_root')!r}. Do not invent or request Cortex task, wave, or attempt identifiers."
         )
         lifecycle_contract = (
             "Do not call Cortex MCP tools. The main coordinator owns the complete Cortex lifecycle. "
@@ -2621,6 +2634,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "a list has no entries. Do not subdelegate unless the coordinator explicitly authorizes it."
         )
     else:
+        task_context_line = f"Cortex task: {package['task_id']}; gate: {package['gate']}; attempt: {package['attempt_id']}."
         identity_contract = (
             f"When calling Cortex MCP tools, use project_root={package.get('project_root') or '(the coordinator-provided project root)'!r}, "
             f"principal={package.get('coordinator_principal')!r}, and thread_id={package.get('coordinator_thread_id')!r}. "
@@ -2660,7 +2674,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Follow this profile exactly:",
         instructions,
         "",
-        f"Cortex task: {package['task_id']}; gate: {package['gate']}; attempt: {package['attempt_id']}.",
+        task_context_line,
         identity_contract,
         f"Objective: {package['objective']}",
         f"Ownership: {package['ownership']}",
@@ -2669,7 +2683,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Verification: " + "; ".join(package["verification"]),
         "Internal worker protocol: English only. " + output_language_contract,
         f"User-facing language: {package.get('user_language', 'en')}. The main coordinator must translate questions, blockers, and summaries into this language (or the explicit language requested by the user) before showing them in the main chat.",
-        "Codebase-memory protocol (mandatory for code search): 1) call mcp__codebase_memory__list_projects with {}; 2) parse the projects array and select the record whose root_path exactly matches the absolute project_root; 3) pass that record's name as project to every subsequent codebase_memory call—never guess or synthesize a project id. Use index_status(project) when freshness/index availability must be verified. For discovery use search_graph(project, query=...); use name_pattern for exact symbol patterns, semantic_query only as an array of keywords on moderate/full indexes, and filters such as label, file_pattern, relationship, include_connected, limit, and offset when needed. For text matches use search_code(project, pattern, regex, mode=compact|full|files, path_filter, file_pattern, context, limit). For callers/dependencies/data flow use trace_path(project, function_name=<qualified_name from search_graph>, mode=calls|data_flow|cross_service, direction, depth, include_tests, parameter_name, risk_labels). For source reading use get_code_snippet(project, qualified_name=<exact qualified_name from search_graph>, include_neighbors); do not use it as the initial search. Use get_architecture(project, aspects) for a high-level structure overview and query_graph(project, query, max_rows) only for explicit multi-hop Cypher analysis. Do not call index_repository, ingest_traces, manage_adr, or delete_project for ordinary discovery; they change indexed state or durable knowledge and require explicit authorization. Do not start with grep, rg, glob, or ad-hoc filesystem scans while codebase_memory is available. If list_projects fails, codebase_memory is unavailable, or no indexed project matches project_root, do not call other codebase_memory tools or pretend they were used: record the limitation and use another search method only as a documented fallback.",
+        "Use only repository and verification tools that are actually available in your worker context. Never guess an unavailable tool, project identifier, or hard-coded mode; record a limitation and use a safe available fallback.",
         lifecycle_contract,
     ))
 
@@ -4922,6 +4936,7 @@ def release_resource(params: dict[str, Any]) -> dict[str, Any]:
 ORCHESTRATE_SCHEMA = "cortex/orchestrate/v1"
 ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question"}
 ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question"}
+PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v3"
 
 
 def _request_diagnostic(path: str, message: str, expected: str | None = None) -> dict[str, Any]:
@@ -5145,6 +5160,13 @@ def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
         "current_gates": active_gates(state),
         "completed_gates": list(state.get("completed_gates", [])),
         "skipped_gates": list(state.get("skipped_gates", [])),
+        "close_verified": any(
+            item.get("gate") == "close"
+            and item.get("verified_execution")
+            and item.get("exit_code") == 0
+            for item in state.get("evidence", [])
+        ),
+        "handoff_created": bool(state.get("handoff_created")),
         "attempts": [
             {
                 "attempt_id": item.get("attempt_id"),
@@ -5433,6 +5455,25 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
     wave = _wave_for_gates(plan, current_gates)
     if wave is None:
         raise ValueError("orchestrate plan has no wave for the current gates")
+    retired_failures = False
+    for attempt in state.get("attempts", []):
+        if (
+            attempt.get("gate") in current_gates
+            and attempt.get("status") in {"failed", "cancelled", "superseded"}
+            and not attempt.get("invalidated")
+        ):
+            attempt["invalidated"] = True
+            attempt["invalidated_at"] = now()
+            attempt["invalidation_reason"] = "retry_after_failure"
+            retired_failures = True
+    if retired_failures:
+        save_state(
+            task_dir,
+            task_dir / "current.json",
+            state,
+            "retry_invalidation",
+            "retired unsuccessful attempts before retry",
+        )
     prepared_attempts: list[dict[str, Any]] = []
     for spec in wave["delegations"]:
         key = spec["orchestration_delegation_key"]
@@ -5631,26 +5672,28 @@ def _preflight_orchestrate_completion(state: dict[str, Any], completion: dict[st
         if attempt.get("status") != requested_status:
             raise ValueError("completion status does not match the terminal ledger attempt")
         return
-    required_host_fields = ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort")
-    missing_host = [field for field in required_host_fields if not str(completion.get(field, "")).strip()]
-    if missing_host:
-        raise ValueError("completion requires actual host fields: " + ", ".join(missing_host))
-    spawn_request = attempt.get("spawn_request") or {}
-    expected = {
-        "host_tool": spawn_request.get("host_tool") or "spawn_agent",
-        "host_task_name": spawn_request.get("task_name") or attempt.get("agent"),
-        # `model` is absent for configured-default requests.  The host still
-        # reports its effective model and it is checked against the durable
-        # expected_model metadata instead.
-        "host_model": spawn_request.get("model") or spawn_request.get("expected_model") or attempt.get("expected_model"),
-        "host_reasoning_effort": spawn_request.get("reasoning_effort"),
-    }
-    mismatches = [
-        field for field, expected_value in expected.items()
-        if expected_value is not None and str(completion.get(field)) != str(expected_value)
-    ]
-    if mismatches:
-        raise ValueError("host completion mismatch for: " + ", ".join(mismatches))
+    observation_source = str(completion.get("host_observation_source") or "").strip()
+    if observation_source != "unattested_parent_result":
+        required_host_fields = ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort")
+        missing_host = [field for field in required_host_fields if not str(completion.get(field, "")).strip()]
+        if missing_host:
+            raise ValueError("completion requires actual host fields: " + ", ".join(missing_host))
+        spawn_request = attempt.get("spawn_request") or {}
+        expected = {
+            "host_tool": spawn_request.get("host_tool") or "spawn_agent",
+            "host_task_name": spawn_request.get("task_name") or attempt.get("agent"),
+            # `model` is absent for configured-default requests.  The host still
+            # reports its effective model and it is checked against the durable
+            # expected_model metadata instead.
+            "host_model": spawn_request.get("model") or spawn_request.get("expected_model") or attempt.get("expected_model"),
+            "host_reasoning_effort": spawn_request.get("reasoning_effort"),
+        }
+        mismatches = [
+            field for field, expected_value in expected.items()
+            if expected_value is not None and str(completion.get(field)) != str(expected_value)
+        ]
+        if mismatches:
+            raise ValueError("host completion mismatch for: " + ", ".join(mismatches))
     if requested_status == "passed":
         sanitize_report_payload(completion.get("report"))
     elif not str(completion.get("reason", "")).strip():
@@ -5696,16 +5739,35 @@ def _complete_orchestrate_attempt(
     report = completion.get("report")
     if requested_status == "passed" and not isinstance(report, dict):
         raise ValueError("passed completions require a strict cortex/report/v1 report")
+    observation_source = str(completion.get("host_observation_source") or "").strip()
+    completion_fields = dict(completion)
+    if observation_source == "unattested_parent_result" and attempt.get("status") == AWAITING_HOST_SPAWN:
+        # V3 deliberately does not ask Luna to echo host metadata.  A returned
+        # parent result proves that the dispatch ran, but it is not independent
+        # evidence of the effective model or reasoning effort.
+        attempt["status"] = "running"
+        attempt["dispatch_correlation"] = observation_source
+        attempt["expected_route"] = {
+            "tool": (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
+            "model": (attempt.get("spawn_request") or {}).get("model"),
+            "expected_model": (attempt.get("spawn_request") or {}).get("expected_model") or attempt.get("expected_model"),
+            "reasoning_effort": (attempt.get("spawn_request") or {}).get("reasoning_effort"),
+        }
+        package_path = task_dir / "delegations" / f"{attempt_id}.json"
+        package = _read_private_json(package_path, "delegation package")
+        package["spawn_status"] = "parent_result_received"
+        package["dispatch_correlation"] = observation_source
+        package["expected_route"] = attempt["expected_route"]
+        write_json(package_path, package)
+        save_state(task_dir, task_dir / "current.json", state, "parent_result", attempt_id)
+        for field in ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort"):
+            completion_fields.pop(field, None)
     completed = complete_attempt({
         **params,
-        **completion,
+        **completion_fields,
         "task_id": state["task_id"],
         "attempt_id": attempt_id,
         "submission_id": completion.get("submission_id") or f"completion-{attempt_id}-report",
-        "host_tool": completion.get("host_tool") or (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
-        "host_task_name": completion.get("host_task_name") or (attempt.get("spawn_request") or {}).get("task_name") or attempt.get("agent"),
-        "host_model": completion.get("host_model") or (attempt.get("spawn_request") or {}).get("model") or (attempt.get("spawn_request") or {}).get("expected_model"),
-        "host_reasoning_effort": completion.get("host_reasoning_effort") or (attempt.get("spawn_request") or {}).get("reasoning_effort"),
         "status": requested_status,
         "report": report,
     })
@@ -5784,11 +5846,30 @@ def _replace_future_orchestrate_waves(
         state = revised["state"]
         completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
     completed_waves = [wave for wave in plan.get("waves", []) if set(wave.get("gates", [])).issubset(completed_set)]
+    relative_v3 = any(
+        item.get("host_observation_source") == "unattested_parent_result"
+        for item in params.get("completions", [])
+        if isinstance(item, dict)
+    )
+    if relative_v3:
+        for index, wave in enumerate(future, len(completed_waves) + 1):
+            wave["wave_id"] = f"wave-{index:02d}"
+            for delegation_index, delegation in enumerate(wave.get("delegations", []), 1):
+                delegation["orchestration_wave_id"] = wave["wave_id"]
+                delegation["orchestration_delegation_key"] = (
+                    f"{wave['wave_id']}-{delegation['gate']}-{delegation_index:02d}"
+                )
     full_pipeline = [gate for gate in state["current_pipeline"] if gate in completed_set]
     for gate in classification["pipeline"]:
         if gate not in full_pipeline:
             full_pipeline.append(gate)
     full_groups = [[gate] for gate in full_pipeline if gate in completed_set] + [wave["gates"] for wave in future]
+    normalized_current_groups = normalize_parallel_groups(state.get("parallel_groups"), state["current_pipeline"])
+    normalized_future_groups = normalize_parallel_groups(full_groups, full_pipeline)
+    pipeline_or_group_change = (
+        full_pipeline != state["current_pipeline"]
+        or normalized_future_groups != normalized_current_groups
+    )
     reassessed = reassess_pipeline({
         **params,
         "task_id": state["task_id"],
@@ -5797,15 +5878,16 @@ def _replace_future_orchestrate_waves(
         "pipeline": full_pipeline,
         "parallel_groups": full_groups,
         "intent": "resequence",
-        "decision": "updated",
-        "reason": "Unified facade accepted an explicit future_waves replacement.",
+        "decision": "updated" if pipeline_or_group_change else "unchanged",
+        "reason": (
+            "Unified facade accepted an explicit future_waves replacement."
+            if pipeline_or_group_change
+            else "Unified facade confirmed that future_waves already match the active pipeline."
+        ),
         "allow_rework": bool(params.get("allow_rework", False)),
-        "apply": True,
+        "apply": pipeline_or_group_change,
     })
-    if not reassessed.get("applied") and not rework_gates:
-        raise ValueError("future_waves replacement produced no applied pipeline change")
-    if reassessed.get("applied"):
-        state = reassessed["state"]
+    state = reassessed["state"]
     plan["waves"] = completed_waves + future
     _write_orchestrate_plan(task_dir, plan)
     return state, plan
@@ -5985,8 +6067,18 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
         "expected_revision": state["revision"],
         "reason": params.get("reason") or "Unified facade resumed the blocked task.",
     })
-    plan = _load_or_create_orchestrate_plan(params, task_dir, resumed["state"])
-    prepared = _prepare_orchestrate_wave(params, task_dir, resumed["state"], plan)
+    resumed_state = resumed["state"]
+    invalidated = False
+    for attempt in resumed_state.get("attempts", []):
+        if attempt.get("gate") in active_gates(resumed_state) and attempt.get("status") == "blocked" and not attempt.get("invalidated"):
+            attempt["invalidated"] = True
+            attempt["invalidated_at"] = now()
+            attempt["invalidation_reason"] = "retry_after_resume"
+            invalidated = True
+    if invalidated:
+        save_state(task_dir, task_dir / "current.json", resumed_state, "resume_invalidation", "retired blocked attempts before retry")
+    plan = _load_or_create_orchestrate_plan(params, task_dir, resumed_state)
+    prepared = _prepare_orchestrate_wave(params, task_dir, resumed_state, plan)
     return _orchestrate_response("resume", prepared["state"], wave_id=prepared["wave_id"], spawn_requests=prepared["spawn_requests"])
 
 
@@ -6142,6 +6234,682 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
         return error
 
 
+V3_COMPLEXITY_ALIASES = {
+    "1": "C1", "c1": "C1", "simple": "C1", "small": "C1", "tiny": "C1", "light": "C1", "lightweight": "C1",
+    "2": "C2", "c2": "C2", "standard": "C2", "default": "C2", "normal": "C2",
+    "3": "C3", "c3": "C3", "complex": "C3", "large": "C3", "critical": "C3", "high": "C3",
+}
+V3_STATUS_ALIASES = {
+    "pass": "passed", "passed": "passed", "success": "passed", "succeeded": "passed", "complete": "passed", "completed": "passed",
+    "fail": "failed", "failed": "failed", "failure": "failed", "error": "failed",
+    "block": "blocked", "blocked": "blocked", "waiting": "blocked", "needs_input": "blocked",
+    "cancel": "cancelled", "canceled": "cancelled", "cancelled": "cancelled",
+    "supersede": "superseded", "superseded": "superseded", "replaced": "superseded",
+}
+
+
+def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    result = {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": False,
+        "outcome": outcome,
+        "code": code,
+        "diagnostics": [{"code": code, "message": redact(message, 1000)}],
+        "dispatches": [],
+        "next_action": redact(message, 1000),
+    }
+    if candidates is not None:
+        result["candidates"] = candidates
+    return result
+
+
+def _v3_task_ref(task_id: str) -> str:
+    return "task-" + digest_text(task_id)[:12]
+
+
+def _v3_registry_path(root: Path) -> Path:
+    return root / "v3-operations.json"
+
+
+def _v3_registry(root: Path) -> dict[str, Any]:
+    path = _v3_registry_path(root)
+    if not path.exists():
+        return {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "starts": {}, "tasks": {}, "updated_at": now()}
+    registry = _read_private_json(path, "v3 operation registry")
+    if registry.get("schema") != PUBLIC_ORCHESTRATION_SCHEMA:
+        raise ValueError("v3 operation registry schema is not supported")
+    if not isinstance(registry.get("starts"), dict) or not isinstance(registry.get("tasks"), dict):
+        raise ValueError("v3 operation registry is invalid")
+    return registry
+
+
+def _write_v3_registry(root: Path, registry: dict[str, Any]) -> None:
+    registry["updated_at"] = now()
+    write_json(_v3_registry_path(root), registry)
+
+
+def _v3_task_state(root: Path, task_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+    indexed = read_task_index(root).get(task_id)
+    directory = indexed.get("directory") if isinstance(indexed, dict) else None
+    if not isinstance(directory, str) or Path(directory).name != directory or directory in {"", ".", ".."}:
+        return None
+    task_dir = _contained_path(root / "tasks", root / "tasks" / directory, "v3 task directory")
+    state_path, task_path = task_dir / "current.json", task_dir / "task.json"
+    if not state_path.exists() or not task_path.exists():
+        return None
+    state = _read_private_json(state_path, "v3 task state")
+    task = _read_private_json(task_path, "v3 task definition")
+    if state.get("schema") != SCHEMA or state.get("task_id") != task_id or task.get("task_id") != task_id:
+        raise ValueError("v3 task lookup found a mismatched ledger")
+    return task_dir, state, task
+
+
+def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = False) -> list[dict[str, Any]]:
+    root = ledger_root(params)
+    candidates: list[dict[str, Any]] = []
+    for task_id in sorted(read_task_index(root)):
+        loaded = _v3_task_state(root, task_id)
+        if loaded is None:
+            continue
+        _, state, task = loaded
+        if not include_completed and state.get("status") not in {"active", "blocked"}:
+            continue
+        candidates.append({
+            "task_id": task_id,
+            "task_ref": _v3_task_ref(task_id),
+            "objective": redact(task.get("objective", ""), 300),
+            "status": state.get("status"),
+            "created_at": task.get("created_at"),
+        })
+    return candidates
+
+
+def _v3_resolve_task(params: dict[str, Any], *, include_completed: bool = False) -> tuple[Path, dict[str, Any], dict[str, Any], str] | dict[str, Any]:
+    root = ledger_root(params)
+    candidates = _v3_task_candidates(params, include_completed=include_completed)
+    requested = str(params.get("task_ref") or "").strip()
+    if requested:
+        selected = next((item for item in candidates if item["task_ref"] == requested), None)
+        if selected is None:
+            return _v3_error("unknown_task_ref", "task_ref does not identify a selectable Cortex task")
+    elif len(candidates) == 1:
+        selected = candidates[0]
+    elif not candidates:
+        return _v3_error("no_active_task", "No active Cortex task exists in this project root.")
+    else:
+        public_candidates = [{key: item[key] for key in ("task_ref", "objective", "status")} for item in candidates]
+        return _v3_error(
+            "task_selection_required",
+            "Several Cortex tasks are active; retry with one returned task_ref.",
+            outcome="needs_selection",
+            candidates=public_candidates,
+        )
+    loaded = _v3_task_state(root, str(selected["task_id"]))
+    if loaded is None:
+        return _v3_error("task_unavailable", "The selected Cortex task is unavailable.")
+    task_dir, state, task = loaded
+    return task_dir, state, task, str(selected["task_ref"])
+
+
+def _v3_complexity(value: object) -> str:
+    raw = str(value or "C2").strip().lower().replace("-", "_").replace(" ", "_")
+    complexity = V3_COMPLEXITY_ALIASES.get(raw)
+    if complexity:
+        return complexity
+    suggestions = difflib.get_close_matches(raw, sorted(V3_COMPLEXITY_ALIASES), n=3)
+    suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
+    raise ValueError("task.complexity is not recognized" + suffix)
+
+
+def _v3_model(value: object) -> str | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    aliases = {"luna": "gpt-5.6-luna", "terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"}
+    model = aliases.get(raw, raw)
+    if model not in SUPPORTED_MODELS:
+        suggestions = difflib.get_close_matches(model, sorted(SUPPORTED_MODELS | set(aliases)), n=3)
+        suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
+        raise ValueError("worker model is not supported" + suffix)
+    return model
+
+
+def _v3_compact_waves(raw_waves: object, task: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(raw_waves, list) or not raw_waves:
+        raise ValueError("waves must be a non-empty array when supplied")
+    result: list[dict[str, Any]] = []
+    allowed_worker_keys = {
+        "phase", "profile", "objective", "paths", "acceptance", "verification",
+        "model", "effort", "visible", "isolated_checkout",
+    }
+    for wave_index, raw_wave in enumerate(raw_waves, 1):
+        if not isinstance(raw_wave, dict) or set(raw_wave) != {"workers"}:
+            raise ValueError(f"waves[{wave_index - 1}] must contain only workers")
+        workers = raw_wave.get("workers")
+        if not isinstance(workers, list) or not workers or len(workers) > 32:
+            raise ValueError(f"waves[{wave_index - 1}].workers must contain 1..32 workers")
+        delegations: list[dict[str, Any]] = []
+        for worker_index, worker in enumerate(workers, 1):
+            if not isinstance(worker, dict):
+                raise ValueError(f"waves[{wave_index - 1}].workers[{worker_index - 1}] must be an object")
+            unknown = sorted(set(worker) - allowed_worker_keys)
+            if unknown:
+                raise ValueError(f"unsupported compact worker fields: {', '.join(unknown)}")
+            raw_phase = str(worker.get("phase") or "").strip()
+            if not raw_phase:
+                raise ValueError(f"waves[{wave_index - 1}].workers[{worker_index - 1}].phase is required")
+            gate = canonical_pipeline_gate(raw_phase)
+            if gate not in AVAILABLE_GATES:
+                suggestions = difflib.get_close_matches(gate, sorted(AVAILABLE_GATES | set(PIPELINE_GATE_ALIASES)), n=3)
+                suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
+                raise ValueError(f"unknown worker phase {raw_phase!r}" + suffix)
+            raw_profile = str(worker.get("profile") or "").strip()
+            profile = canonical_profile(raw_profile) if raw_profile else _default_profile_for_gate(gate)
+            if profile not in AGENTS:
+                suggestions = difflib.get_close_matches(profile, sorted(AGENTS | set(PROFILE_ALIASES)), n=3)
+                suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
+                raise ValueError(f"unknown worker profile {raw_profile!r}" + suffix)
+            visible = bool(worker.get("visible", False))
+            isolated = bool(worker.get("isolated_checkout", False))
+            if isolated and not visible:
+                raise ValueError("isolated_checkout requires visible=true")
+            spec: dict[str, Any] = {"gate": gate, "agent": profile}
+            for source, target in (
+                ("objective", "objective"), ("paths", "allowed_paths"),
+                ("acceptance", "acceptance_criteria"), ("verification", "verification"),
+            ):
+                if source in worker:
+                    spec[target] = worker[source]
+            model = _v3_model(worker.get("model"))
+            if model:
+                spec["requested_model"] = model
+            if str(worker.get("effort") or "").strip():
+                spec["requested_reasoning_effort"] = str(worker["effort"]).strip().lower()
+            if visible:
+                spec["dispatch_mode"] = "visible_thread"
+                spec["thread_environment"] = "worktree" if isolated else "local"
+            delegations.append(spec)
+        result.append({"wave_id": f"wave-{wave_index:02d}", "delegations": delegations})
+    return result
+
+
+def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
+    classified = classify({"complexity": task["complexity"], "requirements": task.get("requirements", [])})
+    return [
+        {
+            "wave_id": f"wave-{index:02d}",
+            "delegations": [{"gate": gate} for gate in group],
+        }
+        for index, group in enumerate(classified["parallel_groups"], 1)
+    ]
+
+
+def _v3_host_capabilities() -> dict[str, Any]:
+    return {
+        "spawn_agent_models": sorted(SUPPORTED_MODELS),
+        "spawn_agent_default_model": CONFIGURED_DEFAULT_MODEL,
+        "create_thread_models": ["gpt-5.6-luna"],
+    }
+
+
+def _v3_native_arguments(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("host_tool") == "create_thread":
+        arguments: dict[str, Any] = {
+            "prompt": request.get("prompt") or request.get("message"),
+            "title": request.get("title") or request.get("task_name"),
+            "target": {"environment": {"type": request.get("thread_environment") or "local"}},
+        }
+    else:
+        arguments = {
+            "task_name": request.get("task_name"),
+            "message": request.get("message"),
+            "reasoning_effort": request.get("reasoning_effort"),
+        }
+    if request.get("model"):
+        arguments["model"] = request["model"]
+    return {key: value for key, value in arguments.items() if value is not None}
+
+
+def _v3_response(old: dict[str, Any], task_ref: str, *, include_result: bool = False) -> dict[str, Any]:
+    wave_label = str(old.get("wave_id") or "")
+    wave_match = re.search(r"(\d+)$", wave_label)
+    step = int(wave_match.group(1)) if wave_match else None
+    if not old.get("ok"):
+        diagnostics = old.get("diagnostics") if isinstance(old.get("diagnostics"), list) else []
+        operation = str(old.get("operation") or "")
+        retry_tool = "start_orchestration" if operation == "start" else "continue_orchestration"
+        response = {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": old.get("state", "needs_input"),
+            "code": old.get("code", "orchestration_failed"),
+            "step": step,
+            "diagnostics": diagnostics,
+            "dispatches": [],
+            "next_action": f"Correct every diagnostic and retry {retry_tool}.",
+        }
+        if include_result and "result" in old:
+            response["result"] = old["result"]
+        return response
+    requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
+    dispatches = [
+        {
+            "worker": index,
+            "call": request.get("host_tool") or "spawn_agent",
+            "arguments": _v3_native_arguments(request),
+        }
+        for index, request in enumerate(requests, 1)
+    ]
+    outcome = old.get("state")
+    if dispatches:
+        next_action = "Run every dispatch, wait for the active worker results, then call continue_orchestration with this step."
+    elif outcome == "completed":
+        next_action = "Orchestration is complete; use the verified handoff."
+    elif outcome == "blocked":
+        next_action = "Resolve the blocker, then use manage_orchestration with intent resume."
+    else:
+        next_action = "Wait for the active worker results, then call continue_orchestration with this step."
+    response = {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": True,
+        "outcome": outcome,
+        "step": step,
+        "dispatches": dispatches,
+        "next_action": next_action,
+    }
+    if outcome == "completed":
+        summary = old.get("state_summary") if isinstance(old.get("state_summary"), dict) else {}
+        response["result"] = {
+            "close_verified": bool(summary.get("close_verified")),
+            "handoff_ready": bool(summary.get("handoff_created")),
+        }
+    if include_result and "result" in old:
+        response["result"] = old["result"]
+    return response
+
+
+def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple[str, str, str, str]:
+    root = ledger_root(params)
+    start_digest = _orchestrate_request_digest({"task": task, "waves": params.get("waves")})
+    with state_lock(root):
+        registry = _v3_registry(root)
+        prior = registry["starts"].get(start_digest)
+        if isinstance(prior, dict):
+            task_id = str(prior.get("task_id") or "")
+            loaded = _v3_task_state(root, task_id) if task_id else None
+            if loaded is None or loaded[1].get("status") in {"active", "blocked"}:
+                return task_id, str(prior["task_ref"]), str(prior["principal"]), str(prior["submission_id"])
+        objective_slug = re.sub(r"[^a-z0-9]+", "-", str(task["objective"]).lower()).strip("-")[:48] or "task"
+        task_id = safe_id(f"{objective_slug}-{secrets.token_hex(4)}")
+        task_ref = _v3_task_ref(task_id)
+        principal = safe_id("v3-" + task_ref)
+        submission_id = safe_id("v3-start-" + secrets.token_hex(8))
+        reservation = {
+            "task_id": task_id,
+            "task_ref": task_ref,
+            "principal": principal,
+            "submission_id": submission_id,
+            "created_at": now(),
+        }
+        registry["starts"][start_digest] = reservation
+        registry["tasks"].setdefault(task_id, {})["start"] = {"digest": start_digest, **reservation}
+        _write_v3_registry(root, registry)
+        return task_id, task_ref, principal, submission_id
+
+
+def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+    """Start Cortex v3 without caller-managed lifecycle identifiers."""
+    try:
+        select_project_root(params)
+        if set(params) - {"project_root", "task", "waves"}:
+            raise ValueError("start_orchestration accepts only project_root, task, and optional waves")
+        raw_task = params.get("task")
+        if not isinstance(raw_task, dict):
+            raise ValueError("task must be an object containing objective")
+        allowed_task = {
+            "objective", "requirements", "acceptance_criteria", "scope", "allowed_paths",
+            "verification", "budget", "pause_conditions", "user_language", "language",
+            "complexity", "replan_limit",
+        }
+        unknown_task = sorted(set(raw_task) - allowed_task)
+        if unknown_task:
+            raise ValueError("unsupported task fields: " + ", ".join(unknown_task))
+        objective = str(raw_task.get("objective") or "").strip()
+        if not objective:
+            raise ValueError("task.objective is required")
+        task = dict(raw_task)
+        task["objective"] = objective
+        task["complexity"] = _v3_complexity(raw_task.get("complexity"))
+        language_alias = task.pop("language", None)
+        task["user_language"] = normalize_user_language(
+            task.get("user_language") or language_alias,
+            objective,
+        )
+        waves = _v3_compact_waves(params["waves"], task) if params.get("waves") is not None else _v3_auto_waves(task)
+        root = ledger_root(params)
+        start_digest = _orchestrate_request_digest({"task": task, "waves": params.get("waves")})
+        registry = _v3_registry(root)
+        prior = registry.get("starts", {}).get(start_digest)
+        prior_active = False
+        if isinstance(prior, dict) and str(prior.get("task_id") or ""):
+            loaded_prior = _v3_task_state(root, str(prior["task_id"]))
+            prior_active = loaded_prior is not None and loaded_prior[1].get("status") in {"active", "blocked"}
+        if not prior_active:
+            active = _v3_task_candidates(params)
+            if len(active) == 1:
+                loaded = _v3_task_state(root, str(active[0]["task_id"]))
+                if loaded is None:
+                    raise ValueError("the active Cortex task became unavailable")
+                _, existing_state, _ = loaded
+                inspected = _orchestrate_inspect({
+                    "project_root": params["project_root"],
+                    "task_id": existing_state["task_id"],
+                    "principal": existing_state.get("principal"),
+                    "thread_id": existing_state.get("thread_id"),
+                })
+                return _v3_response(inspected, str(active[0]["task_ref"]))
+            if len(active) > 1:
+                return _v3_error(
+                    "task_selection_required",
+                    "Several Cortex tasks are already active; recover one with manage_orchestration before starting new work.",
+                    outcome="needs_selection",
+                    candidates=[{key: item[key] for key in ("task_ref", "objective", "status")} for item in active],
+                )
+        task_id, task_ref, principal, submission_id = _v3_start_reservation(params, task)
+        old = orchestrate({
+            "operation": "start",
+            "submission_id": submission_id,
+            "project_root": params["project_root"],
+            "principal": principal,
+            "thread_id": principal,
+            "task": {**task, "task_id": task_id},
+            "waves": waves,
+            "host_capabilities": _v3_host_capabilities(),
+        })
+        return _v3_response(old, task_ref)
+    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        return _v3_error("start_validation_failed", exc)
+
+
+def _v3_status(value: object, *, has_report: bool) -> str:
+    if value in {None, ""} and has_report:
+        return "passed"
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    status_value = V3_STATUS_ALIASES.get(raw)
+    if status_value:
+        return status_value
+    suggestions = difflib.get_close_matches(raw, sorted(V3_STATUS_ALIASES), n=3)
+    suffix = f"; try {', '.join(suggestions)}" if suggestions else ""
+    raise ValueError("result status is not recognized" + suffix)
+
+
+def _v3_active_wave_context(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], int | None]:
+    plan = _load_or_create_orchestrate_plan({**params, "task_id": state["task_id"]}, task_dir, state)
+    wave = _wave_for_gates(plan, active_gates(state))
+    if wave is None:
+        raise ValueError("The active Cortex task has no current wave.")
+    wave_match = re.search(r"(\d+)$", str(wave.get("wave_id") or ""))
+    expected_step = int(wave_match.group(1)) if wave_match else None
+    if type(params.get("step")) is not int or params.get("step") != expected_step:
+        raise ValueError(f"continue step must match the active relative step {expected_step}")
+    active_attempt_ids = [
+        item["attempt_id"] for item in state.get("attempts", [])
+        if item.get("gate") in wave.get("gates", [])
+        and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
+        and not item.get("invalidated")
+    ]
+    attempt_ids = active_attempt_ids or list(wave.get("attempt_ids") or [])
+    return wave, attempt_ids, expected_step
+
+
+def _v3_continue_context(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    task_ref: str,
+) -> tuple[dict[str, Any], list[str], str, str, dict[str, Any] | None]:
+    root = ledger_root(params)
+    request_digest = _orchestrate_request_digest({key: value for key, value in params.items() if key != "task_ref"})
+    with state_lock(root):
+        registry = _v3_registry(root)
+        task_record = registry["tasks"].setdefault(state["task_id"], {})
+        last = task_record.get("last_continue")
+        if isinstance(last, dict) and last.get("digest") == request_digest and isinstance(last.get("response"), dict):
+            return {}, [], "", request_digest, dict(last["response"])
+        inflight = task_record.get("inflight_continue")
+        if isinstance(inflight, dict):
+            if inflight.get("digest") != request_digest:
+                raise ValueError("A different continue payload is already recovering this active wave; retry the original payload first.")
+            return dict(inflight["old_params"]), list(inflight["attempt_ids"]), str(inflight["wave_id"]), request_digest, None
+        wave, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
+        submission_id = safe_id("v3-continue-" + digest_text(state["task_id"] + ":" + str(wave["wave_id"]) + ":" + request_digest)[:20])
+        old_params = {
+            "operation": "advance",
+            "submission_id": submission_id,
+            "project_root": params["project_root"],
+            "principal": state.get("principal"),
+            "thread_id": state.get("thread_id"),
+            "task_id": state["task_id"],
+            "wave_id": wave["wave_id"],
+        }
+        task_record["inflight_continue"] = {
+            "digest": request_digest,
+            "wave_id": wave["wave_id"],
+            "attempt_ids": attempt_ids,
+            "old_params": old_params,
+            "task_ref": task_ref,
+            "created_at": now(),
+        }
+        _write_v3_registry(root, registry)
+        return old_params, attempt_ids, str(wave["wave_id"]), request_digest, None
+
+
+def _v3_store_continue(params: dict[str, Any], task_id: str, request_digest: str, response: dict[str, Any], *, clear_only: bool = False) -> None:
+    root = ledger_root(params)
+    with state_lock(root):
+        registry = _v3_registry(root)
+        task_record = registry["tasks"].setdefault(task_id, {})
+        task_record.pop("inflight_continue", None)
+        if not clear_only:
+            task_record["last_continue"] = {"digest": request_digest, "response": response, "completed_at": now()}
+        _write_v3_registry(root, registry)
+
+
+def _v3_completed_replay(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Replay a final continue after task completion removed the active mapping."""
+    if _v3_task_candidates(params):
+        return None
+    request_digest = _orchestrate_request_digest({key: value for key, value in params.items() if key != "task_ref"})
+    requested_ref = str(params.get("task_ref") or "").strip()
+    registry = _v3_registry(ledger_root(params))
+    matches = []
+    for task_id, record in registry.get("tasks", {}).items():
+        if requested_ref and _v3_task_ref(str(task_id)) != requested_ref:
+            continue
+        last = record.get("last_continue") if isinstance(record, dict) else None
+        if isinstance(last, dict) and last.get("digest") == request_digest and isinstance(last.get("response"), dict):
+            matches.append(dict(last["response"]))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _v3_active_replay(params: dict[str, Any], task_id: str) -> dict[str, Any] | None:
+    request_digest = _orchestrate_request_digest({key: value for key, value in params.items() if key != "task_ref"})
+    record = _v3_registry(ledger_root(params)).get("tasks", {}).get(task_id, {})
+    last = record.get("last_continue") if isinstance(record, dict) else None
+    if isinstance(last, dict) and last.get("digest") == request_digest and isinstance(last.get("response"), dict):
+        return dict(last["response"])
+    return None
+
+
+def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+    """Advance exactly the active Cortex wave using relative worker slots."""
+    try:
+        select_project_root(params)
+        allowed = {"project_root", "task_ref", "step", "results", "future_waves", "rework", "reason"}
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError("unsupported continue fields: " + ", ".join(unknown))
+        results = params.get("results")
+        if not isinstance(results, list) or not results:
+            raise ValueError("results must be a non-empty array")
+        completed_replay = _v3_completed_replay(params)
+        if completed_replay is not None:
+            return completed_replay
+        resolved = _v3_resolve_task(params)
+        if isinstance(resolved, dict):
+            return resolved
+        task_dir, state, task, task_ref = resolved
+        active_replay = _v3_active_replay(params, state["task_id"])
+        if active_replay is not None:
+            return active_replay
+        _, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
+        future_waves = (
+            _v3_compact_waves(params["future_waves"], task)
+            if params.get("future_waves") is not None else None
+        )
+        if len(results) != len(attempt_ids):
+            raise ValueError(f"active wave requires exactly {len(attempt_ids)} result(s)")
+        slots: dict[int, dict[str, Any]] = {}
+        multiple = len(attempt_ids) > 1
+        for index, result in enumerate(results, 1):
+            if not isinstance(result, dict):
+                raise ValueError("every result must be an object")
+            allowed_result = {"worker", "report", "status", "reason"}
+            unknown_result = sorted(set(result) - allowed_result)
+            if unknown_result:
+                raise ValueError("unsupported result fields: " + ", ".join(unknown_result))
+            if multiple:
+                if type(result.get("worker")) is not int:
+                    raise ValueError("parallel results require the integer worker slot returned by Cortex")
+                slot = int(result["worker"])
+            else:
+                if "worker" in result and result["worker"] != 1:
+                    raise ValueError("the single active worker slot is 1")
+                slot = 1
+            if slot < 1 or slot > len(attempt_ids) or slot in slots:
+                raise ValueError("worker slots must be unique members of the active wave")
+            report = result.get("report")
+            status_value = _v3_status(result.get("status"), has_report=isinstance(report, dict))
+            if status_value == "passed":
+                sanitize_report_payload(report)
+                if str(result.get("reason") or "").strip():
+                    raise ValueError("successful results must not include reason")
+            else:
+                if report is not None:
+                    raise ValueError("non-success results must omit report")
+                if not str(result.get("reason") or "").strip():
+                    raise ValueError("non-success results require reason")
+            slots[slot] = result
+        # Reserve the server-owned transaction only after all slots, reports,
+        # statuses, and future-wave overrides pass validation.
+        old_params, reserved_attempt_ids, _, request_digest, replay = _v3_continue_context(params, task_dir, state, task_ref)
+        if replay is not None:
+            return replay
+        if reserved_attempt_ids != attempt_ids:
+            raise ValueError("the active wave changed while continue was being validated; retry with the latest step")
+        completions: list[dict[str, Any]] = []
+        for slot, attempt_id in enumerate(attempt_ids, 1):
+            result = slots[slot]
+            status_value = _v3_status(result.get("status"), has_report=isinstance(result.get("report"), dict))
+            completion = {
+                "attempt_id": attempt_id,
+                "host_observation_source": "unattested_parent_result",
+                "status": status_value,
+            }
+            if status_value == "passed":
+                completion["report"] = result["report"]
+            else:
+                completion["reason"] = str(result["reason"])
+            completions.append(completion)
+        old_params["completions"] = completions
+        if future_waves is not None:
+            old_params["future_waves"] = future_waves
+            old_params["allow_rework"] = bool(params.get("rework", False))
+        if params.get("reason") is not None:
+            old_params["reason"] = params["reason"]
+        old = orchestrate(old_params)
+        response = _v3_response(old, task_ref)
+        if old.get("ok"):
+            _v3_store_continue(params, state["task_id"], request_digest, response)
+        elif str(old.get("phase")) in {"preflight", "started", "validation"}:
+            _v3_store_continue(params, state["task_id"], request_digest, response, clear_only=True)
+        return response
+    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        try:
+            resolved = _v3_resolve_task(params)
+            if not isinstance(resolved, dict):
+                _, state, _, _ = resolved
+                root = ledger_root(params)
+                with state_lock(root):
+                    registry = _v3_registry(root)
+                    registry["tasks"].setdefault(state["task_id"], {}).pop("inflight_continue", None)
+                    _write_v3_registry(root, registry)
+        except Exception:
+            pass
+        return _v3_error("continue_validation_failed", exc)
+
+
+def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
+    """Keep recovery and rare v7 capabilities outside the Luna normal flow."""
+    try:
+        select_project_root(params)
+        allowed = {"project_root", "intent", "task_ref", "reason", "payload"}
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError("unsupported management fields: " + ", ".join(unknown))
+        intent_raw = str(params.get("intent") or "inspect").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "status": "inspect", "inspect": "inspect", "show": "inspect",
+            "resume": "resume", "retry": "resume", "continue_blocked": "resume",
+            "deactivate": "deactivate", "normal": "deactivate", "stop_session": "deactivate",
+            "lane": "lane", "resource": "resource", "question": "question",
+        }
+        intent = aliases.get(intent_raw)
+        if not intent:
+            suggestions = difflib.get_close_matches(intent_raw, sorted(aliases), n=3)
+            raise ValueError("management intent is not recognized" + (f"; try {', '.join(suggestions)}" if suggestions else ""))
+        resolved = _v3_resolve_task(
+            params,
+            include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "deactivate"},
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        _, state, _, task_ref = resolved
+        common = {
+            "project_root": params["project_root"],
+            "principal": state.get("principal"),
+            "thread_id": state.get("thread_id"),
+            "task_id": state["task_id"],
+        }
+        if intent == "inspect":
+            return _v3_response(_orchestrate_inspect(common), task_ref, include_result=True)
+        submission_id = safe_id("v3-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps(params, sort_keys=True, default=str))[:16])
+        if intent in {"resume", "deactivate"}:
+            old = orchestrate({
+                **common,
+                "operation": intent,
+                "submission_id": submission_id,
+                "reason": params.get("reason"),
+            })
+        else:
+            payload = params.get("payload")
+            if not isinstance(payload, dict):
+                raise ValueError(f"{intent} management requires payload")
+            old = orchestrate({
+                **common,
+                "operation": intent,
+                "submission_id": submission_id,
+                "payload": payload,
+            })
+        return _v3_response(old, task_ref, include_result=True)
+    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        return _v3_error("management_failed", exc)
+
+
 PIPELINE_OPERATION_SCHEMA = {"type": "object", "properties": {"op": {"type": "string", "enum": ["add", "remove", "move", "replace", "rework"]}, "gate": {"type": "string"}, "before": {"type": "string"}, "after": {"type": "string"}, "index": {"type": "integer"}, "with": {"type": "array", "items": {"type": "string"}}}, "required": ["op", "gate"]}
 QUESTION_OPTION_SCHEMA = {
     "anyOf": [
@@ -6285,7 +7053,115 @@ ORCHESTRATE_TOOL_SCHEMA = {
     },
     "required": ["operation", "project_root"],
 }
+V3_REPORT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "findings": {"type": "array"},
+        "questions": {"type": "array"},
+        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "tests": {"type": "array"},
+        "evidence": {"type": "array"},
+        "uncertainty": {"type": "array"},
+        "next_action": {"type": "string", "minLength": 1},
+    },
+    "required": sorted(REPORT_FIELDS),
+}
+V3_WORKER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "phase": {"type": "string", "minLength": 1, "description": "Human phase label; common aliases are normalized."},
+        "profile": {"type": "string", "description": "Optional Cortex profile label; omitted profiles are inferred from phase."},
+        "objective": {"type": "string"},
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "acceptance": {"type": "array", "items": {"type": "string"}},
+        "verification": {"type": "array", "items": {"type": "string"}},
+        "model": {"type": "string", "description": "Optional expert override; luna, terra, and sol aliases are accepted."},
+        "effort": {"type": "string", "description": "Optional expert reasoning-effort override."},
+        "visible": {"type": "boolean", "default": False},
+        "isolated_checkout": {"type": "boolean", "default": False},
+    },
+    "required": ["phase"],
+}
+V3_WAVE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"workers": {"type": "array", "minItems": 1, "maxItems": 32, "items": V3_WORKER_SCHEMA}},
+    "required": ["workers"],
+}
+START_ORCHESTRATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+        "task": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "objective": {"type": "string", "minLength": 1},
+                "requirements": {"type": "array", "items": {"type": "string"}},
+                "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                "scope": {"type": "array", "items": {"type": "string"}},
+                "allowed_paths": {"type": "array", "items": {"type": "string"}},
+                "verification": {"type": "array", "items": {"type": "string"}},
+                "budget": {"type": "string"},
+                "pause_conditions": {"type": "array", "items": {"type": "string"}},
+                "user_language": {"type": "string"},
+                "language": {"type": "string"},
+                "complexity": {"type": ["string", "integer"], "description": "Optional C1/C2/C3 or human alias; defaults to C2."},
+                "replan_limit": {"type": "integer", "minimum": 0},
+            },
+            "required": ["objective"],
+        },
+        "waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
+    },
+    "required": ["project_root", "task"],
+}
+CONTINUE_ORCHESTRATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+        "task_ref": {"type": "string", "description": "Needed only when Cortex reports several selectable tasks."},
+        "step": {"type": "integer", "minimum": 1, "description": "Relative step returned by the preceding Cortex response; enables safe idempotent replay without a wave identifier."},
+        "results": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "worker": {"type": "integer", "minimum": 1, "description": "Required only for a parallel wave."},
+                    "report": V3_REPORT_SCHEMA,
+                    "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
+                    "reason": {"type": "string", "description": "Required for a non-success result."},
+                },
+            },
+        },
+        "future_waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
+        "rework": {"type": "boolean", "default": False},
+        "reason": {"type": "string"},
+    },
+    "required": ["project_root", "step", "results"],
+}
+MANAGE_ORCHESTRATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+        "intent": {"type": "string", "description": "Recovery intent such as inspect, resume, deactivate, lane, resource, or question; common aliases are normalized."},
+        "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
+        "reason": {"type": "string"},
+        "payload": {"type": "object", "description": "Rare-operation payload. Normal wave progression never uses this field."},
+    },
+    "required": ["project_root"],
+}
 TOOLS = {
+    "start_orchestration": (start_orchestration, START_ORCHESTRATION_SCHEMA),
+    "continue_orchestration": (continue_orchestration, CONTINUE_ORCHESTRATION_SCHEMA),
+    "manage_orchestration": (manage_orchestration, MANAGE_ORCHESTRATION_SCHEMA),
     "orchestrate": (orchestrate, ORCHESTRATE_TOOL_SCHEMA),
     "activate_orchestration": (activate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/cortex"}, "thread_id": {"type": "string", "minLength": 1}, "principal": {"type": "string", "minLength": 1}}, "required": ["user_command", "thread_id", "principal"]}),
     "deactivate_orchestration": (deactivate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/normal"}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["user_command"]}),
@@ -6390,9 +7266,18 @@ TOOLS["record_delegation"][1]["required"] = [
 for _field in ("allowed_paths", "acceptance_criteria", "verification"):
     TOOLS["record_delegation"][1]["properties"][_field].pop("minItems", None)
 
-# Cortex v2 exposes one state-machine facade.  The legacy handlers remain
-# private implementation primitives so v7 ledgers can be resumed safely.
-PUBLIC_TOOLS = {"orchestrate": TOOLS["orchestrate"]}
+# Cortex v3 keeps the v7 ledger and v2 facade as private compatibility
+# primitives, while the model sees only relative, task-focused operations.
+PUBLIC_TOOLS = {
+    "start_orchestration": TOOLS["start_orchestration"],
+    "continue_orchestration": TOOLS["continue_orchestration"],
+    "manage_orchestration": TOOLS["manage_orchestration"],
+}
+PUBLIC_TOOL_DESCRIPTIONS = {
+    "start_orchestration": "Start a Cortex task from its objective. Cortex creates internal identifiers and returns native worker dispatches.",
+    "continue_orchestration": "Submit the active wave's worker reports and receive the next relative wave. No lifecycle identifiers are needed.",
+    "manage_orchestration": "Inspect or recover a Cortex task, or use an uncommon lane, resource, or durable question operation.",
+}
 
 
 def respond(payload: dict[str, Any]) -> None:
@@ -6432,7 +7317,7 @@ def main() -> None:
             elif method == "notifications/initialized":
                 continue
             elif method == "tools/list":
-                result = {"tools": [{"name": name, "description": "Run or recover the Cortex orchestration state machine.", "inputSchema": schema} for name, (_, schema) in PUBLIC_TOOLS.items()]}
+                result = {"tools": [{"name": name, "description": PUBLIC_TOOL_DESCRIPTIONS[name], "inputSchema": schema} for name, (_, schema) in PUBLIC_TOOLS.items()]}
             elif method == "resources/list":
                 result = {"resources": []}
             elif method == "resources/templates/list":
@@ -6441,19 +7326,14 @@ def main() -> None:
                 name = request.get("params", {}).get("name")
                 if name not in PUBLIC_TOOLS:
                     if name in TOOLS:
-                        raise ValueError("removed_in_v2_use_orchestrate")
+                        raise ValueError("removed_in_v3_use_start_continue_or_manage")
                     raise ValueError(f"unknown tool '{name}'")
                 arguments = request.get("params", {}).get("arguments", {})
                 if not isinstance(arguments, dict):
                     raise ValueError("tool arguments must be an object")
-                # The unified facade owns its validation and converts malformed
-                # workspace inputs into a recoverable structured diagnostic.
-                # Running the preflight here would turn expected coordinator
-                # mistakes (missing/relative project_root or CORTEX_ROOT) into
-                # MCP exceptions, polluting the sensitive tool-error journal
-                # and depriving the host of the facade's next_action.
-                if name != "orchestrate":
-                    select_project_root(arguments)
+                # Public v3 adapters own validation and return recoverable
+                # structured diagnostics. Do not preflight here: an MCP-level
+                # exception would hide their next action from the coordinator.
                 value = PUBLIC_TOOLS[name][0](arguments)
                 structured_error = _tool_result_error(value)
                 if structured_error:

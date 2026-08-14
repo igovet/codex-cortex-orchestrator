@@ -112,40 +112,23 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: cached Cortex MCP failed to start")
         rows = [json.loads(line) for line in rpc.stdout.splitlines() if line.strip()]
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
-        if set(tools) != {"orchestrate"}:
-            raise SystemExit("fresh plugin probe: Cortex v2 must expose exactly the orchestrate tool")
-        operations = set(tools["orchestrate"]["inputSchema"]["properties"]["operation"]["enum"])
-        expected_operations = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question"}
-        if operations != expected_operations:
-            raise SystemExit("fresh plugin probe: orchestrate operation schema is incomplete")
+        expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration"}
+        if set(tools) != expected_tools:
+            raise SystemExit("fresh plugin probe: Cortex v3 public tool set is incomplete")
         workspace = base / "workspace"
         workspace.mkdir()
-        principal = "fresh-plugin-probe"
-        created = mcp_tool(server, environment, workspace, "orchestrate", {
-            "operation": "start", "submission_id": "fresh-plugin-start",
-            "principal": principal, "thread_id": principal,
+        created = mcp_tool(server, environment, workspace, "start_orchestration", {
             "task": {
-                "task_id": "fresh-plugin", "objective": "verify the installed MCP workspace binding",
+                "objective": "verify the installed MCP workspace binding",
                 "complexity": "C1", "requirements": [],
             },
-            "waves": [
-                {"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]},
-                {"wave_id": "implementation", "delegations": [{"gate": "implementation", "agent": "general"}]},
-                {"wave_id": "review", "delegations": [{"gate": "review", "agent": "code_reviewer"}]},
-            ],
-            "host_capabilities": {
-                "spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
-                "create_thread_models": ["gpt-5.6-luna"],
-            },
+            "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
         })
         task_dirs = list((workspace / ".codex/cortex/tasks").iterdir())
-        if not created.get("ok") or created.get("state") != "ready_to_spawn" or len(task_dirs) != 1:
+        if not created.get("ok") or created.get("outcome") != "ready_to_spawn" or len(task_dirs) != 1:
             raise SystemExit("fresh plugin probe: installed MCP did not create a project-local task ledger")
         expected_task = task_dirs[0]
-        confirmed = mcp_tool(server, environment, workspace, "orchestrate", {
-            "operation": "inspect",
-            "task_id": "fresh-plugin", "principal": principal, "thread_id": principal,
-        })
+        confirmed = mcp_tool(server, environment, workspace, "manage_orchestration", {"intent": "inspect"})
         task = json.loads((expected_task / "task.json").read_text(encoding="utf-8"))
         if not confirmed.get("ok") or task.get("project_root") != str(workspace):
             raise SystemExit("fresh plugin probe: created Cortex task was not immediately confirmed in the selected workspace")

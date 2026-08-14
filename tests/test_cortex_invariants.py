@@ -631,11 +631,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(active_event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         context = json.loads(completed.stdout)["additionalContext"]
         self.assertIn("internal worker, never user-facing", context)
-        self.assertIn("main chat", context)
-        self.assertIn("mcp__codebase_memory__list_projects", context)
-        self.assertIn("list_projects", context)
-        self.assertIn("root_path exactly matches the absolute project root", context)
-        self.assertIn("search_graph", context)
+        self.assertIn("native parent channel", context)
+        self.assertIn("Return your final sanitized cortex/report/v1 directly to the parent", context)
+        self.assertNotIn("record_report", context)
+        self.assertNotIn("mcp__codebase_memory__", context)
 
     def test_hook_hashes_thread_and_allowlists_telemetry_fields(self):
         created = self.init(task_id="hook-privacy")
@@ -696,24 +695,23 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("exactly one MCP tool: `orchestrate`", skill)
-        self.assertIn("`host_capabilities.spawn_agent_models`", skill)
-        self.assertIn("Invoke every returned `spawn_request`", skill)
-        self.assertIn("actual host id/tool/model/effort", skill)
+        self.assertIn("Cortex v3 exposes three public MCP tools", skill)
+        self.assertIn("`start_orchestration` and `continue_orchestration`", skill)
+        self.assertIn("Invoke each returned dispatch", skill)
+        self.assertIn("Expected routes are metadata, not proof", skill)
         self.assertIn("Workers do not call Cortex", skill)
-        self.assertIn("`operation=\"question\"`", skill)
+        self.assertIn("question intent", skill)
 
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
         markers = [
             "## Normal flow",
-            "Build the complete task contract",
-            "Call `orchestrate(operation=\"start\")` once",
-            "Invoke every returned `spawn_request`",
-            "After every worker in the wave",
-            "call `orchestrate(operation=\"advance\")` exactly once",
-            "Invoke the next returned spawn requests",
-            "The final `advance`",
+            "Call `start_orchestration` once",
+            "Invoke each returned dispatch",
+            "Workers do not call Cortex",
+            "After all workers finish",
+            "call `continue_orchestration` exactly once",
+            "Repeat one continue per completed wave",
         ]
         positions = [skill.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions))
@@ -757,11 +755,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "harvest-refresh": "harvest-refresh",
             "normal": "normal",
         })
-        help_section = skill.split("### Help route", 1)[1].split("## Explicit activation", 1)[0]
+        help_section = skill.split("## Invocation and routes", 1)[1].split("## Relative one-call-per-wave workflow", 1)[0]
         self.assertIn("`cortex:orchestrator`", help_section)
         self.assertIn("`$cortex:orchestrator`", help_section)
-        self.assertIn("not\n  registered native slash commands", help_section)
-        self.assertIn("Do not activate Cortex", help_section)
+        self.assertIn("not registered native slash", help_section)
+        self.assertIn("Help performs no activation", help_section)
         before = control.capture_project_manifest(self.project)
         after = control.capture_project_manifest(self.project)
         self.assertEqual(before["digest"], after["digest"])

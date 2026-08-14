@@ -1,7 +1,7 @@
 {
   "name": "cortex",
-  "version": "2.0.0+codex.20260814162858",
-  "description": "Durable Cortex control plane for staged agent work: tasks, gates, delegations, locks, and handoffs.",
+  "version": "3.0.0+codex.20260814183202",
+  "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"
   },
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, and one unified orchestrate tool over the local Cortex v7 ledger. One call starts a task wave and one call advances each dependent wave while preserving receipt-backed reports, staged gates, knowledge harvests, and source-backed recovery.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, and three narrow Cortex v3 tools over the local Cortex v7 ledger. Luna coordinators start once, continue by relative step and worker slot, and use a separate management path for recovery while Cortex preserves receipt-backed reports, gates, verification, and handoff state.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

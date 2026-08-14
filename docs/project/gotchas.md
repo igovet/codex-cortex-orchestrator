@@ -1,5 +1,46 @@
 # Gotchas
 
+## Public v3 coordinator contract
+
+- Normal flow is `start_orchestration` once, then
+  `continue_orchestration` once per completed relative `step`.
+  `manage_orchestration` is only for inspect/resume/deactivate and rare
+  lane/resource/durable-question work. The legacy `orchestrate` facade and v7
+  primitives below are private compatibility internals.
+- Every public call requires the exact absolute `project_root`. Start needs
+  only `task.objective`; complexity defaults to C2. Compact wave overrides use
+  `waves[].workers[]`, with only `phase` required.
+- Continue carries the prior response's relative `step`. A single result omits
+  `worker`; a parallel wave must return every unique integer worker slot once.
+  Stale, duplicate, missing, foreign, or changed retries fail before task-state
+  writes.
+- Successful results carry all eight `cortex/report/v1` sections. Non-success
+  results omit report and require normalized status plus reason. Workers
+  return reports through the native parent result and never call Cortex,
+  `record_report`, or identifier-heavy tools.
+- Idempotency is server-owned. Callers do not send submission, task, wave,
+  attempt, coordinator identity, or host metadata. A repeated start while one
+  task is active reconstructs that task instead of creating an accidental
+  duplicate; ambiguous recovery returns opaque `task_ref` choices.
+- Human-readable language names normalize before ledger creation. Repeating a
+  semantically unchanged `future_waves` assessment is valid and keeps the next
+  relative step monotonic; it must not fail after committing the current gate.
+- Dispatch arguments contain only native parameters. Expected model/tool/
+  effort is routing metadata, not actual host attestation. Do not add a native
+  model when configured-default Luna intentionally omits it.
+- Modern Codex clients advertise the `openai/form` MCP extension under
+  initialize capabilities; the legacy boolean is still accepted. A durable UI
+  question uses `manage_orchestration(intent="question")` and must return a
+  recoverable unsupported result rather than guessing when the host cannot
+  render elicitation.
+- Fixture Luna-high evaluation covers sequential, compact parallel, and
+  blocked/resume flows. A live `SKIP` means missing release evidence, not pass.
+
+## Private v2/v7 compatibility internals
+
+The remaining notes document invariants retained inside the v7 ledger and
+private adapter. They are not valid public v3 request envelopes.
+
 - Command evidence must include an explicit `exit_code`; a textual claim that
   a command was green is not sufficient. The final C2/C3 `advance` privately
   runs the allowlisted close verification and requires its server-observed

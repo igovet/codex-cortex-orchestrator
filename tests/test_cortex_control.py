@@ -99,6 +99,28 @@ class ControlPlaneTests(unittest.TestCase):
             payload["report"] = report
         return {**payload, **overrides}
 
+    @staticmethod
+    def v3_report(summary="v3 worker completed"):
+        return {
+            "summary": summary,
+            "findings": [],
+            "questions": [],
+            "changed_files": [],
+            "tests": [],
+            "evidence": ["v3 report evidence"],
+            "uncertainty": [],
+            "next_action": "advance",
+        }
+
+    def v3_start(self, objective="v3 task", waves=None, **task_overrides):
+        arguments = {
+            "project_root": str(self.project),
+            "task": {"objective": objective, **task_overrides},
+        }
+        if waves is not None:
+            arguments["waves"] = waves
+        return control.start_orchestration(arguments)
+
     def test_orchestration_is_inactive_until_main_chat_command(self):
         with self.assertRaisesRegex(ValueError, "inactive"):
             control.init_task({"task_id": "inactive", "objective": "nope", "complexity": "C1", "principal": "thread-a"})
@@ -1636,17 +1658,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Treat any non-English user task text as input data", delegation["spawn_request"]["message"])
         self.assertIn("never reply in that language", delegation["spawn_request"]["message"])
         self.assertIn("User-facing language: ru", delegation["spawn_request"]["message"])
-        self.assertIn("call mcp__codebase_memory__list_projects with {}", delegation["spawn_request"]["message"])
-        self.assertIn("select the record whose root_path exactly matches the absolute project_root", delegation["spawn_request"]["message"])
-        self.assertIn("pass that record's name as project", delegation["spawn_request"]["message"])
-        self.assertIn("search_graph(project, query=...)", delegation["spawn_request"]["message"])
-        self.assertIn("search_code(project, pattern, regex, mode=compact|full|files", delegation["spawn_request"]["message"])
-        self.assertIn("trace_path(project, function_name=<qualified_name from search_graph>", delegation["spawn_request"]["message"])
-        self.assertIn("get_code_snippet(project, qualified_name=<exact qualified_name from search_graph>", delegation["spawn_request"]["message"])
-        self.assertIn("Do not call index_repository, ingest_traces, manage_adr, or delete_project", delegation["spawn_request"]["message"])
-        self.assertIn("Do not start with grep, rg, glob", delegation["spawn_request"]["message"])
-        self.assertIn("If list_projects fails", delegation["spawn_request"]["message"])
-        self.assertIn("documented fallback", delegation["spawn_request"]["message"])
+        self.assertIn("Use only repository and verification tools that are actually available", delegation["spawn_request"]["message"])
+        self.assertNotIn("mcp__codebase_memory__", delegation["spawn_request"]["message"])
+        self.assertNotIn("mode=compact|full|files", delegation["spawn_request"]["message"])
 
     def test_composite_delegation_and_completion_fast_paths(self):
         self.init(task_id="composites")
@@ -1912,6 +1926,232 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(result["prepared"], [])
         state = control.status({"task_id": "composite-rollback", "principal": "thread-a"})["state"]
         self.assertEqual(state["attempts"], [])
+
+    def test_v3_minimal_start_defaults_to_c2_and_hides_durable_ids(self):
+        started = self.v3_start("minimal relative orchestration")
+        self.assertTrue(started["ok"])
+        self.assertEqual(started["schema"], control.PUBLIC_ORCHESTRATION_SCHEMA)
+        self.assertEqual(started["step"], 1)
+        self.assertEqual(len(started["dispatches"]), 1)
+        self.assertEqual(set(started["dispatches"][0]), {"worker", "call", "arguments"})
+        self.assertNotIn("model", started["dispatches"][0]["arguments"])
+        self.assertNotIn("task_id", started)
+        self.assertNotIn("wave_id", started)
+        tasks = list((self.ledger / "tasks").iterdir())
+        definition = json.loads((tasks[0] / "task.json").read_text(encoding="utf-8"))
+        self.assertEqual(definition["complexity"], "C2")
+
+    def test_v3_repeated_start_with_changed_wording_resumes_the_unique_active_task(self):
+        first = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
+        repeated = self.v3_start("stable objective complete end to end", waves=[{"workers": [{"phase": "discover"}]}])
+        self.assertTrue(repeated["ok"])
+        self.assertEqual(repeated["step"], first["step"])
+        self.assertEqual(len(repeated["dispatches"]), 1)
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
+
+    def test_v3_normalizes_human_language_aliases_before_ledger_creation(self):
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {"objective": "language alias", "language": "English", "user_language": "English"},
+            "waves": [{"workers": [{"phase": "discover"}]}],
+        })
+        self.assertTrue(started["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        self.assertEqual(task["user_language"], "en")
+
+    def test_v3_compact_aliases_and_defaults_match_internal_delegation_contract(self):
+        started = self.v3_start("compact aliases", waves=[{"workers": [{
+            "phase": "research", "profile": "exploration", "objective": "Inspect",
+            "paths": ["plugins/cortex"], "acceptance": ["Facts collected"],
+            "verification": ["Cite files"], "model": "luna", "effort": "high",
+        }]}])
+        self.assertTrue(started["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        self.assertEqual((attempt["gate"], attempt["agent"]), ("discover", "explorer"))
+        self.assertEqual(attempt["allowed_paths"], ["plugins/cortex"])
+        self.assertEqual(attempt["acceptance_criteria"], ["Facts collected"])
+        self.assertEqual(attempt["verification"], ["Cite files"])
+        self.assertEqual(attempt["expected_model"], "gpt-5.6-luna")
+
+    def test_v3_unknown_phase_and_profile_are_recoverable_without_task_writes(self):
+        invalid_phase = self.v3_start("bad phase", waves=[{"workers": [{"phase": "discvoery"}]}])
+        invalid_profile = self.v3_start("bad profile", waves=[{"workers": [{"phase": "discover", "profile": "explroer"}]}])
+        self.assertFalse(invalid_phase["ok"])
+        self.assertFalse(invalid_profile["ok"])
+        self.assertIn("try", invalid_phase["diagnostics"][0]["message"])
+        self.assertIn("try", invalid_profile["diagnostics"][0]["message"])
+        tasks = self.ledger / "tasks"
+        self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
+
+    def test_v3_single_and_parallel_worker_slots_are_relative_and_atomic(self):
+        sequential = self.v3_start("single slot", waves=[{"workers": [{"phase": "discover"}]}])
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project), "step": sequential["step"],
+            "results": [{"report": self.v3_report()}],
+        })
+        self.assertTrue(advanced["ok"])
+        while advanced["outcome"] != "completed":
+            advanced = control.continue_orchestration({
+                "project_root": str(self.project), "step": advanced["step"],
+                "results": [{"report": self.v3_report()}],
+            })
+            self.assertTrue(advanced["ok"])
+
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {"objective": "parallel slots", "complexity": "small"},
+            "waves": [{"workers": [{"phase": "discover"}, {"phase": "architecture"}]}],
+        })
+        task_dir = max((self.ledger / "tasks").iterdir())
+        before = (task_dir / "current.json").read_bytes()
+        rejected = control.continue_orchestration({
+            "project_root": str(self.project), "step": started["step"],
+            "results": [
+                {"worker": 1, "report": self.v3_report("one")},
+                {"worker": 1, "report": self.v3_report("duplicate")},
+            ],
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual((task_dir / "current.json").read_bytes(), before)
+        self.assertFalse("inflight_continue" in (self.ledger / "v3-operations.json").read_text(encoding="utf-8"))
+        accepted = control.continue_orchestration({
+            "project_root": str(self.project), "step": started["step"],
+            "results": [
+                {"worker": 2, "report": self.v3_report("two")},
+                {"worker": 1, "report": self.v3_report("one")},
+            ],
+        })
+        self.assertTrue(accepted["ok"])
+
+    def test_v3_continue_replays_exact_retry_and_accepts_identical_report_on_next_step(self):
+        started = self.v3_start("relative retry", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        payload = {
+            "project_root": str(self.project), "step": started["step"],
+            "results": [{"report": self.v3_report("same report")}],
+        }
+        first = control.continue_orchestration(payload)
+        replay = control.continue_orchestration(payload)
+        self.assertEqual(replay, first)
+        self.assertEqual(first["step"], 2)
+        second = control.continue_orchestration({**payload, "step": first["step"]})
+        self.assertTrue(second["ok"])
+        reports = list((next((self.ledger / "tasks").iterdir()) / "reports/records").glob("*.json"))
+        self.assertEqual(len(reports), 2)
+        state = json.loads((next((self.ledger / "tasks").iterdir()) / "current.json").read_text(encoding="utf-8"))
+        completed_attempts = [item for item in state["attempts"] if item["status"] == "passed"]
+        self.assertEqual(completed_attempts[0]["dispatch_correlation"], "unattested_parent_result")
+        self.assertNotIn("host_spawn", completed_attempts[0])
+
+    def test_v3_failed_worker_is_retired_before_a_successful_relative_retry(self):
+        started = self.v3_start("worker retry", waves=[{"workers": [{"phase": "discover"}]}])
+        failed = control.continue_orchestration({
+            "project_root": str(self.project), "step": started["step"],
+            "results": [{"status": "failed", "reason": "transient worker failure"}],
+        })
+        self.assertTrue(failed["ok"])
+        self.assertEqual(failed["step"], started["step"])
+        self.assertEqual(len(failed["dispatches"]), 1)
+        retried = control.continue_orchestration({
+            "project_root": str(self.project), "step": failed["step"],
+            "results": [{"report": self.v3_report("retry succeeded")}],
+        })
+        self.assertTrue(retried["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        failed_attempts = [item for item in state["attempts"] if item["status"] == "failed"]
+        self.assertEqual(len(failed_attempts), 1)
+        self.assertTrue(failed_attempts[0]["invalidated"])
+        self.assertEqual(failed_attempts[0]["invalidation_reason"], "retry_after_failure")
+
+    def test_v3_final_continue_retry_replays_after_task_completion(self):
+        started = self.v3_start("final replay", waves=[{"workers": [{"phase": "close"}]}], complexity="tiny")
+        current = started
+        payload = None
+        while current["outcome"] != "completed":
+            payload = {
+                "project_root": str(self.project), "step": current["step"],
+                "results": [{"report": self.v3_report(f"completed step {current['step']}")}],
+            }
+            current = control.continue_orchestration(payload)
+            self.assertTrue(current["ok"])
+        completed = current
+        self.assertEqual(completed["outcome"], "completed")
+        self.assertTrue(completed["result"]["close_verified"])
+        self.assertIn("handoff_ready", completed["result"])
+        self.assertEqual(control.continue_orchestration(payload), completed)
+
+    def test_v3_ambiguous_active_tasks_require_an_opaque_task_ref(self):
+        for index, objective in enumerate(("first active", "second active"), 1):
+            principal = f"legacy-owner-{index}"
+            control.activate_orchestration({"user_command": "/cortex", "principal": principal, "thread_id": principal})
+            classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": principal})
+            control.init_task({
+                "task_id": f"legacy-active-{index}", "objective": objective,
+                "classification_id": classified["classification_id"], "principal": principal,
+            })
+        ambiguous = control.manage_orchestration({"project_root": str(self.project)})
+        self.assertEqual(ambiguous["outcome"], "needs_selection")
+        self.assertEqual({item["objective"] for item in ambiguous["candidates"]}, {"first active", "second active"})
+        selected = control.manage_orchestration({
+            "project_root": str(self.project), "intent": "inspect",
+            "task_ref": ambiguous["candidates"][0]["task_ref"],
+        })
+        self.assertTrue(selected["ok"])
+        self.assertNotIn("task_id", selected)
+
+    def test_v3_adapter_inspects_and_advances_an_existing_v7_task(self):
+        created = self.init(task_id="v7-through-v3", complexity="C1")
+        self.delegate(created["state"], "v7-through-v3", "discover", "explorer")
+        inspected = control.manage_orchestration({"project_root": str(self.project), "intent": "inspect"})
+        self.assertTrue(inspected["ok"])
+        self.assertEqual(inspected["step"], 1)
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project), "step": inspected["step"],
+            "results": [{"report": self.v3_report("legacy v7 advanced through v3")}],
+        })
+        self.assertTrue(advanced["ok"])
+        self.assertEqual(advanced["step"], 2)
+
+    def test_v3_future_wave_rework_requires_explicit_opt_in(self):
+        started = self.v3_start("v3 future rework", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        common = {
+            "project_root": str(self.project), "step": started["step"],
+            "results": [{"report": self.v3_report("discovery complete")}],
+            "future_waves": [{"workers": [{"phase": "discover"}, {"phase": "implementation"}]}],
+        }
+        denied = control.continue_orchestration(common)
+        self.assertFalse(denied["ok"])
+        self.assertIn("allow_rework=true", denied["diagnostics"][0]["message"])
+        allowed = control.continue_orchestration({**common, "rework": True, "reason": "new evidence"})
+        self.assertTrue(allowed["ok"])
+        self.assertEqual(allowed["step"], 1)
+
+    def test_v3_noop_future_wave_reassessment_advances_with_monotonic_steps(self):
+        started = self.v3_start("v3 no-op future", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project), "step": started["step"],
+            "results": [{"report": self.v3_report("discovery complete")}],
+            "future_waves": [{"workers": [{"phase": "implementation"}]}],
+        })
+        self.assertTrue(advanced["ok"])
+        self.assertEqual(advanced["step"], 2)
+        self.assertEqual(len(advanced["dispatches"]), 1)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        plan = json.loads((task_dir / "orchestration.json").read_text(encoding="utf-8"))
+        wave_ids = [wave["wave_id"] for wave in plan["waves"]]
+        self.assertEqual(wave_ids, sorted(set(wave_ids)))
 
     def test_orchestrate_start_replays_and_advance_returns_parallel_then_dependent_wave(self):
         waves = [
@@ -2193,7 +2433,7 @@ class ControlPlaneTests(unittest.TestCase):
             control.sys.stdin, control.sys.stdout = original_stdin, original_stdout
 
     def test_mcp_process_completes_facade_question_after_host_response(self):
-        self.init(task_id="nested-question")
+        started = self.v3_start("nested question", waves=[{"workers": [{"phase": "discover"}]}])
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
@@ -2202,12 +2442,13 @@ class ControlPlaneTests(unittest.TestCase):
                 proc.stdin.flush()
                 return json.loads(proc.stdout.readline())
 
-            initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
+            initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {"extensions": {"openai/form": {}}}}})
             self.assertEqual(initialized["result"]["serverInfo"]["name"], "cortex")
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "orchestrate", "arguments": {"operation": "question", "submission_id": "nested-question-ui", "project_root": str(self.project), "task_id": "nested-question", "principal": "thread-a", "thread_id": "thread-a", "payload": {"command": "ask", "question": "Continue?"}}}}) + "\n")
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "manage_orchestration", "arguments": {"intent": "question", "project_root": str(self.project), "payload": {"command": "ask", "question": "Continue?"}}}}) + "\n")
             proc.stdin.flush()
             elicitation = json.loads(proc.stdout.readline())
             self.assertEqual(elicitation["method"], "elicitation/create")
+            self.assertEqual(elicitation["params"]["mode"], "openai/form")
             proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "accept", "content": {"custom_response": "yes"}}}) + "\n")
             proc.stdin.flush()
             completed = json.loads(proc.stdout.readline())
@@ -2691,17 +2932,21 @@ class ControlPlaneTests(unittest.TestCase):
         finally:
             os.environ.pop("CORTEX_ROOT", None)
 
-    def test_mcp_smoke_exposes_only_the_orchestrate_facade(self):
+    def test_mcp_smoke_exposes_only_v3_relative_orchestration_tools(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertEqual(names, {"orchestrate"})
-        self.assertEqual(len(tools), 1)
+        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration"})
+        self.assertNotIn("orchestrate", names)
+        self.assertEqual(len(tools), 3)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
-        facade = tools[0]
-        self.assertIn("project_root", facade["inputSchema"]["required"])
-        self.assertEqual(set(facade["inputSchema"]["properties"]["operation"]["enum"]), {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question"})
+        by_name = {item["name"]: item for item in tools}
+        self.assertEqual(by_name["start_orchestration"]["inputSchema"]["required"], ["project_root", "task"])
+        self.assertEqual(by_name["continue_orchestration"]["inputSchema"]["required"], ["project_root", "step", "results"])
+        forbidden = {"operation", "submission_id", "task_id", "wave_id", "attempt_id", "host_tool", "host_model", "host_reasoning_effort"}
+        for name in ("start_orchestration", "continue_orchestration"):
+            self.assertFalse(forbidden & set(by_name[name]["inputSchema"]["properties"]))
 
     def test_mcp_logs_invalid_tool_input_with_session_and_call_ids(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -2758,14 +3003,10 @@ class ControlPlaneTests(unittest.TestCase):
                 "id": "call-18",
                 "method": "tools/call",
                 "params": {
-                    "name": "orchestrate",
+                    "name": "start_orchestration",
                     "arguments": {
-                        "operation": "start",
-                        "submission_id": "structured-log-start",
-                        "principal": "thread-a",
-                        "thread_id": "thread-a",
-                        "task": {"task_id": "structured-log", "objective": "missing waves"},
-                        "host_capabilities": {"spawn_agent_models": ["gpt-5.6-terra"]},
+                        "task": {"objective": "invalid compact wave"},
+                        "waves": [{"workers": [{"phase": "discvoery"}]}],
                         "project_root": str(self.project),
                     },
                 },
@@ -2781,15 +3022,13 @@ class ControlPlaneTests(unittest.TestCase):
             response = json.loads(completed.stdout)
             structured = response["result"]["structuredContent"]
             self.assertEqual(structured["ok"], False)
-            self.assertEqual(structured["next_operation"], "start")
-            self.assertEqual(structured["phase"], structured["diagnostics"][0]["phase"])
-            self.assertIn(structured["diagnostics"][0]["code"], {"invalid_request", structured["code"]})
+            self.assertEqual(structured["code"], "start_validation_failed")
+            self.assertIn("unknown worker phase", structured["diagnostics"][0]["message"])
             log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
             self.assertTrue(log_path.is_file())
             record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
-            self.assertEqual(record["tool"], "orchestrate")
-            self.assertIn("waves", record["error"])
-            self.assertIn("waves", {item["path"] for item in record["structured_result"]["diagnostics"]})
+            self.assertEqual(record["tool"], "start_orchestration")
+            self.assertIn("unknown worker phase", record["error"])
 
     def test_facade_aggregates_all_start_contract_errors_before_writing_ledger(self):
         malformed = control.orchestrate({
@@ -2818,11 +3057,11 @@ class ControlPlaneTests(unittest.TestCase):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
 
         def call(arguments, environment=None):
-            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "orchestrate", "arguments": arguments}}
+            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": arguments}}
             completed = subprocess.run([sys.executable, str(script)], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
             return json.loads(completed.stdout)
 
-        common = {"operation": "start", "submission_id": "root-start", "principal": "mcp", "thread_id": "mcp", "task": {"task_id": "root-task", "objective": "root test", "complexity": "C1"}, "waves": [{"wave_id": "discover", "delegations": [{"gate": "discover"}]}, {"wave_id": "implementation", "delegations": [{"gate": "implementation"}]}, {"wave_id": "review", "delegations": [{"gate": "review"}]}, {"wave_id": "close", "delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}
+        common = {"task": {"objective": "root test", "complexity": "C1"}}
         missing_root = call(common)["result"]["structuredContent"]
         self.assertFalse(missing_root["ok"])
         self.assertIn("project_root is required", missing_root["diagnostics"][0]["message"])
@@ -2839,7 +3078,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(external.exists())
         accepted = call({**common, "project_root": str(self.project)})["result"]["structuredContent"]
         self.assertTrue(accepted["ok"])
-        self.assertEqual(accepted["task_id"], "root-task")
+        self.assertNotIn("task_id", accepted)
         self.assertTrue((self.ledger / "tasks").is_dir())
 
     def test_mcp_process_supports_multiple_project_roots(self):
@@ -2847,7 +3086,7 @@ class ControlPlaneTests(unittest.TestCase):
         other = self.base / "other-project"
         other.mkdir()
         def start(root, task_id, submission_id):
-            return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "orchestrate", "arguments": {"operation": "start", "submission_id": submission_id, "project_root": str(root), "principal": "mcp", "thread_id": submission_id, "task": {"task_id": task_id, "objective": task_id, "complexity": "C1"}, "waves": [{"wave_id": "discover", "delegations": [{"gate": "discover"}]}, {"wave_id": "implementation", "delegations": [{"gate": "implementation"}]}, {"wave_id": "review", "delegations": [{"gate": "review"}]}, {"wave_id": "close", "delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}}}
+            return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": {"project_root": str(root), "task": {"objective": task_id, "complexity": "C1"}}}}
         requests = [start(self.project, "first-root", "first-root-start"), start(other, "second-root", "second-root-start")]
         completed = subprocess.run([sys.executable, str(script)], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
         first, second = [json.loads(line) for line in completed.stdout.splitlines()]
@@ -2876,24 +3115,19 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "2.0.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.0.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "orchestrate", "arguments": {
-                    "operation": "start", "submission_id": "renamed-cache-start",
-                    "project_root": str(self.project), "principal": "cache-test", "thread_id": "cache-test",
-                    "task": {"task_id": "renamed-cache", "objective": "use in-memory profiles", "complexity": "C1"},
-                    "waves": [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}],
-                    "host_capabilities": {
-                        "spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
-                        "create_thread_models": ["gpt-5.6-luna"],
-                    },
+                "params": {"name": "start_orchestration", "arguments": {
+                    "project_root": str(self.project),
+                    "task": {"objective": "use in-memory profiles", "complexity": "C1"},
+                    "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
                 }},
             }
             started = call(request)["result"]["structuredContent"]
             self.assertTrue(started["ok"])
-            self.assertIn("Select this profile", started["spawn_requests"][0]["message"])
+            self.assertIn("Select this profile", started["dispatches"][0]["arguments"]["message"])
         finally:
             if proc.stdin and not proc.stdin.closed:
                 proc.stdin.close()

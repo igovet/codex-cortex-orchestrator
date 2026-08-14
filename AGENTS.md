@@ -11,11 +11,12 @@ returns to normal mode. Cortex does not register native bare `/cortex` or
 of orchestration, task complexity, or ordinary coding requests do not activate
 this policy.
 
-After explicit activation, the main agent follows `cortex-control` and calls
-the single public `orchestrate` MCP tool. Start once with the complete task and
-wave plan, then advance once per completed wave; Cortex privately records the
-classification, delegations, evidence, gate outcomes, reassessment, and
-handoff. Without activation, remain in
+After explicit activation, the main agent follows `cortex-control`, calls
+`start_orchestration` once, and calls `continue_orchestration` once per
+completed wave. `manage_orchestration` is reserved for recovery and rare
+lane, resource, or durable-question work. Cortex privately records durable
+identifiers, classification, delegations, evidence, gate outcomes,
+reassessment, and handoff. Without activation, remain in
 the normal Codex workflow and do not initialize the orchestration ledger,
 create lanes, or dispatch through this policy. C1 work uses the control plane
 only when explicitly activated and genuinely beneficial.
@@ -26,6 +27,14 @@ second repository-level copy.
 All installable agent profiles, skills, hooks, MCP configuration, and runtime
 code live below `plugins/cortex/`; repository-root scripts, tests, and docs are
 development-only support files.
+
+When updating the Cortex plugin, follow semantic versioning for the plugin
+version in `plugins/cortex/.codex-plugin/plugin.json`: increase the patch
+component for fixes only (for example, `1.2.3` -> `1.2.4`), increase the minor
+component for a new backward-compatible feature (for example, `1.2.3` ->
+`1.3.0`), and increase the major component for a large or breaking change
+(for example, `1.2.3` -> `2.0.0`). Do not change unrelated version components;
+ordinary fixes and features must not be released as a major version.
 
 ## Working agreements
 
@@ -44,7 +53,7 @@ development-only support files.
   Terra/Sol/Luna overrides retain their native model field. When neither the
   configured default nor explicit Luna is available, use a hidden Terra
   fallback; never create a visible thread as a model fallback.
-- Supply the explicit absolute `project_root` on every MCP call. Do not touch the project or dispatch a worker until `orchestrate(operation="start")` returns `ready_to_spawn` and confirms `${project_root}/.codex/cortex`; fail closed for MCP failure, a mismatched/unwritable root, `CORTEX_ROOT`, or any `/tmp` fallback. One MCP process may serve multiple projects, but every task remains project-root bound.
+- Supply the explicit absolute `project_root` on every MCP call. Do not touch the project or dispatch a worker until `start_orchestration` returns `outcome="ready_to_spawn"`; fail closed for MCP failure, a mismatched/unwritable root, `CORTEX_ROOT`, or any `/tmp` fallback. One MCP process may serve multiple projects, but every task remains project-root bound.
 - Parallelize read-only exploration, review, testing, and analysis. Use one writer for an overlapping code area. Use separate worktrees for independent write streams.
 - Before finishing a change, run the relevant non-destructive verification and state any limitation plainly.
 - Treat source code, tests, and configuration as authoritative when they conflict with generated documentation.
