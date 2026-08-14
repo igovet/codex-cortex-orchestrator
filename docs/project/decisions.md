@@ -128,11 +128,12 @@ selected, policy, and fallback fields. With multi-agent v2 enabled, every
 delegation is evaluated independently from its declared work intent and risk.
 Luna handles explicit reading, discovery/data gathering, investigation,
 diagnosis, research, code review, CRUD-level edits, and small fixes at any
-risk; a read-only profile alone does not imply Luna. Terra handles
-non-analysis work such as architecture, migration, debugging, and
-implementation. Security task kind, the security gate, and the
-`security_auditor` profile always select Sol, normalizing contradictory task
-kinds to security. A non-security Sol exception must be structurally auditable: a supported
+risk; a read-only profile alone does not imply Luna. Terra is the initial
+policy for non-analysis work such as architecture, migration, debugging, and
+implementation, then the exact model/effort remapping table is applied before
+dispatch. Security task kind, the security gate, and the `security_auditor`
+profile initially select Sol, then follow that same table, normalizing
+contradictory task kinds to security. A non-security Sol exception must be structurally auditable: a supported
 extreme criterion with an audit reference, or a ledger-validated failed Terra
 attempt. The supported auditable-extreme criteria are
 `irreversible_multi_system_recovery`, `safety_critical_incident_response`,
@@ -140,7 +141,12 @@ and `novel_cross_system_failure_without_bounded_rollback`. Luna
 analysis/lightweight work has a `medium` minimum/default at low/moderate risk,
 `high` at high risk, and `xhigh` at critical risk; explicit higher effort is
 preserved. Other reasoning effort is selected independently of routing;
-`none` normalizes to `low` and Sol is at least `high`.
+`none` normalizes to `low`, and the five exact remapping pairs are applied
+before host capability selection. The coordinator passes exact `spawn_agent`
+and `create_thread` catalogs; if the hidden catalog lacks Luna while the thread
+catalog supports it, `record_delegation` creates the visible Luna task by
+default rather than silently substituting Terra. Terra is available only as an
+explicit `luna_fallback: terra` compatibility opt-out.
 
 ## Scoped worker report bus
 

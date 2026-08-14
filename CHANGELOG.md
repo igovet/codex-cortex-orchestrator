@@ -18,6 +18,16 @@ same base version.
   `verify-cortex-release.py --require-tracked` check remain prerequisites to
   any publication claim.
 
+## [1.0.6] - 2026-08-14
+
+- Apply the exact model/effort remapping table in the runtime, including Sol
+  routes, and persist the remap metadata in each delegation.
+- When the hidden `spawn_agent` catalog lacks Luna but `create_thread` exposes
+  it, create a visible Luna task by default instead of silently dispatching a
+  Terra subagent. Keep Terra only as an explicit compatibility opt-out.
+- Add regression coverage and synchronize routing, fallback, and release
+  documentation with the runtime contract.
+
 ## [1.0.3] - 2026-08-14
 
 - Add server-level MCP approval guidance and document the token cost of

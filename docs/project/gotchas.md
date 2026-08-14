@@ -80,8 +80,9 @@
   `confirm_host_spawn` with the returned child/thread id before it can run.
   The visible-thread route requires the exact `create_thread` catalog in
   `available_thread_models`, stays on the Luna policy route, and preserves the
-  dynamically selected reasoning effort rather than forcing `max`. It is never
-  an automatic replacement for a hidden subagent. That id is a
+  dynamically selected reasoning effort rather than forcing `max`. When the
+  hidden host catalog lacks Luna, this route is the automatic replacement for a
+  hidden subagent so the worker is not misrepresented as Terra. That id is a
   coordinator-recorded correlation, not independent proof from the host. Hooks
   remain best-effort, privacy-limited lifecycle telemetry rather than command
   or spawn proof.
@@ -91,14 +92,11 @@
   saved checkout and uncommitted changes, so concurrent writers must be
   serialized.
 - `create_thread` is inherently visible/user-owned; it has no hidden mode.
-  Keep `dispatch_mode` at `hidden_subagent` to stay out of the normal chat
-  list. If the host cannot spawn Luna invisibly, choose the hidden Terra
-  fallback instead of `luna_fallback: visible_thread`.
-- When the user explicitly requires Luna through a task if `spawn_agent` cannot
-  accept it, supply `luna_fallback: visible_thread` and both host catalogs to
-  `record_delegation`. The fallback then produces a Luna `create_thread`
-  request rather than a Terra worker. Without that explicit authorization,
-  normal hidden-subagent routing may still use its Terra fallback.
+  Keep `dispatch_mode` at `hidden_subagent` when the host advertises Luna. If
+  the hidden host cannot spawn Luna, pass both host catalogs and leave
+  `luna_fallback` unset: Cortex creates a Luna `create_thread` request rather
+  than a Terra worker. Set `luna_fallback: terra` only as an explicit
+  backwards-compatible opt-out.
 - If a task is rejected with `orchestration is inactive`, explicitly select a
   non-help Cortex skill route. The skill supplies the server's canonical
   `/cortex` activation token.
@@ -131,7 +129,8 @@
   investigation, diagnosis, research, code review, CRUD-level edits, and
   small fixes at any risk. A read-only profile alone does not imply Luna;
   non-analysis work such as architecture, migration, debugging, and
-  implementation uses Terra. Luna analysis/lightweight work defaults to and
+  implementation initially resolves to Terra and then follows the exact
+  model/effort remapping table. Luna analysis/lightweight work defaults to and
   floors at medium effort for low/moderate risk, high for high risk, and xhigh
   for critical risk.
 - Host model confirmation is strict: `confirm_host_spawn` requires the actual
@@ -149,15 +148,16 @@
   calls and canonicalizes spaces, hyphens, and case (for example, `Code Review`
   becomes `code_review`); unsafe punctuation remains rejected.
   Security task kind, the security gate, and the `security_auditor` profile
-  always use Sol, with contradictory task kinds normalized to security.
+  initially resolve to Sol and then follow the exact remapping table, with
+  contradictory task kinds normalized to security.
   Non-security Sol needs
   a structured auditable extreme criterion plus `audit_ref`, or a
   ledger-validated failed Terra attempt; a free-form escalation note is never
   enough. The supported auditable-extreme criteria are
   `irreversible_multi_system_recovery`, `safety_critical_incident_response`,
   and `novel_cross_system_failure_without_bounded_rollback`. Reasoning effort
-  is independent of the routing category, except that `none` becomes `low`
-  and Sol is clamped to at least `high`.
+  is independent of the routing category; `none` becomes `low`, and only
+  remapping-table pairs bypass the normal Sol high-effort floor.
   Profile names come from `plugins/cortex/profiles.json`; there are 21, and
   `task_formatter` is not one of them.
 - The installer removes only authenticated known legacy artifacts and backs

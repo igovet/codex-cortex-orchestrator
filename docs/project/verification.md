@@ -67,6 +67,11 @@ Host-spawn binding regressions also prove that a model-routed attempt cannot
 become `running` without the host's actual `host_model`, and that a requested
 model mismatch (for example, Luna requested but Terra started) is terminalized
 as `host_model_mismatch` instead of being accepted as a successful dispatch.
+Routing regressions also cover the exact five-pair model/effort remapping table,
+including Sol routes, and prove that a hidden `spawn_agent` catalog containing
+only Sol/Terra produces a Luna `create_thread` request when the thread catalog
+advertises Luna. The explicit `luna_fallback: terra` compatibility opt-out is
+kept separate from the default Luna-preserving behavior.
 The repository validator additionally checks that all installable sources live
 under `plugins/cortex/`, `profiles.json` matches exactly 21 profile files,
 exactly 10 skills ship, all eight report fields are required, and the retired

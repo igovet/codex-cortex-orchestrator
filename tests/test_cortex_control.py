@@ -52,6 +52,7 @@ class ControlPlaneTests(unittest.TestCase):
             "principal": state.get("principal", "thread-a"),
             "expected_revision": delegated["state"]["revision"],
             "attempt_id": delegated["attempt_id"],
+            "host_tool": delegated["spawn_request"]["host_tool"],
             "host_agent_id": f"test-host-{delegated['attempt_id']}",
             "host_task_name": delegated["spawn_request"]["task_name"],
             "host_model": delegated["spawn_request"]["model"],
@@ -344,14 +345,17 @@ class ControlPlaneTests(unittest.TestCase):
         ])
         self.assertNotIn("database_architecture", revised["state"]["current_pipeline"])
 
-    def test_security_always_routes_to_sol_at_every_risk(self):
+    def test_security_sol_route_applies_the_exact_model_effort_remap(self):
         for risk in ("low", "moderate", "high", "critical"):
             with self.subTest(risk=risk):
                 route = control.resolve_dispatch_route({"agent": "security_auditor", "task_kind": "security", "risk": risk, "complexity": "C1", "requested_model": "gpt-5.6-terra", "requested_reasoning_effort": "low"})
                 self.assertEqual(route["policy_model"], "gpt-5.6-sol")
-                self.assertEqual(route["selected_model"], "gpt-5.6-sol")
-                self.assertEqual(route["selected_reasoning_effort"], "high")
+                self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+                self.assertEqual(route["selected_reasoning_effort"], "xhigh")
                 self.assertEqual(route["fallback_reason"], "policy_model_enforced")
+                self.assertEqual(route["remap_from_model"], "gpt-5.6-sol")
+                self.assertEqual(route["remap_from_reasoning_effort"], "low")
+                self.assertEqual(route["remap_reason"], "model_effort_policy_table")
 
     def test_security_profile_normalizes_contradictory_lightweight_kind_to_sol(self):
         route = control.resolve_dispatch_route({"agent": "security_auditor", "task_kind": "reading", "risk": "low", "complexity": "C1"})
@@ -363,7 +367,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.activate()
         classified = control.classify_task({"complexity": "C1", "requirements": ["security"], "principal": "thread-a"})
         state = control.init_task({"task_id": "security-route", "objective": "security routing", "complexity": "C1", "pipeline": ["security", "close"], "classification_id": classified["classification_id"], "principal": "thread-a"})["state"]
-        delegation = self.delegate(state, "security-route", "security", "security_auditor", task_kind="reading", risk="low")
+        delegation = self.delegate(state, "security-route", "security", "security_auditor", task_kind="reading", risk="low", requested_reasoning_effort="high")
         self.assertEqual(delegation["spawn_request"]["model"], "gpt-5.6-sol")
         self.assertEqual(delegation["state"]["attempts"][-1]["task_kind"], "security")
 
@@ -396,7 +400,43 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(route["fallback_reason"], "policy_model_enforced")
         self.assertTrue(route["read_only"])
 
-    def test_read_only_profile_alone_does_not_force_luna(self):
+    def test_model_effort_remap_table_is_exact_and_preserves_other_pairs(self):
+        cases = (
+            ("gpt-5.6-terra", "low", "gpt-5.6-luna", "high"),
+            ("gpt-5.6-terra", "medium", "gpt-5.6-luna", "high"),
+            ("gpt-5.6-terra", "high", "gpt-5.6-luna", "xhigh"),
+            ("gpt-5.6-sol", "low", "gpt-5.6-terra", "xhigh"),
+            ("gpt-5.6-sol", "medium", "gpt-5.6-terra", "max"),
+        )
+        for requested_model, effort, expected_model, expected_effort in cases:
+            with self.subTest(requested_model=requested_model, effort=effort):
+                params = {
+                    "agent": "security_auditor" if requested_model == "gpt-5.6-sol" else "general",
+                    "task_kind": "security" if requested_model == "gpt-5.6-sol" else "implementation",
+                    "risk": "moderate",
+                    "complexity": "C2",
+                    "requested_model": requested_model,
+                    "requested_reasoning_effort": effort,
+                }
+                route = control.resolve_dispatch_route(params)
+                self.assertEqual(route["selected_model"], expected_model)
+                self.assertEqual(route["selected_reasoning_effort"], expected_effort)
+                self.assertEqual(route["remap_from_model"], requested_model)
+                self.assertEqual(route["remap_from_reasoning_effort"], effort)
+
+        preserved = control.resolve_dispatch_route({
+            "agent": "security_auditor",
+            "task_kind": "security",
+            "risk": "moderate",
+            "complexity": "C2",
+            "requested_model": "gpt-5.6-sol",
+            "requested_reasoning_effort": "high",
+        })
+        self.assertEqual(preserved["selected_model"], "gpt-5.6-sol")
+        self.assertEqual(preserved["selected_reasoning_effort"], "high")
+        self.assertIsNone(preserved["remap_reason"])
+
+    def test_read_only_profile_uses_terra_policy_then_applies_the_remap(self):
         route = control.resolve_dispatch_route({
             "agent": "explorer",
             "task_kind": "implementation",
@@ -404,7 +444,10 @@ class ControlPlaneTests(unittest.TestCase):
             "complexity": "C3",
         })
         self.assertEqual(route["policy_model"], "gpt-5.6-terra")
-        self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(route["selected_reasoning_effort"], "high")
+        self.assertEqual(route["remap_from_model"], "gpt-5.6-terra")
+        self.assertEqual(route["remap_from_reasoning_effort"], "medium")
 
     def test_analysis_task_kinds_route_to_luna_even_for_workspace_profiles(self):
         for task_kind in ("analysis", "diagnosis", "research", "runtime_investigation", "root_cause_analysis", "code_review"):
@@ -448,7 +491,9 @@ class ControlPlaneTests(unittest.TestCase):
         for task_kind in ("implementation", "tests", "debugging", "architecture", "migration"):
             with self.subTest(non_lightweight=task_kind):
                 route = control.resolve_dispatch_route({"agent": "general", "task_kind": task_kind, "risk": "low", "complexity": "C1"})
-                self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+                self.assertEqual(route["policy_model"], "gpt-5.6-terra")
+                self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+                self.assertEqual(route["selected_reasoning_effort"], "high")
 
     def test_terra_style_task_kind_is_canonicalized_at_the_mcp_boundary(self):
         for supplied, expected, model in (("Code Review", "code_review", "gpt-5.6-luna"), ("READ-ONLY", "read_only", "gpt-5.6-luna"), ("data   gathering", "data_gathering", "gpt-5.6-luna")):
@@ -507,13 +552,19 @@ class ControlPlaneTests(unittest.TestCase):
             "host-model-fallback",
             "discover",
             "explorer",
-            task_kind="reading",
+            task_kind="implementation",
             available_models=["gpt-5.6-sol", "gpt-5.6-terra"],
+            available_thread_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         )
         attempt = delegation["state"]["attempts"][-1]
-        self.assertEqual(attempt["policy_model"], "gpt-5.6-luna")
-        self.assertEqual(attempt["selected_model"], "gpt-5.6-terra")
-        self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
+        self.assertEqual(attempt["policy_model"], "gpt-5.6-terra")
+        self.assertEqual(attempt["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(attempt["selected_reasoning_effort"], "high")
+        self.assertEqual(attempt["remap_from_model"], "gpt-5.6-terra")
+        self.assertEqual(attempt["remap_from_reasoning_effort"], "medium")
+        self.assertEqual(attempt["fallback_reason"], "spawn_agent_luna_unavailable")
+        self.assertEqual(attempt["luna_fallback"], "visible_thread")
+        self.assertEqual(attempt["spawn_request"]["host_tool"], "create_thread")
         self.assertEqual(attempt["host_spawn"]["model_verification"], "verified")
 
     def test_explicit_visible_thread_keeps_luna_and_dynamic_reasoning_effort(self):
@@ -550,6 +601,25 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(confirmed["confirmed"])
         self.assertEqual(confirmed["host_spawn"]["tool"], "create_thread")
+
+    def test_explicit_terra_fallback_remains_a_compatibility_opt_out(self):
+        state = self.init(task_id="terra-fallback-opt-out")['state']
+        delegated = self.delegate(
+            state,
+            "terra-fallback-opt-out",
+            "discover",
+            "general",
+            task_kind="implementation",
+            available_models=["gpt-5.6-sol", "gpt-5.6-terra"],
+            luna_fallback="terra",
+        )
+        attempt = delegated["state"]["attempts"][-1]
+        self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
+        self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-terra")
+        self.assertEqual(delegated["spawn_request"]["reasoning_effort"], "high")
+        self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
+        self.assertEqual(attempt["fallback_from_model"], "gpt-5.6-luna")
+        self.assertFalse(attempt["user_owned_thread"])
 
     def test_visible_thread_can_opt_into_an_isolated_worktree(self):
         state = self.init(task_id="visible-worktree-thread")["state"]
@@ -628,13 +698,14 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
         self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
 
-    def test_all_ordinary_non_security_complexities_route_to_terra(self):
+    def test_all_ordinary_non_security_complexities_apply_the_terra_to_luna_remap(self):
         for complexity in ("C1", "C2", "C3"):
             for risk in ("low", "moderate", "high", "critical"):
                 with self.subTest(complexity=complexity, risk=risk):
                     route = control.resolve_dispatch_route({"agent": "general", "task_kind": "implementation", "risk": risk, "complexity": complexity})
                     self.assertEqual(route["policy_model"], "gpt-5.6-terra")
-                    self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+                    self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+                    self.assertEqual(route["selected_reasoning_effort"], "high")
 
     def test_non_security_sol_requires_structured_authorization(self):
         for params in (
@@ -655,7 +726,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_failed_terra_attempt_in_ledger_permits_non_security_sol(self):
         state = self.init(task_id="sol-link")["state"]
-        terra = self.delegate(state, "sol-link", "discover", "explorer", task_kind="implementation", requested_model="gpt-5.6-terra")
+        terra = self.delegate(state, "sol-link", "discover", "explorer", task_kind="implementation", requested_model="gpt-5.6-terra", requested_reasoning_effort="xhigh")
         failed = control.finalize_attempt({"task_id": "sol-link", "principal": "thread-a", "expected_revision": terra["state"]["revision"], "attempt_id": terra["attempt_id"], "status": "failed", "reason": "bounded Terra attempt could not resolve the defect"})
         observed = control.status({"task_id": "sol-link", "principal": "thread-a"})
         sol = control.record_delegation({"task_id": "sol-link", "principal": "thread-a", "expected_revision": failed["state"]["revision"], "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "general", "task_kind": "implementation", "risk": "high", "requested_model": "gpt-5.6-sol", "sol_escalation": {"kind": "terra_failure", "prior_terra_attempt_id": terra["attempt_id"]}, "objective": "retry after Terra failure", "ownership": "Own retry", "allowed_paths": ["."], "acceptance_criteria": ["Resolve the defect"], "verification": ["Report evidence"]})
@@ -997,8 +1068,8 @@ class ControlPlaneTests(unittest.TestCase):
             "profile": "general",
             "display_name": "general",
             "task_name": "general",
-            "model": "gpt-5.6-terra",
-            "reasoning_effort": "high",
+            "model": "gpt-5.6-luna",
+            "reasoning_effort": "xhigh",
         }
         package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
@@ -1804,9 +1875,11 @@ class ControlPlaneTests(unittest.TestCase):
         delegation = self.delegate(state, "reports", "plan", "planner", risk="low", requested_model="gpt-5.6-terra", requested_reasoning_effort="none")
         package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
         self.assertEqual(package["requested_model"], "gpt-5.6-terra")
-        self.assertEqual(package["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(package["selected_model"], "gpt-5.6-luna")
         self.assertIsNone(package["fallback_reason"])
-        self.assertEqual(package["selected_reasoning_effort"], "low")
+        self.assertEqual(package["selected_reasoning_effort"], "high")
+        self.assertEqual(package["remap_from_model"], "gpt-5.6-terra")
+        self.assertEqual(package["remap_from_reasoning_effort"], "low")
         report = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
         replay = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
         self.assertTrue(replay["idempotent"])

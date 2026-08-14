@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**1.0.5**. The `cortex/v7` ledger is a breaking upgrade from older task and
+**1.0.6**. The `cortex/v7` ledger is a breaking upgrade from older task and
 lane records; those records have no compatibility reader and must be recreated.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
@@ -25,6 +25,11 @@ After changing this setting, start a new Codex task. Existing tasks retain the
 multi-agent adapter selected when they were created; with v1, an explicit
 `gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to dispatch
 Luna explicitly for eligible lightweight work.
+
+If an agents-v1 host exposes only Sol/Terra to hidden `spawn_agent`, the
+Luna-preserving fallback still works when native `create_thread` exposes Luna:
+Cortex creates a visible Luna task instead of claiming that a Terra subagent is
+Luna. v2 is required only when the Luna worker must remain hidden.
 
 ### MCP tool approvals and auto-review
 
@@ -56,25 +61,22 @@ Auto-review invokes an additional model-based review for approval requests,
 which consumes token and model budget; `approvals_reviewer = "user"` keeps the
 decision manual.
 
-The main coordinator must also pass the exact model identifiers accepted by
-the native `spawn_agent` host as `available_models` on each delegation. When
-the host does not expose Luna but does expose Terra, Cortex records the
-policy preference for Luna and dispatches Terra with
-`fallback_reason: host_model_unavailable`. It never labels that worker as
-Luna. Missing Sol or other non-fallback policy routes remain blocked.
+The main coordinator must pass the exact model identifiers accepted by the
+native `spawn_agent` host as `available_models` and the exact models accepted by
+`create_thread` as `available_thread_models` on each delegation that can resolve
+to Luna. If `spawn_agent` exposes only Sol/Terra, Cortex creates a visible
+user-owned Luna thread through `create_thread` instead of silently dispatching
+a Terra hidden subagent. It never labels a Terra worker as Luna. Missing Luna
+from both host catalogs, or missing Sol/Terra for a required route, remains a
+fail-closed error. `luna_fallback: terra` is retained only as an explicit
+backwards-compatible opt-out.
 
-When the user explicitly requests a separate, visible Luna task, the
-coordinator may choose `dispatch_mode: visible_thread` instead. It must pass
-the exact `create_thread` catalog as `available_thread_models`; Cortex then
-emits a `create_thread` request with Luna and the routing policy's calculated
-reasoning effort (it does not force `max`). This is an opt-in, user-owned task,
-not a hidden subagent and not an automatic fallback.
-
-If the user explicitly requires a Luna task when `spawn_agent` cannot accept
-Luna, the coordinator passes `luna_fallback: visible_thread` together with both
-host catalogs. Cortex retains a hidden Luna dispatch where possible; otherwise
-it returns a visible `create_thread` Luna request and never degrades that
-explicit fallback to Terra.
+`dispatch_mode: visible_thread` can still be selected to request a visible Luna
+task unconditionally. In either case the coordinator passes the exact
+`create_thread` catalog; Cortex emits the remapped model and reasoning effort
+without forcing `max` unless the remapping table requires it. A visible task is
+user-owned and appears in the sidebar, while a supported hidden Luna route
+continues to use `spawn_agent`.
 
 ### Visible-thread workspace
 
@@ -94,14 +96,12 @@ worker. Local tasks share files, branches, and uncommitted changes with the
 main checkout, so concurrent writers must be serialized. Existing worktree
 tasks can be moved with the thread header's **Hand off → Local** action.
 
-If the child must stay out of the normal chat list, keep the default
-`dispatch_mode = "hidden_subagent"` and leave `luna_fallback` unset (or set it
-to `"terra"`). The native `spawn_agent` route is hidden; `create_thread` is
-intentionally user-visible and has no hidden flag. On hosts where
-`spawn_agent` does not expose Luna, this hidden route uses the policy's Terra
-fallback. Hidden Luna requires the host to advertise `gpt-5.6-luna` for
-`spawn_agent`; otherwise the only way to preserve Luna is the visible-thread
-route.
+If the child must stay out of the normal chat list and the host advertises
+Luna, keep the default `dispatch_mode = "hidden_subagent"`; the native
+`spawn_agent` route is hidden. `create_thread` is inherently user-visible and
+has no hidden flag, so a host without Luna necessarily produces a sidebar task
+when the plugin preserves the Luna route. A caller that explicitly accepts the
+Terra compatibility behavior may set `luna_fallback = "terra"`.
 
 Run one command from this repository:
 
@@ -317,10 +317,11 @@ review, CRUD-level edits, and small fixes whenever the `task_kind` declares
 that intent, regardless of low/moderate/high/critical risk or the parent
 task's C1/C2/C3 classification. A read-only profile alone does not force Luna:
 non-analysis work such as implementation, architecture, migration, or
-debugging remains Terra. Security task kind,
-the security gate, and the
-`security_auditor` profile always use Sol; contradictory task kinds are
-normalized to security. A non-security Sol route must carry a structured
+debugging initially resolves to Terra and then follows the exact remapping
+table above. Security task kind, the security gate, and the `security_auditor`
+profile initially resolve to Sol; the same table is authoritative before
+dispatch, and contradictory task kinds are normalized to security. A
+non-security Sol route must carry a structured
 `sol_escalation`: a supported auditable extreme criterion with an `audit_ref`,
 or a `terra_failure` linked to a failed Terra attempt in the current ledger.
 Free-form `escalation_reason` text is preserved as context but never grants the
@@ -331,11 +332,22 @@ selected independently of the routing category: requested effort `none`
 becomes `low`; for Luna analysis/lightweight work the minimum/default is
 `medium` at low/moderate risk, `high` at high risk, and `xhigh` at critical
 risk, while explicitly higher requested effort is preserved. Sol uses at least
-`high`.
+`high` before the exact dispatch remapping below. The runtime applies only
+these five pairs after normal policy resolution:
+
+| resolved pair | dispatched pair |
+| --- | --- |
+| Terra + low | Luna + high |
+| Terra + medium | Luna + high |
+| Terra + high | Luna + xhigh |
+| Sol + low | Terra + xhigh |
+| Sol + medium | Terra + max |
+
+Every other pair is preserved unchanged.
 
 Each delegation first produces an `awaiting_host_spawn` intent plus a complete
-native `spawn_agent` request (or, for an explicitly authorized visible Luna
-task, a `create_thread` request). The main Codex agent calls that host tool, then
+native `spawn_agent` request, or a `create_thread` request when preserving Luna
+requires the visible fallback. The main Codex agent calls that host tool, then
 records its returned child id, actual `host_model`, and actual
 `host_reasoning_effort` with `confirm_host_spawn`; only model-verified
 confirmation may make the attempt running or allow successful completion. A

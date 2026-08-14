@@ -140,6 +140,17 @@ MAX_METRIC_BYTES = 512 * 1024
 SUPPORTED_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 REQUESTABLE_MODELS = SUPPORTED_MODELS
 SUPPORTED_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+# The host model adapter is not the policy router.  Once the coordinator has
+# resolved its normal policy model and effort, these exact pairs are remapped
+# before the host capability catalog is consulted.  Keep this table narrow and
+# explicit: every other pair is preserved unchanged.
+MODEL_EFFORT_REMAP = {
+    ("gpt-5.6-terra", "low"): ("gpt-5.6-luna", "high"),
+    ("gpt-5.6-terra", "medium"): ("gpt-5.6-luna", "high"),
+    ("gpt-5.6-terra", "high"): ("gpt-5.6-luna", "xhigh"),
+    ("gpt-5.6-sol", "low"): ("gpt-5.6-terra", "xhigh"),
+    ("gpt-5.6-sol", "medium"): ("gpt-5.6-terra", "max"),
+}
 LIGHTWEIGHT_TASK_KINDS = {
     "read_only", "read-only", "reading", "discover", "discovery",
     "read_discovery", "read-discovery", "audit", "comparison",
@@ -1124,8 +1135,8 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     )
     # Model choice follows the declared work intent, not the sandbox alone.
     # A read-only profile can still own architecture, review, or another
-    # non-analysis task where Terra is appropriate; the orchestrator must use
-    # an explicit analysis/discovery task_kind to select the Luna route.
+    # non-analysis task whose initial policy is Terra; the exact model/effort
+    # remapping table is applied after that policy decision.
     analysis_dispatch = lightweight_dispatch or is_analysis_task_kind(task_kind)
     # Read-only is a property of the dispatched work, not only of the worker
     # profile.  Documentation/verification profiles may be allowed to touch
@@ -1151,12 +1162,6 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     selected_effort = "low" if requested_effort == "none" else requested_effort
     if selected_effort not in SUPPORTED_EFFORTS:
         raise ValueError("requested_reasoning_effort cannot be resolved to a supported effort")
-    if policy_model == "gpt-5.6-sol" and selected_effort in {"low", "medium"}:
-        selected_effort = "high"
-    elif analysis_dispatch:
-        minimum_effort = ANALYSIS_REASONING_FLOORS[risk]
-        if REASONING_EFFORT_ORDER[selected_effort] < REASONING_EFFORT_ORDER[minimum_effort]:
-            selected_effort = minimum_effort
     available_models_param = params.get("available_models")
     host_available_models: list[str] | None = None
     if available_models_param is not None:
@@ -1189,11 +1194,31 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
             fallback_reason = "policy_model_enforced"
     if selected_model not in SUPPORTED_MODELS:
         raise ValueError("dispatch route cannot be resolved to a Cortex policy model")
+
+    remap_from_model = selected_model
+    remap_from_effort = selected_effort
+    remap_target = MODEL_EFFORT_REMAP.get((selected_model, selected_effort))
+    if remap_target:
+        selected_model, selected_effort = remap_target
+        remap_reason = "model_effort_policy_table"
+    else:
+        remap_reason = None
+
+    # Analysis floors apply only when the exact remapping table did not
+    # already choose a stronger effort.  The table is authoritative for Sol
+    # and security routes as well, so do not floor Sol before applying it.
+    if not remap_target:
+        if policy_model == "gpt-5.6-sol" and selected_effort in {"low", "medium"}:
+            selected_effort = "high"
+        elif analysis_dispatch:
+            minimum_effort = ANALYSIS_REASONING_FLOORS[risk]
+            if REASONING_EFFORT_ORDER[selected_effort] < REASONING_EFFORT_ORDER[minimum_effort]:
+                selected_effort = minimum_effort
     if host_available_models is not None and selected_model not in host_available_models:
-        # Luna is the preferred policy route for lightweight work.  A host can
-        # legitimately expose only Terra/Sol, so use Terra when it is actually
-        # dispatchable and retain an explicit audit trail instead of attempting
-        # an invalid native spawn or claiming that Terra was Luna.
+        # The pure route preview retains Terra as the dispatchable host-capacity
+        # candidate and records the mismatch.  record_delegation sees this
+        # Luna-origin fallback and, by default, re-routes it through the exact
+        # create_thread catalog instead of sending that Terra candidate.
         if selected_model == "gpt-5.6-luna" and "gpt-5.6-terra" in host_available_models:
             fallback_from_model = selected_model
             selected_model = "gpt-5.6-terra"
@@ -1217,6 +1242,9 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         "policy_reason": policy_reason,
         "fallback_reason": fallback_reason,
         "fallback_from_model": fallback_from_model,
+        "remap_from_model": remap_from_model if remap_target else None,
+        "remap_from_reasoning_effort": remap_from_effort if remap_target else None,
+        "remap_reason": remap_reason,
         "host_available_models": host_available_models,
         "escalation_reason": escalation_reason,
         "sol_escalation": sol_escalation,
@@ -3377,7 +3405,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         dispatch_mode = str(params.get("dispatch_mode", "hidden_subagent")).strip() or "hidden_subagent"
         if dispatch_mode not in {"hidden_subagent", "visible_thread"}:
             raise ValueError("dispatch_mode must be hidden_subagent or visible_thread")
-        luna_fallback = str(params.get("luna_fallback", "terra")).strip() or "terra"
+        # A Luna route must remain Luna when the hidden host lacks that model.
+        # The coordinator therefore inspects create_thread up front and the
+        # default fallback is the visible user-owned task.  Terra remains an
+        # explicit compatibility opt-out only.
+        luna_fallback = str(params.get("luna_fallback", "visible_thread")).strip() or "visible_thread"
         if luna_fallback not in {"terra", "visible_thread"}:
             raise ValueError("luna_fallback must be terra or visible_thread")
         route_params = {
@@ -3406,7 +3438,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         if (
             dispatch_mode == "hidden_subagent"
             and luna_fallback == "visible_thread"
-            and route.get("policy_model") == "gpt-5.6-luna"
+            and route.get("fallback_from_model") == "gpt-5.6-luna"
             and route.get("fallback_reason") == "host_model_unavailable"
         ):
             # The caller explicitly authorized a user-owned task as Luna's
@@ -4889,6 +4921,19 @@ TOOLS = {
     "materialize_lane": (materialize_lane, {"type": "object", "properties": {"lane_id": {"type": "string"}, "principal": {"type": "string"}, "run_id": {"type": "string"}, "confirm": {"type": "boolean"}}, "required": ["lane_id", "confirm"]}),
     "reconcile_lane": (reconcile_lane, {"type": "object", "properties": {"lane_id": {"type": "string"}, "principal": {"type": "string"}, "run_id": {"type": "string"}}, "required": ["lane_id"]}),
 }
+
+# Keep routing descriptions synchronized with the default Luna-preserving
+# fallback.  The compact schema declaration above is intentionally retained,
+# while these assignments make the public MCP contract unambiguous.
+_delegation_schema_properties = TOOLS["record_delegation"][1]["properties"]
+_delegation_schema_properties["dispatch_mode"]["description"] = (
+    "visible_thread creates a user-owned Luna task through the native create_thread tool."
+)
+_delegation_schema_properties["luna_fallback"]["description"] = (
+    "By default, visible_thread reroutes an unavailable Luna spawn_agent dispatch "
+    "to native create_thread instead of Terra; terra is an explicit compatibility opt-out."
+)
+_delegation_schema_properties["luna_fallback"]["default"] = "visible_thread"
 
 # Keep the public MCP contract aligned with runtime authorization and validation.
 AUTHORIZED_TOOLS = {

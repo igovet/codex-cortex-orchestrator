@@ -139,10 +139,12 @@ weakening mandatory gates.
 
 Before every native `spawn_agent` call, inspect the host tool's accepted model
 values and pass the exact list as `available_models` when preparing the Cortex
-delegation. If the lightweight Luna route is unavailable but Terra is accepted,
-Cortex selects Terra and records `fallback_reason=host_model_unavailable` and
-`fallback_from_model=gpt-5.6-luna`; the coordinator must report it as a Terra
-worker. Other missing required routes fail closed. After every native
+delegation. Also inspect `create_thread` and pass its exact catalog as
+`available_thread_models` whenever the resolved route can be Luna. If the hidden
+host lacks Luna but the thread host exposes it, Cortex creates a visible Luna
+thread instead of silently replacing the worker with Terra. Other missing
+required routes fail closed. `luna_fallback: terra` is an explicit compatibility
+opt-out, not the default. After every native
 `spawn_agent` call, confirm the returned child with the
 actual `host_model` and `host_reasoning_effort`, not only the child id. Cortex
 requires the actual host model for model-routed attempts; a missing model is
@@ -150,11 +152,10 @@ recoverable, while a requested/actual mismatch (for example Luna requested but
 Terra started) records `host_model_mismatch` and must not be reported as a
 successful worker.
 
-`visible_thread` is a separate, opt-in Desktop route, not a hidden-subagent
-fallback. Use it only when the user explicitly asks to create a visible task
-and the narrow work is eligible for Luna. Inspect native `create_thread`, pass
-its exact model catalog as `available_thread_models`, and record
-`dispatch_mode: visible_thread`; Cortex returns `spawn_request.host_tool` as
+`visible_thread` is the user-owned route used when Luna cannot be spawned by
+the hidden host, and can also be selected explicitly when a visible task is
+wanted unconditionally. Pass the exact `create_thread` catalog as
+`available_thread_models`; Cortex returns `spawn_request.host_tool` as
 `create_thread`, with `prompt`, `title`, the remapped model and reasoning
 effort, and `thread_environment` (default `local`). Apply only the exact
 remapping table above; otherwise preserve the route's effort and model. Call
@@ -167,16 +168,14 @@ concurrent edits. Confirm the returned `threadId` through
 `confirm_host_spawn` as `host_agent_id`, with `host_tool: create_thread`, then
 monitor with `wait_threads`, read with `read_thread`, and send follow-ups with
 `send_message_to_thread`. A visible task is user-owned and may appear in the
-sidebar; it must not be created implicitly merely because `spawn_agent` lacks
-Luna.
+sidebar. When the hidden catalog lacks Luna, the automatic fallback is
+intentionally visible so the Luna policy is not misrepresented as Terra.
 
-When the user explicitly requests that Luna be used through a task if native
-`spawn_agent` cannot accept it, do not leave `dispatch_mode` at its hidden
-default and accept Terra. Pass both host catalogs plus
-`luna_fallback: visible_thread` to `record_delegation`. Cortex then keeps a
-hidden Luna subagent when that tool supports Luna, but returns a `create_thread`
-Luna request when it does not. This is the only automatic decision in that
-explicitly authorized fallback mode.
+When `spawn_agent` cannot accept Luna, keep both host catalogs on the
+delegation and leave `luna_fallback` unset: Cortex defaults to
+`luna_fallback: visible_thread`, keeps a hidden Luna subagent when that tool
+supports Luna, and otherwise returns a `create_thread` Luna request. Use
+`luna_fallback: terra` only when the caller explicitly accepts a Terra worker.
 
 Use only the 21 profiles declared in `plugins/cortex/profiles.json`;
 `task_formatter` is retired. Record task kind, risk, complexity, requested
