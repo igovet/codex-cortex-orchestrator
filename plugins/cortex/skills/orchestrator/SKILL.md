@@ -121,6 +121,22 @@ weakening mandatory gates.
 3. Classify by shape: C1 is local and low-risk; C2 spans a component or has uncertainty; C3 crosses systems, data, security, infrastructure, or has high rollback cost.
 4. Choose models and reasoning effort per dispatch. Use one writer for overlapping paths, parallelize independent read-only work, and run independent verification before completion.
 
+   Before dispatch, take the model and reasoning effort the orchestrator would
+   otherwise request, normalize `none` to `low`, and apply exactly this
+   remapping table:
+
+   - `gpt-5.6-terra` + `low` → `gpt-5.6-luna` + `high`;
+   - `gpt-5.6-terra` + `medium` → `gpt-5.6-luna` + `high`;
+   - `gpt-5.6-terra` + `high` → `gpt-5.6-luna` + `xhigh`;
+   - `gpt-5.6-sol` + `low` → `gpt-5.6-terra` + `xhigh`;
+   - `gpt-5.6-sol` + `medium` → `gpt-5.6-terra` + `max`.
+
+   For every other model/effort pair, preserve the resolved model and effort
+   unchanged. This table is authoritative even when the initial route is a
+   security or Sol route; do not apply a broader substitution. If the target
+   model is unavailable, follow the documented host-capability fallback and
+   record the actual worker and effort rather than claiming the remapped route.
+
 Before every native `spawn_agent` call, inspect the host tool's accepted model
 values and pass the exact list as `available_models` when preparing the Cortex
 delegation. If the lightweight Luna route is unavailable but Terra is accepted,
@@ -139,10 +155,10 @@ fallback. Use it only when the user explicitly asks to create a visible task
 and the narrow work is eligible for Luna. Inspect native `create_thread`, pass
 its exact model catalog as `available_thread_models`, and record
 `dispatch_mode: visible_thread`; Cortex returns `spawn_request.host_tool` as
-`create_thread`, with `prompt`, `title`, Luna, the dynamically selected
-reasoning effort, and `thread_environment` (default `local`). Never force
-`max`: keep the route's effort unless the task shape itself warrants a higher
-one. Call `list_projects` before creating a repository task and map
+`create_thread`, with `prompt`, `title`, the remapped model and reasoning
+effort, and `thread_environment` (default `local`). Apply only the exact
+remapping table above; otherwise preserve the route's effort and model. Call
+`list_projects` before creating a repository task and map
 `thread_environment` to the native target: pass `environment: {type: "local"}`
 to use the saved checkout, or `environment: {type: "worktree"}` only when
 isolation was explicitly requested. Local threads share files and uncommitted
@@ -171,14 +187,15 @@ research, code review, CRUD-level edits, and small fixes when `task_kind`
 explicitly declares that intent, at any risk and regardless of the parent
 task's C1/C2/C3 classification. A read-only profile alone does not imply Luna:
 non-analysis work such as architecture, migration, debugging, or implementation
-uses Terra.
+initially uses Terra, then follows the exact model/effort remapping table above.
 Use canonical task kinds such as `discover`, `data_gathering`,
 `runtime_investigation`, `diagnosis`, `research`, or `code_review` when the
 worker is collecting facts or analyzing a bounded problem; do not hide that
 intent behind a generic `implementation` task kind.
-Security task kind,
-the security gate, and the `security_auditor` profile always use Sol;
-contradictory task kinds are normalized to security.
+Security task kind, the security gate, and the `security_auditor` profile
+initially resolve to Sol; apply the exact remapping table above to the resolved
+model and effort before dispatch. Contradictory task kinds are normalized to
+security.
 Non-security Sol requires a structured `sol_escalation`: either a supported,
 auditable extreme criterion with an `audit_ref`, or a `terra_failure` linked to
 a failed Terra attempt in the current ledger. Free-form `escalation_reason`
