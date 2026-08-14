@@ -27,10 +27,31 @@
   only the exact report-tool error. If persistence succeeds
   but the native acknowledgement is interrupted, inspect with
   `manage_orchestration` and recover the ref from `available_reports`.
+- Embedded predecessor handoffs are mandatory input. Read and reconcile every
+  supplied report before project work, then include the generated
+  `Predecessor review:` entry naming every supplied report ref in report
+  evidence; public `record_report` rejects an incomplete acknowledgement.
+  Omit `depends_on` to receive all verified predecessors, provide exact earlier
+  phases to narrow the set, or use `[]` only for intentional independence.
+  Context count/size overflow fails closed instead of dropping older reports.
+- Available `docs/project/index.md` and `docs/features/index.md` files are
+  injected into every worker briefing. The planner names task-relevant linked
+  pages for the coordinator to attach through `context_files`; downstream
+  workers still re-check both indexes. Reports must include `Knowledge
+  reviewed:` evidence naming every available index and additional page used,
+  or public `record_report` rejects them. Treat documentation as navigation,
+  not authority, and verify consequential claims in current source, tests,
+  schemas, migrations, or executable configuration.
+- Explicit `context_files` are not arbitrary host paths. Cortex rejects
+  absolute paths, traversal, missing entries, symlinks, and anything that is
+  not an existing project-relative regular file.
 - Idempotency is server-owned. Callers do not send submission, task, wave,
-  attempt, coordinator identity, or host metadata. A repeated start while one
-  task is active reconstructs that task instead of creating an accidental
-  duplicate; ambiguous recovery returns opaque `task_ref` choices.
+  attempt, coordinator identity, or host metadata. Preserve the returned opaque
+  `task_ref` on every later lifecycle and report-read call. Exact duplicate
+  active starts replay; changed task/wave contracts create distinct concurrent
+  tasks below the same project root. Omitting the ref while several tasks are
+  selectable returns `needs_selection` with opaque candidates instead of a
+  guessed active task.
 - Human-readable language names normalize before ledger creation. Repeating a
   semantically unchanged `future_waves` assessment is valid and keeps the next
   relative step monotonic; it must not fail after committing the current gate.
@@ -77,10 +98,11 @@
 - Codebase Memory is worker-only and conditional. When its tools are present,
   call `list_projects` first and use only the project whose root exactly matches
   the task root; prefer graph, architecture, and trace operations, then confirm
-  consequential facts in source/tests. If the service, matching index, or data
-  is missing or stale, fall back once to normal repository tools and do not
-  loop. An indexed repository never authorizes the root coordinator to inspect
-  the project.
+  consequential facts in source/tests. `planner`, `explorer`, `architect`, and
+  `database_architect` may refresh one missing or stale index; other profiles
+  fall back to repository-native tools after one failed attempt. Never guess a
+  project id or loop. An indexed repository never authorizes the root
+  coordinator to inspect the project.
 
 ## Private v2/v7 compatibility internals
 
@@ -156,8 +178,9 @@ private adapter. They are not valid public v3 request envelopes.
   also contain `agent`, `task_kind`, `risk`, `requested_model`,
   `configured_default_model`, `available_models`, `available_thread_models`,
   `dispatch_mode`, `thread_environment`, `requested_reasoning_effort`,
-  `escalation_reason`, `sol_escalation`, `retry`, `parallel`, `objective`,
-  `ownership`, `context_files`, `context_report_ids`, `allowed_paths`,
+  `user_requested_model`, `retry`, `parallel`, `objective`,
+  `ownership`, `context_files`, `context_report_ids`, `context_gates`,
+  `allowed_paths`,
   `acceptance_criteria`, and `verification`. Do not use the retired
   `{id, gates: [{id, owner}]}` form: use `wave_id`, `delegations`, `gate`,
   `agent`, and `ownership`; waves and delegations reject every other nested
@@ -225,9 +248,14 @@ private adapter. They are not valid public v3 request envelopes.
   the supported normal-mode route. Bare `/cortex` and `/normal` (including
   their arguments) are textual shorthand, not native slash-command
   registrations; a host may reserve them.
-- Incremental harvests must not touch current docs without stale or missing
-  evidence. Refreshes preserve manual text outside generated blocks and must
-  produce a no-change second planning pass before close.
+- Incremental harvest requires a current source-backed coverage manifest with
+  zero unexplained gaps; absent, shallow, stale, or contradicted baselines
+  trigger a full feature census rather than a recent-change scan. Large
+  repositories use 2–8 bounded domain explorers, architecture synthesis,
+  non-overlapping documentation owners, behavior-complete feature pages, and
+  independent completeness review. Refreshes rebuild the inventory, preserve
+  manual text outside generated blocks, require zero unexplained unmapped
+  surfaces, and finish only after a no-change second documentation plan.
 - A worker report must contain exactly the eight `cortex/report/v1` fields.
   Reports are size/item bounded, sanitized, task-bound, and tied to a real
   delegation attempt. Use an empty list rather than omitting a field; reuse a
@@ -242,16 +270,12 @@ private adapter. They are not valid public v3 request envelopes.
   records, receipts, indexes, tombstones, and Markdown files; use
   `reconcile_report_bus` after suspected interruption, but never expect it to
   revive a consumed receipt.
-- Routing is binding: multi-agent v2 is required for explicit model dispatch.
-  Every delegation is evaluated separately from its declared `task_kind` and
-  risk. Luna handles explicit reading, discovery/data gathering,
-  investigation, diagnosis, research, code review, CRUD-level edits, and
-  small fixes at any risk. A read-only profile alone does not imply Luna;
-  non-analysis work such as architecture, migration, debugging, and
-  implementation initially resolves to Terra and then follows the exact
-  model/effort remapping table. Luna analysis/lightweight work defaults to and
-  floors at medium effort for low/moderate risk, high for high risk, and xhigh
-  for critical risk.
+- Routing is binding: `explorer` always selects Luna with coordinator-selected
+  effort or the risk default; Terra is only its host-unavailable fallback.
+  The accepted effort vocabulary ends at `max`. `planner` and every remaining
+  non-security profile default to Luna at exactly `max`, while the coordinator
+  may normally choose Terra from `medium` through `max`. Luna `max` is already a
+  powerful default and should not be escalated reflexively.
 - Host model confirmation is strict: an `advance` completion must include the
   actual `host_model`. Cortex verifies it against `expected_model`, even when
   a configured-default request intentionally omitted native `model`; explicit
@@ -272,17 +296,14 @@ private adapter. They are not valid public v3 request envelopes.
 - Advance dispatch preparation accepts human-readable task kinds and
   canonicalizes spaces, hyphens, and case (for example, `Code Review`
   becomes `code_review`); unsafe punctuation remains rejected.
-  Security task kind, the security gate, and the `security_auditor` profile
-  initially resolve to Sol and then follow the exact remapping table, with
-  contradictory task kinds normalized to security.
-  Non-security Sol needs
-  a structured auditable extreme criterion plus `audit_ref`, or a
-  ledger-validated failed Terra attempt; a free-form escalation note is never
-  enough. The supported auditable-extreme criteria are
-  `irreversible_multi_system_recovery`, `safety_critical_incident_response`,
-  and `novel_cross_system_failure_without_bounded_rollback`. Reasoning effort
-  is independent of the routing category; `none` becomes `low`, and only
-  remapping-table pairs bypass the normal Sol high-effort floor.
+  Security context, the security gate, and the `security_auditor` profile
+  always select Sol with minimum effort C1 `medium`, C2 `high`, and C3 `xhigh`.
+  Sol effort is also capped at `max`.
+  Non-security Sol requires an explicit user choice: pass compact
+  `user_requested_model: sol`; omit `model` or set it to `sol`. Cortex records
+  matching `user_requested_model` and `requested_model`. Coordinator preference,
+  a failed Terra attempt, and auditable-extreme labels are not authorization. The retired
+  `sol_escalation` and model/effort remapping contracts must not be sent.
   Profile names come from `plugins/cortex/profiles.json`; there are 21, and
   `task_formatter` is not one of them.
 - The installer removes only authenticated known legacy artifacts and backs

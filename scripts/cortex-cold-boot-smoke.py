@@ -45,12 +45,15 @@ def waves() -> list[dict[str, object]]:
     ]
 
 
-def report(worker: int, step: int) -> dict[str, object]:
+def report(worker: int, step: int, predecessor_reports: list[str]) -> dict[str, object]:
+    evidence = [f"step {step} worker {worker} evidence"]
+    if predecessor_reports:
+        evidence.append("Predecessor review: " + ", ".join(predecessor_reports))
     return {
         "summary": f"relative step {step} worker {worker} completed",
         "findings": [], "questions": [], "changed_files": [],
         "tests": ["cold-boot v3 simulation"],
-        "evidence": [f"step {step} worker {worker} evidence"],
+        "evidence": evidence,
         "uncertainty": [], "next_action": "advance",
     }
 
@@ -77,6 +80,7 @@ def run(base: Path) -> dict[str, object]:
         replay = rpc.tool("start_orchestration", start_request)
         if not current.get("ok") or replay != current:
             raise AssertionError("identical start did not replay its committed response")
+        task_ref = str(current["task_ref"])
         task_directory = next((ledger / "tasks").iterdir()).name
 
     (project / "tracked.txt").write_text("after\n", encoding="utf-8")
@@ -86,7 +90,7 @@ def run(base: Path) -> dict[str, object]:
 
     # A fresh process must reconstruct the active relative step read-only.
     with JsonRpcHarness(SERVER, project, ledger) as rpc:
-        current = rpc.tool("manage_orchestration", {"intent": "inspect"})
+        current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
         parallel_wave_seen = False
         last_payload = None
@@ -108,11 +112,11 @@ def run(base: Path) -> dict[str, object]:
                     "task_id": state["task_id"],
                     "attempt_id": attempt["attempt_id"],
                     "profile": dispatch["profile"],
-                    "report": report(index, int(current["step"])),
+                    "report": report(index, int(current["step"]), list(attempt.get("context_report_ids") or [])),
                 })
                 if not published.get("ok"):
                     raise AssertionError(f"record_report failed: {published}")
-                read = rpc.tool("read_worker_report", {"report_ref": published["report_ref"]})
+                read = rpc.tool("read_worker_report", {"task_ref": task_ref, "report_ref": published["report_ref"]})
                 if not read.get("ok") or read.get("report", {}).get("summary") != published.get("summary"):
                     raise AssertionError(f"read_worker_report failed: {read}")
                 result_value: dict[str, object] = {"report_ref": published["report_ref"]}
@@ -120,6 +124,7 @@ def run(base: Path) -> dict[str, object]:
                     result_value["worker"] = index
                 results.append(result_value)
             last_payload = {
+                "task_ref": task_ref,
                 "step": current["step"],
                 "results": results,
             }

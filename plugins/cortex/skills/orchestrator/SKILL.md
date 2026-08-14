@@ -32,6 +32,44 @@ Ordinary work never activates Cortex. The normal route uses
 `manage_orchestration` with intent `deactivate` only when a Cortex task is
 active.
 
+## Harvest route contract
+
+For exact `harvest` or `harvest-refresh`, read
+`../knowledge-harvest/SKILL.md` and its linked
+`references/feature-census.md` completely before calling Cortex. Those files
+define the mandatory inventory, coverage matrix, feature-page depth, and
+completeness gates. Do not substitute a generic documentation task.
+
+Both routes start with the canonical phases `plan`, `discover`, `architecture`,
+`documentation`, `review`, and `close`. After reading the planner report, the
+coordinator must decide whether the repository is large enough to split the
+single discovery placeholder into 2–8 parallel `explorer` workers with
+non-overlapping domain ownership. A repository with several applications,
+services, packages, runtime processes, or integration families is large for
+this purpose. Each discovery worker declares `depends_on: ["plan"]`. After the
+domain census, the architecture worker receives `plan` and `discover`; each
+documentation worker receives the architecture synthesis plus any domain
+handoffs it needs. Use non-overlapping documentation paths when parallelizing
+writers and exactly one owner for `docs/features/index.md`.
+
+`harvest` is incremental only after a source-backed coverage manifest proves a
+complete baseline. If the manifest is absent, shallow, stale, contradicted, or
+contains unexplained gaps, the coordinator must treat harvest as a full
+baseline census. Recent commits may prioritize discovery but may never define
+the entire scope of an incomplete baseline.
+
+`harvest-refresh` always rebuilds the inventory independently of existing
+feature docs. Its review worker performs a second source-to-doc coverage pass;
+zero unexplained unmapped surfaces and a no-change second documentation plan
+are required. Any gap triggers bounded documentation rework rather than a
+successful close.
+
+The coordinator must reject reports that lack inventory counts, domain/source
+coverage, mapping/exclusion evidence, or a concrete next coverage action. A
+handful of top-level service summaries is not complete documentation when
+those services own distinct workflows, commands, state machines, integrations,
+configuration, failure behavior, or operational contracts.
+
 ## Coordinator isolation invariant
 
 While Cortex orchestration is active, the main/root agent is a coordinator,
@@ -119,6 +157,31 @@ Routing is evidence-driven:
    before invoking the dispatch. Never invent a role name or silently replace
    Cortex's native arguments.
 
+Multiple workers with the same profile are separate bounded instances. Keep
+their ownership, paths, dependencies, and report refs distinct even though
+their display name is the same canonical profile.
+
+## Repository knowledge consumption
+
+The coordination-only root does not inspect project documentation itself.
+Cortex automatically puts `docs/project/index.md` and
+`docs/features/index.md` in every worker's Context files when they exist. The
+first planning worker must read both before broad source discovery, use the
+task goal/scope/paths to select all relevant linked project and feature pages,
+and report those exact paths. When adapting future waves, the coordinator
+copies that evidence-backed selection into each worker's `context_files`,
+adding pages for cross-feature dependencies when later reports expose them.
+
+Every downstream worker reads its supplied pages before broad search or edits
+and re-checks the feature index so planner omission cannot silently hide an
+affected capability. Documentation accelerates navigation and captures known
+contracts, conventions, verification, decisions, and gotchas; it never
+overrides current source, tests, schemas, migrations, or executable
+configuration. Workers verify consequential claims and report stale pages,
+contradictions, partial coverage, or missing links. Each persisted report must
+contain one `Knowledge reviewed:` evidence entry naming both available indexes
+and every additional page used; Cortex rejects a missing index acknowledgement.
+
 Canonical phases are `plan`, `discover`, `architecture`,
 `database_architecture`, `implementation`, `qa`, `security`, `performance`,
 `accessibility`, `ux`, `review`, `documentation`, and `close`. A phase may
@@ -137,7 +200,7 @@ should use canonical phases from the returned snapshot rather than guessing.
    authoritative current coordinator plan.
 2. Call `start_orchestration` with exact absolute `project_root` and the task.
    Omit waves for the standard pipeline. A compact override is
-   `{waves: [{workers: [{phase, ...}]}]}`; only phase is required.
+   `{waves: [{workers: [{phase, depends_on, context_files, ...}]}]}`; only phase is required.
 3. Invoke each returned `{worker, call, arguments}` exactly. Native arguments
    are already filtered. Do not add IDs or turn expected model metadata into a
    native model override.
@@ -148,8 +211,8 @@ should use canonical phases from the returned snapshot rather than guessing.
    summary. A worker must never paste the report JSON into the parent channel.
 5. Read every returned ref with `read_worker_report`. Evaluate the full report,
    decide whether the coordinator-owned pipeline still fits, then call
-   `continue_orchestration` once with `project_root`, the returned relative
-   `step`, and results containing `report_ref`. Omit worker for one result;
+   `continue_orchestration` once with `project_root`, the returned opaque
+   `task_ref`, relative `step`, and results containing `report_ref`. Omit worker for one result;
    repeat the returned integer worker slot for parallel results. Inline report
    objects are compatibility-only and must not be requested from new workers.
 6. Repeat until `outcome: completed`. If evidence changes future scope, send a
@@ -159,23 +222,40 @@ should use canonical phases from the returned snapshot rather than guessing.
 Normal flow uses no caller-generated submission/task/wave/attempt IDs, no
 coordinator identity, and no echoed host tool/model/effort. A relative `step`
 is required only to separate retries from an identical report used on a later
-wave. Durable identities, receipts, evidence, verification, manifest, and
-handoff stay private in the compatible v7 ledger.
+wave. Preserve and echo the opaque `task_ref` returned by Cortex so concurrent
+tasks in the same project remain isolated. Durable task IDs, receipts,
+evidence, verification, manifest, and handoff stay private in the compatible
+v7 ledger.
 
 When several tasks are active Cortex returns `needs_selection` with objective
-and opaque `task_ref`; use the chosen ref only for the next ambiguous or
-recovery call. Use `manage_orchestration` for inspect, resume, deactivate,
-lane, resource, or a durable MCP UI question.
+and opaque `task_ref`; use the matching ref on every subsequent lifecycle and
+report-read call. Use `manage_orchestration` for inspect, resume, deactivate,
+lane, resource, or a durable MCP UI question. Different task contracts may run
+concurrently in one project; an exact duplicate start remains an idempotent
+replay of the existing active task.
 
-## Luna high and dispatch contract
+## Model and dispatch contract
 
-This contract is designed for a Luna high parent: two narrow normal tools,
-relative slots only for parallel waves, a canonical profile enum at the public
-boundary, legacy alias normalization inside the runtime, and compact native
-arguments separated from auditable profile-selection metadata.
+`explorer` always selects Luna, using coordinator-selected effort or the
+risk-based default; Terra is reserved for a hidden host-unavailable fallback.
+The complete effort vocabulary is `low`, `medium`, `high`, `xhigh`, and `max`;
+never request another value. `planner` and every remaining non-security profile
+default to Luna at exactly `max`, while the coordinator may normally select
+Terra from `medium` through `max`. Luna `max` is already a powerful default and
+must not be escalated reflexively. Security context, the security gate, and
+`security_auditor` always select Sol, with effort floors C1 `medium`, C2 `high`,
+and C3 `xhigh`, capped at `max`.
+
+Non-security Sol is valid only when the user explicitly chose it. Set the
+compact worker's `user_requested_model: sol`; omit `model` or also set it to
+`sol`. Cortex records matching `user_requested_model` and `requested_model`.
+Coordinator preference, an earlier Terra failure, and auditable-extreme labels do not grant
+Sol. Do not use the retired `sol_escalation` field or any model/effort remap.
 Configured-default Luna dispatches omit native `model` while preserving
-reasoning effort. Explicit model overrides retain `model`. Expected routing is
-not host attestation; claim the actual model only from host runtime metadata.
+reasoning effort. Explicit model selections retain `model`; if Luna is not
+available to the host, a hidden Terra fallback preserves the selected effort.
+Expected routing is not host attestation; claim the actual model only from host
+runtime metadata.
 
 Workers remain internal, English-only, bounded to ownership and allowed paths,
 and cannot subdelegate without explicit authorization. The main coordinator
@@ -203,6 +283,13 @@ documentation/close, rework invalidation, and manifest-backed handoff. If a
 native worker is interrupted after persisting but before returning its ack,
 use `manage_orchestration` inspect to recover `available_reports`; do not ask
 the worker to regenerate a large inline report.
+
+When a dispatch contains predecessor handoffs, the worker must review every
+one before project work and include the generated `Predecessor review:` entry
+in report evidence. `record_report` rejects missing acknowledgements. Omitted
+`depends_on` means all verified predecessor reports; an explicit phase list
+selects only those dependencies. Cortex fails closed instead of silently
+dropping reports when the count or context budget would be exceeded.
 
 Questions normally return through the native parent channel. For a durable UI
 prompt, call `manage_orchestration` with intent `question`; Cortex projects it

@@ -52,6 +52,14 @@ This is deliberately per project root: every call carries an absolute
 wave, attempt, report, evidence, and receipt IDs remain durable for audit but
 are not normal-flow input.
 
+The public exception is the opaque `task_ref` returned by Cortex. The
+coordinator preserves it on every later lifecycle and report-read call so
+different task contracts can run concurrently below one project root without
+cross-session ambiguity. A byte-identical active start replays the same task;
+changed task or wave content creates a distinct task. If a ref is omitted while
+several tasks are selectable, Cortex returns `needs_selection` with bounded
+objective/ref candidates instead of relying on a process-wide "active task."
+
 Human-readable complexity, phase, profile, status, and common language aliases
 are normalized before task-state creation. This keeps the public schema small
 without pushing fragile enums or BCP-47 spelling repairs onto a Luna parent;
@@ -68,9 +76,52 @@ tools are available and `list_projects` returns an entry whose root exactly
 matches the task project. Graph, architecture, and trace operations are
 preferred for initial discovery and impact analysis, but consequential facts
 must be confirmed in current source and tests. If the service, matching index,
-or result is unavailable or stale, the worker falls back once to ordinary
-repository tools and does not loop on recovery. This preserves useful indexed
-context without weakening source authority or the coordination-only root lock.
+or result is unavailable or stale, `planner`, `explorer`, `architect`, and
+`database_architect` may perform one bounded refresh; other profiles fall back
+to ordinary repository tools after one failed attempt. No profile loops on
+setup or recovery. This preserves useful indexed context without weakening
+source authority or the coordination-only root lock.
+
+## Explicit predecessor handoffs
+
+Verified worker handoffs are executable context, not optional prose. Omitted
+`depends_on` supplies every verified predecessor report; an explicit phase list
+selects only those prerequisites, and an empty list declares intentional
+independence. The generated prompt requires the worker to reconcile every
+supplied handoff against current evidence and add the exact generated
+`Predecessor review:` marker to report evidence. Public `record_report` rejects
+missing report acknowledgements. Context count or size overflow fails closed
+with guidance to narrow `depends_on`; Cortex never silently discards an older
+handoff to make a prompt fit.
+
+## Repository knowledge is routed context, not authority
+
+When available, `docs/project/index.md` and `docs/features/index.md` are
+automatically added to every worker briefing. The planner selects the linked
+pages relevant to the task and recommends their exact paths; the coordinator
+attaches that selection to future workers through `context_files`. All workers
+re-check the indexes and record `Knowledge reviewed:` evidence naming every
+available index and additional page used. Public report intake rejects a
+missing index acknowledgement. Explicit context paths must be existing
+project-relative regular files and cannot be absolute, traversing, missing, or
+symlinked. Documentation remains navigation and prior knowledge: consequential
+claims are verified against current source, tests, schemas, migrations, or
+executable configuration.
+
+## Exhaustive knowledge harvest
+
+Repository knowledge is maintained as a source-backed feature census rather
+than a recent-change summary. `docs/features/index.md` is the coverage manifest,
+and incremental harvest is allowed only after it proves a zero-gap baseline.
+Otherwise Cortex runs planning, domain-partitioned discovery, architecture
+synthesis, documentation, independent completeness review, and close. A large
+repository uses 2–8 bounded explorers and non-overlapping documentation owners.
+Completion requires behavior-complete feature pages, evidence-backed
+exclusions, zero unexplained unmapped surfaces, and—for refresh—a no-change
+second documentation plan. Harvest documentation, review, and close also
+validate the feature index structurally; a shallow link list without Coverage
+matrix columns, Inventory totals, Unmapped surfaces, Exclusions, or Known
+unknowns cannot satisfy the coverage-manifest contract.
 
 ## Atomic records, repairable projections, best-effort telemetry
 
@@ -181,31 +232,25 @@ gate, project-manifest, verification, and handoff contracts.
 `plugins/cortex/profiles.json` is the single machine-readable source for the 21
 supported profile names, sandbox modes, automatic gate routes, and the shared
 worker report contract. The removed `task_formatter` profile is not accepted by
-the server. Model selection remains a main-agent dispatch decision, but Cortex
-resolves it against the current host capabilities and persists requested,
-selected, policy, and fallback fields. With multi-agent v2 enabled, every
-delegation is evaluated independently from its declared work intent and risk.
-Luna handles explicit reading, discovery/data gathering, investigation,
-diagnosis, research, code review, CRUD-level edits, and small fixes at any
-risk; a read-only profile alone does not imply Luna. Terra is the initial
-policy for non-analysis work such as architecture, migration, debugging, and
-implementation, then the exact model/effort remapping table is applied before
-dispatch. Security task kind, the security gate, and the `security_auditor`
-profile initially select Sol, then follow that same table, normalizing
-contradictory task kinds to security. A non-security Sol exception must be structurally auditable: a supported
-extreme criterion with an audit reference, or a ledger-validated failed Terra
-attempt. The supported auditable-extreme criteria are
-`irreversible_multi_system_recovery`, `safety_critical_incident_response`,
-and `novel_cross_system_failure_without_bounded_rollback`. Luna
-analysis/lightweight work has a `medium` minimum/default at low/moderate risk,
-`high` at high risk, and `xhigh` at critical risk; explicit higher effort is
-preserved. Other reasoning effort is selected independently of routing;
-`none` normalizes to `low`, and the five exact remapping pairs are applied
-before host capability selection. The coordinator passes the exact
+the server. Model selection remains a coordinator dispatch decision within a
+small policy envelope, and Cortex persists requested, selected, policy, and
+fallback fields. `explorer` always selects Luna, with coordinator-selected
+effort or a risk-based default; Terra is only its host-unavailable fallback.
+The accepted effort vocabulary ends at `max`. `planner` and all remaining
+non-security profiles default to Luna at exactly `max`, and the coordinator may
+normally choose Terra from `medium` through `max`. Luna `max` is the strong
+normal default rather than a reason for reflexive escalation. Security context,
+the security gate, and `security_auditor` always select Sol with complexity
+floors C1 `medium`, C2 `high`, and C3 `xhigh`, capped at `max`.
+Non-security Sol is valid only for an explicit user model request represented
+by matching `user_requested_model` and `requested_model`; old
+`sol_escalation`, auditable-extreme, failed-Terra, and model/effort-remap
+authorization is removed. The coordinator passes the exact
 `spawn_agent` catalog and, after a fresh install, the confirmed
 `spawn_agent_default_model`. A Luna route prefers that configured default,
 then an explicit Luna override, and finally an explicit hidden Terra override.
-Automatic visible-thread fallback is not part of model routing.
+The hidden Terra fallback preserves selected effort. Automatic visible-thread
+fallback is not part of model routing.
 
 ## Scoped worker report bus
 

@@ -46,7 +46,12 @@ class ControlPlaneTests(unittest.TestCase):
 
     def delegate(self, state, task_id, gate, agent, **extra):
         observed = control.status({"task_id": task_id, "principal": state.get("principal", "thread-a")})
-        contract = {"task_kind": gate, "risk": "moderate", "requested_model": "gpt-5.6-terra", "requested_reasoning_effort": "medium", "ownership": f"Own {gate}", "allowed_paths": ["."], "acceptance_criteria": [f"Complete {gate}"], "verification": ["Report evidence"]}
+        default_model = (
+            "gpt-5.6-luna" if agent == "explorer"
+            else "gpt-5.6-sol" if agent == "security_auditor" or gate == "security"
+            else "gpt-5.6-terra"
+        )
+        contract = {"task_kind": gate, "risk": "moderate", "requested_model": default_model, "requested_reasoning_effort": "medium", "ownership": f"Own {gate}", "allowed_paths": ["."], "acceptance_criteria": [f"Complete {gate}"], "verification": ["Report evidence"]}
         delegated = control.record_delegation({"task_id": task_id, "principal": state.get("principal", "thread-a"), "expected_revision": state["revision"], "status_receipt": observed["status_receipt"], "gate": gate, "agent": agent, "objective": "test delegation", **contract, **extra})
         confirmed = control.confirm_host_spawn({
             "task_id": task_id,
@@ -403,17 +408,24 @@ class ControlPlaneTests(unittest.TestCase):
         ])
         self.assertNotIn("database_architecture", revised["state"]["current_pipeline"])
 
-    def test_security_sol_route_applies_the_exact_model_effort_remap(self):
-        for risk in ("low", "moderate", "high", "critical"):
-            with self.subTest(risk=risk):
-                route = control.resolve_dispatch_route({"agent": "security_auditor", "task_kind": "security", "risk": risk, "complexity": "C1", "requested_model": "gpt-5.6-terra", "requested_reasoning_effort": "low"})
+    def test_security_sol_route_uses_complexity_effort_floor(self):
+        for complexity, expected_effort in (("C1", "medium"), ("C2", "high"), ("C3", "xhigh")):
+            with self.subTest(complexity=complexity):
+                route = control.resolve_dispatch_route({
+                    "agent": "security_auditor", "task_kind": "security", "risk": "low",
+                    "complexity": complexity, "requested_model": "gpt-5.6-sol",
+                    "requested_reasoning_effort": "low",
+                })
                 self.assertEqual(route["policy_model"], "gpt-5.6-sol")
-                self.assertEqual(route["selected_model"], "gpt-5.6-terra")
-                self.assertEqual(route["selected_reasoning_effort"], "xhigh")
-                self.assertEqual(route["fallback_reason"], "policy_model_enforced")
-                self.assertEqual(route["remap_from_model"], "gpt-5.6-sol")
-                self.assertEqual(route["remap_from_reasoning_effort"], "low")
-                self.assertEqual(route["remap_reason"], "model_effort_policy_table")
+                self.assertEqual(route["selected_model"], "gpt-5.6-sol")
+                self.assertEqual(route["selected_reasoning_effort"], expected_effort)
+                self.assertEqual(route["model_choice_reason"], "security_policy")
+
+        with self.assertRaisesRegex(ValueError, "security work always uses"):
+            control.resolve_dispatch_route({
+                "agent": "security_auditor", "task_kind": "security", "risk": "low",
+                "complexity": "C1", "requested_model": "gpt-5.6-terra",
+            })
 
     def test_security_profile_normalizes_contradictory_lightweight_kind_to_sol(self):
         route = control.resolve_dispatch_route({"agent": "security_auditor", "task_kind": "reading", "risk": "low", "complexity": "C1"})
@@ -443,20 +455,24 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(route["selected_model"], expected_model)
                 self.assertEqual(route["selected_reasoning_effort"], expected_effort)
 
-    def test_runtime_investigation_routes_to_luna_with_medium_effort(self):
+    def test_explorer_keeps_luna_and_coordinator_selected_effort(self):
         route = control.resolve_dispatch_route({
             "agent": "explorer",
             "task_kind": "runtime_investigation",
             "risk": "moderate",
             "complexity": "C3",
-            "requested_model": "gpt-5.6-terra",
             "requested_reasoning_effort": "medium",
         })
         self.assertEqual(route["policy_model"], "gpt-5.6-luna")
         self.assertEqual(route["selected_model"], "gpt-5.6-luna")
         self.assertEqual(route["selected_reasoning_effort"], "medium")
-        self.assertEqual(route["fallback_reason"], "policy_model_enforced")
+        self.assertEqual(route["model_choice_reason"], "explorer_policy")
         self.assertTrue(route["read_only"])
+        with self.assertRaisesRegex(ValueError, "explorer always uses"):
+            control.resolve_dispatch_route({
+                "agent": "explorer", "task_kind": "runtime_investigation", "risk": "moderate",
+                "complexity": "C3", "requested_model": "gpt-5.6-terra",
+            })
 
     def test_configured_default_luna_omits_native_model_and_separates_expectation(self):
         route = control.resolve_dispatch_route({
@@ -575,56 +591,55 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(fallback["expected_model"], "gpt-5.6-terra")
         self.assertEqual(fallback["model_resolution"], "explicit_override")
 
-    def test_model_effort_remap_table_is_exact_and_preserves_other_pairs(self):
+    def test_planner_and_ordinary_worker_model_effort_matrix(self):
+        for agent in ("planner", "general", "code_reviewer"):
+            for requested_model, requested_effort, expected_effort in (
+                ("gpt-5.6-luna", "high", "max"),
+                ("gpt-5.6-luna", "max", "max"),
+                ("gpt-5.6-terra", "low", "medium"),
+                ("gpt-5.6-terra", "high", "high"),
+                ("gpt-5.6-terra", "max", "max"),
+            ):
+                with self.subTest(agent=agent, model=requested_model, effort=requested_effort):
+                    route = control.resolve_dispatch_route({
+                        "agent": agent, "task_kind": "implementation", "risk": "moderate",
+                        "complexity": "C2", "requested_model": requested_model,
+                        "requested_reasoning_effort": requested_effort,
+                    })
+                    self.assertEqual(route["selected_model"], requested_model)
+                    self.assertEqual(route["selected_reasoning_effort"], expected_effort)
+
+    def test_effort_above_max_is_rejected_for_every_model_route(self):
         cases = (
-            ("gpt-5.6-terra", "low", "gpt-5.6-luna", "high"),
-            ("gpt-5.6-terra", "medium", "gpt-5.6-luna", "high"),
-            ("gpt-5.6-terra", "high", "gpt-5.6-luna", "xhigh"),
-            ("gpt-5.6-sol", "low", "gpt-5.6-terra", "xhigh"),
-            ("gpt-5.6-sol", "medium", "gpt-5.6-terra", "max"),
+            {"agent": "explorer", "task_kind": "discovery", "requested_model": "gpt-5.6-luna"},
+            {"agent": "planner", "task_kind": "planning", "requested_model": "gpt-5.6-luna"},
+            {"agent": "general", "task_kind": "implementation", "requested_model": "gpt-5.6-terra"},
+            {
+                "agent": "general", "task_kind": "implementation",
+                "requested_model": "gpt-5.6-sol", "user_requested_model": "gpt-5.6-sol",
+            },
+            {"agent": "security_auditor", "task_kind": "security", "requested_model": "gpt-5.6-sol"},
         )
-        for requested_model, effort, expected_model, expected_effort in cases:
-            with self.subTest(requested_model=requested_model, effort=effort):
-                params = {
-                    "agent": "security_auditor" if requested_model == "gpt-5.6-sol" else "general",
-                    "task_kind": "security" if requested_model == "gpt-5.6-sol" else "implementation",
-                    "risk": "moderate",
-                    "complexity": "C2",
-                    "requested_model": requested_model,
-                    "requested_reasoning_effort": effort,
-                }
-                route = control.resolve_dispatch_route(params)
-                self.assertEqual(route["selected_model"], expected_model)
-                self.assertEqual(route["selected_reasoning_effort"], expected_effort)
-                self.assertEqual(route["remap_from_model"], requested_model)
-                self.assertEqual(route["remap_from_reasoning_effort"], effort)
+        for case in cases:
+            with self.subTest(agent=case["agent"], model=case["requested_model"]):
+                with self.assertRaisesRegex(ValueError, "supported effort"):
+                    control.resolve_dispatch_route({
+                        **case, "risk": "high", "complexity": "C3",
+                        "requested_reasoning_effort": "ultra",
+                    })
 
-        preserved = control.resolve_dispatch_route({
-            "agent": "security_auditor",
-            "task_kind": "security",
-            "risk": "moderate",
-            "complexity": "C2",
-            "requested_model": "gpt-5.6-sol",
-            "requested_reasoning_effort": "high",
-        })
-        self.assertEqual(preserved["selected_model"], "gpt-5.6-sol")
-        self.assertEqual(preserved["selected_reasoning_effort"], "high")
-        self.assertIsNone(preserved["remap_reason"])
-
-    def test_read_only_profile_uses_terra_policy_then_applies_the_remap(self):
+    def test_explorer_model_is_profile_bound_not_task_kind_bound(self):
         route = control.resolve_dispatch_route({
             "agent": "explorer",
             "task_kind": "implementation",
             "risk": "high",
             "complexity": "C3",
         })
-        self.assertEqual(route["policy_model"], "gpt-5.6-terra")
+        self.assertEqual(route["policy_model"], "gpt-5.6-luna")
         self.assertEqual(route["selected_model"], "gpt-5.6-luna")
         self.assertEqual(route["selected_reasoning_effort"], "high")
-        self.assertEqual(route["remap_from_model"], "gpt-5.6-terra")
-        self.assertEqual(route["remap_from_reasoning_effort"], "medium")
 
-    def test_analysis_task_kinds_route_to_luna_even_for_workspace_profiles(self):
+    def test_ordinary_profiles_default_to_luna_max_regardless_of_task_kind(self):
         for task_kind in ("analysis", "diagnosis", "research", "runtime_investigation", "root_cause_analysis", "code_review"):
             with self.subTest(task_kind=task_kind):
                 route = control.resolve_dispatch_route({
@@ -635,7 +650,7 @@ class ControlPlaneTests(unittest.TestCase):
                 })
                 self.assertEqual(route["policy_model"], "gpt-5.6-luna")
                 self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                self.assertEqual(route["selected_reasoning_effort"], "high")
+                self.assertEqual(route["selected_reasoning_effort"], "max")
 
     def test_record_gate_returns_revision_correction_instead_of_stale_revision_error(self):
         state = self.init(task_id="gate-revision", complexity="C1")["state"]
@@ -650,10 +665,12 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(result["state"])
         self.assertEqual(result["revision_correction"], {"requested": state["revision"] + 7, "used": state["revision"]})
 
-    def test_c2_lightweight_agent_routes_to_luna_in_delegation(self):
-        state = self.init(task_id="c2-lightweight", complexity="C2")["state"]
-        delegation = self.delegate(state, "c2-lightweight", "plan", "planner", task_kind="reading", risk="low")
-        self.assertEqual(delegation["spawn_request"]["model"], "gpt-5.6-luna")
+    def test_planner_defaults_to_luna_max(self):
+        route = control.resolve_dispatch_route({
+            "agent": "planner", "task_kind": "reading", "risk": "low", "complexity": "C2",
+        })
+        self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(route["selected_reasoning_effort"], "max")
 
     def test_lightweight_categories_route_to_luna_with_multi_agent_v2(self):
         for agent, task_kind in (("explorer", "reading"), ("explorer", "discover"), ("explorer", "read_discovery"), ("explorer", "read_only_audit"), ("explorer", "comparative_audit"), ("explorer", "comparative-audit"), ("general", "data_gathering"), ("general", "crud_edit"), ("general", "small_fix")):
@@ -662,13 +679,14 @@ class ControlPlaneTests(unittest.TestCase):
                     route = control.resolve_dispatch_route({"agent": agent, "task_kind": task_kind, "risk": "low", "complexity": "C1", "requested_reasoning_effort": effort})
                     self.assertEqual(route["policy_model"], "gpt-5.6-luna")
                     self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                    self.assertEqual(route["selected_reasoning_effort"], effort)
+                    expected_effort = effort if agent == "explorer" else "max"
+                    self.assertEqual(route["selected_reasoning_effort"], expected_effort)
         for task_kind in ("implementation", "tests", "debugging", "architecture", "migration"):
             with self.subTest(non_lightweight=task_kind):
                 route = control.resolve_dispatch_route({"agent": "general", "task_kind": task_kind, "risk": "low", "complexity": "C1"})
-                self.assertEqual(route["policy_model"], "gpt-5.6-terra")
+                self.assertEqual(route["policy_model"], "gpt-5.6-luna")
                 self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                self.assertEqual(route["selected_reasoning_effort"], "high")
+                self.assertEqual(route["selected_reasoning_effort"], "max")
 
     def test_terra_style_task_kind_is_canonicalized_at_the_mcp_boundary(self):
         for supplied, expected, model in (("Code Review", "code_review", "gpt-5.6-luna"), ("READ-ONLY", "read_only", "gpt-5.6-luna"), ("data   gathering", "data_gathering", "gpt-5.6-luna")):
@@ -732,13 +750,11 @@ class ControlPlaneTests(unittest.TestCase):
             available_thread_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
         )
         attempt = delegation["state"]["attempts"][-1]
-        self.assertEqual(attempt["policy_model"], "gpt-5.6-terra")
+        self.assertEqual(attempt["policy_model"], "gpt-5.6-luna")
         self.assertEqual(attempt["selected_model"], "gpt-5.6-terra")
         self.assertEqual(attempt["expected_model"], "gpt-5.6-terra")
         self.assertEqual(attempt["model_resolution"], "explicit_override")
-        self.assertEqual(attempt["selected_reasoning_effort"], "high")
-        self.assertEqual(attempt["remap_from_model"], "gpt-5.6-terra")
-        self.assertEqual(attempt["remap_from_reasoning_effort"], "medium")
+        self.assertEqual(attempt["selected_reasoning_effort"], "medium")
         self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
         self.assertEqual(attempt["fallback_from_model"], "gpt-5.6-luna")
         self.assertEqual(attempt["luna_fallback"], "terra")
@@ -781,21 +797,21 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(confirmed["confirmed"])
         self.assertEqual(confirmed["host_spawn"]["tool"], "create_thread")
 
-    def test_explicit_terra_fallback_remains_a_compatibility_opt_out(self):
+    def test_luna_host_fallback_uses_hidden_terra_without_changing_effort(self):
         state = self.init(task_id="terra-fallback-opt-out")['state']
         delegated = self.delegate(
             state,
             "terra-fallback-opt-out",
             "discover",
-            "general",
-            task_kind="implementation",
+            "explorer",
+            task_kind="discovery",
             available_models=["gpt-5.6-sol", "gpt-5.6-terra"],
             luna_fallback="terra",
         )
         attempt = delegated["state"]["attempts"][-1]
         self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
         self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-terra")
-        self.assertEqual(delegated["spawn_request"]["reasoning_effort"], "high")
+        self.assertEqual(delegated["spawn_request"]["reasoning_effort"], "medium")
         self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
         self.assertEqual(attempt["fallback_from_model"], "gpt-5.6-luna")
         self.assertFalse(attempt["user_owned_thread"])
@@ -871,40 +887,61 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
         self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
 
-    def test_all_ordinary_non_security_complexities_apply_the_terra_to_luna_remap(self):
+    def test_all_ordinary_non_security_complexities_default_to_luna_max(self):
         for complexity in ("C1", "C2", "C3"):
             for risk in ("low", "moderate", "high", "critical"):
                 with self.subTest(complexity=complexity, risk=risk):
                     route = control.resolve_dispatch_route({"agent": "general", "task_kind": "implementation", "risk": risk, "complexity": complexity})
-                    self.assertEqual(route["policy_model"], "gpt-5.6-terra")
+                    self.assertEqual(route["policy_model"], "gpt-5.6-luna")
                     self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                    self.assertEqual(route["selected_reasoning_effort"], "high")
+                    self.assertEqual(route["selected_reasoning_effort"], "max")
 
-    def test_non_security_sol_requires_structured_authorization(self):
-        for params in (
-            {"requested_model": "gpt-5.6-sol", "escalation_reason": "operator preference"},
-            {"requested_model": "gpt-5.6-sol", "sol_escalation": {"kind": "auditable_extreme", "criterion": "free form note", "audit_ref": "note-1"}},
-            {"requested_model": "gpt-5.6-sol", "sol_escalation": {"kind": "terra_failure", "prior_terra_attempt_id": "missing-01"}},
-        ):
-            with self.subTest(params=params):
-                with self.assertRaisesRegex(ValueError, "structured auditable_extreme|supported criterion|validated failed Terra"):
-                    control.resolve_dispatch_route({"agent": "general", "task_kind": "implementation", "risk": "high", "complexity": "C3", **params})
+    def test_non_security_sol_requires_explicit_user_model_request(self):
+        with self.assertRaisesRegex(ValueError, "requires user_requested_model"):
+            control.resolve_dispatch_route({
+                "agent": "general", "task_kind": "implementation", "risk": "high", "complexity": "C3",
+                "requested_model": "gpt-5.6-sol",
+            })
+        with self.assertRaisesRegex(ValueError, "must match requested_model"):
+            control.resolve_dispatch_route({
+                "agent": "general", "task_kind": "implementation", "risk": "high", "complexity": "C3",
+                "requested_model": "gpt-5.6-terra", "user_requested_model": "gpt-5.6-sol",
+            })
 
-    def test_auditable_extreme_criterion_permits_non_security_sol(self):
-        route = control.resolve_dispatch_route({"agent": "general", "task_kind": "migration", "risk": "critical", "complexity": "C3", "requested_reasoning_effort": "xhigh", "sol_escalation": {"kind": "auditable_extreme", "criterion": "irreversible_multi_system_recovery", "audit_ref": "classification-001"}})
-        self.assertEqual(route["policy_model"], "gpt-5.6-sol")
+    def test_explicit_user_request_permits_non_security_sol(self):
+        route = control.resolve_dispatch_route({
+            "agent": "general", "task_kind": "migration", "risk": "critical", "complexity": "C3",
+            "user_requested_model": "gpt-5.6-sol",
+            "requested_reasoning_effort": "xhigh",
+        })
+        self.assertEqual(route["policy_model"], "gpt-5.6-luna")
         self.assertEqual(route["selected_model"], "gpt-5.6-sol")
         self.assertEqual(route["selected_reasoning_effort"], "xhigh")
-        self.assertEqual(route["sol_escalation"]["criterion"], "irreversible_multi_system_recovery")
+        self.assertEqual(route["model_choice_reason"], "explicit_user_request")
+        self.assertEqual(route["user_requested_model"], "gpt-5.6-sol")
 
-    def test_failed_terra_attempt_in_ledger_permits_non_security_sol(self):
-        state = self.init(task_id="sol-link")["state"]
-        terra = self.delegate(state, "sol-link", "discover", "explorer", task_kind="implementation", requested_model="gpt-5.6-terra", requested_reasoning_effort="xhigh")
-        failed = control.finalize_attempt({"task_id": "sol-link", "principal": "thread-a", "expected_revision": terra["state"]["revision"], "attempt_id": terra["attempt_id"], "status": "failed", "reason": "bounded Terra attempt could not resolve the defect"})
-        observed = control.status({"task_id": "sol-link", "principal": "thread-a"})
-        sol = control.record_delegation({"task_id": "sol-link", "principal": "thread-a", "expected_revision": failed["state"]["revision"], "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "general", "task_kind": "implementation", "risk": "high", "requested_model": "gpt-5.6-sol", "sol_escalation": {"kind": "terra_failure", "prior_terra_attempt_id": terra["attempt_id"]}, "objective": "retry after Terra failure", "ownership": "Own retry", "allowed_paths": ["."], "acceptance_criteria": ["Resolve the defect"], "verification": ["Report evidence"]})
-        self.assertEqual(sol["spawn_request"]["model"], "gpt-5.6-sol")
-        self.assertEqual(sol["state"]["attempts"][-1]["sol_escalation"], {"kind": "terra_failure", "prior_terra_attempt_id": terra["attempt_id"]})
+    def test_public_worker_preserves_user_requested_sol_provenance(self):
+        started = self.v3_start(
+            "user selected Sol",
+            waves=[{"workers": [{
+                "phase": "implementation", "profile": "general",
+                "user_requested_model": "sol", "effort": "high",
+            }]}],
+            complexity="C1",
+        )
+        self.assertTrue(started["ok"])
+        self.assertEqual(started["dispatches"][0]["arguments"]["model"], "gpt-5.6-sol")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        attempt = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))["attempts"][0]
+        self.assertEqual(attempt["requested_model"], "gpt-5.6-sol")
+        self.assertEqual(attempt["user_requested_model"], "gpt-5.6-sol")
+
+    def test_explorer_rejects_user_requested_sol(self):
+        with self.assertRaisesRegex(ValueError, "explorer always uses"):
+            control.resolve_dispatch_route({
+                "agent": "explorer", "task_kind": "discovery", "risk": "high", "complexity": "C3",
+                "requested_model": "gpt-5.6-sol", "user_requested_model": "gpt-5.6-sol",
+            })
 
     def test_evidence_is_required_to_pass(self):
         result = self.init()
@@ -1241,8 +1278,8 @@ class ControlPlaneTests(unittest.TestCase):
             "profile": "general",
             "display_name": "general",
             "task_name": "general",
-            "model": "gpt-5.6-luna",
-            "reasoning_effort": "xhigh",
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "high",
         }
         package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
@@ -2037,6 +2074,23 @@ class ControlPlaneTests(unittest.TestCase):
                 gates = {spec["gate"] for wave in waves for spec in wave["delegations"]}
                 self.assertIn(expected_gate, gates)
 
+    def test_v3_harvest_routes_use_the_complete_census_pipeline(self):
+        expected = ["plan", "discover", "architecture", "documentation", "review", "close"]
+        for objective in (
+            "Harvest exhaustive repository knowledge documentation",
+            "Run harvest-refresh with a complete feature census",
+        ):
+            with self.subTest(objective=objective):
+                waves = control._v3_auto_waves({
+                    "objective": objective,
+                    "requirements": [],
+                    "complexity": "C2",
+                })
+                self.assertEqual(
+                    [spec["gate"] for wave in waves for spec in wave["delegations"]],
+                    expected,
+                )
+
     def test_v3_profile_schema_exposes_exact_roster_and_rejects_wrong_gate_owner(self):
         self.assertEqual(set(control.V3_WORKER_SCHEMA["properties"]["profile"]["enum"]), control.AGENTS)
         rejected = self.v3_start(
@@ -2065,13 +2119,128 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Task-level success criteria: Public behavior remains compatible", prompt)
         self.assertNotIn("Produce a decision-complete implementation plan", prompt)
 
-    def test_v3_repeated_start_with_changed_wording_resumes_the_unique_active_task(self):
+    def test_v3_repeated_exact_start_is_idempotent_but_changed_work_creates_a_new_task(self):
         first = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
-        repeated = self.v3_start("stable objective complete end to end", waves=[{"workers": [{"phase": "discover"}]}])
-        self.assertTrue(repeated["ok"])
-        self.assertEqual(repeated["step"], first["step"])
-        self.assertEqual(len(repeated["dispatches"]), 1)
-        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
+        replay = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
+        changed = self.v3_start("stable objective complete end to end", waves=[{"workers": [{"phase": "discover"}]}])
+        self.assertTrue(replay["ok"])
+        self.assertEqual(replay["task_ref"], first["task_ref"])
+        self.assertTrue(changed["ok"])
+        self.assertNotEqual(changed["task_ref"], first["task_ref"])
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 2)
+
+    def test_v3_multiple_same_project_tasks_are_isolated_by_task_ref(self):
+        starts = [
+            self.v3_start(f"independent session task {index}", waves=[{"workers": [{"phase": "discover"}]}])
+            for index in range(1, 4)
+        ]
+        self.assertTrue(all(item["ok"] for item in starts))
+        self.assertEqual(len({item["task_ref"] for item in starts}), 3)
+        registry = json.loads((self.ledger / "v3-operations.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(registry["starts"]), 3)
+        self.assertEqual(len(registry["tasks"]), 3)
+        ambiguous = control.continue_orchestration({
+            "project_root": str(self.project),
+            "step": starts[0]["step"],
+            "results": [{"report": self.v3_report()}],
+        })
+        self.assertFalse(ambiguous["ok"])
+        self.assertEqual(ambiguous["code"], "task_selection_required")
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": starts[0]["task_ref"],
+            "step": starts[0]["step"],
+            "results": [{"report": self.v3_report("first session only")}],
+        })
+        self.assertTrue(advanced["ok"])
+        self.assertEqual(advanced["task_ref"], starts[0]["task_ref"])
+
+    def test_v3_validation_errors_preserve_the_selected_task_ref(self):
+        started = self.v3_start("preserve task ref", waves=[{"workers": [{"phase": "discover"}]}])
+        continued = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [],
+        })
+        self.assertFalse(continued["ok"])
+        self.assertEqual(continued["task_ref"], started["task_ref"])
+        managed = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "unsupported recovery intent",
+        })
+        self.assertFalse(managed["ok"])
+        self.assertEqual(managed["task_ref"], started["task_ref"])
+
+    def test_v3_concurrent_process_starts_preserve_one_registry(self):
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        barrier = threading.Barrier(3)
+        responses = []
+        errors = []
+
+        def start(index):
+            try:
+                request = {
+                    "jsonrpc": "2.0", "id": index, "method": "tools/call",
+                    "params": {"name": "start_orchestration", "arguments": {
+                        "project_root": str(self.project),
+                        "task": {"objective": f"concurrent task {index}", "complexity": "C1"},
+                        "waves": [{"workers": [{"phase": "discover"}]}],
+                    }},
+                }
+                barrier.wait()
+                completed = subprocess.run(
+                    [sys.executable, str(script)],
+                    input=json.dumps(request) + "\n",
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                responses.append(json.loads(completed.stdout)["result"]["structuredContent"])
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=start, args=(index,)) for index in range(1, 4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertTrue(all(item["ok"] for item in responses))
+        self.assertEqual(len({item["task_ref"] for item in responses}), 3)
+        registry = json.loads((self.ledger / "v3-operations.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(registry["tasks"]), 3)
+
+    def test_v3_concurrent_identical_starts_share_the_pending_reservation(self):
+        task = {"objective": "one concurrent idempotent task", "complexity": "C1"}
+        params = {
+            "project_root": str(self.project),
+            "task": task,
+            "waves": [{"workers": [{"phase": "discover"}]}],
+        }
+        barrier = threading.Barrier(3)
+        responses = []
+        errors = []
+
+        def start():
+            try:
+                barrier.wait()
+                responses.append(control.start_orchestration(params))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=start) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertTrue(all(item["ok"] for item in responses))
+        self.assertEqual(len({item["task_ref"] for item in responses}), 1)
+        registry = json.loads((self.ledger / "v3-operations.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(registry["starts"]), 1)
+        self.assertEqual(len(registry["tasks"]), 1)
 
     def test_v3_normalizes_human_language_aliases_before_ledger_creation(self):
         started = control.start_orchestration({
@@ -2210,10 +2379,225 @@ class ControlPlaneTests(unittest.TestCase):
         prompt = advanced["dispatches"][0]["arguments"]["message"]
         self.assertIn("repository-grounded discovery handoff", prompt)
         self.assertIn("Use the discovered service boundary.", prompt)
+        self.assertIn("Predecessor review requirement", prompt)
+        self.assertIn(f"Predecessor review: {published['report_ref']}", prompt)
         self.assertIn("mcp__codebase_memory__list_projects", prompt)
         self.assertIn("If no exact usable index exists, do not create or refresh one in this gate.", prompt)
         records = list((task_dir / "reports/records").glob("*.json"))
         self.assertEqual(len(records), 1)
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        completed = next(item for item in state["attempts"] if item["gate"] == "discover")
+        self.assertEqual(completed["report_ids"], [published["report_ref"]])
+
+    def test_public_worker_report_requires_predecessor_review_acknowledgement(self):
+        started = self.v3_start("enforced handoff review", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation", "depends_on": ["discover"]}]},
+        ])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        first_attempt = state["attempts"][0]
+        first = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": first_attempt["attempt_id"],
+            "profile": first_attempt["profile"],
+            "report": self.v3_report("first verified handoff"),
+        })
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"report_ref": first["report_ref"]}],
+        })
+        self.assertTrue(advanced["ok"])
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        second_attempt = next(item for item in state["attempts"] if item["gate"] == "implementation")
+        with self.assertRaisesRegex(ValueError, "acknowledge every supplied predecessor handoff"):
+            control.publish_worker_report({
+                "project_root": str(self.project),
+                "task_id": state["task_id"],
+                "attempt_id": second_attempt["attempt_id"],
+                "profile": second_attempt["profile"],
+                "report": self.v3_report("missing review acknowledgement"),
+            })
+        accepted_report = self.v3_report("review acknowledged")
+        accepted_report["evidence"].append(f"Predecessor review: {first['report_ref']}")
+        accepted = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": second_attempt["attempt_id"],
+            "profile": second_attempt["profile"],
+            "report": accepted_report,
+        })
+        self.assertTrue(accepted["ok"])
+
+    def test_v3_workers_consume_project_knowledge_indexes_and_acknowledge_review(self):
+        project_docs = self.project / "docs/project"
+        feature_docs = self.project / "docs/features"
+        project_docs.mkdir(parents=True)
+        feature_docs.mkdir(parents=True)
+        (feature_docs / "trading").mkdir()
+        (project_docs / "index.md").write_text("# Project knowledge\n", encoding="utf-8")
+        (feature_docs / "index.md").write_text("# Feature catalog\n", encoding="utf-8")
+        (feature_docs / "trading/index.md").write_text("# Trading\n", encoding="utf-8")
+        started = self.v3_start("use existing repository knowledge", waves=[
+            {"workers": [{
+                "phase": "plan",
+                "context_files": ["docs/features/trading/index.md"],
+            }]},
+        ])
+        self.assertTrue(started["ok"])
+        prompt = started["dispatches"][0]["arguments"]["message"]
+        self.assertIn(
+            "Context files: docs/project/index.md; docs/features/index.md; docs/features/trading/index.md",
+            prompt,
+        )
+        self.assertIn("Before broad source search, design, or edits", prompt)
+        self.assertIn("docs/features/index.md as the capability/coverage catalog", prompt)
+        self.assertIn("Every changed_files item must be a safe project-relative path", prompt)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        self.assertEqual(
+            attempt["knowledge_index_files"],
+            ["docs/project/index.md", "docs/features/index.md"],
+        )
+        with self.assertRaisesRegex(ValueError, "repository knowledge index"):
+            control.publish_worker_report({
+                "project_root": str(self.project),
+                "task_id": state["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": attempt["profile"],
+                "report": self.v3_report("knowledge was not acknowledged"),
+            })
+        report = self.v3_report("knowledge-guided plan complete")
+        report["evidence"].append(
+            "Knowledge reviewed: docs/project/index.md, docs/features/index.md, docs/features/trading/index.md"
+        )
+        accepted = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertTrue(accepted["ok"])
+
+    def test_harvest_documentation_cannot_publish_with_a_shallow_feature_index(self):
+        project_docs = self.project / "docs/project"
+        feature_docs = self.project / "docs/features"
+        project_docs.mkdir(parents=True)
+        feature_docs.mkdir(parents=True)
+        (project_docs / "index.md").write_text("# Project knowledge\n", encoding="utf-8")
+        feature_index = feature_docs / "index.md"
+        feature_index.write_text("# Features\n\n- [Trading](trading/index.md)\n", encoding="utf-8")
+        started = self.v3_start("harvest exhaustive knowledge", waves=[
+            {"workers": [{"phase": "documentation"}]},
+        ])
+        self.assertTrue(started["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self.v3_report("documentation written")
+        report["evidence"].append(
+            "Knowledge reviewed: docs/project/index.md, docs/features/index.md"
+        )
+        with self.assertRaisesRegex(ValueError, "shallow or incomplete"):
+            control.publish_worker_report({
+                "project_root": str(self.project),
+                "task_id": state["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": attempt["profile"],
+                "report": report,
+            })
+        feature_index.write_text(
+            "# Features\n\n## Inventory totals\n\nTotal: 1.\n\n"
+            "## Coverage matrix\n\n"
+            "| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| Trading | engine | command | service.py | trading/index.md | test.py | documented |\n\n"
+            "## Unmapped surfaces\n\nNone.\n\n## Exclusions\n\nNone.\n\n"
+            "## Known unknowns\n\nNone.\n",
+            encoding="utf-8",
+        )
+        accepted = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertTrue(accepted["ok"])
+
+    def test_v3_context_files_reject_escape_missing_and_symlink_paths(self):
+        docs = self.project / "docs"
+        docs.mkdir()
+        (docs / "relevant.md").write_text("# Relevant\n", encoding="utf-8")
+        outside = self.base / "outside.md"
+        outside.write_text("outside\n", encoding="utf-8")
+        (docs / "linked.md").symlink_to(outside)
+        for context_file in ("../outside.md", str(outside), "docs/missing.md", "docs/linked.md"):
+            with self.subTest(context_file=context_file):
+                rejected = self.v3_start(
+                    f"reject unsafe context {context_file}",
+                    waves=[{"workers": [{"phase": "discover", "context_files": [context_file]}]}],
+                )
+                self.assertFalse(rejected["ok"])
+                self.assertEqual(rejected["code"], "start_validation_failed")
+                self.assertIn("context file", rejected["diagnostics"][0]["message"].replace("_", " "))
+        tasks = self.ledger / "tasks"
+        self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
+
+    def test_v3_depends_on_selects_exact_predecessor_phases(self):
+        started = self.v3_start("semantic handoff dependencies", waves=[
+            {"workers": [{"phase": "plan"}]},
+            {"workers": [{"phase": "discover", "depends_on": ["plan"]}]},
+            {"workers": [{"phase": "architecture", "depends_on": ["plan"]}]},
+            {"workers": [{"phase": "implementation", "depends_on": ["architecture"]}]},
+        ])
+        current = started
+        reports = []
+        for summary in ("plan handoff", "discovery handoff", "architecture handoff"):
+            current = control.continue_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "step": current["step"],
+                "results": [{"report": self.v3_report(summary)}],
+            })
+            self.assertTrue(current["ok"])
+            reports.append(summary)
+            prompt = current["dispatches"][0]["arguments"]["message"]
+            if current["dispatches"][0]["phase"] == "architecture":
+                self.assertIn("plan handoff", prompt)
+                self.assertNotIn("discovery handoff", prompt)
+            if current["dispatches"][0]["phase"] == "implementation":
+                self.assertIn("architecture handoff", prompt)
+                self.assertNotIn("plan handoff", prompt)
+                self.assertNotIn("discovery handoff", prompt)
+
+    def test_v3_context_overflow_fails_closed_instead_of_dropping_old_reports(self):
+        with mock.patch.object(control, "MAX_CONTEXT_REPORTS", 1):
+            started = self.v3_start("bounded handoff overflow", waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "discover"}]},
+                {"workers": [{"phase": "architecture"}]},
+            ])
+            second = control.continue_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "step": started["step"],
+                "results": [{"report": self.v3_report("plan report")}],
+            })
+            self.assertTrue(second["ok"])
+            rejected = control.continue_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "step": second["step"],
+                "results": [{"report": self.v3_report("discover report")}],
+            })
+            self.assertFalse(rejected["ok"])
+            self.assertIn("depends_on", rejected["diagnostics"][0]["message"])
 
     def test_v3_inspect_recovers_report_when_native_worker_ack_is_interrupted(self):
         started = self.v3_start("recover persisted report", waves=[
@@ -2258,6 +2642,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("report", result_schema["properties"])
         self.assertIn("report_ref", result_schema["properties"])
         self.assertIn("never an inline report body", result_schema["properties"]["report_ref"]["description"])
+        self.assertIn("depends_on", control.V3_WORKER_SCHEMA["properties"])
+        self.assertIn("context_files", control.V3_WORKER_SCHEMA["properties"])
 
     def test_v3_phase_aliases_accept_common_labels_and_reject_cross_wave_duplicates(self):
         task = {"objective": "phase aliases", "complexity": "C2"}
@@ -2754,11 +3140,10 @@ class ControlPlaneTests(unittest.TestCase):
         delegation = self.delegate(state, "reports", "plan", "planner", risk="low", requested_model="gpt-5.6-terra", requested_reasoning_effort="none")
         package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
         self.assertEqual(package["requested_model"], "gpt-5.6-terra")
-        self.assertEqual(package["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(package["selected_model"], "gpt-5.6-terra")
         self.assertIsNone(package["fallback_reason"])
-        self.assertEqual(package["selected_reasoning_effort"], "high")
-        self.assertEqual(package["remap_from_model"], "gpt-5.6-terra")
-        self.assertEqual(package["remap_from_reasoning_effort"], "low")
+        self.assertEqual(package["selected_reasoning_effort"], "medium")
+        self.assertEqual(package["model_choice_reason"], "coordinator_selected_terra")
         report = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
         replay = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
         self.assertTrue(replay["idempotent"])
@@ -3363,7 +3748,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.2.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.2.2")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

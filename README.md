@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**3.2.1**. The public MCP surface has exactly five tools: three coordinator
+**3.2.2**. The public MCP surface has exactly five tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `record_report` and coordinator
@@ -28,8 +28,8 @@ multi_agent_v2 = true
 
 After changing this setting, start a new Codex task. Existing tasks retain the
 multi-agent adapter selected when they were created; with v1, an explicit
-`gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to dispatch
-Luna explicitly for eligible lightweight work.
+`gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to apply its
+per-worker Luna/Terra/Sol policy and coordinator-selected effort.
 
 If a host exposes only Sol/Terra to hidden `spawn_agent` and has not confirmed
 the global Luna default, Cortex stays hidden and falls back to an explicit
@@ -168,10 +168,10 @@ for the new installation.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 3.2.1
+and secret-prone paths before validating the package again. The Cortex 3.2.2
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` still validates the
-previous `HEAD` and fails its 3.2.1 package contract. Commit only with explicit
+previous `HEAD` and fails its 3.2.2 package contract. Commit only with explicit
 authorization, then rerun the blocking check against that committed tree before
 any push, tag, or catalog submission.
 
@@ -217,13 +217,22 @@ Cortex skill for any non-help, non-`normal` route explicitly activates it;
 mentions remain normal workflow and do not create a ledger. Help is read-only
 and never activates Cortex.
 
-The knowledge routes delegate source inspection to a read-only `explorer` and
-bounded documentation changes to `technical_writer`. `harvest` changes only
-missing or stale facts justified by evidence. `harvest-refresh` re-audits all
-allowed knowledge docs, preserves manual notes outside generated blocks, runs
-the full applicable verification set, and requires a no-change second planning
-pass before completion. Both routes reconcile the project manifest and finish
-with a handoff.
+The knowledge routes build a source-backed exhaustive feature census, not a
+summary of recent changes. Both use the canonical `plan`, `discover`,
+`architecture`, `documentation`, `review`, and `close` phases. `harvest` is
+incremental only when `docs/features/index.md` already contains a current,
+zero-gap coverage manifest; otherwise it runs a full baseline census.
+`harvest-refresh` always rebuilds the inventory from source and requires an
+independent source-to-doc completeness review with zero unexplained unmapped
+surfaces and a no-change second documentation plan. Large repositories split
+discovery across 2–8 non-overlapping domain explorers and may parallelize
+technical writers only across non-overlapping documentation paths, with one
+owner for the coverage manifest. Both routes preserve manual notes outside
+generated blocks, reconcile the project manifest, and finish with a verified
+handoff. During `documentation`, `review`, and `close`, Cortex structurally
+validates `docs/features/index.md` and rejects a shallow link list that omits
+the Coverage matrix columns, Inventory totals, Unmapped surfaces, Exclusions,
+or Known unknowns sections.
 
 For every Cortex call, the coordinator supplies the exact absolute
 `project_root`; it is never inferred from the server process, environment, or
@@ -237,8 +246,11 @@ The public normal flow has a narrow lifecycle plus scoped report transport. A mi
 `start_orchestration` call contains only the absolute `project_root` and
 `task.objective`; complexity safely defaults to C2 and Cortex constructs the
 pipeline. Optional compact overrides use `waves[].workers[]`, where only
-`phase` is required. Common human language names normalize to compact tags
-before ledger creation; in particular, `implement` maps to `implementation`
+`phase` is required, `depends_on` selects exact prerequisite phases, and
+`context_files` carries task-relevant project or feature documentation.
+Omitting `depends_on` supplies all verified predecessor reports; an empty list
+marks an intentionally independent worker. Common human language names
+normalize to compact tags before ledger creation; in particular, `implement` maps to `implementation`
 and `build_verification` maps to the final `close` phase, avoiding repeated
 correction/retry loops around those common labels. `continue_orchestration` is called once per completed
 wave with the prior relative `step` and worker results. A sequential result
@@ -250,6 +262,14 @@ with `read_worker_report`. If a native acknowledgement is interrupted after
 persistence, `manage_orchestration` inspect exposes the ref in
 `available_reports`. Slots and report refs are validated atomically
 before lifecycle state is written.
+
+Every task-bound lifecycle response returns an opaque `task_ref`. Preserve it
+on every later `continue_orchestration`, `manage_orchestration`, and
+`read_worker_report` call. Different task contracts may run concurrently below
+one project root; an exact duplicate active start is idempotent, while changed
+task or wave content creates a distinct task. If a later call omits the ref
+while several tasks are selectable, Cortex returns `needs_selection` with
+opaque refs and objectives instead of guessing.
 
 Caller-generated submission, task, wave, attempt, coordinator, and host IDs
 do not cross the normal-flow boundary. Cortex owns transaction idempotency:
@@ -304,10 +324,24 @@ capability. When its tools are actually present, a worker first calls
 `list_projects` and selects only the entry whose root exactly matches the task
 project. It should prefer graph, architecture, and trace operations for
 discovery and impact analysis, then confirm consequential findings in current
-source and tests. If the service, matching index, or returned data is
-unavailable or stale, the worker falls back once to normal repository tools
-without retry loops. The coordination-only root never uses Codebase Memory to
-inspect the target project itself.
+source and tests. `planner`, `explorer`, `architect`, and `database_architect`
+may perform one bounded refresh when the exact index is missing or stale;
+every other profile falls back after one failed attempt to normal repository
+tools without setup loops. The coordination-only root never uses Codebase
+Memory to inspect the target project itself.
+
+When present, Cortex automatically adds `docs/project/index.md` and
+`docs/features/index.md` to every worker briefing. The planner reads those
+indexes first, selects all task-relevant linked pages, and recommends their
+exact paths; the coordinator attaches that evidence-backed selection to later
+workers through `context_files`. Every worker re-checks the indexes, treats
+documentation as navigation and prior knowledge rather than authority, and
+confirms consequential claims in current source, tests, schemas, or executable
+configuration. Its persisted report includes one `Knowledge reviewed:`
+evidence entry naming both available indexes and every additional page used;
+public `record_report` rejects a missing index acknowledgement. Explicit
+`context_files` must resolve to existing project-relative regular files;
+absolute, traversing, missing, and symlink paths are rejected.
 
 ## Profiles, routing, and reports
 
@@ -345,44 +379,28 @@ writes. Every returned dispatch exposes `worker`, `phase`, `profile`,
 `capability`, `sandbox`, and `selection_reason` alongside `call` and unchanged
 native `arguments`.
 Every delegation records requested/expected model metadata separately from
-the native request override and always records reasoning effort. A
-configured-default Luna request omits native `model`; confirmation and
-observed host metadata, when the lifecycle runtime supplies it, is stored
-separately. Cortex never claims an actual worker model from expected routing
-alone. With required multi-agent v2 enabled, every delegation is routed
-independently from its declared work intent, profile, and risk. Luna handles
-reading, discovery/data gathering, investigation, diagnosis, research, code
-review, CRUD-level edits, and small fixes whenever the `task_kind` declares
-that intent, regardless of low/moderate/high/critical risk or the parent
-task's C1/C2/C3 classification. A read-only profile alone does not force Luna:
-non-analysis work such as implementation, architecture, migration, or
-debugging initially resolves to Terra and then follows the exact remapping
-table above. Security task kind, the security gate, and the `security_auditor`
-profile initially resolve to Sol; the same table is authoritative before
-dispatch, and contradictory task kinds are normalized to security. A
-non-security Sol route must carry a structured
-`sol_escalation`: a supported auditable extreme criterion with an `audit_ref`,
-or a `terra_failure` linked to a failed Terra attempt in the current ledger.
-Free-form `escalation_reason` text is preserved as context but never grants the
-exception. The supported auditable-extreme criteria are
-`irreversible_multi_system_recovery`, `safety_critical_incident_response`,
-and `novel_cross_system_failure_without_bounded_rollback`. Reasoning effort is
-selected independently of the routing category: requested effort `none`
-becomes `low`; for Luna analysis/lightweight work the minimum/default is
-`medium` at low/moderate risk, `high` at high risk, and `xhigh` at critical
-risk, while explicitly higher requested effort is preserved. Sol uses at least
-`high` before the exact dispatch remapping below. The runtime applies only
-these five pairs after normal policy resolution:
+the native request override and always records reasoning effort. `explorer`
+always selects Luna; its effort is chosen by the coordinator or defaults from
+risk, and Terra is reserved for a hidden host-unavailable fallback. The only
+valid efforts are `low`, `medium`, `high`, `xhigh`, and `max`; `max` is the hard
+upper bound. `planner` and all remaining non-security profiles default to Luna
+at exactly `max`, while the coordinator may normally select Terra from `medium`
+through `max`. Luna `max` is already a powerful default and should not be
+escalated reflexively. Security
+context, the security gate, and `security_auditor` always select Sol, with
+effort floors C1 `medium`, C2 `high`, and C3 `xhigh`, capped at `max`.
 
-| resolved pair | dispatched pair |
-| --- | --- |
-| Terra + low | Luna + high |
-| Terra + medium | Luna + high |
-| Terra + high | Luna + xhigh |
-| Sol + low | Terra + xhigh |
-| Sol + medium | Terra + max |
-
-Every other pair is preserved unchanged.
+Non-security Sol is accepted only when the user explicitly selected it. Pass
+compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
+Cortex records matching `user_requested_model` and `requested_model`.
+Coordinator preference, auditable-extreme labels, and a failed Terra attempt
+are not authorization;
+the retired `sol_escalation` field and model/effort remaps are not part of the
+current contract. A configured-default Luna request omits native `model` while
+preserving the selected effort. Explicit model selections retain `model`; if
+Luna is unavailable to the host, Cortex may dispatch hidden Terra without
+changing the selected effort. Observed host metadata is stored separately,
+and Cortex never claims an actual worker model from expected routing alone.
 
 Each v3 dispatch is `{worker, phase, profile, capability, sandbox,
 selection_reason, call, arguments}`. `arguments` contains only the real native
@@ -410,6 +428,16 @@ to the current relative slot. Cortex privately creates
 the durable report receipt, evidence, gate transitions, reconciliation, and
 handoff. The coordinator waits for every native worker in the current wave
 before calling `continue_orchestration`.
+When predecessor handoffs are embedded in a dispatch, the worker reads every
+one before project work, reconciles relevant findings and conflicts against
+current evidence, and adds the generated `Predecessor review:` entry naming
+every supplied report ref to report evidence. Public `record_report` rejects
+an incomplete acknowledgement. Cortex also fails closed instead of silently
+dropping predecessor reports when the safe count or context-size budget is
+exceeded; narrow the dependency set with `depends_on`.
+The public compact worker schema accepts `context_files`. Cortex also injects
+the available project and feature indexes, and the report must include the
+generated `Knowledge reviewed:` acknowledgement described above.
 Worker execution is English-only: internal prompts, Cortex arguments, reports,
 questions, handoffs, and audit records are English. The main coordinator uses
 the user's task language (or explicit `user_language`) for all user-facing
@@ -461,13 +489,14 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current candidate is installed as
-`3.2.1+codex.20260814203024`. Verification includes 220 passing Python tests,
-marketplace validation, content-verified installer check with the Luna default,
-cold-boot smoke, all three deterministic Luna-high fixtures, the composite
-benchmark target, isolated fresh-plugin registration, Python compilation,
-shell syntax, and installer dry-run. The live Luna-high route was not attempted
-because `--live` was not supplied. The blocking tracked-release check correctly
-remains blocked because committed `HEAD` does not contain the uncommitted 3.2.1
-package contract; no commit, tag, push, catalog publication, or public release
-is claimed.
+The current 3.2.2 source candidate has 234 passing Python tests in 15.481
+seconds; skill quick validation, plugin and marketplace validation, Python
+compilation, and shell syntax also pass. Cachebuster
+`3.2.2+codex.20260814215722` is installed and content-verified; installer check
+and dry-run pass with `agents.default_subagent_model=gpt-5.6-luna`. Cold-boot
+smoke, all three deterministic Luna-high fixtures, the eight-worker/five-wave
+benchmark target, and the isolated fresh-plugin probe also pass for 3.2.2.
+The earlier `3.2.1+codex.20260814203024` candidate remains historical evidence
+for historical comparison only. The live Luna-high route, tracked release,
+commit, tag, push, catalog publication, and
+public release remain unverified.

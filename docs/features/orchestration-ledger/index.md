@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 3.2.1 task ledger, staged waves,
+The local MCP server implements the Cortex 3.2.2 task ledger, staged waves,
 worker reports, and optional execution lanes through exactly five public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -22,8 +22,9 @@ details; existing v7 tasks are inspectable and resumable through the v3 adapter.
 `start_orchestration` accepts an absolute `project_root` and compact task
 contract, defaults complexity to safe C2, builds the standard pipeline when
 waves are omitted, and prepares the first wave. Each
-`continue_orchestration` call supplies the relative active-wave `step` and
-persisted worker `report_ref` values. A single-worker wave needs no slot; a parallel wave
+`continue_orchestration` call supplies the relative active-wave `step`, the
+opaque `task_ref`, and persisted worker `report_ref` values. A single-worker
+wave needs no slot; a parallel wave
 uses short relative `worker: 1..N` slots. The server validates completeness,
 uniqueness, and ownership atomically before state writes, then returns the
 next step and native dispatch arguments. Future-wave replacement and explicit
@@ -35,6 +36,14 @@ inspect/resume/deactivate, lanes, resources, and durable questions; it is not
 part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
+
+Cortex returns `task_ref` on every task-bound lifecycle response. The
+coordinator preserves it on every later lifecycle and report-read call. Different task and
+wave contracts can run concurrently below one project root; an exact duplicate
+active start replays idempotently, while changed content creates a distinct
+task. Omitting the ref when several tasks are selectable returns
+`needs_selection` with bounded objective/ref candidates. The project registry
+is lock-serialized so concurrent process starts do not overwrite one another.
 
 The coordinator builds or consciously accepts the initial pipeline and follows
 the returned snapshot by default. Planner and explorer findings are advisory;
@@ -104,13 +113,47 @@ never an inline report body. If the worker is interrupted after persistence but
 before its acknowledgement, `manage_orchestration` inspect returns the compact
 entry in `available_reports` for recovery.
 
+Predecessor handoffs are an enforced worker contract. Omitted `depends_on`
+supplies every verified predecessor report, an explicit phase list selects only
+those completed or earlier-wave dependencies, and `[]` declares intentional
+independence. The generated prompt requires reconciliation of every supplied
+handoff and an exact generated `Predecessor review:` evidence marker containing
+all report refs; public `record_report` rejects incomplete acknowledgement.
+More than eight reports or a predecessor payload beyond the safe context budget
+fails closed with guidance to narrow `depends_on`, never by silently dropping
+older reports.
+
 Codebase Memory is conditional worker tooling rather than a ledger dependency.
 When the tools are available, the worker resolves the task project by exact
 root through `list_projects`, prefers graph, architecture, and trace operations
 for discovery and impact analysis, and confirms consequential findings in
-source and tests. An unavailable or stale service/index triggers one fallback
-to ordinary repository tools, not a retry loop. The main/root coordinator must
-not use Codebase Memory to inspect the project.
+source and tests. `planner`, `explorer`, `architect`, and `database_architect`
+may refresh one missing or stale index; other profiles fall back to ordinary
+repository tools after one failed attempt. No profile loops on setup, and the
+main/root coordinator must not use Codebase Memory to inspect the project.
+
+Repository knowledge is an enforced worker context layer. Cortex adds
+`docs/project/index.md` and `docs/features/index.md` to every briefing when
+they exist. The planner selects task-relevant linked pages and recommends
+their exact paths; the coordinator attaches them to future compact workers
+through `context_files`. All workers re-check the indexes, treat documentation
+as navigation and prior knowledge rather than authority, verify consequential
+claims in source, tests, schemas, migrations, or executable configuration,
+and persist `Knowledge reviewed:` evidence. Public report intake rejects a
+missing index acknowledgement. Explicit context paths must be existing
+project-relative regular files; absolute, traversing, missing, and symlink
+paths are rejected.
+
+Knowledge-harvest objectives force the canonical `plan`, `discover`,
+`architecture`, `documentation`, `review`, and `close` pipeline. Incremental
+harvest is valid only after a current source-backed coverage manifest proves a
+zero-gap baseline. Otherwise the coordinator runs a full feature census, uses
+2–8 non-overlapping domain explorers for a large repository, synthesizes stable
+feature boundaries, writes behavior-complete pages, and requires an independent
+review with zero unexplained unmapped surfaces. Refresh rebuilds the inventory
+and also requires a no-change second documentation plan. Documentation,
+review, and close reject a shallow feature index without Coverage matrix
+columns, Inventory totals, Unmapped surfaces, Exclusions, or Known unknowns.
 
 Reports are sanitized, task- and attempt-bound, and use one-use receipts.
 Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
@@ -137,9 +180,40 @@ specialist rules. Recovery and nested
 operations are `inspect`, `resume`, `deactivate`, `lane`, `resource`, and
 `question`.
 
-Ledger, report-bus, and journal paths reject symlink ancestry and require regular-file targets, so journal or report-bus links cannot redirect state writes. Metrics reject negative token/elapsed values and non-finite or negative costs; telemetry retains a bounded tail of 1,000 events or 512 KiB and records evictions in `telemetry_dropped`. Multi-agent v2 is required for explicit per-worker model selection. Every delegation is evaluated independently from its declared work intent and risk: Luna handles explicit reading, discovery/data gathering, investigation, diagnosis, research, code review, CRUD-level edits, and small fixes at any risk; a read-only profile alone does not change the initial policy category, and non-analysis work such as architecture, migration, debugging, and implementation initially resolves to Terra before the exact model/effort remapping table is applied. Luna analysis/lightweight work defaults to and floors at medium effort for low/moderate risk, high for high risk, and xhigh for critical risk; explicit higher effort is preserved. Security task kind, the security gate, and the `security_auditor` profile initially resolve to Sol, then follow the same exact table; contradictory task kinds are normalized to security. Non-security Sol requires either a supported auditable extreme criterion and audit reference or a ledger-validated failed Terra attempt; free-form text is never authorization. Classification receipts are authoritative at initialization, so duplicate complexity and requirements inputs are ignored. Host completion and gate proof are separate: a passed attempt may be finalized before evidence linkage, while the gate remains blocked until required evidence is recorded. A unique context-grant id supplied where a report receipt is expected is corrected to that report's one-use receipt. Other `commit_gate` validation failures are recorded as bounded recovery events; after three failures for the same gate/mode the task becomes `blocked` with an explicit handoff/resume action instead of remaining active forever. Supported auditable-extreme criteria are `irreversible_multi_system_recovery`, `safety_critical_incident_response`, and `novel_cross_system_failure_without_bounded_rollback`. Reasoning effort is independently selected, with `none` normalized to `low`; only pairs outside the exact table retain the Sol high-effort floor. Lanes support creation, leases, task binding, resource claims, optional declared-worktree materialization, reconciliation, and clean retirement; managed dirty worktrees are refused during retirement.
+Ledger, report-bus, and journal paths reject symlink ancestry and require
+regular-file targets, so journal or report-bus links cannot redirect state
+writes. Metrics reject negative token/elapsed values and non-finite or negative
+costs; telemetry retains a bounded tail of 1,000 events or 512 KiB and records
+evictions in `telemetry_dropped`.
+
+Multi-agent v2 is required for explicit per-worker model selection. `explorer`
+always selects Luna with coordinator-selected effort or a risk-based default;
+Terra is only its host-unavailable fallback. The accepted effort vocabulary
+ends at `max`. `planner` and all remaining non-security profiles default to Luna
+at exactly `max`, while the coordinator may normally choose Terra from `medium`
+through `max`. Luna `max` is the strong normal default, not a reason for
+reflexive escalation. Security context, the security gate, and
+`security_auditor` always select Sol with effort floors C1 `medium`, C2 `high`,
+and C3 `xhigh`, capped at `max`. Non-security Sol requires matching
+`user_requested_model` and `requested_model` from an explicit user choice; old
+`sol_escalation`, auditable-extreme, failed-Terra, and model/effort-remap
+authorization is rejected. Configured-default Luna omits native `model`, while
+a hidden host-unavailable Terra fallback preserves selected effort.
+
+Classification receipts are authoritative at initialization, so duplicate
+complexity and requirements inputs are ignored. Host completion and gate proof
+are separate: a passed attempt may be finalized before evidence linkage, while
+the gate remains blocked until required evidence is recorded. A unique
+context-grant id supplied where a report receipt is expected is corrected to
+that report's one-use receipt. Other `commit_gate` validation failures are
+recorded as bounded recovery events; after three failures for the same
+gate/mode the task becomes `blocked` with an explicit handoff/resume action
+instead of remaining active forever. Lanes support creation, leases, task
+binding, resource claims, optional declared-worktree materialization,
+reconciliation, and clean retirement; managed dirty worktrees are refused
+during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 3.2.1 evidence includes 220 passing tests, marketplace validation, installed cachebuster `3.2.1+codex.20260814203024`, cold-boot smoke, deterministic fixture evaluation, benchmark target, fresh-plugin probe, compilation, shell syntax, installer check, dry-run, and a real subagent Codebase Memory forward-test. The live model route was not attempted, and tracked release/publication remain blocked or unverified. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 3.2.2 evidence includes 234 passing tests, skill quick validation for `knowledge-harvest`, `orchestrator`, and `cortex-control`, plugin and marketplace validation, Python compilation, shell syntax, installed and content-verified cachebuster `3.2.2+codex.20260814215722`, installer check/dry-run with the Luna default, cold boot, three deterministic Luna-high fixtures, the composite benchmark target, and the isolated fresh-plugin probe. The live model route, tracked release, and publication remain unverified. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

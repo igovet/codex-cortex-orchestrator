@@ -15,26 +15,27 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Current Cortex 3.2.1 evidence:
+Current Cortex 3.2.2 source evidence:
 
-- Plugin cachebuster `3.2.1+codex.20260814203024` installed successfully.
-- `./scripts/sync-cortex.sh --check` passed with installed content verified and
+- The full Python suite passed 234 tests in 15.481 seconds.
+- Quick validation passed for `knowledge-harvest`, `orchestrator`, and
+  `cortex-control`; plugin and marketplace validation also passed.
+- Python compilation and shell syntax passed.
+- Cachebuster `3.2.2+codex.20260814215722` was generated, installed from this
+  repository, and content-verified. Installer check and dry-run pass with
   `agents.default_subagent_model=gpt-5.6-luna`.
-- The full Python suite passed 220 tests; marketplace validation also passed.
-- Cold-boot smoke passed with seven `continue_orchestration` calls, eight
-  reports, and a parallel wave observed.
-- Deterministic Luna-high fixtures passed for `automatic_sequential`,
-  `compact_parallel`, and `blocked_resume`. The live route was not attempted
-  because `--live` was not supplied; no live-model evidence is claimed.
-- The composite benchmark met its target: 50 legacy calls versus 22 relative-v3
-  calls, a 0.56 reduction. The v3 count includes one scoped report write and
-  one coordinator report read for each of eight workers.
-- The isolated fresh-plugin probe passed with version
-  `3.2.1+codex.20260814203024`; Python compilation, shell syntax, and installer
-  dry-run also passed.
-- `verify-cortex-release.py --require-tracked` remains correctly blocked because
-  committed `HEAD` does not contain the uncommitted 3.2.1 package contract.
-  No commit, tag, push, catalog submission, or publication is verified.
+- Cold boot passed with seven continues, eight reports, and a parallel wave;
+  all three deterministic Luna-high fixtures passed.
+- The eight-worker/five-wave composite benchmark met its target with a 56%
+  public-call reduction, and the isolated fresh-plugin probe passed on the
+  installed cachebuster.
+- No live-model, tracked-release, or publication result is claimed.
+
+Historical 3.2.1 evidence includes installed cachebuster
+`3.2.1+codex.20260814203024`, content-verified installer check with the Luna
+default, 220 tests, marketplace validation, cold boot, deterministic fixtures,
+the composite benchmark, isolated fresh-plugin probe, compilation, shell
+syntax, and installer dry-run. These results do not attest 3.2.2.
 
 `cortex-cold-boot-smoke.py` is the v3 cold-boot smoke. It creates a fresh
 temporary Git project, drives the stdio JSON-RPC server through the public
@@ -49,8 +50,8 @@ regressions cover changed-payload conflicts, validation before writes,
 future-wave replacement/rework protection, every transaction checkpoint,
 multi-root isolation, and expected `ok: false` results that do not enter the
 exception log.
-For the current candidate it completed successfully with seven continue calls,
-eight reports, and a parallel wave.
+For the current 3.2.2 candidate it completed successfully with seven continue
+calls, eight reports, and a parallel wave.
 
 Coordinator-isolation regressions assert that `SessionStart` reasserts the
 root lock and that every public v3 `next_action`, including validation
@@ -80,7 +81,7 @@ finished with one active task, public v3 tools only, strict reports, server-
 observed close evidence, and handoff. The Codex JSON event stream did not expose
 an independent effective-model field, so the exact launch configuration is
 evidence of the requested runtime route, not a separate host-model attestation.
-This is historical runtime evidence and was not rerun for the current 3.2.1
+This is historical runtime evidence and was not rerun for the current 3.2.2
 candidate.
 
 `cortex-composite-benchmark.py` is a call-count contract benchmark, not a
@@ -109,8 +110,8 @@ temporary directory, uses temporary `HOME` and `CODEX_HOME`, installs it with fr
 processes, and checks that `cortex` is exposed. It reports
 `SKIP` when the Codex CLI is unavailable; treat that as an environment
 limitation, not plugin-registration evidence.
-The current isolated probe passed and observed installed version
-`3.2.1+codex.20260814203024`.
+The 3.2.2 isolated probe passed and observed installed version
+`3.2.2+codex.20260814215722`.
 
 The lane regression creates a real temporary Git repository, materializes a
 declared branch/worktree, reconciles branch and dirty state, and retires the
@@ -152,6 +153,17 @@ Pipeline regressions also require coordinator authority in the returned
 snapshot and an explicit reason for a future-wave replacement; planner and
 explorer evidence remains advisory.
 
+The current 231-test suite exercises opaque `task_ref` isolation for multiple and
+concurrently started same-root tasks, exact duplicate-start replay, and
+`needs_selection` when an ambiguous call omits the ref. They also exercise
+phase-level `depends_on`, mandatory `Predecessor review:` evidence, public
+report rejection for an incomplete acknowledgement, and fail-closed
+predecessor-context overflow. Repository-knowledge cases verify automatic
+index injection, compact-worker `context_files`, required `Knowledge reviewed:`
+evidence, and rejection of unsafe context paths. Worker-report coverage also
+requires safe project-relative `changed_files`; explanatory text belongs in
+`findings` or `evidence`.
+
 Codebase Memory is enabled for the local development host and this repository
 has a ready index. Prompt regressions verify conditional exact-root lookup,
 graph/architecture/trace preference, source/test confirmation, one bounded
@@ -172,10 +184,15 @@ arguments, and that planner/explorer prompts receive the complete generated
 team catalog.
 
 The isolated route regressions parse the canonical bundled skill contract and
-exercise fixture documentation trees. They prove help is read-only, an
-incremental harvest changes only evidence-justified generated facts while
-accounting for its manifest, and a refresh preserves manual notes and produces
-an idempotent second pass.
+exercise fixture documentation trees. Existing evidence proves help is
+read-only and preserves manual notes. Current source checks require both harvest
+routes to use the full census pipeline, require a zero-gap coverage manifest
+before incremental work, and validate the mandatory inventory, coverage
+matrix, feature-page depth, independent completeness review, zero unexplained
+unmapped surfaces, and no-change refresh pass. They also reject shallow feature
+indexes missing Coverage matrix columns, Inventory totals, Unmapped surfaces,
+Exclusions, or Known unknowns. These assertions are included in the current
+231-test result.
 
 The v7 report regressions cover strict shape and redaction, task/attempt scope,
 one-use evidence receipts, explicit context grants, idempotent submissions,
@@ -184,11 +201,16 @@ Host-spawn binding regressions also prove that a model-routed attempt cannot
 become `running` without the host's actual `host_model`, and that an expected
 model mismatch (for example, configured-default Luna but Terra started) is terminalized
 as `host_model_mismatch` instead of being accepted as a successful dispatch.
-Routing regressions also cover the exact five-pair model/effort remapping table,
-including Sol routes, and prove the three hidden Luna resolution branches:
-confirmed configured default with no native `model`, explicit Luna when the
-host advertises it, and explicit hidden Terra when it does not. No automatic
-`create_thread` fallback is accepted.
+Routing regressions cover the simplified policy: explorer-only Luna selection,
+exact Luna `max` defaults for planner and ordinary profiles, normal Terra
+selection from `medium` through `max`, security Sol complexity floors, a hard
+`max` ceiling for every route, and
+matching `user_requested_model` provenance for non-security Sol. They also
+prove configured-default Luna with no native `model`, explicit Luna when the
+host advertises it, and hidden Terra fallback with preserved effort when Luna
+is unavailable. Removed `sol_escalation`, failed-Terra/auditable-extreme
+authorization, model/effort remaps, and automatic `create_thread` fallback are
+not accepted.
 The repository validator additionally checks that all installable sources live
 under `plugins/cortex/`, `profiles.json` matches exactly 21 profile files,
 every TOML identity/description/sandbox matches its canonical entry, complete
@@ -213,7 +235,7 @@ child's persisted `thread_settings_applied` snapshot records
 `model=gpt-5.6-luna` and `reasoning_effort=high`. This runtime metadata, rather
 than worker self-report, is the acceptance evidence. The worker returned to
 the parent and no user-owned visible task was created.
-This proof predates the current 3.2.1 candidate and is not a fresh-install or
+This proof predates the current 3.2.2 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
@@ -229,9 +251,9 @@ It requires a committed `HEAD`. Without one, the non-blocking command reports
 `SKIP` and `--require-tracked` fails intentionally; neither result validates a
 release archive. Create the initial commit only with authorization and rerun
 the blocking command against the committed tree before publication.
-For the current candidate, `--require-tracked` is blocked exactly because the
-committed tree does not yet contain the uncommitted 3.2.1 package contract; this
-is not release or publication evidence.
+The tracked-release command has not been rerun for 3.2.2. The historical 3.2.1
+run was blocked because committed `HEAD` did not contain that uncommitted
+package contract; this is not release or publication evidence.
 
 <!-- GENERATED:START -->
 

@@ -6,6 +6,14 @@ same base version.
 
 ## [Unreleased]
 
+- Simplify model routing around a strong Luna default: explorer is always Luna
+  except hidden host fallback, planner and ordinary profiles default to Luna
+  at exactly `max`, normal Terra selection ranges from `medium` through `max`,
+  and security always uses Sol with complexity-based effort floors capped at
+  `max`. Reject any effort outside `low`, `medium`, `high`, `xhigh`, and `max`.
+  Non-security Sol now requires matching explicit user-model provenance;
+  remove `sol_escalation`, failed-Terra/auditable-extreme authorization, and
+  model/effort remaps.
 - Make the coordinator the explicit pipeline authority: Cortex validates and
   persists its plan, planner/explorer reports remain advisory, and only the
   coordinator may replace future waves with a stated evidence-based reason.
@@ -15,14 +23,39 @@ same base version.
   coordinator advances by ref. Persisted refs remain recoverable after a
   native worker acknowledgement is interrupted. Together with the three
   coordinator lifecycle operations, these make the public surface five tools.
+- Require every worker to review all embedded predecessor handoffs and include
+  the generated `Predecessor review:` acknowledgement in report evidence.
+  Add phase-level `depends_on` selection and fail closed on predecessor-context
+  overflow instead of silently dropping older reports.
+- Automatically add available `docs/project/index.md` and
+  `docs/features/index.md` files to every worker briefing. Planner reports now
+  recommend task-relevant linked pages for later `context_files`; all workers
+  re-check the indexes, verify consequential documentation claims against
+  authoritative project artifacts, and persist a required
+  `Knowledge reviewed:` acknowledgement. Explicit context paths must be
+  existing project-relative regular files.
+- Return an opaque `task_ref` on every task-bound lifecycle response and
+  preserve it on later lifecycle/report-read calls. Distinct task contracts may now run
+  concurrently below one project root; exact duplicate active starts remain
+  idempotent and ambiguous calls return selectable refs.
 - Normalize common pipeline labels such as `implement` and
   `build_verification`, reject a canonical phase duplicated across later
   waves, and return the current pipeline snapshot with every lifecycle result
   to prevent correction loops.
 - Make Codebase Memory conditional worker tooling: resolve an exact-root index,
   prefer graph/architecture/trace queries for discovery and impact, confirm
-  consequential findings in source/tests, and fall back once without looping.
+  consequential findings in source/tests, allow one bounded refresh only for
+  `planner`, `explorer`, `architect`, and `database_architect`, and otherwise
+  fall back without looping.
   The coordination-only root never uses it to inspect the target project.
+- Make `harvest` and `harvest-refresh` build an exhaustive source-backed
+  feature census. Incremental harvest now requires a proven zero-gap coverage
+  manifest; otherwise Cortex uses domain-partitioned discovery, architecture
+  synthesis, behavior-complete feature pages, independent completeness review,
+  and zero unexplained unmapped surfaces before close.
+- Enforce the feature coverage-manifest shape during harvest documentation,
+  review, and close, rejecting shallow indexes without Coverage matrix
+  columns, Inventory totals, Unmapped surfaces, Exclusions, or Known unknowns.
 - Make `profiles.json` the canonical machine-validated catalog for all 21
   profiles, including exact descriptions, sandbox and route metadata, owned
   gates, and selection/avoidance guidance; keep TOML identities and the
@@ -66,9 +99,9 @@ same base version.
   for sequential waves, use short `worker: 1..N` slots for parallel waves,
   and atomically reject missing, duplicate, foreign, stale, or malformed
   results before lifecycle writes.
-- Move idempotency ownership to the server, replay identical retries, reject
-  changed or stale payloads, recover checkpointed transactions, and avoid
-  duplicate active tasks when Luna repeats a start with revised wording.
+- Move idempotency ownership to the server, replay byte-identical retries,
+  reject changed or stale continuation payloads, recover checkpointed
+  transactions, and isolate changed start contracts as distinct active tasks.
 - Treat semantically unchanged future-wave reassessment as a valid unchanged
   receipt and keep relative future steps monotonic after replacement.
 - Return compact native dispatches without internal task/wave/attempt IDs;
@@ -101,7 +134,7 @@ same base version.
   redacted Cortex tool-error journal.
 - Catalog submission, remote provenance, and tagged installation remain
   pending external release authorization and verification.
-- The 3.2.1 working-tree changes remain uncommitted; a committed release tree and
+- The 3.2.2 working-tree changes remain uncommitted; a committed release tree and
   a passing `verify-cortex-release.py --require-tracked` check remain
   prerequisites to any publication claim.
 

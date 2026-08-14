@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Use this skill when coordinating a non-trivial task across Codex agents and durable gate, delegation, lock, or handoff state is useful. It uses the local cortex MCP server; choose each subagent's model and reasoning effort dynamically at dispatch time.
+description: Use this skill when coordinating a non-trivial task across Codex agents and durable gate, delegation, lock, or handoff state is useful. It uses the local cortex MCP server; apply Cortex model policy and bounded coordinator overrides at dispatch time.
 ---
 
 # Cortex Control
@@ -36,7 +36,11 @@ signal, never permission for the root to perform the work directly.
    returns, and validates that plan and enforces documentation and close. An override uses only
    `waves: [{workers: [{phase, ...}]}]`. `phase` is required; optional fields
    are `profile`, `objective`, `paths`, `acceptance`, `verification`, `model`,
-   `effort`, `visible`, and `isolated_checkout`.
+   `user_requested_model`, `effort`, `depends_on`, `context_files`, `visible`,
+   and `isolated_checkout`. `depends_on`
+   names exact completed or earlier prerequisite phases; omit it to receive all
+   verified predecessor reports. `context_files` carries exact project/feature
+   knowledge pages selected by the planner for that worker.
 3. Invoke each returned dispatch with its exact `call` and `arguments`.
    Before invoking it, check the sibling `phase`, `profile`, `capability`,
    `sandbox`, and `selection_reason` against the latest worker evidence and
@@ -47,11 +51,13 @@ signal, never permission for the root to perform the work directly.
    for questions, publish one strict `cortex/report/v1` through `record_report`,
    and return only `REPORT_RECORDED report_ref=<value>` plus at most a
    two-sentence summary. They must never paste the report JSON into the parent
-   channel.
+   channel. When predecessor handoffs are supplied, they review all of them and
+   include the generated `Predecessor review:` acknowledgement in report
+   evidence; the report tool enforces complete acknowledgement.
 5. After all workers finish, read every ref with `read_worker_report`, evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
-   once with `project_root`, the relative `step` from the prior response, and
-   all `report_ref` results. A single result needs no worker reference.
+   once with `project_root`, the opaque `task_ref` and relative `step` from the
+   prior response, and all `report_ref` results. A single result needs no worker reference.
    Parallel results repeat only the returned integer `worker` slot. Omit
    status for success; non-success requires normalized `status` and `reason`
    and omits report fields. Until all workers finish, remain idle and perform
@@ -72,9 +78,12 @@ distinguishes identical report content used on successive waves without
 exposing durable identity. Parallel worker slots are complete, unique, and
 validated atomically before task state changes.
 
-When one task is active Cortex selects it automatically. If several tasks are
-active it returns `needs_selection` with objectives and opaque `task_ref`
-values. Repeat only the next ambiguous or recovery call with the chosen ref.
+Preserve the `task_ref` returned by start and pass it on later lifecycle and
+report-read calls. Different task contracts can run concurrently below one
+project root; the project registry is lock-serialized and task records remain
+isolated. An exact duplicate active start is an idempotent replay. If a caller
+omits the ref while several tasks are active, Cortex returns `needs_selection`
+with objectives and opaque refs instead of guessing.
 
 ## Adaptation and recovery
 
@@ -98,11 +107,31 @@ answer.
 
 ## Dispatch and evidence policy
 
-Profiles do not pin model or effort. Configured-default Luna routes carry
-explicit effort but omit native `model`; explicit Luna/Terra/Sol overrides
-retain it. Expected routes are metadata, not proof of the effective host
-model. Only host-observed runtime metadata may attest actual models. Workers
-emit English only; the main coordinator localizes user-facing content.
+Use the simplified model policy. `explorer` always selects Luna; the
+coordinator chooses its effort, with the risk-based default used when omitted,
+and Terra is permitted only as the hidden host-unavailable fallback.
+The complete effort vocabulary is `low`, `medium`, `high`, `xhigh`, and `max`;
+never request another value. `planner` defaults to Luna at exactly `max`, and
+the coordinator may normally select Terra from `medium` through `max`. Every
+remaining non-security profile has the same exact Luna `max` default and normal
+Terra `medium`-through-`max` override. Luna `max` is already a powerful default;
+do not escalate it reflexively. Security context, the security gate, and
+`security_auditor` always select Sol, with minimum effort `medium` for C1,
+`high` for C2, and `xhigh` for C3, capped at `max`. Non-security Sol is accepted
+only when the user explicitly selected it.
+Set compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
+Cortex records matching `user_requested_model` and `requested_model`.
+Coordinator preference, an earlier Terra failure, and auditable-extreme labels
+do not authorize Sol;
+the retired `sol_escalation` and model/effort remapping contracts must not be
+used.
+
+Configured-default Luna routes carry explicit effort but omit native `model`;
+explicit Luna/Terra/Sol selections retain it. If Luna is unavailable to the
+host, Cortex may use a hidden Terra fallback while preserving the selected
+effort. Expected routes are metadata, not proof of the effective host model.
+Only host-observed runtime metadata may attest actual models. Workers emit
+English only; the main coordinator localizes user-facing content.
 
 Generated worker briefings carry a bounded Codebase Memory contract. When the
 `mcp__codebase_memory__*` tools are actually available, workers resolve the
@@ -114,6 +143,19 @@ repository-native tools. One failed MCP attempt is enough: record the
 limitation and do not loop. The coordinator never calls repository-intelligence
 tools itself because the root lock still applies.
 
+When `docs/project/index.md` or `docs/features/index.md` exists, Cortex adds it
+to every worker briefing without asking the coordination-only root to inspect
+the project. The planning worker reads both indexes first, selects all linked
+pages relevant to the task boundary, and records the recommended paths in its
+report. The coordinator attaches those paths through later-wave
+`context_files`; downstream workers also re-check the indexes for missed
+cross-feature dependencies. Documentation is a navigation layer and prior,
+not authority: workers confirm consequential claims in current source, tests,
+schemas, or executable configuration. Every worker report must include one
+`Knowledge reviewed:` evidence entry naming both available indexes and every
+additional knowledge page actually used. The report tool rejects an omitted
+index acknowledgement.
+
 Canonical phases are `plan`, `discover`, `architecture`,
 `database_architecture`, `implementation`, `qa`, `security`, `performance`,
 `accessibility`, `ux`, `review`, `documentation`, and `close`. One phase may
@@ -124,7 +166,9 @@ appear in only one wave; multiple owners for a phase share that wave. Generic
 Every report remains quota-, redaction-, path-, and receipt-checked. Cortex
 fails closed on root or symlink violations, stale steps, invalid slots,
 changed retries, missing sections, invalid rework, failed close verification,
-or manifest mismatch.
+manifest mismatch, incomplete predecessor or knowledge-index acknowledgement,
+or handoff context that exceeds its safe count/size budget. It never silently drops an older
+report; narrow the dependency set with `depends_on`.
 
 ## Durable artifacts
 

@@ -275,14 +275,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
         success = control.execute_verification(base)
         self.assertEqual(success["execution"]["exit_code"], 0)
 
-    def test_malformed_sol_escalation_is_rejected_as_value_error(self):
-        with self.assertRaisesRegex(ValueError, "sol_escalation.kind must be a string"):
+    def test_mismatched_user_model_request_is_rejected_as_value_error(self):
+        with self.assertRaisesRegex(ValueError, "user_requested_model must match requested_model"):
             control.resolve_dispatch_route({
                 "project_root": str(self.project),
                 "agent": "general",
                 "task_kind": "implementation",
                 "risk": "moderate",
-                "sol_escalation": {"kind": {}},
+                "requested_model": "gpt-5.6-terra",
+                "user_requested_model": "gpt-5.6-sol",
             })
 
     def test_record_gate_cannot_remove_mandatory_c2_gates(self):
@@ -750,6 +751,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("`record_report`", skill)
         self.assertIn("`read_worker_report`", skill)
         self.assertIn("question intent", skill)
+        self.assertIn("depends_on", skill)
+        self.assertIn("Predecessor review:", skill)
+        self.assertIn("task_ref", skill)
+        self.assertIn("docs/features/index.md", skill)
+        self.assertIn("Knowledge reviewed:", skill)
+        self.assertIn("context_files", skill)
 
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -869,16 +876,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         manifest = json.loads((Path(__file__).parents[1] / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], control.SERVER_VERSION)
 
-    def test_sol_escalation_schema_is_structured_and_auditable(self):
+    def test_user_requested_model_schema_is_explicit_and_sol_escalation_is_removed(self):
         for tool_name in ("resolve_dispatch_route", "record_delegation"):
             with self.subTest(tool_name=tool_name):
                 schema = control.TOOLS[tool_name][1]
-                escalation = schema["properties"]["sol_escalation"]
-                self.assertFalse(escalation["additionalProperties"])
-                self.assertEqual(escalation["properties"]["kind"]["enum"], ["auditable_extreme", "terra_failure"])
-                self.assertIn("criterion", escalation["properties"])
-                self.assertIn("audit_ref", escalation["properties"])
-                self.assertIn("prior_terra_attempt_id", escalation["properties"])
+                self.assertEqual(schema["properties"]["user_requested_model"]["enum"], sorted(control.SUPPORTED_MODELS))
+                self.assertNotIn("sol_escalation", schema["properties"])
 
     def test_cortex_help_route_is_deterministic_and_read_only(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
@@ -897,6 +900,35 @@ class OrchestrationInvariantTests(unittest.TestCase):
         before = control.capture_project_manifest(self.project)
         after = control.capture_project_manifest(self.project)
         self.assertEqual(before["digest"], after["digest"])
+
+    def test_harvest_skills_require_exhaustive_feature_coverage(self):
+        repository = Path(__file__).parents[1]
+        orchestrator = (repository / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        harvest = (repository / "plugins/cortex/skills/knowledge-harvest/SKILL.md").read_text(encoding="utf-8")
+        census = (repository / "plugins/cortex/skills/knowledge-harvest/references/feature-census.md").read_text(encoding="utf-8")
+        for marker in (
+            "## Harvest route contract",
+            "2–8 parallel `explorer` workers",
+            "zero unexplained unmapped surfaces",
+            "Recent commits may prioritize discovery but may never define",
+        ):
+            self.assertIn(marker, orchestrator)
+        for marker in (
+            "summary of recent commits",
+            "full census",
+            "docs/features/index.md` is the coverage manifest",
+            "Completeness review",
+            "depends_on",
+        ):
+            self.assertIn(marker, harvest)
+        for marker in (
+            "## Inventory surface",
+            "## Coverage matrix",
+            "## Required feature documentation",
+            "## Failure conditions",
+            "only recent commits were scanned",
+        ):
+            self.assertIn(marker, census)
 
     def test_incremental_harvest_fixture_changes_only_evidence_justified_docs(self):
         docs = self.project / "docs/project"
