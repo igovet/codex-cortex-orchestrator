@@ -10,7 +10,7 @@ approval exists.
 - `plugins/cortex` is the only installable Cortex source tree.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
-- The plugin and MCP server versions must match the release version `1.0.6`.
+- The plugin and MCP server versions must match the release version `2.0.0`.
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
@@ -38,7 +38,7 @@ tracked-release archive validation.
 
 ## External release gates
 
-- Create the initial commit only with explicit authorization.
+- Create the Cortex 2.0 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

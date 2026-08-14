@@ -3,8 +3,10 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**1.0.6**. The `cortex/v7` ledger is a breaking upgrade from older task and
-lane records; those records have no compatibility reader and must be recreated.
+**2.0.0**. The public MCP surface is one `orchestrate` state-machine tool;
+existing v7 ledgers remain readable through its `inspect` and `advance`
+operations. Ledgers older than v7 have no compatibility reader and must be
+recreated.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
 configuration, and runtime code live below `plugins/cortex/`; root-level
@@ -26,10 +28,9 @@ multi-agent adapter selected when they were created; with v1, an explicit
 `gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to dispatch
 Luna explicitly for eligible lightweight work.
 
-If an agents-v1 host exposes only Sol/Terra to hidden `spawn_agent`, the
-Luna-preserving fallback still works when native `create_thread` exposes Luna:
-Cortex creates a visible Luna task instead of claiming that a Terra subagent is
-Luna. v2 is required only when the Luna worker must remain hidden.
+If a host exposes only Sol/Terra to hidden `spawn_agent` and has not confirmed
+the global Luna default, Cortex stays hidden and falls back to an explicit
+Terra subagent. It never creates a sidebar task as a model fallback.
 
 ### MCP tool approvals and auto-review
 
@@ -61,24 +62,27 @@ Auto-review invokes an additional model-based review for approval requests,
 which consumes token and model budget; `approvals_reviewer = "user"` keeps the
 decision manual.
 
-The main coordinator must pass the exact model identifiers accepted by the
-native `spawn_agent` host as `available_models` and the exact models accepted by
-`create_thread` as `available_thread_models` on each delegation that can resolve
-to Luna. If `spawn_agent` exposes only Sol/Terra, Cortex creates a visible
-user-owned Luna thread through `create_thread` instead of silently dispatching
-a Terra hidden subagent. It never labels a Terra worker as Luna. Missing Luna
-from both host catalogs, or missing Sol/Terra for a required route, remains a
-fail-closed error. `luna_fallback: terra` is retained only as an explicit
-backwards-compatible opt-out.
+The main coordinator passes the exact model identifiers accepted by native
+`spawn_agent` as `host_capabilities.spawn_agent_models`. After a fresh host has
+loaded the installed global setting, it also passes
+`host_capabilities.spawn_agent_default_model = "gpt-5.6-luna"`. Cortex
+validates every planned wave against those capabilities before creating task
+state. A Luna route prefers the confirmed default and omits native `model`;
+without that confirmation it uses an explicit Luna override when supported,
+then an explicit hidden Terra fallback. It never labels Terra as Luna and
+never creates a visible task as a fallback.
 
-`dispatch_mode: visible_thread` can still be selected to request a visible Luna
-task unconditionally. In either case the coordinator passes the exact
-`create_thread` catalog; Cortex emits the remapped model and reasoning effort
-without forcing `max` unless the remapping table requires it. A visible task is
+`dispatch_mode: visible_thread` remains a separate, explicitly selected
+user-owned workflow; it is not accepted as `luna_fallback`. For hidden Luna
+routes, the installer configures the global `[agents] default_subagent_model =
+"gpt-5.6-luna"` setting. A configured-default hidden request carries
+`expected_model = "gpt-5.6-luna"` and `model_resolution = "configured_default"`,
+always includes `reasoning_effort`, and omits native `model`; explicit
+Terra/Sol/Luna requests retain their `model` override. A visible task is
 user-owned and appears in the sidebar, while a supported hidden Luna route
 continues to use `spawn_agent`.
 
-### Visible-thread workspace
+### Explicit visible-thread workspace
 
 For a visible `create_thread` task, Cortex now emits
 `spawn_request.thread_environment = "local"` by default. The coordinator maps
@@ -96,12 +100,11 @@ worker. Local tasks share files, branches, and uncommitted changes with the
 main checkout, so concurrent writers must be serialized. Existing worktree
 tasks can be moved with the thread header's **Hand off → Local** action.
 
-If the child must stay out of the normal chat list and the host advertises
-Luna, keep the default `dispatch_mode = "hidden_subagent"`; the native
-`spawn_agent` route is hidden. `create_thread` is inherently user-visible and
-has no hidden flag, so a host without Luna necessarily produces a sidebar task
-when the plugin preserves the Luna route. A caller that explicitly accepts the
-Terra compatibility behavior may set `luna_fallback = "terra"`.
+Normal Cortex routing always keeps the child out of the normal chat list. The
+native `spawn_agent` route is hidden; when Luna cannot be resolved, Cortex uses
+hidden Terra. `create_thread` is inherently user-visible and has no hidden
+flag, so it is used only when the caller explicitly requests
+`dispatch_mode = "visible_thread"` for reasons unrelated to model fallback.
 
 Run one command from this repository:
 
@@ -117,7 +120,11 @@ exact retired local marketplace entry. Unexpected files, symlinks, versions,
 or paths cause refusal. If `~/.codex/config.toml` already contains Cortex's
 `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
 override, the installer preserves that value across the remove/add cycle; it
-does not create the override for users who have not configured it. Use
+does not create the override for users who have not configured it. The same
+installer atomically enforces
+`[agents] default_subagent_model = "gpt-5.6-luna"`. Before replacing a
+different existing default it creates a private backup; comments, unrelated
+keys, and file mode are preserved. Use
 `--dry-run` to report the planned update without writing, or `--check` for a
 read-only installed-content and legacy-artifact check:
 
@@ -152,12 +159,12 @@ for the new installation.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. This checkout has
-an unborn `HEAD`, so `python3 scripts/verify-cortex-release.py` reports `SKIP`
-and `python3 scripts/verify-cortex-release.py --require-tracked` fails by
-design. Create the initial commit only with explicit authorization, then run
-the blocking check against that committed tree before any push, tag, or catalog
-submission.
+and secret-prone paths before validating the package again. The Cortex 2.0
+changes in this working tree are intentionally uncommitted, so
+`python3 scripts/verify-cortex-release.py --require-tracked` still validates the
+previous `HEAD` and fails its 2.0 package contract. Commit only with explicit
+authorization, then rerun the blocking check against that committed tree before
+any push, tag, or catalog submission.
 
 See [release readiness](docs/release-readiness.md) for the external gates:
 verified public-manifest schema, confidential vulnerability reporting route,
@@ -209,55 +216,46 @@ the full applicable verification set, and requires a no-change second planning
 pass before completion. Both routes reconcile the project manifest and finish
 with a handoff.
 
-For every active Cortex task, the coordinator supplies an explicit absolute
-`project_root` on activation. That first call immutably binds the MCP process;
-later calls may repeat the same root or safely omit it. Before any
-project read, search, edit, command, test, or worker dispatch, Cortex must
-successfully activate, classify, initialize, and read status from
-`${project_root}/.codex/cortex`. An unavailable MCP server, failed
-initialization/status call, unwritable or mismatched root, a set
-`CORTEX_ROOT`, or a `/tmp` fallback is a hard blocker; Cortex stops and
-reports it rather than running an unledgered fallback. `CORTEX_PROJECT_ROOT`
-is not a substitute for the activation argument. When calling the installed
-server through JSON-RPC, launch
-`python3 /absolute/plugin/path/scripts/cortex.py` and include `project_root`
-in the activation `tools/call.arguments` object. Stale delegation revisions,
-reused status receipts, and stale requested gates are corrected against the
-serialized ledger state and reported as correction metadata rather than MCP
-errors. Premature gate passes and missing-but-ambiguous evidence links return
-`recorded: false` with a machine-readable `next_action`.
-Coordinator calls must keep the activation-bound `principal`/`thread_id` pair;
-workers must not substitute profiles or native child ids for coordinator
-identity. Reassessment previews use `decision: unchanged` and `apply: false`,
-while reviewed changes use the returned revision with `decision: updated` and
-`apply: true`. Reports always contain all eight fields, reuse a submission id
-only for identical content, and link evidence only to running/passed attempts;
-stale attempts are finalized instead of retried.
-Every MCP tool failure is also appended as a redacted JSONL record under
+For every Cortex call, the coordinator supplies the exact absolute
+`project_root`; it is never inferred from the server process, environment, or
+working directory. One MCP process may serve multiple project roots, while
+each activation and task remains authorized only by its own
+`${project_root}/.codex/cortex` record. A missing, relative, symlinked,
+unwritable, or mismatched root, a set `CORTEX_ROOT`, or a `/tmp` fallback fails
+closed before task state is created.
+
+The public normal flow has only two operations. One
+`orchestrate(operation="start")` call validates the installation, all 21
+profiles, coordinator identity, task contract, full ordered wave plan, and
+host model catalogs; it then privately activates, classifies, initializes,
+and returns every native spawn request in the first wave. One
+`orchestrate(operation="advance")` call per wave accepts every terminal host
+completion, validates all actual host fields and strict reports before writing,
+records reports/evidence/gates, optionally replaces not-yet-started
+`future_waves`, and returns the next dependent wave. Reintroducing a completed
+gate requires `allow_rework: true`. The final `advance` also performs the
+documentation decision, server-observed close verification, report and file
+manifest reconciliation, handoff, audit, and task completion.
+
+Every mutating call uses a stable `submission_id`. An identical retry replays
+its committed transaction receipt; reusing the id with different content is a
+structured conflict. `inspect`, `resume`, and `deactivate` handle recovery and
+session lifecycle. `lane`, `resource`, and `question` retain uncommon durable
+subsystems as nested modes of the same public tool. Existing `cortex/v7`
+ledgers can be reconstructed through `inspect` and continued through
+`advance`; the old lifecycle names are private implementation details and
+return `removed_in_v2_use_orchestrate` at the public JSON-RPC boundary.
+
+Coordinator calls keep the task-bound `principal`/`thread_id` pair. Workers do
+not call Cortex: they use the native parent/child channel for questions and
+return one strict eight-field `cortex/report/v1` object. Expected validation
+and recovery outcomes return `ok: false`, bounded diagnostics, and an exact
+`next_action` without being appended to the exception log. Unexpected MCP
+failures are appended as redacted JSONL under
 `~/.codex/logs/cortex-tool-errors.jsonl`. Each record includes the tool input
 summary, chat/thread session id, JSON-RPC request id, and any task/attempt or
 other call ids that were present; the log directory is `0700` and the file is
 `0600`.
-The classification receipt is also authoritative for the initial pipeline:
-the main orchestrator chooses the complete optional gate list from
-`available_gates` and passes it as `classify_task.pipeline`. Cortex validates
-those ids and appends only the mandatory `documentation` and `close` gates;
-the canonical gate IDs are `plan`, `discover`, `architecture`,
-`database_architecture`, `implementation`, `qa`, `security`, `performance`,
-`accessibility`, `ux`, `review`, `documentation`, and `close`. For adapter
-compatibility, bounded aliases such as `planning`, `discovery`, and
-`verification` are normalized to `plan`, `discover`, and `qa`; unknown IDs
-still fail closed.
-duplicate, truncated, malformed, or reordered `init_task.pipeline` input is
-ignored and reported through `pipeline_correction`, so mandatory gates cannot
-disappear because of a model-generated duplicate field. Calls that omit
-`pipeline` remain supported as a legacy heuristic fallback, but the shipped
-orchestrator instructions always provide the full proposal. During execution,
-`reassess_pipeline` accepts another full replacement and can add, remove, or
-reorder gates. The orchestrator may also provide ordered `parallel_groups`
-waves; independent gates in the current wave can run concurrently, while the
-next wave waits for every active gate. Removing a completed gate requires
-explicit `allow_rework`.
 
 Textual shorthand examples (only if the host accepts them; not native slash
 commands):
@@ -309,8 +307,10 @@ of claiming codebase-memory evidence that was not obtained.
 
 `plugins/cortex/profiles.json` is the runtime contract for the 21 bundled
 profiles and their exact names. `task_formatter` is not a supported profile.
-Every delegation records the requested and selected model and reasoning
-effort. With required multi-agent v2 enabled, every delegation is routed
+Every delegation records requested/expected model metadata separately from
+the native request override and always records reasoning effort. A
+configured-default Luna request omits native `model`; confirmation and
+`advance` use the actual host model as authority. With required multi-agent v2 enabled, every delegation is routed
 independently from its declared work intent, profile, and risk. Luna handles
 reading, discovery/data gathering, investigation, diagnosis, research, code
 review, CRUD-level edits, and small fixes whenever the `task_kind` declares
@@ -345,22 +345,20 @@ these five pairs after normal policy resolution:
 
 Every other pair is preserved unchanged.
 
-Each delegation first produces an `awaiting_host_spawn` intent plus a complete
-native `spawn_agent` request, or a `create_thread` request when preserving Luna
-requires the visible fallback. The main Codex agent calls that host tool, then
-records its returned child id, actual `host_model`, and actual
-`host_reasoning_effort` with `confirm_host_spawn`; only model-verified
-confirmation may make the attempt running or allow successful completion. A
-missing host model is recoverable, while a requested/actual model mismatch
-(such as Luna requested but Terra started) terminalizes the attempt as failed
-with `host_model_mismatch` and cannot be reported as a successful Luna worker.
-A native spawn failure is finalized as a non-success attempt rather than being
-represented as a running worker. The recorded child id is coordinator-supplied
-correlation, while Desktop/CLI host activity remains the source of truth for
-the actual worker. Each worker
-publishes exactly the `cortex/report/v1` fields: `summary`,
+Each facade `spawn_request` contains its durable `attempt_id`, exact
+profile/task name, native `host_tool`, expected model and resolution metadata,
+an optional native model override, reasoning effort, and complete worker
+prompt. The main Codex agent invokes all requests in that wave
+in parallel when their ownership is independent. It then supplies the actual
+host child id, tool, task name, model, reasoning effort, terminal status, and
+report for every attempt in one `advance` call. A missing or mismatched host
+field, malformed report, duplicate attempt, or incomplete wave is rejected in
+preflight without partially accepting the batch. Native spawn failures are
+submitted as explicit non-success completions with reasons.
+
+Each worker returns exactly the `cortex/report/v1` fields: `summary`,
 `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
-and `next_action`. `record_report` stores sanitized authoritative JSON, creates
+and `next_action`. The private report primitive stores sanitized authoritative JSON, creates
 a one-use attempt receipt, updates task- and delegation-scoped indexes, and
 generates an escaped Markdown view. Evidence consumption creates an
 irreversible `reports/consumptions/` tombstone; reconciliation may repair
@@ -369,25 +367,15 @@ The spawn briefing supplies the exact canonical `attempt_id` and a lowercase
 stable `submission_id`. For native-worker recovery, either identifier may be
 omitted or empty only when the worker identity maps to one active attempt;
 Cortex then infers the attempt and derives a deterministic submission id.
-Ambiguous or malformed identifiers remain fail-closed. The coordinator must
-monitor every worker through host completion, task status, report/question
-buses, and finalization, preserving exact Cortex tool errors in the report or
-terminal-attempt reason.
+Ambiguous or malformed identifiers remain fail-closed. The coordinator waits
+for every native worker in the current wave before calling `advance`.
 Worker execution is English-only: internal prompts, Cortex arguments, reports,
 questions, handoffs, and audit records are English. The main coordinator uses
 the user's task language (or explicit `user_language`) for all user-facing
 questions and summaries; localized display text does not replace the durable
-English record. Typed fast paths reduce round-trips without weakening receipts
-or locks: `prepare_delegation`, `prepare_delegations` for independent
-same-wave workers (including multiple gates in `parallel_groups`),
-`complete_attempt`, `commit_gate`, and `close_audit`.
-Legacy calls remain available for older adapters and recovery.
-If a host adapter submits a unique context-grant id where a report receipt is
-expected, the server corrects it to the attempt-bound receipt. Other
-`commit_gate` and `complete_attempt` validation failures are persisted as
-bounded recovery events; after three failures for the same gate/mode, Cortex
-marks the task `blocked` and returns a handoff/resume action instead of
-allowing an active retry loop.
+English record. The v7 report, evidence, gate, and recovery primitives remain
+available only inside the server so existing ledgers keep their invariants;
+coordinators and workers must not call them directly.
 Individual files are atomically replaced; the whole multi-file publication is
 not crash-atomic. Report bodies are task-bound and require an explicit
 per-attempt context grant. Hooks inject the report contract and internal-worker
@@ -401,12 +389,11 @@ symlink.
 
 ## Questions in the main chat
 
-Use `cortex.question` whenever the coordinator or a worker reaches a material
-branch, approval, or missing requirement. A worker supplies its `attempt_id`
-and stable `submission_id`; Cortex records the question and the main agent
-surfaces it with `list_worker_questions` followed by `cortex.question` using the
-returned `question_id`. Hidden workers never open a user-facing form and must
-wait for `get_worker_question_updates` after publishing a blocking question.
+Questions normally travel through the native parent/child channel and the main
+agent surfaces them to the user. Use `orchestrate(operation="question")` only
+when a pause must be durable across interruption. Its payload commands are
+`ask`, `publish`, `list`, `answer`, and `updates`; mutating commands use a
+stable facade `submission_id`.
 
 The native form supports one-choice options, multi-choice checkboxes via
 `multiple: true`, and always appends a final `custom_response` field for free
@@ -424,7 +411,7 @@ reaches zero.
 python3 -m unittest discover -s tests -v
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/probe-fresh-cortex-plugin.py
-python3 scripts/cortex-composite-benchmark.py --workers 8
+python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
 python3 scripts/validate-cortex-marketplace.py
 python3 scripts/verify-cortex-release.py --require-tracked  # requires a committed HEAD
 # Optional: run the plugin-creator validator from its installed skill directory.

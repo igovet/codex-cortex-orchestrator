@@ -18,8 +18,16 @@ legacy_marketplace="${home_root}/.agents/plugins/marketplace.json"
 # Only the exact retired profile distributed by this project is eligible for automatic removal.
 legacy_profile_sha256="6b74fa45aa5e2312aca5472a17b39a638bdba7a74da7c36ce9a2fa9db925c367"
 mode="install"
-# Preserve only an explicit user override; never introduce a default during install.
+# Preserve explicit user configuration, and install the Luna default when the
+# global subagent setting is absent. The native spawn_agent request can then
+# omit `model` and let Codex resolve this configured default.
 cortex_mcp_approval_override=""
+global_subagent_model=""
+global_subagent_model_state="missing"
+global_config_mode=""
+global_config_backup_created="false"
+original_global_subagent_model_state=""
+original_global_config_mode=""
 
 usage() {
   cat <<'EOF'
@@ -222,8 +230,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "1.0.6":
-    raise SystemExit("plugin/server version must match the 1.0.6 release manifest")
+if module.SERVER_VERSION != version or base_version != "2.0.0":
+    raise SystemExit("plugin/server version must match the 2.0.0 release manifest")
 PY
 }
 
@@ -331,6 +339,186 @@ if value not in allowed:
 print(value)
 PY
   })" || return 1
+}
+
+capture_global_subagent_model() {
+  local config_path="${codex_home}/config.toml"
+  global_subagent_model=""
+  global_subagent_model_state="missing"
+  [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
+  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
+    echo "error: refusing to inspect non-regular Codex config: ${config_path}" >&2
+    return 1
+  }
+  global_subagent_model_state="$(python3 - "${config_path}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: cannot parse Codex config for agents.default_subagent_model: {exc}")
+try:
+    value = payload["agents"]["default_subagent_model"]
+except (KeyError, TypeError):
+    print("missing")
+    raise SystemExit(0)
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit("error: agents.default_subagent_model must be a non-empty string")
+print(value.strip())
+PY
+)" || return 1
+  if [[ "${global_subagent_model_state}" != "missing" ]]; then
+    global_subagent_model="${global_subagent_model_state}"
+  fi
+  if [[ -f "${config_path}" && ! -L "${config_path}" ]]; then
+    global_config_mode="$(python3 - "${config_path}" <<'PY'
+import stat, sys
+from pathlib import Path
+print(format(stat.S_IMODE(Path(sys.argv[1]).stat().st_mode), "o"))
+PY
+)" || return 1
+  fi
+}
+
+backup_global_config_if_replacing() {
+  local config_path="${codex_home}/config.toml" backup_dir backup_slot
+  [[ "${global_subagent_model_state}" != "missing" ]] || return 0
+  [[ "${global_subagent_model_state}" != "gpt-5.6-luna" ]] || return 0
+  [[ "${mode}" != "dry-run" && "${mode}" != "check" ]] || return 0
+  backup_dir="${codex_home}/backups/${plugin_name}-upgrade"
+  prepare_backup_directory "${backup_dir}" || return 1
+  backup_slot="$(mktemp -d "${backup_dir}/codex-config-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
+  run cp -a -- "${config_path}" "${backup_slot}/config.toml"
+  harden_backup_slot "${backup_slot}"
+  global_config_backup_created="true"
+}
+
+check_global_subagent_model() {
+  capture_global_subagent_model || return 1
+  if [[ "${global_subagent_model_state}" != "gpt-5.6-luna" ]]; then
+    echo "outdated Codex global config: agents.default_subagent_model must be gpt-5.6-luna (found ${global_subagent_model_state})" >&2
+    return 1
+  fi
+  echo "ok      agents.default_subagent_model=${global_subagent_model_state}"
+}
+
+ensure_global_subagent_model() {
+  local config_path="${codex_home}/config.toml"
+  local target_model="gpt-5.6-luna" previous_model
+  capture_global_subagent_model || return 1
+  previous_model="${original_global_subagent_model_state:-${global_subagent_model_state}}"
+  if [[ "${previous_model}" == "${target_model}" ]]; then
+    if [[ "${mode}" == "install" && -n "${original_global_config_mode}" ]]; then
+      run chmod "${original_global_config_mode}" -- "${config_path}"
+    fi
+    echo "ok      agents.default_subagent_model=${target_model}"
+    return 0
+  fi
+  if [[ "${mode}" == "check" ]]; then
+    echo "outdated Codex global config: agents.default_subagent_model must be ${target_model} (found ${previous_model})" >&2
+    return 1
+  fi
+  if [[ "${mode}" == "dry-run" ]]; then
+    if [[ "${previous_model}" == "missing" ]]; then
+      echo "would set agents.default_subagent_model=${target_model}"
+    else
+      echo "would back up config and replace agents.default_subagent_model=${previous_model} with ${target_model}"
+    fi
+    return 0
+  fi
+  if [[ "${previous_model}" != "missing" && "${global_config_backup_created}" != "true" ]]; then
+    echo "error: refusing to replace agents.default_subagent_model without a private pre-install backup" >&2
+    return 1
+  fi
+  python3 - "${config_path}" "${target_model}" "${original_global_config_mode:-${global_config_mode}}" <<'PY'
+import os
+import json
+import re
+import stat
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+desired = sys.argv[2]
+original_mode = int(sys.argv[3], 8) if len(sys.argv) > 3 and sys.argv[3] else None
+encoded_desired = json.dumps(desired)
+path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+if path.exists() and (path.is_symlink() or not path.is_file()):
+    raise SystemExit(f"error: refusing to update non-regular Codex config: {path}")
+original = path.read_text(encoding="utf-8") if path.exists() else ""
+lines = original.splitlines(keepends=True)
+header = "[agents]"
+headers = [index for index, line in enumerate(lines) if line.strip() == header]
+if len(headers) > 1:
+    raise SystemExit("error: Codex config contains duplicate [agents] tables")
+if not headers:
+    text = original
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += f"{header}\ndefault_subagent_model = {encoded_desired}\n"
+else:
+    start = headers[0] + 1
+    end = start
+    table_header = re.compile(r"^\s*\[(?!\[).+\]\s*(?:#.*)?$")
+    while end < len(lines) and not table_header.match(lines[end]):
+        end += 1
+    key_indexes = [
+        index for index in range(start, end)
+        if re.match(r"^\s*default_subagent_model\s*=", lines[index])
+    ]
+    if len(key_indexes) > 1:
+        raise SystemExit("error: Codex config contains duplicate agents.default_subagent_model keys")
+    if not key_indexes:
+        lines.insert(start, f"default_subagent_model = {encoded_desired}\n")
+        text = "".join(lines)
+    else:
+        index = key_indexes[0]
+        line = lines[index]
+        newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(newline)] if newline else line
+        prefix = re.match(r"^(\s*default_subagent_model\s*=\s*)", body)
+        if prefix is None:
+            raise SystemExit("error: unable to locate agents.default_subagent_model key")
+        comment = ""
+        if "#" in body[prefix.end():]:
+            comment = " #" + body[prefix.end():].split("#", 1)[1].lstrip()
+        lines[index] = f"{prefix.group(1)}{encoded_desired}{comment}{newline}"
+        text = "".join(lines)
+try:
+    parsed = tomllib.loads(text)
+    observed = parsed["agents"]["default_subagent_model"]
+except (KeyError, TypeError, OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: updated Codex config is invalid: {exc}")
+if observed != desired:
+    raise SystemExit("error: updated agents.default_subagent_model was not retained")
+mode = original_mode if original_mode is not None else (stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600)
+fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+  if [[ "${previous_model}" == "missing" ]]; then
+    echo "configured agents.default_subagent_model=${target_model}"
+  else
+    echo "backed up config and replaced agents.default_subagent_model=${previous_model} with ${target_model}"
+  fi
 }
 
 restore_cortex_mcp_approval_override() {
@@ -443,9 +631,14 @@ install_or_check() {
   if [[ "${mode}" == "check" ]]; then
     [[ "${version}" == "${expected_version}" ]] || { echo "outdated ${plugin_name}@${marketplace_name}: expected ${expected_version}, found ${version:-missing}" >&2; return 1; }
     content_matches || { echo "outdated ${plugin_name}@${marketplace_name}: same-version content drift"; return 1; }
+    check_global_subagent_model || return 1
     echo "ok      ${plugin_name}@${marketplace_name} (${expected_version}, content verified)"; return 0
   fi
   capture_cortex_mcp_approval_override || return 1
+  capture_global_subagent_model || return 1
+  original_global_subagent_model_state="${global_subagent_model_state}"
+  original_global_config_mode="${global_config_mode}"
+  backup_global_config_if_replacing || return 1
   if ! run codex plugin marketplace add "${marketplace_root}" --json >/dev/null; then
     restore_cortex_mcp_approval_override || true
     return 1
@@ -459,6 +652,7 @@ install_or_check() {
     return 1
   fi
   restore_cortex_mcp_approval_override || return 1
+  ensure_global_subagent_model || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
   echo "installed ${plugin_name}@${marketplace_name} from ${marketplace_root}"
 }

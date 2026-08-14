@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.0.6+codex.20260814140646",
+  "version": "2.0.0+codex.20260814160405",
   "description": "Durable Cortex control plane for staged agent work: tasks, gates, delegations, locks, and handoffs.",
   "author": {
     "name": "igovet"
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, and a local opt-in Cortex v7 ledger with receipt-backed worker reports, staged gates, incremental knowledge harvests, and full source-backed refreshes. Requested model and reasoning effort remain the parent Codex dispatch decision and are resolved against host capabilities.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, and one unified orchestrate tool over the local Cortex v7 ledger. One call starts a task wave and one call advances each dependent wave while preserving receipt-backed reports, staged gates, knowledge harvests, and source-backed recovery.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

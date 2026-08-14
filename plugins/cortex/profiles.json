@@ -14,7 +14,9 @@
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
     "user_facing_language": "task_language_or_explicit_user_language",
-    "composite_operations": ["prepare_delegation", "prepare_delegations", "complete_attempt", "commit_gate", "close_audit"],
+    "public_operation": "orchestrate",
+    "normal_flow": ["start", "advance"],
+    "recovery_operations": ["inspect", "resume", "deactivate", "lane", "resource", "question"],
     "required_report_fields": [
       "summary",
       "findings",

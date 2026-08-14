@@ -36,7 +36,6 @@ PROFILE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "profiles.json"
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 PLUGIN_ROOT = PROFILE_CONTRACT_PATH.parent
 PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
-MCP_PROJECT_ROOT: Path | None = None
 MCP_OPENAI_FORM = False
 _STATE_LOCK_LOCAL = threading.local()
 
@@ -46,7 +45,7 @@ except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
     raise RuntimeError("bundled Cortex plugin manifest is unreadable") from exc
 
 
-def load_profile_contract() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+def load_profile_contract() -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, str]]:
     try:
         contract = json.loads(PROFILE_CONTRACT_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -61,10 +60,27 @@ def load_profile_contract() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         if name in profiles:
             raise RuntimeError("bundled Cortex profile contract contains duplicate profiles")
         profiles[name] = item
-    return contract, profiles
+    instructions: dict[str, str] = {}
+    agents_root = PROFILE_CONTRACT_PATH.parent / "agents"
+    for name, profile in profiles.items():
+        filename = Path(str(profile.get("filename", "")))
+        if filename.is_absolute() or len(filename.parts) != 1 or filename.name in {"", ".", ".."}:
+            raise RuntimeError(f"bundled Cortex agent profile path is invalid: {name}")
+        profile_path = agents_root / filename
+        if profile_path.is_symlink() or not profile_path.is_file():
+            raise RuntimeError(f"bundled Cortex agent profile is not a regular file: {name}")
+        try:
+            profile_data = tomllib.loads(profile_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise RuntimeError(f"bundled Cortex agent profile is unreadable: {name}") from exc
+        developer_instructions = str(profile_data.get("developer_instructions", "")).strip()
+        if not developer_instructions:
+            raise RuntimeError(f"bundled Cortex agent profile has no developer instructions: {name}")
+        instructions[name] = developer_instructions
+    return contract, profiles, instructions
 
 
-PROFILE_CONTRACT, PROFILES = load_profile_contract()
+PROFILE_CONTRACT, PROFILES, PROFILE_INSTRUCTIONS = load_profile_contract()
 AGENTS = set(PROFILES)
 AVAILABLE_GATES = {
     "plan", "discover", "architecture", "database_architecture", "implementation",
@@ -140,6 +156,8 @@ MAX_METRIC_BYTES = 512 * 1024
 SUPPORTED_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 REQUESTABLE_MODELS = SUPPORTED_MODELS
 SUPPORTED_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+CONFIGURED_DEFAULT_MODEL = "gpt-5.6-luna"
+MODEL_RESOLUTIONS = {"configured_default", "explicit_override", "visible_thread"}
 # The host model adapter is not the policy router.  Once the coordinator has
 # resolved its normal policy model and effort, these exact pairs are remapped
 # before the host capability catalog is consulted.  Keep this table narrow and
@@ -1151,7 +1169,14 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         policy_model, policy_reason = "gpt-5.6-luna", "analysis_or_lightweight_work"
     else:
         policy_model, policy_reason = "gpt-5.6-terra", "default_non_security_work"
-    requested_model = str(params.get("requested_model") or policy_model).strip()
+    raw_requested_model = str(params.get("requested_model") or "").strip()
+    explicit_model = bool(raw_requested_model)
+    configured_default_model = str(
+        params.get("configured_default_model")
+        or (CONFIGURED_DEFAULT_MODEL if params.get("configured_default") is True else "")
+    ).strip()
+    configured_default_available = configured_default_model == CONFIGURED_DEFAULT_MODEL
+    requested_model = raw_requested_model or policy_model
     if requested_model not in REQUESTABLE_MODELS:
         raise ValueError("requested_model is not supported by Cortex routing policy")
     requested_effort = str(params.get("requested_reasoning_effort") or "").strip().lower() or (
@@ -1173,6 +1198,22 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         if not host_available_models:
             raise ValueError("available_models must contain at least one non-empty model identifier")
 
+    # Preserve the existing policy/remap interpretation for legacy routing
+    # hints. A confirmed global default makes explicit Terra/Sol overrides
+    # authoritative, while an unconfigured host may use explicit Luna only
+    # when the native catalog actually advertises it. A confirmed Luna default
+    # always wins over an explicit Luna override so the native request omits
+    # model as intended.
+    explicit_luna_supported = (
+        requested_model == CONFIGURED_DEFAULT_MODEL
+        and host_available_models is not None
+        and CONFIGURED_DEFAULT_MODEL in host_available_models
+    )
+    use_explicit_override = explicit_model and (
+        (configured_default_available and requested_model != CONFIGURED_DEFAULT_MODEL)
+        or (not configured_default_available and explicit_luna_supported)
+    )
+
     fallback_reason = None
     fallback_from_model = None
     escalation_reason = redact(params.get("escalation_reason", ""), 1000) or None
@@ -1180,24 +1221,29 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         selected_model = "gpt-5.6-sol"
         if requested_model != selected_model:
             fallback_reason = "policy_model_enforced"
-    elif policy_model == "gpt-5.6-terra":
+    elif use_explicit_override:
         if requested_model == "gpt-5.6-sol":
             raise ValueError("non-security gpt-5.6-sol requires a structured auditable_extreme or validated terra_failure escalation")
-        selected_model = "gpt-5.6-terra"
+        selected_model = requested_model
+        if requested_model != policy_model:
+            fallback_reason = "explicit_model_override"
+    elif explicit_model:
+        if requested_model == "gpt-5.6-sol":
+            raise ValueError("non-security gpt-5.6-sol requires a structured auditable_extreme or validated terra_failure escalation")
+        selected_model = policy_model
         if requested_model != selected_model:
             fallback_reason = "policy_model_enforced"
     else:
-        if requested_model == "gpt-5.6-sol":
-            raise ValueError("non-security gpt-5.6-sol requires a structured auditable_extreme or validated terra_failure escalation")
-        selected_model = "gpt-5.6-luna"
-        if requested_model != selected_model:
-            fallback_reason = "policy_model_enforced"
+        selected_model = policy_model
     if selected_model not in SUPPORTED_MODELS:
         raise ValueError("dispatch route cannot be resolved to a Cortex policy model")
 
     remap_from_model = selected_model
     remap_from_effort = selected_effort
-    remap_target = MODEL_EFFORT_REMAP.get((selected_model, selected_effort))
+    # Only an omitted model may be promoted by the policy remap.  Supplying
+    # Terra or Luna is an explicit native override and must remain visible in
+    # the request metadata instead of silently becoming a configured default.
+    remap_target = None if use_explicit_override else MODEL_EFFORT_REMAP.get((selected_model, selected_effort))
     if remap_target:
         selected_model, selected_effort = remap_target
         remap_reason = "model_effort_policy_table"
@@ -1214,23 +1260,32 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
             minimum_effort = ANALYSIS_REASONING_FLOORS[risk]
             if REASONING_EFFORT_ORDER[selected_effort] < REASONING_EFFORT_ORDER[minimum_effort]:
                 selected_effort = minimum_effort
+    model_resolution = "explicit_override"
+    if selected_model == CONFIGURED_DEFAULT_MODEL and configured_default_available and not use_explicit_override:
+        model_resolution = "configured_default"
     if host_available_models is not None and selected_model not in host_available_models:
-        # The pure route preview retains Terra as the dispatchable host-capacity
-        # candidate and records the mismatch.  record_delegation sees this
-        # Luna-origin fallback and, by default, re-routes it through the exact
-        # create_thread catalog instead of sending that Terra candidate.
-        if selected_model == "gpt-5.6-luna" and "gpt-5.6-terra" in host_available_models:
+        if model_resolution == "configured_default":
+            # The native spawn_agent contract intentionally omits model and
+            # resolves it from agents.default_subagent_model.  Its explicit
+            # model catalog therefore cannot be used to reject Luna here.
+            pass
+        elif selected_model == "gpt-5.6-luna" and "gpt-5.6-terra" in host_available_models:
             fallback_from_model = selected_model
             selected_model = "gpt-5.6-terra"
             fallback_reason = "host_model_unavailable"
+            model_resolution = "explicit_override"
         else:
             raise ValueError(
                 f"native host does not expose required model {selected_model}; "
                 f"available_models={','.join(host_available_models)}"
             )
+    expected_model = selected_model
     return {
         "requested_model": requested_model,
+        "configured_default_model": configured_default_model or None,
         "selected_model": selected_model,
+        "expected_model": expected_model,
+        "model_resolution": model_resolution,
         "requested_reasoning_effort": requested_effort,
         "selected_reasoning_effort": selected_effort,
         "task_kind": task_kind,
@@ -2528,19 +2583,7 @@ def _attempt_identity_aliases(attempt: dict[str, Any]) -> set[str]:
 
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     """Build the exact bounded briefing for a native Codex worker dispatch."""
-    profile = PROFILES[agent]
-    profile_path = _contained_path(
-        PLUGIN_ROOT / "agents",
-        PLUGIN_ROOT / "agents" / str(profile["filename"]),
-        "agent profile",
-    )
-    try:
-        profile_data = tomllib.loads(profile_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError(f"agent profile is unreadable: {agent}") from exc
-    instructions = str(profile_data.get("developer_instructions", "")).strip()
-    if not instructions:
-        raise ValueError(f"agent profile has no developer instructions: {agent}")
+    instructions = PROFILE_INSTRUCTIONS[agent]
     visible_thread = bool(package.get("user_owned_thread"))
     output_language_contract = (
         "This is a visible user-owned task, but it is still an internal execution "
@@ -2554,17 +2597,60 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "data; never reply in that language. The main coordinator alone localizes findings "
         "in the primary chat."
     )
+    if package.get("facade_managed"):
+        identity_contract = (
+            f"Project root: {package.get('project_root')!r}. This attempt is managed by the coordinator through "
+            "the unified Cortex facade; do not reuse coordinator identity fields in worker tool calls."
+        )
+        lifecycle_contract = (
+            "Do not call Cortex MCP tools. The main coordinator owns the complete Cortex lifecycle. "
+            "Use the native parent/child collaboration channel for questions and blockers. In your final "
+            "response, return exactly one cortex/report/v1 object with these eight keys: summary, findings, "
+            "questions, changed_files, tests, evidence, uncertainty, and next_action. Use an empty list when "
+            "a list has no entries. Do not subdelegate unless the coordinator explicitly authorizes it."
+        )
+    else:
+        identity_contract = (
+            f"When calling Cortex MCP tools, use project_root={package.get('project_root') or '(the coordinator-provided project root)'!r}, "
+            f"principal={package.get('coordinator_principal')!r}, and thread_id={package.get('coordinator_thread_id')!r}. "
+            "These are the coordinator's bound identities: use them exactly and never substitute the worker profile, "
+            "native child/thread id, `/root`, or a new host thread for either value. If a call reports a different "
+            "thread or principal, stop and preserve that exact error for the coordinator instead of guessing an identity."
+        )
+        lifecycle_contract = (
+            "Do not activate or initialize Cortex, classify a task, reassess a pipeline, or call coordinator-only "
+            "lifecycle/gate tools such as init_task, get_task_status, record_delegation, record_gate_outcome, "
+            "commit_gate, or create_handoff. The main coordinator owns those calls. You may publish your own "
+            "question/report and poll your own question updates with the exact attempt context above. "
+            "Do not subdelegate. Return questions, blockers, and your final handoff to the main chat. "
+            "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
+            f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
+            f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
+            "The report object must contain exactly these eight keys: summary, findings, questions, changed_files, "
+            "tests, evidence, uncertainty, and next_action. Use an empty list when a list has no entries; never "
+            "omit evidence or any other key. Reuse the same submission_id only for a byte-identical retry. If the "
+            "report content changes after validation, increment the suffix (for example, -report-2) instead of "
+            "reusing the prior id. Do not publish after the coordinator has cancelled, superseded, or reworked this "
+            "attempt; preserve the stale-attempt error and stop rather than retrying with another attempt id. "
+            "If a requirement, branch, trade-off, missing fact, or implementation choice needs user approval, "
+            "do not decide silently: call cortex.question with this task_id, the coordinator principal, "
+            f"attempt_id={package['attempt_id']!r}, and a stable lowercase submission_id such as "
+            f"{package['attempt_id']}-question-1. Include concrete options when useful, set multiple=true "
+            "only when more than one option may be selected, and explain the decision in context. "
+            "The worker call records a pending question; it must not open a worker-local UI. "
+            "The coordinator will surface the question in the main chat, answer it, and you must poll "
+            "get_worker_question_updates before continuing. Never choose a user decision on the user's behalf. "
+            "If a Cortex call returns an error, preserve the exact error in report.questions or report.findings, "
+            "then retry only with the returned correction fields; use the same submission_id only when the payload "
+            "is unchanged, otherwise use a new submission_id."
+        )
     return "\n".join((
         f"You are the internal Cortex worker with profile `{agent}`.",
         "Follow this profile exactly:",
         instructions,
         "",
         f"Cortex task: {package['task_id']}; gate: {package['gate']}; attempt: {package['attempt_id']}.",
-        f"When calling Cortex MCP tools, use project_root={package.get('project_root') or '(the coordinator-provided project root)'!r}, "
-        f"principal={package.get('coordinator_principal')!r}, and thread_id={package.get('coordinator_thread_id')!r}. "
-        "These are the coordinator's bound identities: use them exactly and never substitute the worker profile, "
-        "native child/thread id, `/root`, or a new host thread for either value. If a call reports a different "
-        "thread or principal, stop and preserve that exact error for the coordinator instead of guessing an identity.",
+        identity_contract,
         f"Objective: {package['objective']}",
         f"Ownership: {package['ownership']}",
         "Allowed paths: " + ", ".join(package["allowed_paths"]),
@@ -2573,31 +2659,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Internal worker protocol: English only. " + output_language_contract,
         f"User-facing language: {package.get('user_language', 'en')}. The main coordinator must translate questions, blockers, and summaries into this language (or the explicit language requested by the user) before showing them in the main chat.",
         "Codebase-memory protocol (mandatory for code search): 1) call mcp__codebase_memory__list_projects with {}; 2) parse the projects array and select the record whose root_path exactly matches the absolute project_root; 3) pass that record's name as project to every subsequent codebase_memory call—never guess or synthesize a project id. Use index_status(project) when freshness/index availability must be verified. For discovery use search_graph(project, query=...); use name_pattern for exact symbol patterns, semantic_query only as an array of keywords on moderate/full indexes, and filters such as label, file_pattern, relationship, include_connected, limit, and offset when needed. For text matches use search_code(project, pattern, regex, mode=compact|full|files, path_filter, file_pattern, context, limit). For callers/dependencies/data flow use trace_path(project, function_name=<qualified_name from search_graph>, mode=calls|data_flow|cross_service, direction, depth, include_tests, parameter_name, risk_labels). For source reading use get_code_snippet(project, qualified_name=<exact qualified_name from search_graph>, include_neighbors); do not use it as the initial search. Use get_architecture(project, aspects) for a high-level structure overview and query_graph(project, query, max_rows) only for explicit multi-hop Cypher analysis. Do not call index_repository, ingest_traces, manage_adr, or delete_project for ordinary discovery; they change indexed state or durable knowledge and require explicit authorization. Do not start with grep, rg, glob, or ad-hoc filesystem scans while codebase_memory is available. If list_projects fails, codebase_memory is unavailable, or no indexed project matches project_root, do not call other codebase_memory tools or pretend they were used: record the limitation and use another search method only as a documented fallback.",
-        "Do not activate or initialize Cortex, classify a task, reassess a pipeline, or call coordinator-only "
-        "lifecycle/gate tools such as init_task, get_task_status, record_delegation, record_gate_outcome, "
-        "commit_gate, or create_handoff. The main coordinator owns those calls. You may publish your own "
-        "question/report and poll your own question updates with the exact attempt context above. "
-        "Do not subdelegate. Return questions, blockers, and your final handoff to the main chat. "
-        "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
-        f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
-        f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
-        "The report object must contain exactly these eight keys: summary, findings, questions, changed_files, "
-        "tests, evidence, uncertainty, and next_action. Use an empty list when a list has no entries; never "
-        "omit evidence or any other key. Reuse the same submission_id only for a byte-identical retry. If the "
-        "report content changes after validation, increment the suffix (for example, -report-2) instead of "
-        "reusing the prior id. Do not publish after the coordinator has cancelled, superseded, or reworked this "
-        "attempt; preserve the stale-attempt error and stop rather than retrying with another attempt id. "
-        "If a requirement, branch, trade-off, missing fact, or implementation choice needs user approval, "
-        "do not decide silently: call cortex.question with this task_id, the coordinator principal, "
-        f"attempt_id={package['attempt_id']!r}, and a stable lowercase submission_id such as "
-        f"{package['attempt_id']}-question-1. Include concrete options when useful, set multiple=true "
-        "only when more than one option may be selected, and explain the decision in context. "
-        "The worker call records a pending question; it must not open a worker-local UI. "
-        "The coordinator will surface the question in the main chat, answer it, and you must poll "
-        "get_worker_question_updates before continuing. Never choose a user decision on the user's behalf. "
-        "If a Cortex call returns an error, preserve the exact error in report.questions or report.findings, "
-        "then retry only with the returned correction fields; use the same submission_id only when the payload "
-        "is unchanged, otherwise use a new submission_id.",
+        lifecycle_contract,
     ))
 
 
@@ -3405,13 +3467,13 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         dispatch_mode = str(params.get("dispatch_mode", "hidden_subagent")).strip() or "hidden_subagent"
         if dispatch_mode not in {"hidden_subagent", "visible_thread"}:
             raise ValueError("dispatch_mode must be hidden_subagent or visible_thread")
-        # A Luna route must remain Luna when the hidden host lacks that model.
-        # The coordinator therefore inspects create_thread up front and the
-        # default fallback is the visible user-owned task.  Terra remains an
-        # explicit compatibility opt-out only.
-        luna_fallback = str(params.get("luna_fallback", "visible_thread")).strip() or "visible_thread"
-        if luna_fallback not in {"terra", "visible_thread"}:
-            raise ValueError("luna_fallback must be terra or visible_thread")
+        # Luna routes stay hidden. If neither the configured default nor an
+        # explicit Luna override is available, the compatibility fallback is
+        # an explicit Terra spawn_agent request. Visible threads remain an
+        # independently requested dispatch mode, never a fallback.
+        luna_fallback = str(params.get("luna_fallback", "terra")).strip() or "terra"
+        if luna_fallback != "terra":
+            raise ValueError("luna_fallback must be terra")
         route_params = {
             **params,
             "agent": agent,
@@ -3435,30 +3497,12 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("terra_failure Sol escalation requires a validated failed Terra attempt in this task ledger")
             route_params["_validated_terra_failure"] = {"attempt_id": prior_attempt_id}
         route = resolve_dispatch_route(route_params)
-        if (
-            dispatch_mode == "hidden_subagent"
-            and luna_fallback == "visible_thread"
-            and route.get("fallback_from_model") == "gpt-5.6-luna"
-            and route.get("fallback_reason") == "host_model_unavailable"
-        ):
-            # The caller explicitly authorized a user-owned task as Luna's
-            # fallback. Re-route through create_thread's independent catalog
-            # rather than silently replacing Luna with a Terra subagent.
-            route = resolve_dispatch_route({
-                **route_params,
-                "available_models": params.get("available_thread_models"),
-            })
-            if route["selected_model"] != "gpt-5.6-luna":
-                raise ValueError("visible_thread Luna fallback requires native create_thread to expose gpt-5.6-luna")
-            dispatch_mode = "visible_thread"
-            route["fallback_reason"] = "spawn_agent_luna_unavailable"
-            route["fallback_from_model"] = "gpt-5.6-luna"
-            route["fallback_from_host_tool"] = "spawn_agent"
         if dispatch_mode == "visible_thread":
             if route["selected_model"] != "gpt-5.6-luna":
                 raise ValueError("visible_thread is reserved for a Luna policy route")
             if route.get("host_available_models") is None:
                 raise ValueError("visible_thread requires exact available_thread_models from native create_thread")
+            route["model_resolution"] = "visible_thread"
         requested_thread_environment = params.get("thread_environment")
         raw_thread_environment = str(requested_thread_environment or "").strip().lower()
         if dispatch_mode == "visible_thread":
@@ -3509,25 +3553,39 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "profile": agent,
             "display_name": agent,
             "task_name": task_name,
-            "model": route["selected_model"],
+            # `model` is a native override, not the policy expectation.  A
+            # configured-default Luna route deliberately omits it so the
+            # host resolves agents.default_subagent_model.  Keep the durable
+            # expectation and resolution metadata beside the request.
+            "expected_model": route.get("expected_model") or route["selected_model"],
+            "model_resolution": route.get("model_resolution", "policy"),
             "reasoning_effort": route["selected_reasoning_effort"],
         }
+        if route.get("model_resolution") != "configured_default":
+            spawn_request["model"] = route["selected_model"]
         if visible_thread:
             # The native create_thread tool nests this value under
             # target.environment; keep the adapter request explicit so the
             # coordinator cannot silently fall back to a Git worktree.
             spawn_request["thread_environment"] = thread_environment
-        question_route = {
-            "mode": "pull",
-            "worker_tool": "cortex.question",
-            "publish_tool": "publish_worker_question",
-            "updates_tool": "get_worker_question_updates",
-            "coordinator_list_tool": "list_worker_questions",
-            "coordinator_answer_tool": "answer_worker_question",
-            "coordinator_ui_tool": "cortex.question",
-            "answer_location": "main_chat",
-        }
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "objective": redact(params.get("objective", "")), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in params.get("context_files", [])][:50], "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(select_project_root(params)), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        facade_managed = bool(params.get("facade_managed", False))
+        question_route = (
+            {"mode": "native_parent", "answer_location": "main_chat"}
+            if facade_managed else
+            {
+                "mode": "pull",
+                "worker_tool": "cortex.question",
+                "publish_tool": "publish_worker_question",
+                "updates_tool": "get_worker_question_updates",
+                "coordinator_list_tool": "list_worker_questions",
+                "coordinator_answer_tool": "answer_worker_question",
+                "coordinator_ui_tool": "cortex.question",
+                "answer_location": "main_chat",
+            }
+        )
+        orchestration_wave_id = str(params.get("orchestration_wave_id", "")).strip() or None
+        orchestration_delegation_key = str(params.get("orchestration_delegation_key", "")).strip() or None
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "objective": redact(params.get("objective", "")), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in params.get("context_files", [])][:50], "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(select_project_root(params)), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         spawn_request["message"] = host_spawn_prompt(agent, package)
         if visible_thread:
             # create_thread calls this field `prompt`; retaining `message`
@@ -3540,7 +3598,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             observed["consumed_at"] = now()
             observed["attempt_id"] = attempt_id
             write_json(status_path, observed)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "ownership": package["ownership"], "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "ownership": package["ownership"], "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
         delegation_index_path, delegation_index = _delegation_report_index(report_paths, state["task_id"], attempt_id)
         delegation_index["context_report_ids"] = context_report_ids
         delegation_index["updated_at"] = now()
@@ -3685,13 +3743,25 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             {"requested": host_task_name, "used": expected_task_name}
             if host_task_name != expected_task_name else None
         )
-        requested_model = str(
-            attempt.get("selected_model")
-            or (attempt.get("spawn_request") or {}).get("model")
+        spawn_request = attempt.get("spawn_request") or {}
+        expected_model = str(
+            attempt.get("expected_model")
+            or spawn_request.get("expected_model")
+            or attempt.get("selected_model")
+            or spawn_request.get("model")
             or ""
         ).strip()
+        model_resolution = str(
+            attempt.get("model_resolution")
+            or spawn_request.get("model_resolution")
+            or ("explicit" if spawn_request.get("model") else "policy")
+        ).strip()
+        # An omitted native model is intentional for configured-default
+        # dispatch. Verify the actual host model against expected_model,
+        # while retaining requested_model only for explicit native overrides.
+        requested_model = str(spawn_request.get("model") or "").strip()
         host_model = redact(str(params.get("host_model", "")).strip(), 128) or None
-        if requested_model and not host_model:
+        if expected_model and not host_model:
             return {
                 "confirmed": False,
                 "attempt_id": attempt_id,
@@ -3710,21 +3780,23 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             "model": host_model,
             "reasoning_effort": redact(str(params.get("host_reasoning_effort", "")).strip(), 64) or None,
             "requested_model": requested_model or None,
+            "expected_model": expected_model or None,
+            "model_resolution": model_resolution or None,
             "confirmed_at": now(),
         }
         model_verification = "not_requested"
-        if requested_model:
-            model_verification = "verified" if host_model == requested_model else "mismatch"
+        if expected_model:
+            model_verification = "verified" if host_model == expected_model else "mismatch"
         host_spawn["model_verification"] = model_verification
         if attempt.get("status") == "running":
             existing = attempt.get("host_spawn") or {}
-            if all(existing.get(key) == host_spawn.get(key) for key in ("tool", "agent_id", "task_name", "model", "reasoning_effort", "requested_model", "model_verification")):
+            if all(existing.get(key) == host_spawn.get(key) for key in ("tool", "agent_id", "task_name", "model", "reasoning_effort", "requested_model", "expected_model", "model_resolution", "model_verification")):
                 return {"attempt_id": attempt_id, "idempotent": True, "revision_correction": revision_correction, "state": state}
             raise ValueError("running attempt already has a different host spawn binding")
         if attempt.get("status") != AWAITING_HOST_SPAWN or attempt.get("invalidated"):
             raise ValueError("only an active attempt awaiting host spawn can be confirmed")
         if model_verification == "mismatch":
-            mismatch_reason = f"host_model_mismatch: requested {requested_model}, actual {host_model}"
+            mismatch_reason = f"host_model_mismatch: expected {expected_model}, actual {host_model}"
             attempt["host_spawn"] = host_spawn
             attempt["model_verification"] = model_verification
             attempt["status"] = "failed"
@@ -3744,7 +3816,7 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
                 "attempt_id": attempt_id,
                 "reason": "host_model_mismatch",
                 "detail": mismatch_reason,
-                "expected_model": requested_model,
+                "expected_model": expected_model,
                 "actual_model": host_model,
                 "host_spawn": host_spawn,
                 "task_name_correction": task_name_correction,
@@ -4836,6 +4908,1052 @@ def release_resource(params: dict[str, Any]) -> dict[str, Any]:
         return {"state": state}
 
 
+ORCHESTRATE_SCHEMA = "cortex/orchestrate/v1"
+ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question"}
+ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question"}
+
+
+def _orchestrate_error(
+    operation: str,
+    code: str,
+    message: object,
+    *,
+    phase: str = "validation",
+    recoverable: bool = True,
+    next_operation: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    resolved_next_operation = next_operation or (operation if operation in ORCHESTRATE_OPERATIONS else None)
+    return {
+        "schema": ORCHESTRATE_SCHEMA,
+        "ok": False,
+        "operation": operation,
+        "transaction_id": None,
+        "task_id": task_id,
+        "wave_id": None,
+        "state": "blocked" if not recoverable else "needs_input",
+        "spawn_requests": [],
+        "phase": phase,
+        "code": code,
+        "diagnostics": [{"code": code, "phase": phase, "message": redact(message, 1000)}],
+        "recoverable": recoverable,
+        "next_operation": resolved_next_operation,
+        "next_action": (
+            f"retry orchestrate(operation={resolved_next_operation}) with a new submission_id after correcting the diagnostic"
+            if recoverable and resolved_next_operation else
+            "retry orchestrate with a supported operation" if recoverable else
+            "inspect the Cortex installation"
+        ),
+    }
+
+
+def _orchestrate_state_name(state: dict[str, Any]) -> str:
+    if state.get("status") == "completed":
+        return "completed"
+    if state.get("status") == "blocked":
+        return "blocked"
+    current = set(active_gates(state))
+    attempts = [item for item in state.get("attempts", []) if item.get("gate") in current and not item.get("invalidated")]
+    if any(item.get("status") == AWAITING_HOST_SPAWN for item in attempts):
+        return "ready_to_spawn"
+    if any(item.get("status") == "running" for item in attempts):
+        return "waiting_workers"
+    return "needs_input"
+
+
+def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": state.get("status"),
+        "revision": state.get("revision"),
+        "complexity": state.get("complexity"),
+        "current_gates": active_gates(state),
+        "completed_gates": list(state.get("completed_gates", [])),
+        "skipped_gates": list(state.get("skipped_gates", [])),
+        "attempts": [
+            {
+                "attempt_id": item.get("attempt_id"),
+                "gate": item.get("gate"),
+                "profile": item.get("profile"),
+                "status": item.get("status"),
+                "wave_id": item.get("orchestration_wave_id"),
+            }
+            for item in state.get("attempts", [])
+            if not item.get("invalidated")
+        ],
+    }
+
+
+def _orchestrate_transaction_path(root: Path, submission_id: str) -> Path:
+    directory = root / "operations"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory / f"{safe_id(submission_id)}.json"
+
+
+def _orchestrate_request_digest(params: dict[str, Any]) -> str:
+    return digest_text(json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
+    submission_id = safe_id(str(params.get("submission_id", "")))
+    path = _orchestrate_transaction_path(root, submission_id)
+    request_digest = _orchestrate_request_digest(params)
+    if path.exists():
+        receipt = _read_private_json(path, "orchestrate transaction")
+        if receipt.get("schema") != ORCHESTRATE_SCHEMA or receipt.get("request_digest") != request_digest:
+            raise ValueError("orchestrate submission_id was reused with different content")
+        if receipt.get("status") == "committed" and isinstance(receipt.get("result"), dict):
+            replay = dict(receipt["result"])
+            replay["idempotent"] = True
+            return path, receipt, replay
+        receipt["resumed_at"] = now()
+        receipt["status"] = "running"
+        write_json(path, receipt)
+        return path, receipt, None
+    receipt = {
+        "schema": ORCHESTRATE_SCHEMA,
+        "transaction_id": f"transaction-{submission_id}",
+        "submission_id": submission_id,
+        "operation": params["operation"],
+        "request_digest": request_digest,
+        "task_id": str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None,
+        "status": "running",
+        "phase": "started",
+        "context": {},
+        "created_at": now(),
+        "updated_at": now(),
+    }
+    write_json(path, receipt)
+    return path, receipt, None
+
+
+def _checkpoint_orchestrate_transaction(path: Path, receipt: dict[str, Any], phase: str, **context: Any) -> None:
+    receipt["phase"] = phase
+    receipt.setdefault("context", {}).update(context)
+    receipt["updated_at"] = now()
+    write_json(path, receipt)
+
+
+def _commit_orchestrate_transaction(path: Path, receipt: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    result = {**result, "transaction_id": receipt["transaction_id"], "idempotent": False}
+    receipt.update({"status": "committed", "phase": "committed", "result": result, "updated_at": now(), "committed_at": now()})
+    write_json(path, receipt)
+    return result
+
+
+def _default_profile_for_gate(gate: str) -> str:
+    return {
+        "plan": "planner",
+        "discover": "explorer",
+        "architecture": "architect",
+        "database_architecture": "database_architect",
+        "implementation": "general",
+        "qa": "qa_engineer",
+        "security": "security_auditor",
+        "performance": "performance_engineer",
+        "accessibility": "accessibility_engineer",
+        "ux": "ux_designer",
+        "review": "code_reviewer",
+        "documentation": "technical_writer",
+        "close": "build_verification",
+    }.get(gate, "general")
+
+
+def _default_task_kind_for_gate(gate: str) -> str:
+    return {
+        "plan": "planning", "discover": "discovery", "architecture": "architecture",
+        "database_architecture": "database", "implementation": "implementation", "qa": "testing",
+        "security": "security", "performance": "performance", "accessibility": "accessibility",
+        "ux": "ux", "review": "code_review", "documentation": "documentation", "close": "verification",
+    }.get(gate, gate)
+
+
+def _normalize_orchestrate_waves(
+    raw_waves: object,
+    task: dict[str, Any],
+    host_capabilities: dict[str, Any],
+    project_root_value: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not isinstance(raw_waves, list) or not raw_waves:
+        raise ValueError("start requires a non-empty waves array")
+    by_gate: dict[str, list[dict[str, Any]]] = {}
+    original_ids: dict[tuple[str, ...], str] = {}
+    proposed_pipeline: list[str] = []
+    proposed_groups: list[list[str]] = []
+    for index, raw_wave in enumerate(raw_waves, 1):
+        if not isinstance(raw_wave, dict):
+            raise ValueError("each wave must be an object")
+        wave_id = safe_id(str(raw_wave.get("wave_id") or f"wave-{index:02d}"))
+        raw_delegations = raw_wave.get("delegations")
+        if not isinstance(raw_delegations, list) or not raw_delegations or len(raw_delegations) > 32:
+            raise ValueError("each wave requires 1..32 delegation specs")
+        group: list[str] = []
+        for raw_spec in raw_delegations:
+            if not isinstance(raw_spec, dict):
+                raise ValueError("delegation specs must be objects")
+            gate = canonical_pipeline_gate(raw_spec.get("gate") or "")
+            if gate not in AVAILABLE_GATES:
+                raise ValueError(f"unsupported gate in wave: {gate}")
+            if gate not in group:
+                group.append(gate)
+            if gate not in proposed_pipeline:
+                proposed_pipeline.append(gate)
+            by_gate.setdefault(gate, []).append(dict(raw_spec))
+        original_ids[tuple(group)] = wave_id
+        proposed_groups.append(group)
+    complexity = str(task.get("complexity", "C2")).upper()
+    classification = classify({
+        "complexity": complexity,
+        "requirements": task.get("requirements", []),
+        "pipeline": proposed_pipeline,
+        "parallel_groups": proposed_groups,
+    })
+    spawn_models = host_capabilities.get("spawn_agent_models") or host_capabilities.get("available_models")
+    thread_models = host_capabilities.get("create_thread_models") or host_capabilities.get("available_thread_models")
+    configured_default_model = str(
+        host_capabilities.get("spawn_agent_default_model")
+        or host_capabilities.get("configured_default_model")
+        or ""
+    ).strip()
+    if configured_default_model and configured_default_model not in SUPPORTED_MODELS:
+        raise ValueError("host_capabilities.spawn_agent_default_model must be a supported model")
+    if not isinstance(spawn_models, list) or not spawn_models:
+        raise ValueError("host_capabilities.spawn_agent_models must be a non-empty array")
+    normalized: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for index, group in enumerate(classification["parallel_groups"], 1):
+        wave_id = original_ids.get(tuple(group), f"wave-{index:02d}")
+        if wave_id in used_ids:
+            wave_id = f"wave-{index:02d}"
+        used_ids.add(wave_id)
+        delegations: list[dict[str, Any]] = []
+        for gate in group:
+            specs = by_gate.get(gate) or [{"gate": gate}]
+            for spec_index, raw_spec in enumerate(specs, 1):
+                agent = str(raw_spec.get("agent") or _default_profile_for_gate(gate))
+                if agent not in AGENTS:
+                    raise ValueError(f"unknown Cortex profile: {agent}")
+                objective = str(raw_spec.get("objective") or f"Complete the {gate} gate for: {task.get('objective', '')}").strip()
+                ownership = str(raw_spec.get("ownership") or f"Own the {gate} gate as {agent}").strip()
+                task_kind = str(raw_spec.get("task_kind") or _default_task_kind_for_gate(gate))
+                risk = str(raw_spec.get("risk") or ("high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate"))
+                spec = {
+                    **raw_spec,
+                    "gate": gate,
+                    "agent": agent,
+                    "task_kind": task_kind,
+                    "risk": risk,
+                    "objective": objective,
+                    "ownership": ownership,
+                    "allowed_paths": raw_spec.get("allowed_paths") or task.get("allowed_paths") or ["."],
+                    "acceptance_criteria": raw_spec.get("acceptance_criteria") or task.get("acceptance_criteria") or [f"Complete and report the {gate} gate."],
+                    "verification": raw_spec.get("verification") or task.get("verification") or [f"Provide report-backed evidence for {gate}."],
+                    "available_models": raw_spec.get("available_models") or spawn_models,
+                    "available_thread_models": raw_spec.get("available_thread_models") or thread_models,
+                    "configured_default_model": raw_spec.get("configured_default_model") or configured_default_model,
+                    "parallel": len(group) > 1 or len(specs) > 1,
+                    "facade_managed": True,
+                    "orchestration_wave_id": wave_id,
+                    "orchestration_delegation_key": f"{wave_id}-{gate}-{spec_index:02d}",
+                }
+                route = resolve_dispatch_route({
+                    **spec,
+                    "complexity": complexity,
+                    "_security_gate": gate == "security",
+                    "project_root": project_root_value,
+                })
+                if (
+                    str(spec.get("dispatch_mode", "hidden_subagent")) == "visible_thread"
+                    and (not isinstance(thread_models, list) or "gpt-5.6-luna" not in thread_models)
+                ):
+                    raise ValueError("visible_thread requires create_thread_models to include gpt-5.6-luna")
+                delegations.append(spec)
+        normalized.append({"wave_id": wave_id, "gates": list(group), "delegations": delegations, "status": "pending"})
+    return normalized, classification
+
+
+def _orchestrate_plan_path(task_dir: Path) -> Path:
+    return task_dir / "orchestration.json"
+
+
+def _write_orchestrate_plan(task_dir: Path, plan: dict[str, Any]) -> None:
+    plan["updated_at"] = now()
+    write_json(_orchestrate_plan_path(task_dir), plan)
+
+
+def _orchestrate_wave_contract(waves: object) -> list[dict[str, Any]]:
+    """Return the immutable portion of a facade wave plan for replay checks."""
+    if not isinstance(waves, list):
+        return []
+    return [
+        {
+            "wave_id": wave.get("wave_id"),
+            "gates": wave.get("gates"),
+            "delegations": wave.get("delegations"),
+        }
+        for wave in waves
+        if isinstance(wave, dict)
+    ]
+
+
+def _load_or_create_orchestrate_plan(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
+    path = _orchestrate_plan_path(task_dir)
+    if path.exists():
+        plan = _read_private_json(path, "orchestrate plan")
+        if plan.get("schema") != ORCHESTRATE_SCHEMA or plan.get("task_id") != state.get("task_id"):
+            raise ValueError("orchestrate plan does not match the task")
+        return plan
+    task = _read_private_json(task_dir / "task.json", "task definition")
+    waves = []
+    for index, group in enumerate(normalize_parallel_groups(state.get("parallel_groups"), state["current_pipeline"]), 1):
+        if all(gate in state.get("completed_gates", []) or gate in state.get("skipped_gates", []) for gate in group):
+            wave_status = "completed"
+        else:
+            wave_status = "pending"
+        wave_id = f"wave-{index:02d}"
+        waves.append({
+            "wave_id": wave_id,
+            "gates": list(group),
+            "status": wave_status,
+            "delegations": [
+                {
+                    "gate": gate,
+                    "agent": _default_profile_for_gate(gate),
+                    "task_kind": _default_task_kind_for_gate(gate),
+                    "risk": "high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate",
+                    "objective": f"Complete the {gate} gate for: {task.get('objective', '')}",
+                    "ownership": f"Own the {gate} gate as {_default_profile_for_gate(gate)}",
+                    "allowed_paths": task.get("allowed_paths") or ["."],
+                    "acceptance_criteria": task.get("acceptance_criteria") or [f"Complete and report the {gate} gate."],
+                    "verification": task.get("verification") or [f"Provide report-backed evidence for {gate}."],
+                    "parallel": len(group) > 1,
+                    "facade_managed": True,
+                    "orchestration_wave_id": wave_id,
+                    "orchestration_delegation_key": f"{wave_id}-{gate}-01",
+                }
+                for gate in group
+            ],
+        })
+    plan = {"schema": ORCHESTRATE_SCHEMA, "task_id": state["task_id"], "waves": waves, "created_at": now(), "migrated_from_v7": True}
+    if persist:
+        _write_orchestrate_plan(task_dir, plan)
+    return plan
+
+
+def _wave_for_gates(plan: dict[str, Any], gates: list[str]) -> dict[str, Any] | None:
+    gate_set = set(gates)
+    return next((wave for wave in plan.get("waves", []) if set(wave.get("gates", [])) == gate_set), None)
+
+
+def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    current_gates = active_gates(state)
+    if not current_gates:
+        return {"wave_id": None, "spawn_requests": [], "attempt_ids": [], "state": state}
+    wave = _wave_for_gates(plan, current_gates)
+    if wave is None:
+        raise ValueError("orchestrate plan has no wave for the current gates")
+    prepared_attempts: list[dict[str, Any]] = []
+    for spec in wave["delegations"]:
+        key = spec["orchestration_delegation_key"]
+        existing = next(
+            (
+                item for item in state.get("attempts", [])
+                if not item.get("invalidated")
+                and item.get("status") in {AWAITING_HOST_SPAWN, "running", "passed"}
+                and (
+                    item.get("orchestration_delegation_key") == key
+                    or (
+                        not item.get("orchestration_delegation_key")
+                        and item.get("gate") == spec["gate"]
+                        and item.get("agent") == spec["agent"]
+                    )
+                )
+            ),
+            None,
+        )
+        if existing is not None:
+            if not existing.get("orchestration_wave_id"):
+                existing["orchestration_wave_id"] = wave["wave_id"]
+                existing["orchestration_delegation_key"] = key
+            prepared_attempts.append(existing)
+            continue
+        observed = status({**params, "task_id": state["task_id"]})
+        delegated = record_delegation({
+            **params,
+            **spec,
+            "task_id": state["task_id"],
+            "expected_revision": observed["state"]["revision"],
+            "status_receipt": observed["status_receipt"],
+        })
+        if delegated.get("recorded") is False:
+            raise ValueError(str(delegated.get("reason") or "wave delegation was not recorded"))
+        state = delegated["state"]
+        prepared_attempts.append(_attempt(state, delegated["attempt_id"]))
+    wave["status"] = "active"
+    wave["attempt_ids"] = [item["attempt_id"] for item in prepared_attempts]
+    _write_orchestrate_plan(task_dir, plan)
+    save_state(task_dir, task_dir / "current.json", state, "orchestrate_wave", wave["wave_id"])
+    spawn_requests = [
+        {**item["spawn_request"], "attempt_id": item["attempt_id"]}
+        for item in prepared_attempts
+        if item.get("status") == AWAITING_HOST_SPAWN
+    ]
+    return {"wave_id": wave["wave_id"], "spawn_requests": spawn_requests, "attempt_ids": wave["attempt_ids"], "state": state}
+
+
+def _orchestrate_response(
+    operation: str,
+    state: dict[str, Any],
+    *,
+    wave_id: str | None = None,
+    spawn_requests: list[dict[str, Any]] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    facade_state = _orchestrate_state_name(state)
+    if facade_state == "ready_to_spawn":
+        next_action = "invoke every returned native spawn request, wait for the wave, then call orchestrate(operation=advance) once"
+    elif facade_state == "waiting_workers":
+        next_action = "wait for every worker in the current wave, then call orchestrate(operation=advance) once"
+    elif facade_state == "completed":
+        next_action = "report the verified task result to the user"
+    elif facade_state == "blocked":
+        next_action = "resolve the blocker, then call orchestrate(operation=resume)"
+    else:
+        next_action = "inspect the returned diagnostics or provide the required completion data"
+    response = {
+        "schema": ORCHESTRATE_SCHEMA,
+        "ok": True,
+        "operation": operation,
+        "transaction_id": None,
+        "task_id": state.get("task_id"),
+        "wave_id": wave_id,
+        "state": facade_state,
+        "state_summary": _orchestrate_summary(state),
+        "spawn_requests": spawn_requests or [],
+        "diagnostics": diagnostics or [],
+        "next_action": next_action,
+    }
+    if result is not None:
+        response["result"] = result
+    return response
+
+
+def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
+    task = params.get("task")
+    if not isinstance(task, dict):
+        raise ValueError("start requires a task object")
+    task_id = safe_id(str(task.get("task_id", "")))
+    objective = str(task.get("objective", "")).strip()
+    if not objective:
+        raise ValueError("start task.objective is required")
+    principal = str(params.get("principal", "")).strip()
+    thread_id = str(params.get("thread_id", "")).strip()
+    if not principal or not thread_id:
+        raise ValueError("start requires principal and thread_id")
+    host_capabilities = params.get("host_capabilities")
+    if not isinstance(host_capabilities, dict):
+        raise ValueError("start requires host_capabilities")
+    waves, classification_preview = _normalize_orchestrate_waves(params.get("waves"), task, host_capabilities, str(params["project_root"]))
+    root = ledger_root(params)
+    with state_lock(root):
+        activated = activate_orchestration({**params, "user_command": ACTIVATION_COMMAND})
+        if not activated.get("active"):
+            raise ValueError(str(activated.get("next_action") or "orchestration activation failed"))
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "activated", task_id=task_id)
+        existing_state = None
+        existing_task_dir = None
+        try:
+            _, existing_task_dir, existing_state = load_state(task_id, params)
+            authorize_principal(existing_state, params)
+        except (FileNotFoundError, ValueError):
+            existing_state = None
+            existing_task_dir = None
+        if existing_state is None:
+            classification_id = str(transaction.get("context", {}).get("classification_id") or "")
+            if not classification_id:
+                classified = classify_task({
+                    **params,
+                    "complexity": classification_preview["complexity"],
+                    "requirements": task.get("requirements", []),
+                    "pipeline": classification_preview["pipeline"],
+                    "parallel_groups": classification_preview["parallel_groups"],
+                })
+                classification_id = classified["classification_id"]
+                _checkpoint_orchestrate_transaction(transaction_path, transaction, "classified", classification_id=classification_id)
+            created = init_task({
+                **params,
+                **task,
+                "task_id": task_id,
+                "objective": objective,
+                "classification_id": classification_id,
+            })
+            state = created["state"]
+            _, task_dir, _ = task_paths(task_id, params)
+            _checkpoint_orchestrate_transaction(transaction_path, transaction, "initialized", task_directory=task_dir.name)
+        else:
+            state = existing_state
+            task_dir = existing_task_dir
+            stored_task = _read_private_json(task_dir / "task.json", "task definition")
+            if stored_task.get("objective") != redact(objective):
+                raise ValueError("existing task_id belongs to a different objective")
+        plan = {
+            "schema": ORCHESTRATE_SCHEMA,
+            "task_id": task_id,
+            "waves": waves,
+            "host_capabilities": sanitize_structured(host_capabilities),
+            "classification": classification_preview,
+            "created_at": now(),
+        }
+        plan_path = _orchestrate_plan_path(task_dir)
+        if plan_path.exists():
+            existing_plan = _read_private_json(plan_path, "orchestrate plan")
+            if digest_text(json.dumps(_orchestrate_wave_contract(existing_plan.get("waves")), sort_keys=True)) != digest_text(json.dumps(_orchestrate_wave_contract(waves), sort_keys=True)):
+                raise ValueError("existing task has a different orchestration wave plan")
+            plan = existing_plan
+        else:
+            _write_orchestrate_plan(task_dir, plan)
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "plan_recorded")
+        prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
+        return _orchestrate_response(
+            "start",
+            prepared["state"],
+            wave_id=prepared["wave_id"],
+            spawn_requests=prepared["spawn_requests"],
+        )
+
+
+def _report_receipt_for_attempt(task_dir: Path, state: dict[str, Any], attempt_id: str) -> dict[str, Any] | None:
+    paths = report_bus_paths(task_dir)
+    reports = [
+        item for item in _report_index(paths, state["task_id"]).get("reports", [])
+        if item.get("attempt_id") == attempt_id
+    ]
+    if not reports:
+        return None
+    report_id = safe_id(str(reports[-1]["report_id"]))
+    receipt_path = paths["receipts"] / f"report-receipt-{report_id}.json"
+    if not receipt_path.exists():
+        return None
+    return _read_private_json(receipt_path, "report receipt")
+
+
+def _preflight_orchestrate_completion(state: dict[str, Any], completion: dict[str, Any]) -> None:
+    """Validate a host completion without mutating the task ledger."""
+    attempt_id = safe_id(str(completion.get("attempt_id", "")))
+    attempt = _attempt(state, attempt_id)
+    requested_status = str(completion.get("status", "passed")).strip().lower()
+    if requested_status not in TERMINAL_ATTEMPT_STATUSES:
+        raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
+    if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
+        if attempt.get("status") != requested_status:
+            raise ValueError("completion status does not match the terminal ledger attempt")
+        return
+    required_host_fields = ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort")
+    missing_host = [field for field in required_host_fields if not str(completion.get(field, "")).strip()]
+    if missing_host:
+        raise ValueError("completion requires actual host fields: " + ", ".join(missing_host))
+    spawn_request = attempt.get("spawn_request") or {}
+    expected = {
+        "host_tool": spawn_request.get("host_tool") or "spawn_agent",
+        "host_task_name": spawn_request.get("task_name") or attempt.get("agent"),
+        # `model` is absent for configured-default requests.  The host still
+        # reports its effective model and it is checked against the durable
+        # expected_model metadata instead.
+        "host_model": spawn_request.get("model") or spawn_request.get("expected_model") or attempt.get("expected_model"),
+        "host_reasoning_effort": spawn_request.get("reasoning_effort"),
+    }
+    mismatches = [
+        field for field, expected_value in expected.items()
+        if expected_value is not None and str(completion.get(field)) != str(expected_value)
+    ]
+    if mismatches:
+        raise ValueError("host completion mismatch for: " + ", ".join(mismatches))
+    if requested_status == "passed":
+        sanitize_report_payload(completion.get("report"))
+    elif not str(completion.get("reason", "")).strip():
+        raise ValueError("non-success completion requires an explicit reason")
+
+
+def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any], next_action: str) -> dict[str, Any]:
+    baseline = _read_private_json(task_dir / "baseline-manifest.json", "baseline manifest")
+    current = capture_project_manifest(Path(baseline["project_root"]))
+    comparison = compare_manifests(baseline, current)
+    completed = [
+        f"{gate}: {state.get('gates', {}).get(gate, {}).get('summary') or state.get('gates', {}).get(gate, {}).get('outcome', 'completed')}"
+        for gate in state.get("completed_gates", [])
+    ] or [f"Prepared handoff for {state.get('current_gate')}"]
+    return handoff({
+        **params,
+        "task_id": state["task_id"],
+        "expected_revision": state["revision"],
+        "name": f"orchestrate-{state.get('current_gate')}-{state['revision'] + 1}",
+        "completed": completed,
+        "files": comparison["changed_paths"],
+        "decisions": ["Unified orchestrate facade reconciled the current wave."],
+        "risks": [],
+        "next_action": next_action,
+    })
+
+
+def _complete_orchestrate_attempt(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    completion: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    attempt_id = safe_id(str(completion.get("attempt_id", "")))
+    attempt = _attempt(state, attempt_id)
+    requested_status = str(completion.get("status", "passed")).strip().lower()
+    if requested_status not in TERMINAL_ATTEMPT_STATUSES:
+        raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
+    if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
+        if attempt.get("status") != requested_status:
+            raise ValueError("completion status does not match the terminal ledger attempt")
+        return state, _report_receipt_for_attempt(task_dir, state, attempt_id)
+    report = completion.get("report")
+    if requested_status == "passed" and not isinstance(report, dict):
+        raise ValueError("passed completions require a strict cortex/report/v1 report")
+    completed = complete_attempt({
+        **params,
+        **completion,
+        "task_id": state["task_id"],
+        "attempt_id": attempt_id,
+        "submission_id": completion.get("submission_id") or f"completion-{attempt_id}-report",
+        "host_tool": completion.get("host_tool") or (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
+        "host_task_name": completion.get("host_task_name") or (attempt.get("spawn_request") or {}).get("task_name") or attempt.get("agent"),
+        "host_model": completion.get("host_model") or (attempt.get("spawn_request") or {}).get("model") or (attempt.get("spawn_request") or {}).get("expected_model"),
+        "host_reasoning_effort": completion.get("host_reasoning_effort") or (attempt.get("spawn_request") or {}).get("reasoning_effort"),
+        "status": requested_status,
+        "report": report,
+    })
+    if completed.get("recorded") is False or completed.get("atomic") is False:
+        raise ValueError(completed.get("error") or (completed.get("confirmed") or {}).get("reason") or "attempt completion failed")
+    state = completed["state"]
+    receipt = completed.get("report", {}).get("receipt") if isinstance(completed.get("report"), dict) else None
+    return state, receipt
+
+
+def _ensure_attempt_evidence(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    receipt: dict[str, Any] | None,
+    *,
+    command: bool = False,
+) -> dict[str, Any]:
+    existing = next((item for item in state.get("evidence", []) if item.get("attempt_id") == attempt["attempt_id"] and not item.get("invalidated")), None)
+    if existing is not None:
+        return state
+    evidence_params = {
+        **params,
+        "task_id": state["task_id"],
+        "expected_revision": state["revision"],
+        "gate": attempt["gate"],
+        "attempt_id": attempt["attempt_id"],
+        "report_receipt": receipt.get("receipt_id") if receipt else None,
+        "summary": f"Unified facade accepted the {attempt['gate']} report from {attempt['agent']}",
+        "paths": [],
+    }
+    if attempt["gate"] == "documentation":
+        report_record = _read_private_json(report_bus_paths(task_dir)["records"] / f"{receipt['report_id']}.json", "report record") if receipt else {"report": {}}
+        changed_files = report_record.get("report", {}).get("changed_files", [])
+        evidence_params.update({
+            "kind": "documentation",
+            "decision": "updated" if changed_files else "not_applicable",
+            "justification": "The documentation worker reported no changed documentation files." if not changed_files else "The documentation worker reported updated files.",
+            "paths": changed_files,
+        })
+        result = record_evidence(evidence_params)
+    elif command:
+        result = execute_verification({**evidence_params, "verification_id": "benign_success"})
+    else:
+        result = record_evidence({**evidence_params, "kind": "report"})
+    if result.get("recorded") is False:
+        raise ValueError(str(result.get("reason") or "attempt evidence was not recorded"))
+    return result["state"]
+
+
+def _replace_future_orchestrate_waves(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+    raw_future: object,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    task = _read_private_json(task_dir / "task.json", "task definition")
+    host_capabilities = plan.get("host_capabilities") or {}
+    future, classification = _normalize_orchestrate_waves(raw_future, task, host_capabilities, str(params["project_root"]))
+    completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+    requested_future_gates = {gate for wave in future for gate in wave["gates"]}
+    rework_gates = sorted(completed_set & requested_future_gates)
+    if rework_gates and not params.get("allow_rework", False):
+        raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
+    if rework_gates:
+        revised = update_pipeline({
+            **params,
+            "task_id": state["task_id"],
+            "expected_revision": state["revision"],
+            "operations": [{"op": "rework", "gate": gate} for gate in rework_gates],
+            "allow_rework": True,
+            "reason": "Unified facade explicitly reintroduced completed gates in future_waves.",
+        })
+        state = revised["state"]
+        completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+    completed_waves = [wave for wave in plan.get("waves", []) if set(wave.get("gates", [])).issubset(completed_set)]
+    full_pipeline = [gate for gate in state["current_pipeline"] if gate in completed_set]
+    for gate in classification["pipeline"]:
+        if gate not in full_pipeline:
+            full_pipeline.append(gate)
+    full_groups = [[gate] for gate in full_pipeline if gate in completed_set] + [wave["gates"] for wave in future]
+    reassessed = reassess_pipeline({
+        **params,
+        "task_id": state["task_id"],
+        "expected_revision": state["revision"],
+        "signals": ["Coordinator replaced the not-yet-started facade waves."],
+        "pipeline": full_pipeline,
+        "parallel_groups": full_groups,
+        "intent": "resequence",
+        "decision": "updated",
+        "reason": "Unified facade accepted an explicit future_waves replacement.",
+        "allow_rework": bool(params.get("allow_rework", False)),
+        "apply": True,
+    })
+    if not reassessed.get("applied") and not rework_gates:
+        raise ValueError("future_waves replacement produced no applied pipeline change")
+    if reassessed.get("applied"):
+        state = reassessed["state"]
+    plan["waves"] = completed_waves + future
+    _write_orchestrate_plan(task_dir, plan)
+    return state, plan
+
+
+def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
+    task_id = safe_id(str(params.get("task_id", "")))
+    completions = params.get("completions")
+    if not isinstance(completions, list) or not completions:
+        raise ValueError("advance requires a non-empty completions array")
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(task_id, params)
+        authorize(state, params)
+        plan = _load_or_create_orchestrate_plan(params, task_dir, state)
+        current_wave = _wave_for_gates(plan, active_gates(state))
+        requested_wave_id = safe_id(str(params.get("wave_id", "")))
+        if current_wave is None or current_wave.get("wave_id") != requested_wave_id:
+            prior_wave = next((wave for wave in plan.get("waves", []) if wave.get("wave_id") == requested_wave_id), None)
+            transaction_phase = str(transaction.get("phase", ""))
+            if (
+                prior_wave is None
+                or prior_wave.get("status") not in {"completed", "blocked"}
+                or transaction_phase not in {"gates_recorded", "next_wave_prepared"}
+            ):
+                raise ValueError("advance wave_id does not match the active Cortex wave")
+            # The prior call crossed the gate boundary but crashed before its
+            # transaction receipt was committed. Continue only the remaining
+            # post-gate phases; never replay its completions into the new wave.
+            if transaction_phase == "gates_recorded" and params.get("future_waves") is not None and state.get("status") == "active":
+                state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
+            if state.get("status") == "completed":
+                audited = close_audit({**params, "task_id": task_id})
+                return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"report_count": audited["report_count"]})
+            if state.get("status") == "blocked":
+                return _orchestrate_response("advance", state, wave_id=requested_wave_id)
+            prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+            _checkpoint_orchestrate_transaction(transaction_path, transaction, "next_wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
+            return _orchestrate_response(
+                "advance",
+                prepared["state"],
+                wave_id=prepared["wave_id"],
+                spawn_requests=prepared["spawn_requests"],
+            )
+        expected_attempt_ids = set(current_wave.get("attempt_ids") or [
+            item["attempt_id"] for item in state.get("attempts", [])
+            if item.get("gate") in current_wave["gates"] and not item.get("invalidated")
+        ])
+        provided_attempt_ids = {safe_id(str(item.get("attempt_id", ""))) for item in completions if isinstance(item, dict)}
+        if len(provided_attempt_ids) != len(completions):
+            raise ValueError("advance completion attempt_ids must be unique")
+        unexpected = sorted(provided_attempt_ids - expected_attempt_ids)
+        if unexpected:
+            raise ValueError("advance contains attempts outside the active wave: " + ", ".join(unexpected))
+        missing = sorted(expected_attempt_ids - provided_attempt_ids - {
+            item["attempt_id"] for item in state.get("attempts", []) if item.get("status") in TERMINAL_ATTEMPT_STATUSES
+        })
+        if missing:
+            raise ValueError("advance is missing completions for: " + ", ".join(missing))
+        for completion in completions:
+            if not isinstance(completion, dict):
+                raise ValueError("completion entries must be objects")
+            _preflight_orchestrate_completion(state, completion)
+        if params.get("future_waves") is not None:
+            task = _read_private_json(task_dir / "task.json", "task definition")
+            future_preview, _ = _normalize_orchestrate_waves(
+                params["future_waves"], task, plan.get("host_capabilities") or {}, str(params["project_root"])
+            )
+            prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(current_wave["gates"])
+            reintroduced = sorted(prospective_completed & {gate for wave in future_preview for gate in wave["gates"]})
+            if reintroduced and not params.get("allow_rework", False):
+                raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
+        receipts: dict[str, dict[str, Any] | None] = {}
+        for completion in completions:
+            if not isinstance(completion, dict):
+                raise ValueError("completion entries must be objects")
+            state, receipt = _complete_orchestrate_attempt(params, task_dir, state, completion)
+            receipts[safe_id(str(completion["attempt_id"]))] = receipt
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "attempts_completed", attempt_ids=sorted(provided_attempt_ids))
+        if state.get("require_delegation") and not state.get("reassessment_receipts") and "close" in current_wave["gates"]:
+            reassessed = reassess_pipeline({
+                **params,
+                "task_id": task_id,
+                "expected_revision": state["revision"],
+                "signals": ["Unified facade reached the close wave without a material pipeline change."],
+                "intent": "resequence",
+                "decision": "unchanged",
+                "reason": "No pipeline change was required before close.",
+                "apply": False,
+            })
+            state = reassessed["state"]
+        gate_outcomes = params.get("gate_outcomes") if isinstance(params.get("gate_outcomes"), dict) else {}
+        for gate in list(current_wave["gates"]):
+            if gate in state.get("completed_gates", []) or gate in state.get("skipped_gates", []):
+                continue
+            gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
+            statuses = {item.get("status") for item in gate_attempts}
+            default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
+            outcome = str(gate_outcomes.get(gate, default_outcome))
+            if outcome == "passed":
+                passed = [item for item in gate_attempts if item.get("status") == "passed"]
+                for index, attempt in enumerate(passed):
+                    receipt = receipts.get(attempt["attempt_id"]) or _report_receipt_for_attempt(task_dir, state, attempt["attempt_id"])
+                    state = _ensure_attempt_evidence(
+                        params,
+                        task_dir,
+                        state,
+                        attempt,
+                        receipt,
+                        command=gate == "close" and index == 0,
+                    )
+            if outcome in {"blocked"} or (outcome == "passed" and gate == "close" and state.get("require_handoff")):
+                handed = _auto_handoff(params, task_dir, state, "Resume after resolving the blocker." if outcome == "blocked" else "Close the Cortex task.")
+                if handed.get("recorded") is False:
+                    raise ValueError("automatic handoff manifest reconciliation failed")
+                state = handed["state"]
+            recorded = record_gate({
+                **params,
+                "task_id": task_id,
+                "expected_revision": state["revision"],
+                "gate": gate,
+                "outcome": outcome,
+                "summary": f"Unified facade recorded {gate} as {outcome}.",
+            })
+            if recorded.get("recorded") is False:
+                raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
+            state = recorded["state"]
+        current_wave["status"] = "completed" if state.get("status") != "blocked" else "blocked"
+        _write_orchestrate_plan(task_dir, plan)
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=current_wave["gates"])
+        if params.get("future_waves") is not None and state.get("status") == "active":
+            state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
+        if state.get("status") == "completed":
+            audited = close_audit({**params, "task_id": task_id})
+            return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"report_count": audited["report_count"]})
+        if state.get("status") == "blocked":
+            return _orchestrate_response("advance", state, wave_id=requested_wave_id)
+        prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "next_wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
+        return _orchestrate_response(
+            "advance",
+            prepared["state"],
+            wave_id=prepared["wave_id"],
+            spawn_requests=prepared["spawn_requests"],
+        )
+
+
+def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
+    task_id = safe_id(str(params.get("task_id", "")))
+    _, task_dir, state = load_state(task_id, params)
+    authorize(state, params)
+    plan = _load_or_create_orchestrate_plan(params, task_dir, state, persist=False)
+    current_wave = _wave_for_gates(plan, active_gates(state))
+    spawn_requests = [
+        {**item["spawn_request"], "attempt_id": item["attempt_id"]}
+        for item in state.get("attempts", [])
+        if item.get("status") == AWAITING_HOST_SPAWN
+        and (current_wave is None or item.get("gate") in current_wave.get("gates", []))
+        and not item.get("invalidated")
+    ]
+    return _orchestrate_response(
+        "inspect",
+        state,
+        wave_id=current_wave.get("wave_id") if current_wave else None,
+        spawn_requests=spawn_requests,
+        result={"plan": [{"wave_id": wave["wave_id"], "gates": wave["gates"], "status": wave.get("status", "pending")} for wave in plan.get("waves", [])]},
+    )
+
+
+def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
+    task_id = safe_id(str(params.get("task_id", "")))
+    _, task_dir, state = load_state(task_id, params)
+    authorize(state, params)
+    resumed = resume_task({
+        **params,
+        "task_id": task_id,
+        "expected_revision": state["revision"],
+        "reason": params.get("reason") or "Unified facade resumed the blocked task.",
+    })
+    plan = _load_or_create_orchestrate_plan(params, task_dir, resumed["state"])
+    prepared = _prepare_orchestrate_wave(params, task_dir, resumed["state"], plan)
+    return _orchestrate_response("resume", prepared["state"], wave_id=prepared["wave_id"], spawn_requests=prepared["spawn_requests"])
+
+
+def _orchestrate_lane(params: dict[str, Any]) -> dict[str, Any]:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    command = str(payload.get("command", "")).strip()
+    handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+        "create": create_lane,
+        "inspect": lane_status,
+        "claim": claim_lane,
+        "release": release_lane,
+        "retire": retire_lane,
+        "bind_task": bind_task_lane,
+        "materialize": materialize_lane,
+        "reconcile": reconcile_lane,
+        "claim_resource": claim_lane_resource,
+        "release_resource": release_lane_resource,
+    }
+    if command not in handlers:
+        raise ValueError("lane payload.command is unsupported")
+    result = handlers[command]({**params, **payload})
+    state = result.get("state") or {}
+    return {
+        "schema": ORCHESTRATE_SCHEMA,
+        "ok": True,
+        "operation": "lane",
+        "transaction_id": None,
+        "task_id": state.get("task_id") or params.get("task_id"),
+        "wave_id": None,
+        "state": "completed",
+        "spawn_requests": [],
+        "diagnostics": [],
+        "result": result,
+        "next_action": "continue the lane lifecycle with orchestrate(operation=lane) when needed",
+    }
+
+
+def _orchestrate_resource(params: dict[str, Any]) -> dict[str, Any]:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    command = str(payload.get("command", "")).strip()
+    handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+        "claim": claim_resource,
+        "release": release_resource,
+        "acquire_lock": acquire_lock,
+        "release_lock": release_lock,
+    }
+    if command not in handlers:
+        raise ValueError("resource payload.command is unsupported")
+    task_id = safe_id(str(params.get("task_id") or payload.get("task_id") or ""))
+    _, _, state = load_state(task_id, params)
+    result = handlers[command]({**params, **payload, "task_id": task_id, "expected_revision": state["revision"]})
+    return _orchestrate_response("resource", result["state"], result=result)
+
+
+def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    command = str(payload.get("command", "ask")).strip()
+    handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+        "ask": cortex_question,
+        "publish": publish_worker_question,
+        "list": list_worker_questions,
+        "answer": answer_worker_question,
+        "updates": get_worker_question_updates,
+    }
+    if command not in handlers:
+        raise ValueError("question payload.command is unsupported")
+    result = handlers[command]({**params, **payload})
+    task_id = safe_id(str(params.get("task_id") or payload.get("task_id") or ""))
+    _, _, state = load_state(task_id, params)
+    return _orchestrate_response("question", state, result=result)
+
+
+def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
+    """Single public Cortex state-machine facade."""
+    operation = str(params.get("operation", "")).strip()
+    if operation not in ORCHESTRATE_OPERATIONS:
+        return _orchestrate_error(operation or "unknown", "unsupported_operation", "operation must be start, advance, inspect, resume, deactivate, lane, resource, or question", recoverable=True)
+    try:
+        select_project_root(params)
+        if operation == "inspect":
+            return _orchestrate_inspect(params)
+        mutating = operation in ORCHESTRATE_MUTATING_OPERATIONS
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        if operation == "lane" and str(payload.get("command", "")) == "inspect":
+            mutating = False
+        if operation == "question" and str(payload.get("command", "ask")) in {"list", "updates"}:
+            mutating = False
+        transaction_path = None
+        transaction = None
+        if mutating:
+            if not str(params.get("submission_id", "")).strip():
+                raise ValueError(f"{operation} requires submission_id")
+            root = ledger_root(params)
+            transaction_path, transaction, replay = _begin_orchestrate_transaction(root, params)
+            if replay is not None:
+                return replay
+        if operation == "start":
+            result = _orchestrate_start(params, transaction_path, transaction)
+        elif operation == "advance":
+            result = _orchestrate_advance(params, transaction_path, transaction)
+        elif operation == "resume":
+            result = _orchestrate_resume(params)
+        elif operation == "deactivate":
+            result = {
+                "schema": ORCHESTRATE_SCHEMA,
+                "ok": True,
+                "operation": "deactivate",
+                "transaction_id": None,
+                "task_id": params.get("task_id"),
+                "wave_id": None,
+                "state": "completed",
+                "spawn_requests": [],
+                "diagnostics": [],
+                "result": deactivate_orchestration({**params, "user_command": NORMAL_COMMAND}),
+                "next_action": "Cortex orchestration is inactive for this coordinator",
+            }
+        elif operation == "lane":
+            result = _orchestrate_lane(params)
+        elif operation == "resource":
+            result = _orchestrate_resource(params)
+        else:
+            result = _orchestrate_question(params)
+        if mutating:
+            return _commit_orchestrate_transaction(transaction_path, transaction, result)
+        return {**result, "transaction_id": None, "idempotent": False}
+    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
+        error = _orchestrate_error(
+            operation,
+            "orchestrate_validation_failed",
+            exc,
+            phase=(transaction or {}).get("phase", "preflight") if "transaction" in locals() else "preflight",
+            recoverable=True,
+            next_operation=operation,
+            task_id=task_id,
+        )
+        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+            transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})
+            write_json(transaction_path, transaction)
+            error["transaction_id"] = transaction.get("transaction_id")
+        return error
+
+
 PIPELINE_OPERATION_SCHEMA = {"type": "object", "properties": {"op": {"type": "string", "enum": ["add", "remove", "move", "replace", "rework"]}, "gate": {"type": "string"}, "before": {"type": "string"}, "after": {"type": "string"}, "index": {"type": "integer"}, "with": {"type": "array", "items": {"type": "string"}}}, "required": ["op", "gate"]}
 QUESTION_OPTION_SCHEMA = {
     "anyOf": [
@@ -4871,15 +5989,39 @@ QUESTION_TOOL_SCHEMA = {
     },
     "required": ["task_id", "principal"],
 }
+ORCHESTRATE_TOOL_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "operation": {"type": "string", "enum": sorted(ORCHESTRATE_OPERATIONS)},
+        "submission_id": {"type": "string", "description": "Required for every mutating operation; identical retries are replayed exactly."},
+        "project_root": {"type": "string", "minLength": 1, "description": "Absolute project workspace. Cortex state remains below project_root/.codex/cortex."},
+        "principal": {"type": "string", "minLength": 1},
+        "thread_id": {"type": "string"},
+        "task_id": {"type": "string"},
+        "wave_id": {"type": "string"},
+        "task": {"type": "object", "description": "Start-only immutable task contract."},
+        "waves": {"type": "array", "items": {"type": "object"}, "description": "Start-only full ordered execution-wave plan."},
+        "host_capabilities": {"type": "object", "description": "Start-only native model catalogs plus the optional confirmed spawn_agent_default_model."},
+        "completions": {"type": "array", "items": {"type": "object"}, "description": "Advance-only host completions with strict cortex/report/v1 reports."},
+        "gate_outcomes": {"type": "object", "description": "Optional explicit gate outcome overrides for advance."},
+        "future_waves": {"type": "array", "items": {"type": "object"}, "description": "Optional replacement for not-yet-started waves during advance."},
+        "allow_rework": {"type": "boolean", "default": False},
+        "reason": {"type": "string"},
+        "payload": {"type": "object", "description": "Operation-specific lane, resource, or question command payload."},
+    },
+    "required": ["operation", "project_root"],
+}
 TOOLS = {
+    "orchestrate": (orchestrate, ORCHESTRATE_TOOL_SCHEMA),
     "activate_orchestration": (activate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/cortex"}, "thread_id": {"type": "string", "minLength": 1}, "principal": {"type": "string", "minLength": 1}}, "required": ["user_command", "thread_id", "principal"]}),
     "deactivate_orchestration": (deactivate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/normal"}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["user_command"]}),
     "get_activation_status": (activation_status, {"type": "object", "properties": {"thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": []}),
     "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; Cortex appends only documentation and close when missing."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
     "init_task": (init_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "objective": {"type": "string"}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "classification_id": {"type": "string"}, "requirements": {"type": "array", "items": {"type": "string"}}, "acceptance_criteria": {"type": "array", "items": {"type": "string"}}, "scope": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "items": {"type": "string"}}, "verification": {"type": "array", "items": {"type": "string"}}, "budget": {"type": "string"}, "pause_conditions": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "thread_id": {"type": "string"}, "principal": {"type": "string"}, "user_language": {"type": "string"}, "replan_limit": {"type": "integer", "minimum": 0}}, "required": ["task_id", "objective", "classification_id"]}),
     "get_task_status": (status, {"type": "object", "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
-    "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}}, "required": ["agent", "task_kind", "risk"]}),
-    "record_delegation": (record_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "status_receipt": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "dispatch_mode": {"type": "string", "enum": ["hidden_subagent", "visible_thread"], "description": "visible_thread creates a user-owned Luna task through the native create_thread tool; use only with explicit user authorization."}, "luna_fallback": {"type": "string", "enum": ["terra", "visible_thread"], "description": "When explicitly user-authorized, visible_thread reroutes an unavailable Luna spawn_agent dispatch to native create_thread instead of Terra."}, "available_thread_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by native create_thread; required for visible_thread."}, "thread_environment": {"type": "string", "enum": ["local", "worktree"], "default": "local", "description": "Workspace for a visible_thread. The coordinator passes it as target.environment.type to create_thread; local uses the saved checkout and worktree creates an isolated checkout."}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}, "retry": {"type": "integer"}, "parallel": {"type": "boolean"}, "objective": {"type": "string"}, "ownership": {"type": "string", "minLength": 1}, "context_files": {"type": "array", "items": {"type": "string"}}, "context_report_ids": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}, "required": ["task_id", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"]}),
+    "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Host-configured agents.default_subagent_model used when native model is omitted."}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}}, "required": ["agent", "task_kind", "risk"]}),
+    "record_delegation": (record_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "status_receipt": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Confirmed host agents.default_subagent_model used when native model is omitted."}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "dispatch_mode": {"type": "string", "enum": ["hidden_subagent", "visible_thread"], "description": "visible_thread is an explicit user-owned task request and is never an automatic fallback."}, "luna_fallback": {"type": "string", "enum": ["terra"], "description": "Unavailable Luna hidden dispatches fall back to an explicit hidden Terra spawn_agent request."}, "available_thread_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by native create_thread; required only for an explicit visible_thread dispatch."}, "thread_environment": {"type": "string", "enum": ["local", "worktree"], "default": "local", "description": "Workspace for an explicitly requested visible_thread."}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}, "retry": {"type": "integer"}, "parallel": {"type": "boolean"}, "objective": {"type": "string"}, "ownership": {"type": "string", "minLength": 1}, "context_files": {"type": "array", "items": {"type": "string"}}, "context_report_ids": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}, "required": ["task_id", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"]}),
     "prepare_delegation": (prepare_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "delegation": {"type": "object"}}, "required": ["task_id", "principal", "delegation"]}),
     "prepare_delegations": (prepare_delegations, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "delegations": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object"}}}, "required": ["task_id", "principal", "delegations"]}),
     "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string", "minLength": 1, "description": "Native child id; for create_thread pass the returned threadId here."}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
@@ -4922,18 +6064,17 @@ TOOLS = {
     "reconcile_lane": (reconcile_lane, {"type": "object", "properties": {"lane_id": {"type": "string"}, "principal": {"type": "string"}, "run_id": {"type": "string"}}, "required": ["lane_id"]}),
 }
 
-# Keep routing descriptions synchronized with the default Luna-preserving
-# fallback.  The compact schema declaration above is intentionally retained,
-# while these assignments make the public MCP contract unambiguous.
+# Keep routing descriptions synchronized with the hidden Terra fallback. The
+# compact schema declaration above is intentionally retained, while these
+# assignments make the public MCP contract unambiguous.
 _delegation_schema_properties = TOOLS["record_delegation"][1]["properties"]
 _delegation_schema_properties["dispatch_mode"]["description"] = (
-    "visible_thread creates a user-owned Luna task through the native create_thread tool."
+    "visible_thread creates a user-owned Luna task only when explicitly requested; it is never a fallback."
 )
 _delegation_schema_properties["luna_fallback"]["description"] = (
-    "By default, visible_thread reroutes an unavailable Luna spawn_agent dispatch "
-    "to native create_thread instead of Terra; terra is an explicit compatibility opt-out."
+    "An unavailable hidden Luna dispatch falls back to an explicit hidden Terra spawn_agent request."
 )
-_delegation_schema_properties["luna_fallback"]["default"] = "visible_thread"
+_delegation_schema_properties["luna_fallback"]["default"] = "terra"
 
 # Keep the public MCP contract aligned with runtime authorization and validation.
 AUTHORIZED_TOOLS = {
@@ -4976,6 +6117,10 @@ TOOLS["record_delegation"][1]["required"] = [
 for _field in ("allowed_paths", "acceptance_criteria", "verification"):
     TOOLS["record_delegation"][1]["properties"][_field].pop("minItems", None)
 
+# Cortex v2 exposes one state-machine facade.  The legacy handlers remain
+# private implementation primitives so v7 ledgers can be resumed safely.
+PUBLIC_TOOLS = {"orchestrate": TOOLS["orchestrate"]}
+
 
 def respond(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -4983,7 +6128,7 @@ def respond(payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    global MCP_PROJECT_ROOT, MCP_OPENAI_FORM
+    global MCP_OPENAI_FORM
     # Use readline rather than a ``for line`` iterator because cortex.question
     # performs a nested JSON-RPC read while the originating tools/call is
     # suspended for host elicitation.
@@ -5014,27 +6159,31 @@ def main() -> None:
             elif method == "notifications/initialized":
                 continue
             elif method == "tools/list":
-                result = {"tools": [{"name": name, "description": name.replace("_", " "), "inputSchema": schema} for name, (_, schema) in TOOLS.items()]}
+                result = {"tools": [{"name": name, "description": "Run or recover the Cortex orchestration state machine.", "inputSchema": schema} for name, (_, schema) in PUBLIC_TOOLS.items()]}
             elif method == "resources/list":
                 result = {"resources": []}
             elif method == "resources/templates/list":
                 result = {"resourceTemplates": []}
             elif method == "tools/call":
                 name = request.get("params", {}).get("name")
-                if name not in TOOLS:
+                if name not in PUBLIC_TOOLS:
+                    if name in TOOLS:
+                        raise ValueError("removed_in_v2_use_orchestrate")
                     raise ValueError(f"unknown tool '{name}'")
                 arguments = request.get("params", {}).get("arguments", {})
                 if not isinstance(arguments, dict):
                     raise ValueError("tool arguments must be an object")
-                if not str(arguments.get("project_root") or "").strip() and MCP_PROJECT_ROOT is not None:
-                    arguments = {**arguments, "project_root": str(MCP_PROJECT_ROOT)}
-                requested_root = select_project_root(arguments)
-                if MCP_PROJECT_ROOT is not None and requested_root != MCP_PROJECT_ROOT:
-                    raise ValueError("Cortex MCP process is already bound to a different project_root")
-                MCP_PROJECT_ROOT = requested_root
-                value = TOOLS[name][0](arguments)
+                # The unified facade owns its validation and converts malformed
+                # workspace inputs into a recoverable structured diagnostic.
+                # Running the preflight here would turn expected coordinator
+                # mistakes (missing/relative project_root or CORTEX_ROOT) into
+                # MCP exceptions, polluting the sensitive tool-error journal
+                # and depriving the host of the facade's next_action.
+                if name != "orchestrate":
+                    select_project_root(arguments)
+                value = PUBLIC_TOOLS[name][0](arguments)
                 structured_error = _tool_result_error(value)
-                if structured_error:
+                if structured_error and name != "orchestrate":
                     log_tool_error(request, request_id, line.rstrip("\n"), ValueError(structured_error), value)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
             elif method == "ping":

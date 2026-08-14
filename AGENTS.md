@@ -11,10 +11,11 @@ returns to normal mode. Cortex does not register native bare `/cortex` or
 of orchestration, task complexity, or ordinary coding requests do not activate
 this policy.
 
-After explicit activation, the main agent calls `cortex-control`
-directly. For C2/C3 work, classify and initialize a durable task ledger before
-delegating, record each delegation and gate outcome, reassess the pipeline, and
-create a handoff before any pause or completion. Without activation, remain in
+After explicit activation, the main agent follows `cortex-control` and calls
+the single public `orchestrate` MCP tool. Start once with the complete task and
+wave plan, then advance once per completed wave; Cortex privately records the
+classification, delegations, evidence, gate outcomes, reassessment, and
+handoff. Without activation, remain in
 the normal Codex workflow and do not initialize the orchestration ledger,
 create lanes, or dispatch through this policy. C1 work uses the control plane
 only when explicitly activated and genuinely beneficial.
@@ -35,15 +36,23 @@ development-only support files.
 - Choose a subagent's model and reasoning effort at dispatch time from task risk and ambiguity. Agent profiles intentionally do not pin either setting.
 - Use the selected profile's exact `name` as the subagent display name and thread label; never invent or paraphrase a role name. If the creation API has no title field, preserve the exact name in the dispatch prompt and lifecycle context as the fallback identifier.
 - Every delegation record and dispatch must include the exact profile, selected model, reasoning effort, ownership and allowed paths, acceptance criteria, and verification responsibilities.
-- Supply the same explicit absolute `project_root` on every MCP call. Do not touch the project or dispatch a worker until activation, classification, initialization, and status confirm `${project_root}/.codex/cortex`; fail closed for MCP failure, a mismatched/unwritable root, `CORTEX_ROOT`, or any `/tmp` fallback.
+- The installer owns the global `[agents] default_subagent_model` setting. For a
+  configured-default Luna route, keep `expected_model` and
+  `model_resolution` as durable metadata, always send `reasoning_effort`, and
+  omit the native `spawn_agent.model`; use the host-reported child model for
+  confirmation. Never copy `expected_model` into the native call. Explicit
+  Terra/Sol/Luna overrides retain their native model field. When neither the
+  configured default nor explicit Luna is available, use a hidden Terra
+  fallback; never create a visible thread as a model fallback.
+- Supply the explicit absolute `project_root` on every MCP call. Do not touch the project or dispatch a worker until `orchestrate(operation="start")` returns `ready_to_spawn` and confirms `${project_root}/.codex/cortex`; fail closed for MCP failure, a mismatched/unwritable root, `CORTEX_ROOT`, or any `/tmp` fallback. One MCP process may serve multiple projects, but every task remains project-root bound.
 - Parallelize read-only exploration, review, testing, and analysis. Use one writer for an overlapping code area. Use separate worktrees for independent write streams.
 - Before finishing a change, run the relevant non-destructive verification and state any limitation plainly.
 - Treat source code, tests, and configuration as authoritative when they conflict with generated documentation.
 
 ## Cortex MCP tool-error log
 
-Cortex appends one JSON object per line for every MCP exception and for
-recoverable error-shaped tool result to the private per-user log
+Cortex appends one JSON object per line for MCP exceptions and legacy
+error-shaped tool results to the private per-user log
 `~/.codex/logs/cortex-tool-errors.jsonl`. The `~` is the home directory of the
 user running the MCP process, not the project directory or the Cortex ledger.
 The log is not rotated by this plugin.
@@ -51,12 +60,15 @@ The log is not rotated by this plugin.
 Each record normally contains `timestamp`, `event` (`tool_error`),
 `server_version`, `pid`, `error_type`, `error`, `method`, `tool`,
 `chat_session_id`, `thread_id`, `request_id`, `ids`, and `input`. A successful
-MCP call whose returned structure is classified as an error also has
+legacy MCP call whose returned structure is classified as an error also has
 `structured_result`. Use `chat_session_id`/`thread_id`, `request_id`, and the
 optional `ids` map to correlate one failure across retries. The `ids` map may
 contain `id`, `call_id`, `task_id`, `attempt_id`, `question_id`, `submission_id`,
 `status_receipt`, `report_receipt`, `verification_id`, `lane_id`, `run_id`,
 `host_agent_id`, and `turn_id` when those values were supplied.
+
+Expected `orchestrate` validation and recovery outcomes return `ok: false`
+with bounded diagnostics and are not appended to this exception log.
 
 Treat this file as sensitive diagnostic data. Cortex redacts common credential
 keys and values, bounds nested input/results, truncates oversized payloads,

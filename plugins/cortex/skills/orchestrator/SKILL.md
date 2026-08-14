@@ -7,409 +7,135 @@ description: Coordinate non-trivial coding work or source-backed repository know
 
 ## Native invocation and route selection
 
-In Codex Desktop, direct the user to select Cortex Orchestrator
-(`cortex:orchestrator`) through the Skills picker or mention
-`$cortex:orchestrator`. In Codex CLI, direct the user first to
-`$cortex:orchestrator`, or to `/skills` and then select
-`cortex:orchestrator`. Cortex does not register native bare `/cortex` or
-`/normal` commands: they are not registered native slash commands. Those and
-their arguments are optional textual shorthand only when the host passes them
-through instead of reserving them. Do not use the deprecated `/prompts`
-mechanism.
+In Codex Desktop, select Cortex Orchestrator (`cortex:orchestrator`) through
+the Skills picker or mention `$cortex:orchestrator`. In Codex CLI, lead with
+`$cortex:orchestrator`, or use `/skills` and select `cortex:orchestrator`.
+Cortex does not register native bare `/cortex` or `/normal` commands; they are
+textual shorthand and not registered native slash commands.
+Do not use the deprecated `/prompts` mechanism.
 
-Select exactly one route from the normalized argument after the skill name or
-the `/cortex` text prefix:
+Select exactly one route from the normalized argument:
 
 | Exact argument | Route | Effect |
 | --- | --- | --- |
-| `empty` | `orchestrate` | Default normal task orchestration. |
-| `help` | `help` | Explain usage and return without creating a ledger. |
+| `empty` | `orchestrate` | Default task orchestration. |
+| `help` | `help` | Explain usage without creating a ledger. |
 | `harvest` | `harvest` | Incrementally synchronize missing or stale knowledge docs. |
 | `harvest-refresh` | `harvest-refresh` | Fully re-audit knowledge docs from source evidence. |
 | `normal` | `normal` | Exit an active Cortex session without creating a task. |
 
-Do not guess unknown subcommands. Show the `help` route and ask the user to
-choose. Only exact lowercase route names are defined.
+Do not guess unknown arguments. Show the help route and ask the user to choose.
 
 ### Help route
 
 Report these facts concisely:
 
-- Desktop: choose Cortex Orchestrator (`cortex:orchestrator`) in the Skills
-  picker or send `$cortex:orchestrator`; CLI: send `$cortex:orchestrator` or
-  use `/skills` then select `cortex:orchestrator`. Append one exact argument
-  from the table when needed.
-- Textual shorthand: `/cortex`, `/cortex help`, `/cortex harvest`,
-  `/cortex harvest-refresh`, and `/normal` are interpreted text, not
-  registered native slash commands, and a host may reserve or reject them.
-- `orchestrate` is the default task route; `harvest` is incremental;
-  `harvest-refresh` is a full source-backed re-audit; `normal` exits an active
-  orchestration session.
-- Cortex uses a project-local `.codex/cortex` ledger only after explicit
-  activation. Workers are hidden, local control receipts do not prove a host
-  spawn, and source/tests outrank generated documentation.
+- Desktop uses `cortex:orchestrator` or `$cortex:orchestrator`; CLI uses
+  `$cortex:orchestrator` or `/skills`.
+- `/cortex` and `/normal` are textual shorthand, not
+  registered native slash commands.
+- Orchestration is opt-in and stores a project-local `.codex/cortex` ledger.
+- Cortex v2 exposes one MCP tool, `orchestrate`, and advances one dependent
+  worker wave per call.
+- Workers remain internal and source/tests outrank generated documentation.
 
-The help route is read-only. Do not activate Cortex, initialize a task, create
-a lane, dispatch a worker, or write project files merely to display help.
+Do not activate Cortex, initialize a task, dispatch a worker, or write project
+files merely to display help.
 
 ## Explicit activation
 
-The main/root Codex agent is the sole user-facing coordinator. Selecting this
-skill for `orchestrate`, `harvest`, or `harvest-refresh` explicitly activates
-the workflow. Selecting `normal` deactivates the active session and creates no
-task. `/cortex` and `/normal` may be treated as text only if the host passes
-them through; do not claim that either is a native slash command. Ordinary
-requests, complex requests, requests that merely mention orchestration, and
-ordinary use of subagents never activate durable orchestration implicitly.
+The non-help, non-`normal` routes explicitly authorize durable orchestration.
+Ordinary requests, complexity, or ordinary subagent use do not activate it.
+The `normal` route calls `orchestrate(operation="deactivate")`; it creates no
+task.
 
-After activation, the main agent calls the control plane directly before
-`init_task`. It passes the exact absolute `project_root` on activation, which
-immutably binds the MCP process; later calls may repeat it or let the process
-restore it. It
-must first complete `activate_orchestration` → `classify_task` → `init_task` →
-`get_task_status`. Until status confirms both that exact root and
-`${project_root}/.codex/cortex`, no project search, read, edit, command, test,
-or worker dispatch may occur. MCP absence, any failure, an unwritable ledger,
-a mismatched root, `CORTEX_ROOT`, or a `/tmp` fallback is a hard blocker: stop
-and report it; never continue through an ordinary-subagent or unledgered
-workflow. It may then coordinate, delegate, inspect worker reports, advance
-gates, and hand off, but project search, reads, execution, tests, builds, and
-edits belong to internal workers. Workers are never user-facing: all
-clarifications, escalations, blockers, and handoffs return to the main chat.
+Every Cortex call includes the exact absolute `project_root`. The server may
+serve multiple projects in one process, but task identity remains bound to the
+project-local ledger, coordinator principal, and thread. A missing or
+unwritable root, `CORTEX_ROOT`, or `/tmp` fallback is a blocker.
 
-Identity is part of the task contract. Every coordinator control-plane call
-must use the exact `principal` and bound `thread_id` returned by activation or
-task status; do not copy a native host thread id, child id, worker profile, or
-`/root` spelling into the other field. If a resumed host turn does not know the
-bound thread, omit `thread_id` and let the server restore the task-bound value;
-never guess a replacement. Worker reports are the only scoped exception and
-may use the confirmed host child id only when it maps unambiguously to that
-active attempt. An identity error is a stop-and-reconcile condition, not a
-prompt to retry with a different principal or thread.
+## One-call-per-wave workflow
 
-The classification receipt is authoritative for initial complexity,
-requirements, and pipeline. The main orchestrator must choose the complete
-optional gate list from the available gates and pass it as `classify_task.pipeline`.
-Use canonical IDs only: `plan`, `discover`, `architecture`,
-`database_architecture`, `implementation`, `qa`, `security`, `performance`,
-`accessibility`, `ux`, `review`, `documentation`, and `close`. Cortex accepts
-the bounded compatibility aliases `planning`, `discovery`, and
-`verification`, but the orchestrator must not emit those human labels.
-When independent gates have no dependency or resource conflict, also pass
-ordered `classify_task.parallel_groups` waves; gates in one wave may execute
-concurrently and the next wave waits until every gate in the current wave is
-resolved. Cortex still appends only the mandatory `documentation` and `close`
-gates. Do not try
-to reconstruct its pipeline in `init_task`; if a duplicate pipeline is supplied,
-Cortex ignores it and returns `pipeline_correction` rather than failing or
-weakening mandatory gates.
+1. State the goal, success criteria, constraints, paths, approval boundaries,
+   and user language. Classify the work as C1, C2, or C3.
+2. Build the complete ordered `waves` plan. Each wave contains only independent
+   gates/agents. Keep conflicting writers and dependent decisions in separate
+   waves. Cortex appends mandatory documentation and close waves when absent.
+3. Call `orchestrate(operation="start")` once. Pass a stable submission id,
+   task contract, full waves, coordinator identity, and exact native model
+   catalogs. Do not call private activation, classification, status, or
+   delegation functions.
+4. Invoke every returned native `spawn_request`. Use the exact host tool,
+   profile name, reasoning effort, prompt/message, and optional thread
+   environment. For `model_resolution = "configured_default"`, preserve the
+   omitted `model` key so Codex resolves
+   `agents.default_subagent_model = "gpt-5.6-luna"`; use `expected_model` only
+   as request metadata and verify the actual child settings independently.
+   Pass only keys that are real arguments of the returned native request:
+   never copy `expected_model` into `spawn_agent.model`.
+   Workers do not call Cortex; they return their strict report in the native
+   parent/child result.
+5. Wait for every worker in the wave. Route questions through the native
+   parent channel and main chat. Use `operation="question"` only when a
+   durable question record is required.
+6. Call `orchestrate(operation="advance")` once with all completions. Passed
+   completions include the actual host identity/model/effort and exactly eight
+   report fields: `summary`, `findings`, `questions`, `changed_files`, `tests`,
+   `evidence`, `uncertainty`, and `next_action`.
+7. Spawn the returned next wave and repeat. If evidence changes scope, include
+   a complete `future_waves` replacement in the same `advance` call. Use
+   `allow_rework=true` only for intentional completed-gate rework.
+8. Finish only after the final `advance` returns `state="completed"`. Cortex
+   internally reconciles reports, evidence, documentation, verification,
+   changed files, handoff, and close invariants.
 
-## Intake and dispatch
+Normal orchestration must use only `start` and `advance`. `inspect`, `resume`,
+and `deactivate` are recovery/session operations; `lane`, `resource`, and
+`question` are uncommon nested modes. Never retry through removed legacy tool
+names.
 
-1. State the goal, acceptance criteria, constraints, affected area, and approval boundaries. Select the full initial gate list from Cortex's available gates and pass it to `classify_task.pipeline`; use the requirements as the evidence/rationale for that choice. Pass `parallel_groups` when two or more selected gates are independent; never group conflicting writers or gates with a dependency. Cortex will append only `documentation` and `close` when they are absent. If discovery changes the scope or dependencies, call `reassess_pipeline` with a new complete `pipeline` and (when needed) `parallel_groups`; apply it only after reviewing the proposed replacement, and set `allow_rework: true` when intentionally removing a completed gate.
+## Dispatch and worker contract
 
-   Reassessment has an explicit preview/apply protocol. For a preview, send
-   `apply: false` with `decision: unchanged` and inspect `operations`, the
-   suggested pipeline, and the returned revision. Apply only a reviewed
-   change with `apply: true`, the returned `expected_revision`, and
-   `decision: updated`; if there are no pipeline or wave operations, keep the
-   decision `unchanged`. A `rework_gate` is an applied update and therefore
-   also requires `decision: updated`, a reason, and `allow_rework: true` when
-   completed evidence is being invalidated. Never send `decision: updated`
-   with `apply: false`, and never omit the decision on C2/C3.
-2. Inspect relevant project and feature documentation when present; source and tests win if they conflict.
-3. Classify by shape: C1 is local and low-risk; C2 spans a component or has uncertainty; C3 crosses systems, data, security, infrastructure, or has high rollback cost.
-4. Choose models and reasoning effort per dispatch. Use one writer for overlapping paths, parallelize independent read-only work, and run independent verification before completion.
+Use the bundled profiles (`explorer`, `planner`, `architect`, `general`,
+`qa_engineer`, `code_reviewer`, `security_auditor`, `technical_writer`, and
+specialists). The coordinator owns scope and integration. Workers own only
+their declared paths and acceptance criteria, do not subdelegate without
+explicit authorization, and emit English only.
 
-   Before dispatch, take the model and reasoning effort the orchestrator would
-   otherwise request, normalize `none` to `low`, and apply exactly this
-   remapping table:
+Model choice is per delegation. Luna handles reading, discovery, research,
+review, CRUD work, and small fixes; Terra handles broader implementation,
+architecture, migration, and debugging; security routes start from Sol. The
+runtime's exact remapping table and host capability checks are authoritative.
+Never claim a requested or expected model was used when the host returned
+another model. Explicit Terra/Sol/Luna requests retain a native `model`
+override; configured-default Luna requests omit it and always carry an
+explicit reasoning effort.
 
-   - `gpt-5.6-terra` + `low` → `gpt-5.6-luna` + `high`;
-   - `gpt-5.6-terra` + `medium` → `gpt-5.6-luna` + `high`;
-   - `gpt-5.6-terra` + `high` → `gpt-5.6-luna` + `xhigh`;
-   - `gpt-5.6-sol` + `low` → `gpt-5.6-terra` + `xhigh`;
-   - `gpt-5.6-sol` + `medium` → `gpt-5.6-terra` + `max`.
+The worker's final report is not user-facing. The coordinator translates and
+integrates it. A worker without a strict report cannot be passed; submit a
+terminal non-success completion with an explicit reason.
 
-   For every other model/effort pair, preserve the resolved model and effort
-   unchanged. This table is authoritative even when the initial route is a
-   security or Sol route; do not apply a broader substitution. If the target
-   model is unavailable, follow the documented host-capability fallback and
-   record the actual worker and effort rather than claiming the remapped route.
+## Recovery
 
-Before every native `spawn_agent` call, inspect the host tool's accepted model
-values and pass the exact list as `available_models` when preparing the Cortex
-delegation. Also inspect `create_thread` and pass its exact catalog as
-`available_thread_models` whenever the resolved route can be Luna. If the hidden
-host lacks Luna but the thread host exposes it, Cortex creates a visible Luna
-thread instead of silently replacing the worker with Terra. Other missing
-required routes fail closed. `luna_fallback: terra` is an explicit compatibility
-opt-out, not the default. After every native
-`spawn_agent` call, confirm the returned child with the
-actual `host_model` and `host_reasoning_effort`, not only the child id. Cortex
-requires the actual host model for model-routed attempts; a missing model is
-recoverable, while a requested/actual mismatch (for example Luna requested but
-Terra started) records `host_model_mismatch` and must not be reported as a
-successful worker.
+- Replay an identical mutating request with the same `submission_id`; a changed
+  request uses a new id.
+- Use `inspect` after interruption. It reconstructs a facade plan for existing
+  v7 tasks when necessary.
+- Follow `ok=false`, `diagnostics`, and `next_action`; do not invent receipts,
+  attempts, or identities.
+- Use `resume` only after resolving a recorded blocker.
+- Use `lane` and `resource` modes for durable worktrees or exclusive resources,
+  with expiries and clean release.
 
-`visible_thread` is the user-owned route used when Luna cannot be spawned by
-the hidden host, and can also be selected explicitly when a visible task is
-wanted unconditionally. Pass the exact `create_thread` catalog as
-`available_thread_models`; Cortex returns `spawn_request.host_tool` as
-`create_thread`, with `prompt`, `title`, the remapped model and reasoning
-effort, and `thread_environment` (default `local`). Apply only the exact
-remapping table above; otherwise preserve the route's effort and model. Call
-`list_projects` before creating a repository task and map
-`thread_environment` to the native target: pass `environment: {type: "local"}`
-to use the saved checkout, or `environment: {type: "worktree"}` only when
-isolation was explicitly requested. Local threads share files and uncommitted
-changes, so serialize writers; worktrees remain the isolation option for
-concurrent edits. Confirm the returned `threadId` through
-`confirm_host_spawn` as `host_agent_id`, with `host_tool: create_thread`, then
-monitor with `wait_threads`, read with `read_thread`, and send follow-ups with
-`send_message_to_thread`. A visible task is user-owned and may appear in the
-sidebar. When the hidden catalog lacks Luna, the automatic fallback is
-intentionally visible so the Luna policy is not misrepresented as Terra.
-
-When `spawn_agent` cannot accept Luna, keep both host catalogs on the
-delegation and leave `luna_fallback` unset: Cortex defaults to
-`luna_fallback: visible_thread`, keeps a hidden Luna subagent when that tool
-supports Luna, and otherwise returns a `create_thread` Luna request. Use
-`luna_fallback: terra` only when the caller explicitly accepts a Terra worker.
-
-Use only the 21 profiles declared in `plugins/cortex/profiles.json`;
-`task_formatter` is retired. Record task kind, risk, complexity, requested
-capability, and the resolved capability. With multi-agent v2 enabled, every
-delegation is evaluated independently from its declared work intent and risk.
-Use Luna for reading, discovery/data gathering, investigation, diagnosis,
-research, code review, CRUD-level edits, and small fixes when `task_kind`
-explicitly declares that intent, at any risk and regardless of the parent
-task's C1/C2/C3 classification. A read-only profile alone does not imply Luna:
-non-analysis work such as architecture, migration, debugging, or implementation
-initially uses Terra, then follows the exact model/effort remapping table above.
-Use canonical task kinds such as `discover`, `data_gathering`,
-`runtime_investigation`, `diagnosis`, `research`, or `code_review` when the
-worker is collecting facts or analyzing a bounded problem; do not hide that
-intent behind a generic `implementation` task kind.
-Security task kind, the security gate, and the `security_auditor` profile
-initially resolve to Sol; apply the exact remapping table above to the resolved
-model and effort before dispatch. Contradictory task kinds are normalized to
-security.
-Non-security Sol requires a structured `sol_escalation`: either a supported,
-auditable extreme criterion with an `audit_ref`, or a `terra_failure` linked to
-a failed Terra attempt in the current ledger. Free-form `escalation_reason`
-text is context only and cannot authorize Sol. Supported auditable-extreme
-criteria are `irreversible_multi_system_recovery`,
-`safety_critical_incident_response`, and
-`novel_cross_system_failure_without_bounded_rollback`. For Luna
-analysis/lightweight work, default/minimum reasoning is `medium` at
-low/moderate risk, `high` at high risk, and `xhigh` at critical risk; explicit
-higher requested effort is preserved. Otherwise reasoning is selected
-independently of routing; requested effort `none` becomes `low`.
-
-Internal worker execution is English-only: worker prompts, tool arguments,
-reports, findings, question records, handoffs, and audit events must be in
-English. The main coordinator owns user-facing language and must use the
-language of the task or an explicit `user_language` when presenting questions,
-blockers, decisions, and summaries. It may pass localized display fields to
-`cortex.question`; durable English worker records remain authoritative.
-This applies to every worker-emitted message, including commentary, progress
-updates, and final answers. A visible Luna task remains an English-only
-execution channel even though it appears in the sidebar; non-English task text
-is input data, and only the main coordinator may localize it for the user.
-
-For repository/code discovery, every worker must first call
-`mcp__codebase_memory__list_projects`, match the exact absolute `project_root`
-to an indexed project, and pass the returned project identifier/path to later
-codebase-memory tools. Never guess the project identifier. Only after that
-lookup, prefer `search_graph` for definitions and relationships, `search_code`
-for textual matches, `trace_path` for callers/dependencies/data flow, and
-`get_code_snippet` only after locating the exact symbol. Do not begin with
-`grep`, `rg`, globbing, or ad-hoc filesystem scans while codebase-memory is
-available. If `list_projects` fails, the MCP is unavailable, or no indexed
-project matches, do not call the other codebase-memory tools; state that
-limitation in the report and use another search method only as a documented
-fallback. Never claim codebase-memory evidence that was not obtained.
-
-The available codebase-memory tools are used as follows:
-
-- `list_projects({})` — mandatory first step; select the indexed record whose
-  `root_path` exactly equals the task's absolute `project_root`, then pass its
-  returned `name` as `project`.
-- `index_status({project})` — verify that the selected project is indexed and
-  sufficiently fresh before relying on graph results.
-- `search_graph({project, query})` — recommended natural-language/BM25
-  discovery. Use `name_pattern` for exact symbol patterns, `semantic_query` as
-  an array of keywords only on moderate/full indexes, and `label`,
-  `file_pattern`, `relationship`, `include_connected`, `limit`, or `offset` to
-  constrain results.
-- `search_code({project, pattern})` — graph-enriched text matching. Choose
-  `mode: compact` for signatures/metadata, `full` for source context, or
-  `files` for paths; `regex`, `path_filter`, `file_pattern`, `context`, and
-  `limit` refine the search.
-- `trace_path({project, function_name})` — callers, callees, dependencies, or
-  data flow. Use a qualified name from `search_graph`; choose `mode: calls`,
-  `data_flow`, or `cross_service`, plus `direction`, `depth`, `include_tests`,
-  `parameter_name`, and `risk_labels` as needed.
-- `get_code_snippet({project, qualified_name})` — source for an exact symbol,
-  normally after `search_graph`; `include_neighbors` adds surrounding symbols.
-- `get_architecture({project, aspects})` — high-level packages, services,
-  dependencies, and project structure.
-- `query_graph({project, query, max_rows})` — explicit multi-hop Cypher
-  analysis; use only when the simpler graph tools cannot express the question.
-
-`index_repository`, `ingest_traces`, `manage_adr`, and `delete_project` change
-indexed state or durable knowledge. They are not discovery fallbacks and may be
-used only with explicit authorization and an appropriate ownership boundary.
-
-For resumable, auditable coordination, use this plugin's `cortex-control`
-skill. It records gates and delegation packages in the current repository and
-never pins a profile model or replaces the parent Codex dispatch decision.
-
-Every worker should publish one strict `cortex/report/v1` payload through
-`record_report`: `summary`, `findings`, `questions`, `changed_files`, `tests`,
-`evidence`, `uncertainty`, and `next_action`. After host completion or timeout,
-the coordinator must finalize the corresponding attempt with
-`finalize_attempt` and one of `passed`, `failed`, `blocked`, `cancelled`, or
-`superseded`; every non-`passed` status requires a reason. C2/C3 evidence must
-consume the attempt's one-use report receipt, and passed attempts still need
-linked evidence. An invalidated running attempt may only be finalized as
-`superseded` with a reason; already-terminal invalidated attempts remain
-idempotent. A terminal non-success attempt may have no report, remains visible
-in task status, and a gate with only terminal non-success attempts may pass
-without report or evidence when acceptance permits partial failure. It may also
-be carried through a closing gate when the acceptance criteria allow partial
-failure; the coordinator must explicitly report that partial failure. Share
-report bodies only through explicit per-attempt context grants; task listings
-expose metadata. JSON records are authoritative and escaped Markdown is
-generated. Use `reconcile_report_bus` after interruption because file
-replacement is atomic individually, not as a multi-file transaction.
-Treat every `recorded: false` or `recoverable: true` response as a control-plane
-correction, not as permission to dispatch another worker. Follow its explicit
-`next_action` and reuse the existing attempt whenever it names candidate
-attempts. In particular, a documentation-gate evidence or receipt mismatch
-must be repaired with `record_evidence`/`record_gate_outcome`; never launch a
-second `technical_writer` for the same unresolved receipt. If the same
-recoverable reason repeats, stop dispatching, preserve the exact error in the
-current report, and route the gate to repair or handoff.
-The spawn briefing supplies the canonical `attempt_id` and a lowercase stable
-`submission_id`; native workers may omit either field only when the server can
-infer an unambiguous active attempt, and the server then derives a deterministic
-submission id. The coordinator must monitor each worker individually: wait for
-host completion, poll `list_worker_questions` during every native wait interval,
-inspect `get_task_status` and the report/question buses after every completion,
-timeout, or newly listed question, preserve exact Cortex tool errors in the
-worker report, and finalize a worker with the exact error as the reason if it
-cannot report.
-
-Treat the following as protocol violations with one deterministic recovery,
-not as reasons to start another worker:
-
-- Do not rework a gate, advance a wave, or consume evidence while any prior
-  attempt is still active. Finalize cancelled/stale workers first. After an
-  attempt becomes terminal or invalidated, its worker must not publish a late
-  report; preserve the stale-attempt error and stop. A retry-budget response
-  means rework the gate with new evidence (or create a handoff and pause), not
-  a third delegation to the same gate.
-- Reuse a `submission_id` only for an identical report payload. A corrected
-  report gets a new lowercase id. The report must contain exactly all eight
-  fields, including `evidence: []` when there is no evidence; do not send a
-  partial object and do not retry a changed payload under the old id.
-- Link evidence only to an attempt whose current status is `running` or
-  `passed` and whose gate is the current gate. Failed, blocked, cancelled, and
-  superseded attempts do not receive report evidence. Use the exact
-  `report_receipt` returned for that attempt; consume it once, then never
-  replay it. For command proof, pass the exact `verification_id` from the
-  fixed verification catalog—never a report, attempt, or guessed id.
-- C2/C3 never skip `documentation` or `close`. Delegate `documentation` to
-  `technical_writer`, record its `updated`/`not_applicable` decision evidence,
-  and create a current-gate handoff before recording a blocked outcome. A
-  blocked pause without that handoff is incomplete; repair the handoff before
-  retrying the gate.
-
-### User decisions and question UI
-
-Questions belong to the main chat, even when they originate inside a hidden
-worker. A worker must use `cortex.question` for a real ambiguity, branch,
-approval, or missing requirement and must not silently choose among materially
-different alternatives. Supplying `attempt_id` records the question on the
-durable worker bus and returns `pending_user_input`; it deliberately does not
-open a worker-local form. The coordinator polls `list_worker_questions`, then
-calls `cortex.question` with the question's `question_id` in the main chat.
-That call opens the host-native MCP elicitation UI and persists the answer back
-to the worker. Options are single-select by default; `multiple: true` renders
-multi-select checkboxes. Every form ends with a free-form `custom_response`
-field so the user can add context, paste a path, or provide any other answer.
-The coordinator forwards the exact accepted content, including structured host
-attachment/image fields when present, and the worker polls
-`get_worker_question_updates` before continuing. A declined, cancelled, or
-unavailable form is a blocker/question outcome, not permission for the worker
-to guess.
-
-Several workers may ask questions concurrently. The question bus keeps a
-global sequence plus each attempt id; the coordinator must answer open
-questions independently in sequence order (or explicitly group them), never
-merge answers across attempts, and continue polling until `open_count` is zero.
-
-For round-trip reduction, use `prepare_delegation` for the status-receipt plus
-delegation fast path, `prepare_delegations` for independent `parallel=true`
-workers across the current executable gate wave, `complete_attempt` for host
-confirmation plus an
-optional strict report and terminal status, `commit_gate` for evidence plus a
-gate transition, and `close_audit` for report listing plus reconciliation.
-These are typed fast paths; a batch rolls back on a routing/validation failure
-and returns the exact error, while the legacy tool sequences remain the
-fallback for older adapters and recovery.
+Before compaction or a user-facing final response, preserve the exact task id,
+wave, attempts, decisions, changed paths, verification results, risks, and next
+action. Do not include secrets, raw prompts, or private telemetry.
 
 ## Knowledge routes
 
-For both knowledge routes, read the bundled `knowledge-harvest` and
-`documentation-sync` skills completely. Their allowed documentation paths and
-generated-block preservation rules are mandatory. Activate Cortex, classify
-the work, initialize a task, and retain the standard gates, receipts,
-reassessment, project-manifest reconciliation, and final handoff.
-For a skill-row knowledge route, pass the control plane its canonical `/cortex`
-activation token and the exact absolute `project_root` after route selection;
-the route argument remains in the task objective and is not presented as a
-separately registered host command. The server launch pattern is
-`python3 /absolute/plugin/path/scripts/cortex.py` with the project supplied in
-each JSON-RPC `tools/call.arguments.project_root`; do not rely on plugin cwd,
-`CORTEX_PROJECT_ROOT`, `CORTEX_ROOT`, or `/tmp` fallback for a real task.
-
-Dispatch in this order:
-
-1. An `explorer` owns read-only repository evidence. It reports source paths,
-   tests, entry points, tooling, and which allowed docs are missing or
-   contradicted. It never edits.
-2. A `technical_writer` owns only the justified allowed documentation paths.
-   It cites the explorer evidence, preserves protected manual content, and
-   reports every created, updated, and preserved file.
-3. Independently verify scope, facts, generated-block boundaries, links,
-   commands where safe, and the project manifest. Reconcile every changed path
-   before the documentation and close gates, then create the final handoff.
-
-### `harvest`
-
-Perform an incremental evidence scan. Create a missing allowed document only
-when source evidence justifies its required content. Update an existing
-document only when its generated facts are missing, stale, or contradicted.
-Do not rewrite current generated facts, unchanged files, or manual text merely
-for style. The handoff must include the before/after project-manifest receipt,
-the evidence for each changed doc, and an explicit list of preserved docs.
-
-### `harvest-refresh`
-
-Perform a full source-backed re-audit of every allowed project and discovered
-feature document, even when it appears current. Replace facts only inside
-`<!-- GENERATED:START -->` and `<!-- GENERATED:END -->` blocks unless verified
-source evidence contradicts manual text; in that case, preserve the manual text
-and report the contradiction for the user unless they explicitly authorized
-editing it. Never overwrite ADRs, manually recorded gotchas, or manual feature
-explanations implicitly.
-
-Run the full verification set recorded in `docs/project/verification.md` when
-safe and applicable, validate internal links and documented file paths, then
-repeat the refresh planning pass. The second pass must propose no file changes;
-otherwise resolve the non-idempotence before closing. The handoff must record
-full-scan coverage, preservation decisions, verification evidence, the final
-project-manifest receipt, and the idempotence result.
+For `harvest` and `harvest-refresh`, also follow the bundled
+`knowledge-harvest` skill. Represent discovery, writing, verification,
+documentation, and close as normal Cortex waves. Incremental harvest changes
+only stale or missing generated facts. Refresh re-audits source-backed facts,
+preserves manual text outside generated blocks, and verifies an idempotent
+second pass.

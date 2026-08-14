@@ -6,6 +6,18 @@ same base version.
 
 ## [Unreleased]
 
+- Replace the 48-tool public MCP surface with one `orchestrate` facade while
+  keeping v7 lifecycle primitives private for ledger compatibility.
+- Add one-call start, one-call-per-wave advancement, durable operation
+  receipts, profile preloading, multi-project MCP reuse, and nested
+  lane/resource/question modes for the 2.0.0 release.
+- Route omitted Luna model overrides through the configured global
+  `agents.default_subagent_model`, keep expected-model metadata separate from
+  native requests, and make the installer enforce the default atomically with
+  a private backup before replacing another value plus dry-run/check coverage.
+- Remove automatic visible `create_thread` fallback. An unavailable hidden
+  Luna route now stays hidden and uses an explicit Terra override; visible
+  threads remain an independently requested workflow only.
 - Let visible Cortex threads request the saved Local checkout by default, with
   an explicit worktree option for isolation.
 - Harden coordinator/worker protocol guidance for bound identities,
@@ -14,9 +26,9 @@ same base version.
   child ids are now accepted as aliases only for their own worker reports.
 - Catalog submission, remote provenance, and tagged installation remain
   pending external release authorization and verification.
-- This checkout has an unborn `HEAD`; a committed release tree and a passing
-  `verify-cortex-release.py --require-tracked` check remain prerequisites to
-  any publication claim.
+- The 2.0 working-tree changes remain uncommitted; a committed release tree and
+  a passing `verify-cortex-release.py --require-tracked` check remain
+  prerequisites to any publication claim.
 
 ## [1.0.6] - 2026-08-14
 

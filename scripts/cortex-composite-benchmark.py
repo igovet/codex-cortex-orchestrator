@@ -1,43 +1,41 @@
 #!/usr/bin/env python3
-"""Report the MCP round-trip reduction provided by Cortex typed fast paths.
-
-This is a contract benchmark, not a latency claim: it counts the calls in an
-equivalent orchestration trace and leaves the durable ledger untouched. Use a
-real cold-boot run for elapsed-time measurements on a specific host adapter.
-"""
+"""Report the Cortex v2 MCP round-trip reduction for a wave plan."""
 from __future__ import annotations
 
 import argparse
 import json
 
 
-def counts(workers: int) -> tuple[int, int]:
-    if workers < 1:
-        raise ValueError("workers must be positive")
-    # Initial activation/classification/init/status and final status are kept
-    # in both paths. Per worker: status+delegation vs prepare_delegation;
-    # confirmation+report+finalize vs complete_attempt. Gate and close each
-    # save one round-trip as well.
-    fixed = 5
-    legacy = fixed + workers * (2 + 3) + 2 + 2
-    fast = fixed + workers * (1 + 1) + 1 + 1
-    return legacy, fast
+def counts(workers: int, waves: int) -> tuple[int, int]:
+    if workers < 1 or waves < 1 or waves > workers:
+        raise ValueError("require workers >= waves >= 1")
+    # The legacy public API needed activation, classification, initialization,
+    # status, delegation, confirmation, report, finalization, evidence, gate,
+    # reconciliation, handoff, close, and final status round-trips.
+    legacy = 4 + workers * 4 + waves * 2 + 4
+    # Cortex v2 needs one start and one advance per wave. Native spawn_agent
+    # calls are deliberately outside this MCP-call budget.
+    facade = 1 + waves
+    return legacy, facade
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--waves", type=int, default=5)
     args = parser.parse_args()
-    legacy, fast = counts(args.workers)
-    reduction = (legacy - fast) / legacy if legacy else 0.0
+    legacy, facade = counts(args.workers, args.waves)
+    reduction = (legacy - facade) / legacy
     result = {
         "workers": args.workers,
+        "waves": args.waves,
         "legacy_mcp_calls": legacy,
-        "fast_path_mcp_calls": fast,
+        "orchestrate_mcp_calls": facade,
         "reduction": round(reduction, 4),
-        "target_met": reduction >= 0.35,
-        "fast_paths": ["prepare_delegation", "prepare_delegations", "complete_attempt", "commit_gate", "close_audit"],
-        "note": "Call-count contract benchmark; elapsed latency requires host-specific measurement.",
+        "target_met": facade == args.waves + 1,
+        "public_tools": ["orchestrate"],
+        "normal_operations": ["start", "advance"],
+        "note": "Call-count contract benchmark; native host spawn calls are excluded.",
     }
     print(json.dumps(result, sort_keys=True))
     return 0

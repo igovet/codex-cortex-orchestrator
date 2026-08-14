@@ -1,39 +1,32 @@
 # Gotchas
 
 - Command evidence must include an explicit `exit_code`; a textual claim that
-  a command was green is not sufficient. For a C2/C3 close gate, use
-  `execute_verification_command`: only its server-observed exit-0 command
-  receipt can satisfy close.
+  a command was green is not sufficient. The final C2/C3 `advance` privately
+  runs the allowlisted close verification and requires its server-observed
+  exit-0 receipt; coordinators must not call the private verification primitive.
 - Bearer tokens, URI credentials, quoted secrets, and secret-like environment
   assignments are redacted before ledger persistence. Do not place real secrets
   in task prompts or reports.
-- `claim_resource` is the explicit exclusive-resource API. Use an expiry for
-  ports, processes, databases, branches, and other resources that may survive a
-  crashed agent.
-- An activation is bound to the initialized task and its active-thread mapping;
-  it cannot authorize a different task. The mapping is cleaned when a task
-  completes. Stale entries from older schema versions should be removed by the
-  owning operator after review. Cortex v7 does not read or migrate older tasks
-  or lanes; create new records.
+- `orchestrate(operation="resource", payload.command="claim")` is the explicit
+  exclusive-resource API. Use an expiry for ports, processes, databases,
+  branches, and other resources that may survive a crashed agent.
+- The v2 coordinator workflow is `orchestrate(start)` followed by one
+  `orchestrate(advance)` call for each completed wave. Historical `cortex/v7`
+  tasks remain inspectable and resumable through recovery operations, but v7
+  primitive names are private implementation details and are not a public
+  coordinator workflow.
 - C2/C3 gates cannot silently skip or remove `documentation` or `close` from
   the pipeline. There is no `learn` gate. The documentation gate must be
   delegated to `technical_writer` and record `updated` or justified
   `not_applicable`; close also requires at least one reassessment receipt.
   Other skipped C2/C3 gates require an explicit reason.
-- `reassess_pipeline` uses a two-step preview/apply contract: preview with
-  `apply=false, decision=unchanged`, then apply a reviewed change with the
-  returned revision and `apply=true, decision=updated`. A no-op stays
-  `unchanged`; never omit the C2/C3 decision or claim `updated` without
-  applied operations.
-- Call `classify_task` before `init_task`; its classification receipt is bound
-  to the activated principal, complexity, and requirements. Before every
-  delegation, obtain a current `get_task_status` receipt: it is single-use and
-  revision-bound.
-- Classification runs before a task directory exists, so its one-time receipt
-  is staged under the ledger root rather than inside a task directory. It is
-  activation-bound, consumed by `init_task`, and linked back to the resulting
-  task through `consumed_by`; it is not a worker report or task-owned mutable
-  state.
+- Use `advance` to submit a reviewed future-wave replacement. A no-op remains
+  unchanged; never claim a C2/C3 documentation or reassessment decision was
+  applied without the corresponding durable operation. Replacing completed
+  work requires `allow_rework=true`.
+- `start` creates the authoritative classification and initializes the task;
+  callers must not synthesize lifecycle receipts. Classification provenance is
+  ledger state, not a worker report or task-owned mutable input.
 - `principal` and `thread_id` are separate identity fields. Every coordinator
   call should send both. If a native call omits `principal`, Cortex may recover
   it only from the exact task-bound `thread_id`; an unrelated thread is
@@ -50,12 +43,17 @@
   `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
   the chat/thread session id, JSON-RPC request id, and any task/attempt or
   other call ids, but never stores secret-like input values verbatim.
-- Every control-plane call for a real task must include its exact absolute
-  `project_root`. Do not touch the project or dispatch a worker until
-  activate → classify → `init_task` → `get_task_status` confirms
-  `${project_root}/.codex/cortex`. MCP absence, failure, a read-only/mismatched
-  root, `CORTEX_ROOT`, or `/tmp` is a hard blocker, not permission to fall
-  back to unledgered work.
+- Expected facade input failures (for example, a missing or relative
+  `project_root`, malformed start plan, invalid completion report, or host-model
+  mismatch) return a recoverable `orchestrate` result with `ok: false`,
+  diagnostics, and `next_action`. They are validated before lifecycle writes
+  where possible and are not MCP transport exceptions or tool-error-journal
+  events. Correct the payload and use a fresh `submission_id`; reuse an id only
+  for a byte-identical replay.
+- Every `orchestrate` call for a real task must include its exact absolute
+  `project_root`. The server is multi-root: do not assume a process-wide root
+  binding. A failed, read-only, or mismatched selected root is a hard blocker,
+  not permission to fall back to unledgered work.
 - A C2/C3 pause needs a handoff at the current gate. A final handoff must
   account for all changed project-relative files under the manifest policy;
   `reconcile_project_files` is useful to find omitted additions, deletions,
@@ -74,15 +72,15 @@
   worktree, and managed worktrees must be clean.
 - The ledger serializes each mutation and atomically replaces individual JSON
   files, but does not provide cross-file crash atomicity or remote/distributed
-  locking. `record_delegation` leaves an attempt `awaiting_host_spawn`; the
-  coordinator must invoke native `spawn_agent`, or an explicitly user-authorized
-  `create_thread` for `dispatch_mode: visible_thread`, then use
-  `confirm_host_spawn` with the returned child/thread id before it can run.
-  The visible-thread route requires the exact `create_thread` catalog in
-  `available_thread_models`, stays on the Luna policy route, and preserves the
-  dynamically selected reasoning effort rather than forcing `max`. When the
-  hidden host catalog lacks Luna, this route is the automatic replacement for a
-  hidden subagent so the worker is not misrepresented as Terra. That id is a
+  locking. `advance` returns host dispatch instructions; the coordinator then
+  invokes native `spawn_agent`, or an explicitly user-authorized
+  `create_thread` for a visible task, and supplies the actual host result in a
+  later `advance` completion. Native host calls are not MCP public tools.
+  The explicitly requested visible-thread route requires the exact
+  `create_thread` catalog in `host_capabilities.create_thread_models`, stays on
+  the Luna policy route, and preserves the dynamically selected reasoning
+  effort rather than forcing `max`. It is never an automatic replacement for
+  a hidden subagent. That id is a
   coordinator-recorded correlation, not independent proof from the host. Hooks
   remain best-effort, privacy-limited lifecycle telemetry rather than command
   or spawn proof.
@@ -92,11 +90,10 @@
   saved checkout and uncommitted changes, so concurrent writers must be
   serialized.
 - `create_thread` is inherently visible/user-owned; it has no hidden mode.
-  Keep `dispatch_mode` at `hidden_subagent` when the host advertises Luna. If
-  the hidden host cannot spawn Luna, pass both host catalogs and leave
-  `luna_fallback` unset: Cortex creates a Luna `create_thread` request rather
-  than a Terra worker. Set `luna_fallback: terra` only as an explicit
-  backwards-compatible opt-out.
+  Normal model routing keeps `dispatch_mode` at `hidden_subagent`. Pass the
+  confirmed `host_capabilities.spawn_agent_default_model` only after the host
+  loaded it; otherwise Cortex uses explicit Luna when supported and hidden
+  Terra when it is not. `luna_fallback` defaults to and accepts only `terra`.
 - If a task is rejected with `orchestration is inactive`, explicitly select a
   non-help Cortex skill route. The skill supplies the server's canonical
   `/cortex` activation token.
@@ -133,19 +130,25 @@
   model/effort remapping table. Luna analysis/lightweight work defaults to and
   floors at medium effort for low/moderate risk, high for high risk, and xhigh
   for critical risk.
-- Host model confirmation is strict: `confirm_host_spawn` requires the actual
-  `host_model`, verifies it against the requested dispatch model, and marks a
-  mismatch such as requested Luna/actual Terra as `host_model_mismatch` rather
-  than allowing a false successful Luna result. A missing host model is a
-  recoverable response that must be retried with the host's actual model.
-- Classification receipts are authoritative. `init_task` ignores duplicate
-  model-generated `complexity` and `requirements` fields instead of comparing
-  them byte-for-byte.
+- Host model confirmation is strict: an `advance` completion must include the
+  actual `host_model`. Cortex verifies it against `expected_model`, even when
+  a configured-default request intentionally omitted native `model`; explicit
+  Terra/Sol/Luna overrides remain separate request metadata. A mismatch such
+  as expected Luna/actual Terra is rejected during batch preflight rather than
+  allowing a false successful result or partial writes.
+  A missing host model is recoverable and needs a corrected submission id.
+- `expected_model` is durable validation metadata, not a native tool argument.
+  For `model_resolution = configured_default`, invoke `spawn_agent` without a
+  `model` key and pass `reasoning_effort` independently. Never copy
+  `expected_model` into the native request.
+- Start-time classification is authoritative; duplicate model-generated
+  complexity or requirements fields are ignored rather than compared
+  byte-for-byte.
 - Host completion and gate proof are separate. A passed attempt may be
   finalized before report evidence is linked, but the gate cannot pass until
   the required evidence exists.
-- `record_delegation` accepts human-readable task kinds from model-generated
-  calls and canonicalizes spaces, hyphens, and case (for example, `Code Review`
+- Advance dispatch preparation accepts human-readable task kinds and
+  canonicalizes spaces, hyphens, and case (for example, `Code Review`
   becomes `code_review`); unsafe punctuation remains rejected.
   Security task kind, the security gate, and the `security_auditor` profile
   initially resolve to Sol and then follow the exact remapping table, with
@@ -168,46 +171,25 @@
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
   override is captured and restored; no override is created when the user did
   not configure one.
-- The main orchestrator owns the complete optional pipeline: it selects every
-  gate except `documentation` and `close` and passes the full list through
-  `classify_task.pipeline`. Cortex validates the list and appends only those
-  two mandatory audit gates. Calls without `pipeline` use a compatibility
-  heuristic, but are not the authoritative orchestrator path. During work,
-  `reassess_pipeline` accepts a new full list and applies additions, removals,
-  or reordering under a revision guard; removing a completed gate requires
-  explicit `allow_rework=true`.
+- The main orchestrator owns the full optional pipeline: `start` receives the
+  complete plan and Cortex appends the mandatory `documentation` and `close`
+  audit gates. During work, `advance` may replace future waves under a revision
+  guard; changing completed work requires explicit `allow_rework=true`.
 - Pipeline gate IDs are canonical lowercase identifiers (`plan`, `discover`,
   `architecture`, `database_architecture`, `implementation`, `qa`, `security`,
   `performance`, `accessibility`, `ux`, `review`, `documentation`, `close`).
   The MCP boundary normalizes a bounded set of human labels such as
   `planning`, `discovery`, and `verification` for adapter compatibility, but
   still rejects unknown IDs instead of guessing.
-- Independent gates can be grouped into ordered `parallel_groups` waves. Only
+- Independent gates can be grouped into ordered public `waves`. Only
   gates in the first unfinished wave are executable; each gate is completed
   and evidenced independently, and the next wave cannot start until all gates
   in the current wave are resolved. Keep conflicting writers, shared-resource
   work, and dependency-ordered gates in separate waves.
-- If `finalize_attempt` receives a terminal non-`passed` status without a
-  reason, it returns `recorded: false` and
-  `next_action: retry_finalize_attempt_with_reason`. This is a recoverable
-  protocol response; the attempt is deliberately not finalized until the
-  coordinator supplies the reason.
-- If `create_handoff` omits changed project paths, it returns
-  `recorded: false`, `unaccounted_paths`, and
-  `next_action: retry_create_handoff_with_complete_files`. The coordinator
-  should add the reported paths and retry; no handoff state is written by the
-  incomplete attempt.
-- `commit_gate` is a bounded recovery path. A unique context-grant id is
-  repaired to its attempt-bound report receipt, while an invalid or otherwise
-  unrecoverable gate proof is recorded in `state.recovery_events`. Three
-  failures for the same gate/mode terminalize the task as `blocked` and return
-  `create_handoff_and_resume_after_gate_repair`; do not keep retrying the same
-  request indefinitely.
-- `commit_gate` is idempotent for a gate that already completed. A host timeout
-  may safely replay the same request (including a consumed report receipt);
-  Cortex returns the existing transition instead of creating a spurious
-  recovery failure.
-- `complete_attempt` uses the same bounded recovery ledger for malformed host
-  reports or terminalization payloads. A corrected payload may be submitted on
-  the same attempt; repeated failures for that gate/mode eventually block the
-  task instead of leaving an active worker forever.
+- An advance completion with a terminal non-passed status needs a reason. A
+  final handoff must account for all project paths; incomplete payloads return
+  an actionable validation result without a partial durable transition.
+- Recovery is bounded. Invalid gate proof is recorded as a recovery event, and
+  repeated failures for the same gate/mode eventually block the task with an
+  explicit handoff/resume action. Use the same submission id only for an
+  identical replay; use a new id for a corrected payload.

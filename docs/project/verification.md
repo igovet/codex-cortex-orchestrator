@@ -5,6 +5,7 @@ The control plane is validated with the standard-library test suite:
 ```bash
 python3 -m unittest discover -s tests -v
 python3 scripts/cortex-cold-boot-smoke.py
+python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
 python3 scripts/probe-fresh-cortex-plugin.py
 python3 scripts/verify-cortex-release.py --require-tracked
 python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py
@@ -13,16 +14,31 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-`cortex-cold-boot-smoke.py` uses a fresh temporary Git project and its
-`${project_root}/.codex/cortex` ledger root, then
-drives the server through its stdio JSON-RPC interface. It restarts the server
-mid-lifecycle and proves a C2 task can complete only after classification,
-fresh status-backed delegation receipts, documentation and reassessment
-receipts, one consumed `cortex/report/v1` receipt per worker attempt,
-server-observed successful command evidence, a complete final file manifest,
-and a close-gate handoff. It also confirms that a nonzero command is not
-accepted as a passing gate and that report-bus reconciliation preserves the
-indexed report count.
+`cortex-cold-boot-smoke.py` is the v2 cold-boot smoke. It creates a fresh
+temporary Git project, drives the stdio JSON-RPC server solely through the
+public `orchestrate` tool, restarts the server mid-lifecycle, and proves the
+one-start/one-advance-per-wave contract. It covers durable identical-request
+replay, strict eight-field `cortex/report/v1` reports, actual host completion
+fields, server-observed close evidence, report and manifest reconciliation,
+documentation decision, handoff, audit, and final completion. Focused unit
+regressions cover changed-payload conflicts, validation before writes,
+future-wave replacement/rework protection, every transaction checkpoint,
+multi-root isolation, and expected `ok: false` results that do not enter the
+exception log.
+
+`cortex-composite-benchmark.py` is a call-count contract benchmark, not a
+latency benchmark. It reports `legacy_mcp_calls` against
+`orchestrate_mcp_calls` and checks the façade target of `waves + 1` calls: one
+`start` plus one `advance` per wave. Native host spawns are intentionally
+excluded because they remain host calls rather than MCP façade calls. Run it
+when changing the public lifecycle; it is not correctness or performance
+evidence.
+
+Facade validation regressions cover malformed requests and completions,
+including missing/relative roots, invalid reports, and actual-host-model
+mismatches. They assert a recoverable structured `ok: false` result, no
+partial attempt transition after preflight failure, and no corresponding entry
+in the MCP exception journal for an expected coordinator correction.
 
 `probe-fresh-cortex-plugin.py` copies the full root-layout checkout into a
 temporary directory, uses temporary `HOME` and `CODEX_HOME`, installs it with fresh Codex CLI
@@ -64,18 +80,35 @@ The v7 report regressions cover strict shape and redaction, task/attempt scope,
 one-use evidence receipts, explicit context grants, idempotent submissions,
 concurrent publishers, generated-Markdown repair, and capability-aware routing.
 Host-spawn binding regressions also prove that a model-routed attempt cannot
-become `running` without the host's actual `host_model`, and that a requested
-model mismatch (for example, Luna requested but Terra started) is terminalized
+become `running` without the host's actual `host_model`, and that an expected
+model mismatch (for example, configured-default Luna but Terra started) is terminalized
 as `host_model_mismatch` instead of being accepted as a successful dispatch.
 Routing regressions also cover the exact five-pair model/effort remapping table,
-including Sol routes, and prove that a hidden `spawn_agent` catalog containing
-only Sol/Terra produces a Luna `create_thread` request when the thread catalog
-advertises Luna. The explicit `luna_fallback: terra` compatibility opt-out is
-kept separate from the default Luna-preserving behavior.
+including Sol routes, and prove the three hidden Luna resolution branches:
+confirmed configured default with no native `model`, explicit Luna when the
+host advertises it, and explicit hidden Terra when it does not. No automatic
+`create_thread` fallback is accepted.
 The repository validator additionally checks that all installable sources live
 under `plugins/cortex/`, `profiles.json` matches exactly 21 profile files,
 exactly 10 skills ship, all eight report fields are required, and the retired
 `task_formatter`/dedicated-orchestrator profiles are absent.
+
+The installer regression also checks atomic global `[agents]` default creation,
+private configuration backups, explicit override preservation, dry-run output,
+replacement of a different default while preserving comments and mode, and
+read-only check failures when the setting is missing or not Luna.
+
+The 2026-08-14 fresh-CLI proof used parent task
+`01a000fb-12ef-7631-a022-8076b6b6a828`. The first Cortex delegation selected
+`expected_model=gpt-5.6-luna`, `model_resolution=configured_default`, and
+`reasoning_effort=high`, with no `model` field. The persisted parent rollout
+likewise records a native `spawn_agent` call containing `task_name=explorer`
+and `reasoning_effort=high` but no `model` key. Its child edge points to
+`01a000fb-cd55-76c1-8922-484c710f6d6e` with `thread_source=subagent`; that
+child's persisted `thread_settings_applied` snapshot records
+`model=gpt-5.6-luna` and `reasoning_effort=high`. This runtime metadata, rather
+than worker self-report, is the acceptance evidence. The worker returned to
+the parent and no user-owned visible task was created.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
 it validates a fresh `git archive HEAD` rather than the mutable working tree,
@@ -97,6 +130,7 @@ the blocking command against the committed tree before publication.
 
 - `python -m unittest discover -s tests -v` — standard-library regression suite; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [cortex-cold-boot-smoke.py](../../scripts/cortex-cold-boot-smoke.py).
+- `python3 scripts/cortex-composite-benchmark.py` — v2 MCP call-count contract benchmark (`legacy_mcp_calls` versus `orchestrate_mcp_calls`); implementation: [cortex-composite-benchmark.py](../../scripts/cortex-composite-benchmark.py). It asserts the `waves + 1` façade target and makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [probe-fresh-cortex-plugin.py](../../scripts/probe-fresh-cortex-plugin.py). `SKIP` means the Codex CLI is unavailable.
 - `python3 scripts/verify-cortex-release.py --require-tracked` — blocking tracked-release archive boundary; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [verify-cortex-release.py](../../scripts/verify-cortex-release.py).
 - `python scripts/validate-cortex-marketplace.py` — repository marketplace and plugin-contract validation; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [validate-cortex-marketplace.py](../../scripts/validate-cortex-marketplace.py).

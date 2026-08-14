@@ -409,11 +409,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         preview = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(preview.returncode, 0, preview.stderr)
         self.assertIn("would preserve Cortex MCP default_tools_approval_mode=approve", preview.stdout)
+        self.assertIn("would set agents.default_subagent_model=gpt-5.6-luna", preview.stdout)
         self.assertEqual(config.read_text(encoding="utf-8"), before_preview)
         installed = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         self.assertIn('[plugins."cortex@cortex".mcp_servers.cortex]', config.read_text(encoding="utf-8"))
         self.assertIn('default_tools_approval_mode = "approve"', config.read_text(encoding="utf-8"))
+        self.assertIn('[agents]', config.read_text(encoding="utf-8"))
+        self.assertIn('default_subagent_model = "gpt-5.6-luna"', config.read_text(encoding="utf-8"))
         self.assertFalse(retired.exists())
         self.assertFalse(retired_cache.parent.exists())
         backup_root = codex_home / "backups/cortex-upgrade"
@@ -428,6 +431,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         repaired = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(repaired.returncode, 0, repaired.stderr)
         self.assertIn('default_tools_approval_mode = "approve"', config.read_text(encoding="utf-8"))
+        self.assertIn('default_subagent_model = "gpt-5.6-luna"', config.read_text(encoding="utf-8"))
         checked = subprocess.run(["bash", str(script), "--check"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
@@ -447,6 +451,64 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("must not traverse symlinks", completed.stderr)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
         self.assertEqual(sorted(path.name for path in outside.iterdir()), ["sentinel.txt"])
+
+    def test_sync_refuses_symlinked_global_config_without_touching_target(self):
+        isolated = self.base / "symlink-config-home"
+        codex_home = isolated / ".codex"
+        codex_home.mkdir(parents=True)
+        target = isolated / "outside-config.toml"
+        target.write_text(
+            '[agents]\n'
+            'default_subagent_model = "gpt-5.6-terra"\n',
+            encoding="utf-8",
+        )
+        (codex_home / "config.toml").symlink_to(target)
+        environment = os.environ.copy()
+        environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home)})
+        script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
+        completed = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("refusing to inspect non-regular Codex config", completed.stderr)
+        self.assertEqual(
+            target.read_text(encoding="utf-8"),
+            '[agents]\ndefault_subagent_model = "gpt-5.6-terra"\n',
+        )
+
+    def test_sync_backs_up_and_replaces_a_different_global_subagent_model(self):
+        if not shutil.which("codex"):
+            self.skipTest("codex CLI is unavailable")
+        isolated = self.base / "explicit-model-home"
+        codex_home = isolated / ".codex"
+        codex_home.mkdir(parents=True)
+        config = codex_home / "config.toml"
+        config.write_text(
+            '[agents]\n'
+            'enabled = true\n'
+            'default_subagent_model = "gpt-5.6-terra" # keep this comment\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o640)
+        original = config.read_text(encoding="utf-8")
+        environment = os.environ.copy()
+        environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home)})
+        script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
+        preview = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertIn("would back up config and replace agents.default_subagent_model=gpt-5.6-terra with gpt-5.6-luna", preview.stdout)
+        self.assertEqual(config.read_text(encoding="utf-8"), original)
+        installed = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        updated = config.read_text(encoding="utf-8")
+        self.assertIn('default_subagent_model = "gpt-5.6-luna" #keep this comment', updated)
+        self.assertIn('enabled = true', updated)
+        self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+        backups = list((codex_home / "backups/cortex-upgrade").rglob("config.toml"))
+        self.assertTrue(backups)
+        self.assertTrue(any('default_subagent_model = "gpt-5.6-terra"' in path.read_text(encoding="utf-8") for path in backups))
+        for backup_path in [codex_home / "backups/cortex-upgrade", *(codex_home / "backups/cortex-upgrade").rglob("*")]:
+            self.assertEqual(backup_path.stat().st_mode & 0o077, 0, backup_path)
+        checked = subprocess.run(["bash", str(script), "--check"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_sync_refuses_unauthenticated_retired_cache(self):
         isolated = self.base / "untrusted-cache-home"
@@ -632,29 +694,26 @@ class OrchestrationInvariantTests(unittest.TestCase):
         matches = [path for path in repository.rglob("SKILL.md") if path.parent.name == "orchestrator"]
         self.assertEqual(matches, [authoritative])
 
-    def test_control_skill_requires_exact_host_dispatch_naming_fallback(self):
+    def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("native host `spawn_agent` tool", skill)
-        self.assertIn("`awaiting_host_spawn`", skill)
-        self.assertIn("`confirm_host_spawn`", skill)
-        self.assertIn("`spawn_request.message`", skill)
-        self.assertIn("`multi_agent_v1` exposes no title field", skill)
-        self.assertIn("`get_worker_question_updates`", skill)
+        self.assertIn("exactly one MCP tool: `orchestrate`", skill)
+        self.assertIn("`host_capabilities.spawn_agent_models`", skill)
+        self.assertIn("Invoke every returned `spawn_request`", skill)
+        self.assertIn("actual host id/tool/model/effort", skill)
+        self.assertIn("Workers do not call Cortex", skill)
+        self.assertIn("`operation=\"question\"`", skill)
 
-    def test_control_skill_requires_ordered_main_agent_close_protocol(self):
+    def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
         markers = [
-            "## Main-agent close protocol",
-            "Wait for every dispatched host worker",
-            "Reconcile the complete",
-            "Call `list_task_reports`",
-            "Consume each passed attempt's one-use `report_receipt`",
-            "Record the current gate outcome",
-            "every remaining gate",
-            "create the final",
-            "Only after that final status reconciliation",
-            "`PASSED`, `FAILED`, or `BLOCKED`",
-            "changed files, exact tests/results, and limitations",
+            "## Normal flow",
+            "Build the complete task contract",
+            "Call `orchestrate(operation=\"start\")` once",
+            "Invoke every returned `spawn_request`",
+            "After every worker in the wave",
+            "call `orchestrate(operation=\"advance\")` exactly once",
+            "Invoke the next returned spawn requests",
+            "The final `advance`",
         ]
         positions = [skill.index(marker) for marker in markers]
         self.assertEqual(positions, sorted(positions))

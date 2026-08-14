@@ -2,6 +2,7 @@ import io
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,41 @@ class ControlPlaneTests(unittest.TestCase):
 
     def report(self, task_id, attempt_id, principal="thread-a", submission_id="final"):
         return control.record_report({"task_id": task_id, "principal": principal, "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": [], "next_action": "advance the gate"}})
+
+    def facade_start(self, task_id, waves, *, complexity="C1", submission_id=None, host_capabilities=None):
+        return control.orchestrate({
+            "operation": "start",
+            "submission_id": submission_id or f"{task_id}-start",
+            "principal": "thread-a",
+            "thread_id": "thread-a",
+            "task": {"task_id": task_id, "objective": f"facade task {task_id}", "complexity": complexity},
+            "waves": waves,
+            "host_capabilities": host_capabilities or {
+                "spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+                "create_thread_models": ["gpt-5.6-luna"],
+            },
+        })
+
+    @staticmethod
+    def facade_completion(spawn_request, *, status="passed", report=None, **overrides):
+        payload = {
+            "attempt_id": spawn_request["attempt_id"],
+            "host_tool": spawn_request["host_tool"],
+            "host_agent_id": f"host-{spawn_request['attempt_id']}",
+            "host_task_name": spawn_request["task_name"],
+            "host_model": spawn_request.get("model") or spawn_request["expected_model"],
+            "host_reasoning_effort": spawn_request["reasoning_effort"],
+            "status": status,
+        }
+        if report is None and status == "passed":
+            report = {
+                "summary": "facade worker completed", "findings": [], "questions": [],
+                "changed_files": [], "tests": [], "evidence": ["facade evidence"],
+                "uncertainty": [], "next_action": "advance",
+            }
+        if report is not None:
+            payload["report"] = report
+        return {**payload, **overrides}
 
     def test_orchestration_is_inactive_until_main_chat_command(self):
         with self.assertRaisesRegex(ValueError, "inactive"):
@@ -400,6 +436,123 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(route["fallback_reason"], "policy_model_enforced")
         self.assertTrue(route["read_only"])
 
+    def test_configured_default_luna_omits_native_model_and_separates_expectation(self):
+        route = control.resolve_dispatch_route({
+            "agent": "explorer",
+            "task_kind": "reading",
+            "risk": "low",
+            "complexity": "C1",
+            "configured_default_model": "gpt-5.6-luna",
+            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+            "requested_reasoning_effort": "high",
+        })
+        self.assertEqual(route["expected_model"], "gpt-5.6-luna")
+        self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(route["model_resolution"], "configured_default")
+        self.assertEqual(route["selected_reasoning_effort"], "high")
+
+    def test_configured_default_delegation_omits_model_key_but_confirms_actual_luna(self):
+        state = self.init(task_id="configured-default-luna") ["state"]
+        observed = control.status({"task_id": "configured-default-luna", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "configured-default-luna", "principal": "thread-a",
+            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+            "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
+            "configured_default_model": "gpt-5.6-luna",
+            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+            "objective": "configured Luna", "ownership": "Read-only discovery",
+            "allowed_paths": ["."], "acceptance_criteria": ["Report findings"],
+            "verification": ["Cite paths"],
+        })
+        request = delegated["spawn_request"]
+        self.assertEqual(request["host_tool"], "spawn_agent")
+        self.assertNotIn("model", request)
+        self.assertEqual(request["expected_model"], "gpt-5.6-luna")
+        self.assertEqual(request["model_resolution"], "configured_default")
+        self.assertEqual(request["reasoning_effort"], "medium")
+        confirmed = control.confirm_host_spawn({
+            "task_id": "configured-default-luna", "principal": "thread-a",
+            "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
+            "host_tool": "spawn_agent", "host_agent_id": "luna-child",
+            "host_task_name": request["task_name"], "host_model": "gpt-5.6-luna",
+            "host_reasoning_effort": request["reasoning_effort"],
+        })
+        self.assertTrue(confirmed["confirmed"])
+        self.assertEqual(confirmed["host_spawn"]["model_verification"], "verified")
+
+    def test_configured_default_keeps_explicit_terra_override(self):
+        route = control.resolve_dispatch_route({
+            "agent": "general", "task_kind": "implementation", "risk": "moderate", "complexity": "C2",
+            "configured_default_model": "gpt-5.6-luna", "requested_model": "gpt-5.6-terra",
+            "requested_reasoning_effort": "high",
+        })
+        self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(route["model_resolution"], "explicit_override")
+
+    def test_orchestrate_prefers_confirmed_luna_default_over_explicit_catalog(self):
+        for suffix, spawn_models in (
+            ("luna-catalog", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
+            ("terra-catalog", ["gpt-5.6-sol", "gpt-5.6-terra"]),
+        ):
+            with self.subTest(spawn_models=spawn_models):
+                started = self.facade_start(
+                    f"configured-default-{suffix}",
+                    [{"wave_id": "discover", "delegations": [{
+                        "gate": "discover", "agent": "explorer",
+                        "requested_reasoning_effort": "high",
+                    }]}],
+                    host_capabilities={
+                        "spawn_agent_models": spawn_models,
+                        "create_thread_models": ["gpt-5.6-luna"],
+                        "spawn_agent_default_model": "gpt-5.6-luna",
+                    },
+                )
+                request = started["spawn_requests"][0]
+                self.assertEqual(request["host_tool"], "spawn_agent")
+                self.assertNotIn("model", request)
+                self.assertEqual(request["expected_model"], "gpt-5.6-luna")
+                self.assertEqual(request["model_resolution"], "configured_default")
+                self.assertEqual(request["reasoning_effort"], "high")
+
+    def test_configured_default_preserves_independent_effort(self):
+        for effort in ("medium", "high", "xhigh"):
+            with self.subTest(effort=effort):
+                started = self.facade_start(
+                    f"configured-effort-{effort}",
+                    [{"wave_id": "discover", "delegations": [{
+                        "gate": "discover", "agent": "explorer",
+                        "requested_reasoning_effort": effort,
+                    }]}],
+                    host_capabilities={
+                        "spawn_agent_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+                        "spawn_agent_default_model": "gpt-5.6-luna",
+                    },
+                )
+                request = started["spawn_requests"][0]
+                self.assertNotIn("model", request)
+                self.assertEqual(request["reasoning_effort"], effort)
+
+    def test_orchestrate_without_default_uses_explicit_luna_then_hidden_terra(self):
+        explicit = self.facade_start(
+            "explicit-luna-no-default",
+            [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}],
+            host_capabilities={"spawn_agent_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]},
+        )["spawn_requests"][0]
+        self.assertEqual(explicit["host_tool"], "spawn_agent")
+        self.assertEqual(explicit["model"], "gpt-5.6-luna")
+        self.assertEqual(explicit["expected_model"], "gpt-5.6-luna")
+        self.assertEqual(explicit["model_resolution"], "explicit_override")
+
+        fallback = self.facade_start(
+            "terra-fallback-no-default",
+            [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}],
+            host_capabilities={"spawn_agent_models": ["gpt-5.6-sol", "gpt-5.6-terra"]},
+        )["spawn_requests"][0]
+        self.assertEqual(fallback["host_tool"], "spawn_agent")
+        self.assertEqual(fallback["model"], "gpt-5.6-terra")
+        self.assertEqual(fallback["expected_model"], "gpt-5.6-terra")
+        self.assertEqual(fallback["model_resolution"], "explicit_override")
+
     def test_model_effort_remap_table_is_exact_and_preserves_other_pairs(self):
         cases = (
             ("gpt-5.6-terra", "low", "gpt-5.6-luna", "high"),
@@ -545,7 +698,7 @@ class ControlPlaneTests(unittest.TestCase):
                 "available_models": ["gpt-5.6-sol"],
             })
 
-    def test_delegation_records_a_host_capability_fallback_without_model_mismatch(self):
+    def test_delegation_records_hidden_terra_fallback_without_model_mismatch(self):
         state = self.init(task_id="host-model-fallback")["state"]
         delegation = self.delegate(
             state,
@@ -558,13 +711,17 @@ class ControlPlaneTests(unittest.TestCase):
         )
         attempt = delegation["state"]["attempts"][-1]
         self.assertEqual(attempt["policy_model"], "gpt-5.6-terra")
-        self.assertEqual(attempt["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(attempt["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(attempt["expected_model"], "gpt-5.6-terra")
+        self.assertEqual(attempt["model_resolution"], "explicit_override")
         self.assertEqual(attempt["selected_reasoning_effort"], "high")
         self.assertEqual(attempt["remap_from_model"], "gpt-5.6-terra")
         self.assertEqual(attempt["remap_from_reasoning_effort"], "medium")
-        self.assertEqual(attempt["fallback_reason"], "spawn_agent_luna_unavailable")
-        self.assertEqual(attempt["luna_fallback"], "visible_thread")
-        self.assertEqual(attempt["spawn_request"]["host_tool"], "create_thread")
+        self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
+        self.assertEqual(attempt["fallback_from_model"], "gpt-5.6-luna")
+        self.assertEqual(attempt["luna_fallback"], "terra")
+        self.assertEqual(attempt["spawn_request"]["host_tool"], "spawn_agent")
+        self.assertEqual(attempt["spawn_request"]["model"], "gpt-5.6-terra")
         self.assertEqual(attempt["host_spawn"]["model_verification"], "verified")
 
     def test_explicit_visible_thread_keeps_luna_and_dynamic_reasoning_effort(self):
@@ -661,27 +818,21 @@ class ControlPlaneTests(unittest.TestCase):
                 "allowed_paths": ["."], "acceptance_criteria": ["Report"], "verification": ["Cite"],
             })
 
-    def test_explicit_luna_thread_fallback_uses_create_thread_not_terra(self):
+    def test_visible_thread_is_rejected_as_a_luna_fallback(self):
         state = self.init(task_id="luna-thread-fallback")["state"]
         observed = control.status({"task_id": "luna-thread-fallback", "principal": "thread-a"})
-        delegated = control.record_delegation({
-            "task_id": "luna-thread-fallback", "principal": "thread-a",
-            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
-            "gate": "discover", "agent": "explorer", "task_kind": "discover", "risk": "low",
-            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
-            "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-            "luna_fallback": "visible_thread",
-            "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
-            "allowed_paths": ["."], "acceptance_criteria": ["Report findings"],
-            "verification": ["Cite paths"],
-        })
-        attempt = delegated["state"]["attempts"][-1]
-        self.assertEqual(delegated["spawn_request"]["host_tool"], "create_thread")
-        self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
-        self.assertEqual(delegated["spawn_request"]["reasoning_effort"], "medium")
-        self.assertEqual(attempt["fallback_reason"], "spawn_agent_luna_unavailable")
-        self.assertEqual(attempt["fallback_from_host_tool"], "spawn_agent")
-        self.assertTrue(attempt["user_owned_thread"])
+        with self.assertRaisesRegex(ValueError, "luna_fallback must be terra"):
+            control.record_delegation({
+                "task_id": "luna-thread-fallback", "principal": "thread-a",
+                "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+                "gate": "discover", "agent": "explorer", "task_kind": "discover", "risk": "low",
+                "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+                "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+                "luna_fallback": "visible_thread",
+                "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
+                "allowed_paths": ["."], "acceptance_criteria": ["Report findings"],
+                "verification": ["Cite paths"],
+            })
 
     def test_luna_thread_fallback_keeps_hidden_luna_when_spawn_agent_supports_it(self):
         state = self.init(task_id="luna-fallback-not-needed")["state"]
@@ -693,7 +844,7 @@ class ControlPlaneTests(unittest.TestCase):
             task_kind="discover",
             available_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
             available_thread_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-            luna_fallback="visible_thread",
+            luna_fallback="terra",
         )
         self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
         self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
@@ -1762,6 +1913,243 @@ class ControlPlaneTests(unittest.TestCase):
         state = control.status({"task_id": "composite-rollback", "principal": "thread-a"})["state"]
         self.assertEqual(state["attempts"], [])
 
+    def test_orchestrate_start_replays_and_advance_returns_parallel_then_dependent_wave(self):
+        waves = [
+            {"wave_id": "plan", "delegations": [{"gate": "plan", "agent": "planner"}]},
+            {"wave_id": "discovery", "delegations": [
+                {"gate": "discover", "agent": "explorer"},
+                {"gate": "architecture", "agent": "architect"},
+            ]},
+            {"wave_id": "implementation", "delegations": [{"gate": "implementation", "agent": "general"}]},
+            {"wave_id": "review", "delegations": [{"gate": "review", "agent": "code_reviewer"}]},
+        ]
+        started = self.facade_start("facade-waves", waves, complexity="C2")
+        replayed = self.facade_start("facade-waves", waves, complexity="C2")
+        self.assertTrue(started["ok"])
+        self.assertFalse(started["idempotent"])
+        self.assertTrue(replayed["idempotent"])
+        self.assertEqual(replayed["transaction_id"], started["transaction_id"])
+        self.assertEqual(len(started["spawn_requests"]), 1)
+        self.assertIn("Do not call Cortex MCP tools", started["spawn_requests"][0]["message"])
+
+        discovery = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-waves-advance-plan",
+            "task_id": "facade-waves", "wave_id": started["wave_id"],
+            "principal": "thread-a", "thread_id": "thread-a",
+            "completions": [self.facade_completion(started["spawn_requests"][0])],
+        })
+        self.assertEqual(discovery["wave_id"], "discovery")
+        self.assertEqual(len(discovery["spawn_requests"]), 2)
+        active_attempt_ids = {
+            item["attempt_id"] for item in discovery["state_summary"]["attempts"]
+            if item["status"] == control.AWAITING_HOST_SPAWN
+        }
+        self.assertEqual({item["attempt_id"] for item in discovery["spawn_requests"]}, active_attempt_ids)
+
+        implementation = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-waves-advance-discovery",
+            "task_id": "facade-waves", "wave_id": discovery["wave_id"],
+            "principal": "thread-a", "thread_id": "thread-a",
+            "completions": [self.facade_completion(item) for item in discovery["spawn_requests"]],
+        })
+        self.assertEqual(implementation["wave_id"], "implementation")
+        self.assertEqual(len(implementation["spawn_requests"]), 1)
+
+    def test_orchestrate_rejects_changed_idempotency_payload_without_duplicate_attempt(self):
+        waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
+        started = self.facade_start("facade-idempotency", waves, submission_id="same-submission")
+        changed = control.orchestrate({
+            "operation": "start", "submission_id": "same-submission",
+            "principal": "thread-a", "thread_id": "thread-a",
+            "task": {"task_id": "facade-idempotency", "objective": "different payload", "complexity": "C1"},
+            "waves": waves,
+            "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]},
+        })
+        self.assertFalse(changed["ok"])
+        self.assertIn("different content", changed["diagnostics"][0]["message"])
+        inspected = control.orchestrate({"operation": "inspect", "task_id": "facade-idempotency", "principal": "thread-a"})
+        self.assertEqual(len(inspected["state_summary"]["attempts"]), 1)
+        self.assertEqual(inspected["spawn_requests"][0]["attempt_id"], started["spawn_requests"][0]["attempt_id"])
+
+    def test_orchestrate_start_recovers_after_every_transaction_phase(self):
+        waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
+        original_checkpoint = control._checkpoint_orchestrate_transaction
+        for phase in ("activated", "classified", "initialized", "plan_recorded", "wave_prepared"):
+            with self.subTest(phase=phase):
+                task_id = f"start-crash-{phase.replace('_', '-')}"
+                fired = False
+
+                def crash_after_checkpoint(path, receipt, current_phase, **context):
+                    nonlocal fired
+                    original_checkpoint(path, receipt, current_phase, **context)
+                    if current_phase == phase and not fired:
+                        fired = True
+                        raise RuntimeError(f"simulated crash after {phase}")
+
+                with mock.patch.object(control, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
+                    interrupted = self.facade_start(task_id, waves)
+                self.assertFalse(interrupted["ok"])
+                recovered = self.facade_start(task_id, waves)
+                self.assertTrue(recovered["ok"])
+                self.assertEqual(len(recovered["spawn_requests"]), 1)
+                state = control.orchestrate({"operation": "inspect", "task_id": task_id, "principal": "thread-a"})
+                self.assertEqual(len(state["state_summary"]["attempts"]), 1)
+                receipt = json.loads((self.ledger / "operations" / f"{task_id}-start.json").read_text(encoding="utf-8"))
+                self.assertEqual(receipt["status"], "committed")
+
+    def test_orchestrate_advance_recovers_after_every_transaction_phase(self):
+        waves = [
+            {"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]},
+            {"wave_id": "implementation", "delegations": [{"gate": "implementation", "agent": "general"}]},
+            {"wave_id": "review", "delegations": [{"gate": "review", "agent": "code_reviewer"}]},
+        ]
+        original_checkpoint = control._checkpoint_orchestrate_transaction
+        for phase in ("attempts_completed", "gates_recorded", "next_wave_prepared"):
+            with self.subTest(phase=phase):
+                task_id = f"advance-crash-{phase.replace('_', '-')}"
+                started = self.facade_start(task_id, waves)
+                arguments = {
+                    "operation": "advance", "submission_id": f"{task_id}-advance",
+                    "task_id": task_id, "wave_id": started["wave_id"], "principal": "thread-a",
+                    "completions": [self.facade_completion(started["spawn_requests"][0])],
+                }
+                fired = False
+
+                def crash_after_checkpoint(path, receipt, current_phase, **context):
+                    nonlocal fired
+                    original_checkpoint(path, receipt, current_phase, **context)
+                    if current_phase == phase and not fired:
+                        fired = True
+                        raise RuntimeError(f"simulated crash after {phase}")
+
+                with mock.patch.object(control, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
+                    interrupted = control.orchestrate(arguments)
+                self.assertFalse(interrupted["ok"])
+                recovered = control.orchestrate(arguments)
+                self.assertTrue(recovered["ok"])
+                self.assertEqual(recovered["wave_id"], "implementation")
+                self.assertEqual(len(recovered["spawn_requests"]), 1)
+                inspected = control.orchestrate({"operation": "inspect", "task_id": task_id, "principal": "thread-a"})
+                self.assertEqual(len(inspected["state_summary"]["attempts"]), 2)
+                reports = control.list_task_reports({"task_id": task_id, "principal": "thread-a"})["reports"]
+                self.assertEqual(len(reports), 1)
+                receipt = json.loads((self.ledger / "operations" / f"{task_id}-advance.json").read_text(encoding="utf-8"))
+                self.assertEqual(receipt["status"], "committed")
+
+    def test_orchestrate_malformed_report_and_host_mismatch_are_recoverable(self):
+        waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
+        malformed_start = self.facade_start("facade-malformed", waves)
+        request = malformed_start["spawn_requests"][0]
+        malformed = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-malformed-bad-report",
+            "task_id": "facade-malformed", "wave_id": malformed_start["wave_id"], "principal": "thread-a",
+            "completions": [self.facade_completion(request, report={"summary": "missing fields"})],
+        })
+        self.assertFalse(malformed["ok"])
+        self.assertTrue(malformed["recoverable"])
+        malformed_state = control.orchestrate({"operation": "inspect", "task_id": "facade-malformed", "principal": "thread-a"})
+        self.assertEqual(malformed_state["state_summary"]["attempts"][0]["status"], control.AWAITING_HOST_SPAWN)
+
+        mismatch_start = self.facade_start("facade-host-mismatch", waves)
+        mismatch_request = mismatch_start["spawn_requests"][0]
+        mismatch = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-host-mismatch-advance",
+            "task_id": "facade-host-mismatch", "wave_id": mismatch_start["wave_id"], "principal": "thread-a",
+            "completions": [self.facade_completion(mismatch_request, host_model="gpt-5.6-sol")],
+        })
+        self.assertFalse(mismatch["ok"])
+        self.assertIn("model", mismatch["diagnostics"][0]["message"].lower())
+
+    def test_orchestrate_future_wave_rework_requires_opt_in_and_restarts_gate(self):
+        waves = [
+            {"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]},
+            {"wave_id": "implementation", "delegations": [{"gate": "implementation", "agent": "general"}]},
+            {"wave_id": "review", "delegations": [{"gate": "review", "agent": "code_reviewer"}]},
+        ]
+        denied_start = self.facade_start("facade-rework-denied", waves)
+        denied = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-rework-denied-advance",
+            "task_id": "facade-rework-denied", "wave_id": denied_start["wave_id"], "principal": "thread-a",
+            "completions": [self.facade_completion(denied_start["spawn_requests"][0])],
+            "future_waves": waves,
+        })
+        self.assertFalse(denied["ok"])
+        self.assertIn("allow_rework=true", denied["diagnostics"][0]["message"])
+        denied_state = control.orchestrate({"operation": "inspect", "task_id": "facade-rework-denied", "principal": "thread-a"})
+        self.assertEqual(denied_state["state_summary"]["completed_gates"], [])
+
+        allowed_start = self.facade_start("facade-rework-allowed", waves)
+        allowed = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-rework-allowed-advance",
+            "task_id": "facade-rework-allowed", "wave_id": allowed_start["wave_id"], "principal": "thread-a",
+            "completions": [self.facade_completion(allowed_start["spawn_requests"][0])],
+            "future_waves": waves, "allow_rework": True,
+        })
+        self.assertTrue(allowed["ok"])
+        self.assertEqual(allowed["wave_id"], "discover")
+        self.assertEqual(allowed["state_summary"]["completed_gates"], [])
+        self.assertNotEqual(allowed["spawn_requests"][0]["attempt_id"], allowed_start["spawn_requests"][0]["attempt_id"])
+
+    def test_orchestrate_blocked_wave_resumes_with_a_fresh_attempt(self):
+        started = self.facade_start("facade-resume", [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}])
+        blocked = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-resume-blocked",
+            "task_id": "facade-resume", "wave_id": started["wave_id"], "principal": "thread-a",
+            "completions": [self.facade_completion(started["spawn_requests"][0], status="blocked", report=None, reason="dependency unavailable")],
+        })
+        self.assertEqual(blocked["state"], "blocked")
+        resumed = control.orchestrate({
+            "operation": "resume", "submission_id": "facade-resume-retry",
+            "task_id": "facade-resume", "principal": "thread-a", "reason": "dependency restored",
+        })
+        self.assertEqual(resumed["state"], "ready_to_spawn")
+        self.assertNotEqual(resumed["spawn_requests"][0]["attempt_id"], started["spawn_requests"][0]["attempt_id"])
+
+    def test_orchestrate_inspect_is_read_only_and_advance_migrates_an_active_v7_task(self):
+        created = self.init(task_id="facade-v7-compatibility", complexity="C1")
+        delegated = self.delegate(created["state"], "facade-v7-compatibility", "discover", "explorer")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        plan_path = task_dir / "orchestration.json"
+        self.assertFalse(plan_path.exists())
+        inspected = control.orchestrate({
+            "operation": "inspect", "task_id": "facade-v7-compatibility", "principal": "thread-a",
+        })
+        self.assertTrue(inspected["ok"])
+        self.assertFalse(plan_path.exists())
+        spawn_request = {**delegated["spawn_request"], "attempt_id": delegated["attempt_id"]}
+        advanced = control.orchestrate({
+            "operation": "advance", "submission_id": "facade-v7-compatibility-advance",
+            "task_id": "facade-v7-compatibility", "wave_id": inspected["wave_id"], "principal": "thread-a",
+            "completions": [self.facade_completion(
+                spawn_request,
+                host_agent_id=delegated["host_spawn"]["agent_id"],
+            )],
+        })
+        self.assertTrue(advanced["ok"])
+        self.assertTrue(plan_path.exists())
+        self.assertEqual(advanced["wave_id"], "wave-02")
+
+    def test_orchestrate_lane_and_resource_modes_keep_rare_capabilities(self):
+        started = self.facade_start("facade-resource", [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}])
+        lane = control.orchestrate({
+            "operation": "lane", "submission_id": "facade-lane-create", "principal": "thread-a",
+            "payload": {"command": "create", "lane_id": "facade-lane", "purpose": "facade test"},
+        })
+        self.assertTrue(lane["ok"])
+        inspected_lane = control.orchestrate({
+            "operation": "lane", "principal": "thread-a", "payload": {"command": "inspect", "lane_id": "facade-lane"},
+        })
+        self.assertEqual(inspected_lane["result"]["state"]["lane_id"], "facade-lane")
+
+        claimed = control.orchestrate({
+            "operation": "resource", "submission_id": "facade-resource-claim",
+            "task_id": "facade-resource", "principal": "thread-a",
+            "payload": {"command": "claim", "path": "port:4321", "owner": "thread-a", "expires_at": "2999-01-01T00:00:00+00:00"},
+        })
+        self.assertTrue(claimed["ok"])
+        self.assertIn(control.lock_key("port:4321"), claimed["result"]["state"]["locks"])
+        self.assertEqual(started["state"], "ready_to_spawn")
+
     def test_mcp_elicitation_nested_exchange_is_json_rpc_safe(self):
         original_stdin, original_stdout = control.sys.stdin, control.sys.stdout
         try:
@@ -1804,7 +2192,7 @@ class ControlPlaneTests(unittest.TestCase):
         finally:
             control.sys.stdin, control.sys.stdout = original_stdin, original_stdout
 
-    def test_mcp_process_completes_cortex_question_after_host_response(self):
+    def test_mcp_process_completes_facade_question_after_host_response(self):
         self.init(task_id="nested-question")
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -1816,7 +2204,7 @@ class ControlPlaneTests(unittest.TestCase):
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
             self.assertEqual(initialized["result"]["serverInfo"]["name"], "cortex")
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "cortex.question", "arguments": {"project_root": str(self.project), "task_id": "nested-question", "principal": "thread-a", "question": "Continue?"}}}) + "\n")
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "orchestrate", "arguments": {"operation": "question", "submission_id": "nested-question-ui", "project_root": str(self.project), "task_id": "nested-question", "principal": "thread-a", "thread_id": "thread-a", "payload": {"command": "ask", "question": "Continue?"}}}}) + "\n")
             proc.stdin.flush()
             elicitation = json.loads(proc.stdout.readline())
             self.assertEqual(elicitation["method"], "elicitation/create")
@@ -1824,7 +2212,7 @@ class ControlPlaneTests(unittest.TestCase):
             proc.stdin.flush()
             completed = json.loads(proc.stdout.readline())
             self.assertEqual(completed["id"], 2)
-            self.assertEqual(completed["result"]["structuredContent"]["status"], "answered")
+            self.assertEqual(completed["result"]["structuredContent"]["result"]["status"], "answered")
         finally:
             proc.stdin.close()
             proc.terminate()
@@ -2303,34 +2691,17 @@ class ControlPlaneTests(unittest.TestCase):
         finally:
             os.environ.pop("CORTEX_ROOT", None)
 
-    def test_mcp_smoke_exposes_new_tools(self):
+    def test_mcp_smoke_exposes_only_the_orchestrate_facade(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertTrue({
-            "record_evidence",
-            "execute_verification_command",
-            "reconcile_project_files",
-            "resume_task",
-            "cortex.question",
-            "publish_worker_question",
-            "list_worker_questions",
-            "answer_worker_question",
-            "get_worker_question_updates",
-            "prepare_delegation",
-            "prepare_delegations",
-            "complete_attempt",
-            "commit_gate",
-            "close_audit",
-        }.issubset(names))
-        self.assertEqual(len(tools), 48)
+        self.assertEqual(names, {"orchestrate"})
+        self.assertEqual(len(tools), 1)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
-        activation = next(item for item in tools if item["name"] == "activate_orchestration")
-        self.assertIn("project_root", activation["inputSchema"]["required"])
-        report_tool = next(item for item in tools if item["name"] == "record_report")
-        self.assertNotIn("attempt_id", report_tool["inputSchema"]["required"])
-        self.assertNotIn("submission_id", report_tool["inputSchema"]["required"])
+        facade = tools[0]
+        self.assertIn("project_root", facade["inputSchema"]["required"])
+        self.assertEqual(set(facade["inputSchema"]["properties"]["operation"]["enum"]), {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question"})
 
     def test_mcp_logs_invalid_tool_input_with_session_and_call_ids(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -2376,8 +2747,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(record["input"]["api_key"], "<REDACTED>")
             self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
 
-    def test_mcp_logs_structured_recoverable_tool_errors(self):
-        self.init(task_id="structured-log", complexity="C2")
+    def test_mcp_does_not_log_structured_facade_validation_results(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         with tempfile.TemporaryDirectory() as home:
             environment = os.environ.copy()
@@ -2388,14 +2758,14 @@ class ControlPlaneTests(unittest.TestCase):
                 "id": "call-18",
                 "method": "tools/call",
                 "params": {
-                    "name": "record_evidence",
+                    "name": "orchestrate",
                     "arguments": {
-                        "task_id": "structured-log",
+                        "operation": "start",
+                        "submission_id": "structured-log-start",
                         "principal": "thread-a",
                         "thread_id": "thread-a",
-                        "expected_revision": 0,
-                        "gate": "plan",
-                        "summary": "missing delegation evidence",
+                        "task": {"task_id": "structured-log", "objective": "missing waves"},
+                        "host_capabilities": {"spawn_agent_models": ["gpt-5.6-terra"]},
                         "project_root": str(self.project),
                     },
                 },
@@ -2409,48 +2779,102 @@ class ControlPlaneTests(unittest.TestCase):
                 check=True,
             )
             response = json.loads(completed.stdout)
-            self.assertEqual(response["result"]["structuredContent"]["recorded"], False)
+            structured = response["result"]["structuredContent"]
+            self.assertEqual(structured["ok"], False)
+            self.assertEqual(structured["next_operation"], "start")
+            self.assertEqual(structured["phase"], structured["diagnostics"][0]["phase"])
+            self.assertEqual(structured["code"], structured["diagnostics"][0]["code"])
             log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
-            record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
-            self.assertEqual(record["request_id"], "call-18")
-            self.assertEqual(record["chat_session_id"], "thread-a")
-            self.assertEqual(record["structured_result"]["reason"], "delegation_attempt_required")
+            self.assertFalse(log_path.exists())
 
-    def test_mcp_rejects_root_fallbacks_and_reports_canonical_ledger(self):
+    def test_mcp_rejects_root_fallbacks_and_starts_in_the_canonical_ledger(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
 
         def call(arguments, environment=None):
-            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "activate_orchestration", "arguments": arguments}}
+            request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "orchestrate", "arguments": arguments}}
             completed = subprocess.run([sys.executable, str(script)], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
             return json.loads(completed.stdout)
 
-        common = {"user_command": "/cortex", "principal": "mcp", "thread_id": "mcp"}
-        self.assertIn("project_root is required", call(common)["error"]["message"])
-        self.assertIn("absolute path", call({**common, "project_root": "relative"})["error"]["message"])
+        common = {"operation": "start", "submission_id": "root-start", "principal": "mcp", "thread_id": "mcp", "task": {"task_id": "root-task", "objective": "root test", "complexity": "C1"}, "waves": [{"delegations": [{"gate": "discover"}]}, {"delegations": [{"gate": "implementation"}]}, {"delegations": [{"gate": "review"}]}, {"delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}
+        missing_root = call(common)["result"]["structuredContent"]
+        self.assertFalse(missing_root["ok"])
+        self.assertIn("project_root is required", missing_root["diagnostics"][0]["message"])
+        relative_root = call({**common, "project_root": "relative"})["result"]["structuredContent"]
+        self.assertFalse(relative_root["ok"])
+        self.assertIn("absolute path", relative_root["diagnostics"][0]["message"])
         external = self.base / "external-ledger"
         environment = os.environ.copy()
         environment["CORTEX_ROOT"] = str(external)
         rejected = call({**common, "project_root": str(self.project)}, environment)
-        self.assertIn("CORTEX_ROOT is not supported", rejected["error"]["message"])
+        rejected_result = rejected["result"]["structuredContent"]
+        self.assertFalse(rejected_result["ok"])
+        self.assertIn("CORTEX_ROOT is not supported", rejected_result["diagnostics"][0]["message"])
         self.assertFalse(external.exists())
         accepted = call({**common, "project_root": str(self.project)})["result"]["structuredContent"]
-        self.assertEqual(accepted["ledger_root"], str(self.ledger))
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(accepted["task_id"], "root-task")
+        self.assertTrue((self.ledger / "tasks").is_dir())
 
-    def test_mcp_process_rejects_project_root_switch(self):
+    def test_mcp_process_supports_multiple_project_roots(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         other = self.base / "other-project"
         other.mkdir()
-        requests = [
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_activation_status", "arguments": {"project_root": str(self.project), "principal": "mcp"}}},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "get_activation_status", "arguments": {"principal": "mcp"}}},
-            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_activation_status", "arguments": {"project_root": str(other), "principal": "mcp"}}},
-        ]
+        def start(root, task_id, submission_id):
+            return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "orchestrate", "arguments": {"operation": "start", "submission_id": submission_id, "project_root": str(root), "principal": "mcp", "thread_id": submission_id, "task": {"task_id": task_id, "objective": task_id, "complexity": "C1"}, "waves": [{"delegations": [{"gate": "discover"}]}, {"delegations": [{"gate": "implementation"}]}, {"delegations": [{"gate": "review"}]}, {"delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}}}
+        requests = [start(self.project, "first-root", "first-root-start"), start(other, "second-root", "second-root-start")]
         completed = subprocess.run([sys.executable, str(script)], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
-        first, omitted, second = [json.loads(line) for line in completed.stdout.splitlines()]
-        self.assertEqual(first["result"]["structuredContent"]["ledger_root"], str(self.ledger))
-        self.assertEqual(omitted["result"]["structuredContent"]["ledger_root"], str(self.ledger))
-        self.assertIn("already bound", second["error"]["message"])
-        self.assertFalse((other / ".codex/cortex").exists())
+        first, second = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertTrue(first["result"]["structuredContent"]["ok"])
+        self.assertTrue(second["result"]["structuredContent"]["ok"])
+        self.assertTrue((self.project / ".codex/cortex").is_dir())
+        self.assertTrue((other / ".codex/cortex").is_dir())
+
+    def test_mcp_profile_cache_survives_source_directory_rename(self):
+        source = Path(__file__).parents[1] / "plugins/cortex"
+        cached = self.base / "cached-cortex"
+        renamed = self.base / "retired-cache-entry"
+        shutil.copytree(source, cached, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        script = cached / "scripts/cortex.py"
+        proc = subprocess.Popen(
+            [sys.executable, str(script)], cwd=self.project,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            def call(payload):
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+                line = proc.stdout.readline()
+                if not line:
+                    self.fail(proc.stderr.read())
+                return json.loads(line)
+
+            initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "2.0.0")
+            cached.rename(renamed)
+            request = {
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "orchestrate", "arguments": {
+                    "operation": "start", "submission_id": "renamed-cache-start",
+                    "project_root": str(self.project), "principal": "cache-test", "thread_id": "cache-test",
+                    "task": {"task_id": "renamed-cache", "objective": "use in-memory profiles", "complexity": "C1"},
+                    "waves": [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}],
+                    "host_capabilities": {
+                        "spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+                        "create_thread_models": ["gpt-5.6-luna"],
+                    },
+                }},
+            }
+            started = call(request)["result"]["structuredContent"]
+            self.assertTrue(started["ok"])
+            self.assertIn("Select this profile", started["spawn_requests"][0]["message"])
+        finally:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+            proc.wait(timeout=5)
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
 
 
 if __name__ == "__main__":
