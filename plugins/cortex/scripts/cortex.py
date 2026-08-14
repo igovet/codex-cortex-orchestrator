@@ -130,6 +130,28 @@ LIGHTWEIGHT_TASK_KINDS = {
     "data_gathering", "data-gathering", "crud", "crud_edit", "crud-edit",
     "small_fix", "small-fix",
 }
+# Analysis intent must not be inferred only from low risk.  A high-risk
+# investigation is still a Luna investigation; the reasoning floor changes,
+# but the worker model does not fall back to Terra.  Keep this list bounded and
+# explicit because task_kind is model-supplied input at the MCP boundary.
+ANALYSIS_TASK_KINDS = {
+    "analysis", "analyze", "investigation", "investigate", "diagnosis",
+    "diagnostic", "research", "fact_gathering", "fact_finding",
+    "source_analysis", "code_analysis", "runtime_investigation",
+    "root_cause_analysis", "code_review",
+}
+ANALYSIS_TASK_KIND_PREFIXES = (
+    "analysis", "analy", "investigat", "diagnos", "research",
+    "fact_gather", "fact_find", "source_analysis", "code_analysis",
+    "runtime_investigat", "root_cause",
+)
+ANALYSIS_REASONING_FLOORS = {
+    "low": "medium",
+    "moderate": "medium",
+    "high": "high",
+    "critical": "xhigh",
+}
+REASONING_EFFORT_ORDER = {name: index for index, name in enumerate(("low", "medium", "high", "xhigh", "max", "ultra"))}
 AUDITABLE_EXTREME_CRITERIA = {
     "irreversible_multi_system_recovery",
     "safety_critical_incident_response",
@@ -1041,6 +1063,12 @@ def resolve_sol_escalation(params: dict[str, Any]) -> dict[str, str] | None:
     raise ValueError("sol_escalation.kind must be auditable_extreme or terra_failure")
 
 
+def is_analysis_task_kind(task_kind: str) -> bool:
+    return task_kind in ANALYSIS_TASK_KINDS or any(
+        task_kind.startswith(prefix) for prefix in ANALYSIS_TASK_KIND_PREFIXES
+    )
+
+
 def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     select_project_root(params)
     profile_name = str(params.get("agent") or params.get("profile") or "").strip()
@@ -1074,30 +1102,41 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         or task_kind.startswith("data_gather")
         or task_kind.startswith("audit")
     )
+    # Model choice follows the declared work intent, not the sandbox alone.
+    # A read-only profile can still own architecture, review, or another
+    # non-analysis task where Terra is appropriate; the orchestrator must use
+    # an explicit analysis/discovery task_kind to select the Luna route.
+    analysis_dispatch = lightweight_dispatch or is_analysis_task_kind(task_kind)
     # Read-only is a property of the dispatched work, not only of the worker
     # profile.  Documentation/verification profiles may be allowed to touch
     # docs in normal work, but a read-only audit must remain read-only in the
     # durable attempt record regardless of which profile owns its gate.
-    read_only = read_only or lightweight_dispatch
+    read_only = read_only or analysis_dispatch
     if security_context:
         policy_model, policy_reason = "gpt-5.6-sol", "security_context"
     elif sol_escalation:
         policy_model, policy_reason = "gpt-5.6-sol", f"authorized_{sol_escalation['kind']}_sol_escalation"
-    elif lightweight_dispatch and risk in {"low", "moderate"}:
-        policy_model, policy_reason = "gpt-5.6-luna", "lightweight_read_discovery_crud_or_small_fix"
+    elif analysis_dispatch:
+        policy_model, policy_reason = "gpt-5.6-luna", "analysis_or_lightweight_work"
     else:
         policy_model, policy_reason = "gpt-5.6-terra", "default_non_security_work"
     requested_model = str(params.get("requested_model") or policy_model).strip()
     if requested_model not in REQUESTABLE_MODELS:
         raise ValueError("requested_model is not supported by Cortex routing policy")
     requested_effort = str(params.get("requested_reasoning_effort") or "").strip().lower() or (
-        "high" if policy_model == "gpt-5.6-sol" else "low" if policy_model == "gpt-5.6-luna" else "medium"
+        "high" if policy_model == "gpt-5.6-sol"
+        else ANALYSIS_REASONING_FLOORS[risk] if analysis_dispatch
+        else "medium"
     )
     selected_effort = "low" if requested_effort == "none" else requested_effort
     if selected_effort not in SUPPORTED_EFFORTS:
         raise ValueError("requested_reasoning_effort cannot be resolved to a supported effort")
     if policy_model == "gpt-5.6-sol" and selected_effort in {"low", "medium"}:
         selected_effort = "high"
+    elif analysis_dispatch:
+        minimum_effort = ANALYSIS_REASONING_FLOORS[risk]
+        if REASONING_EFFORT_ORDER[selected_effort] < REASONING_EFFORT_ORDER[minimum_effort]:
+            selected_effort = minimum_effort
     fallback_reason = None
     escalation_reason = redact(params.get("escalation_reason", ""), 1000) or None
     if policy_model == "gpt-5.6-sol":
@@ -1233,6 +1272,42 @@ def _resolve_report_receipt_hint(
     receipt_path = paths["receipts"] / f"{candidate}.json"
     if receipt_path.exists() and not receipt_path.is_symlink():
         return candidate, None
+
+    # The task report index deliberately exposes report ids to the coordinator,
+    # while the one-use receipt is returned to the worker that published the
+    # report.  Treat an exact report id as a recoverable *hint*, never as the
+    # receipt itself: resolve it only when it belongs to this task, gate, and
+    # attempt and its matching receipt is still usable.  This lets a resumed
+    # coordinator recover from a report/receipt handoff without broadening
+    # access to another attempt's receipt.
+    record_path = paths["records"] / f"{candidate}.json"
+    if record_path.exists() and not record_path.is_symlink():
+        record = _read_private_json(record_path, "report record")
+        if (
+            record.get("schema") == REPORT_SCHEMA
+            and record.get("task_id") == state["task_id"]
+            and record.get("gate") == gate
+            and record.get("attempt_id") == attempt_id
+        ):
+            resolved = f"report-receipt-{candidate}"
+            resolved_path = paths["receipts"] / f"{resolved}.json"
+            if resolved_path.exists() and not resolved_path.is_symlink():
+                receipt = _read_private_json(resolved_path, "report receipt")
+                if (
+                    receipt.get("schema") == REPORT_SCHEMA
+                    and receipt.get("task_id") == state["task_id"]
+                    and receipt.get("gate") == gate
+                    and receipt.get("attempt_id") == attempt_id
+                    and receipt.get("report_id") == candidate
+                    and not receipt.get("invalidated")
+                    and not receipt.get("consumed_at")
+                    and not receipt.get("consumed_by_evidence_id")
+                ):
+                    return resolved, {
+                        "requested": candidate,
+                        "used": resolved,
+                        "reason": "report id resolved to its exact active report receipt",
+                    }
 
     grant_path = paths["grants"] / f"{candidate}.json"
     if not grant_path.exists() or grant_path.is_symlink():
@@ -2618,6 +2693,25 @@ def get_delegation_reports(params: dict[str, Any]) -> dict[str, Any]:
         record = _read_private_json(_contained_path(paths["records"], paths["records"] / f"{report_id}.json", "report record"), "report record")
         if record.get("task_id") != state["task_id"]:
             raise ValueError("report record crosses task scope")
+        # A coordinator completing the producer attempt needs the one-use
+        # receipt, but a downstream context grant must not transfer that
+        # capability.  Return it only when this attempt owns the report and
+        # validate the durable binding before exposing it.
+        if record.get("attempt_id") == attempt_id:
+            receipt_id = f"report-receipt-{report_id}"
+            receipt = _read_private_json(
+                _contained_path(paths["receipts"], paths["receipts"] / f"{receipt_id}.json", "report receipt"),
+                "report receipt",
+            )
+            if (
+                receipt.get("schema") != REPORT_SCHEMA
+                or receipt.get("task_id") != state["task_id"]
+                or receipt.get("report_id") != report_id
+                or receipt.get("attempt_id") != attempt_id
+                or receipt.get("gate") != record.get("gate")
+            ):
+                raise ValueError("report receipt does not match its owned report")
+            record = {**record, "receipt": receipt}
         reports.append(record)
     return {"schema": REPORT_SCHEMA, "task_id": state["task_id"], "attempt_id": attempt_id, "reports": reports}
 
@@ -4671,11 +4765,22 @@ def main() -> None:
                     capabilities.get("mcpServerOpenaiFormElicitation")
                     or (isinstance(extensions, dict) and "openai/form" in extensions)
                 )
-                result = {"protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}}, "serverInfo": {"name": "cortex", "version": SERVER_VERSION}}
+                result = {
+                    "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
+                    # Cortex publishes no resources, but advertises an empty resource
+                    # catalogue so MCP hosts that probe the standard discovery methods
+                    # receive a valid result instead of an avoidable protocol error.
+                    "capabilities": {"tools": {}, "resources": {"subscribe": False, "listChanged": False}},
+                    "serverInfo": {"name": "cortex", "version": SERVER_VERSION},
+                }
             elif method == "notifications/initialized":
                 continue
             elif method == "tools/list":
                 result = {"tools": [{"name": name, "description": name.replace("_", " "), "inputSchema": schema} for name, (_, schema) in TOOLS.items()]}
+            elif method == "resources/list":
+                result = {"resources": []}
+            elif method == "resources/templates/list":
+                result = {"resourceTemplates": []}
             elif method == "tools/call":
                 name = request.get("params", {}).get("name")
                 if name not in TOOLS:

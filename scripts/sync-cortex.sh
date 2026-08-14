@@ -219,8 +219,8 @@ version = json.load(open(manifest, encoding="utf-8"))["version"]
 spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-if module.SERVER_VERSION != version or not version.startswith("1.0.1+codex."):
-    raise SystemExit("plugin/server version must match the 1.0.1+codex cachebuster manifest")
+if module.SERVER_VERSION != version or version != "1.0.2":
+    raise SystemExit("plugin/server version must match the 1.0.2 release manifest")
 PY
 }
 

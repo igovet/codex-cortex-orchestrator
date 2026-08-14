@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**1.0.1** with a Codex cachebuster. This is a breaking ledger upgrade: older tasks and lanes have no
+**1.0.2**. This is a breaking ledger upgrade: older tasks and lanes have no
 compatibility reader and must be recreated as v7 records.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
@@ -222,10 +222,13 @@ of claiming codebase-memory evidence that was not obtained.
 profiles and their exact names. `task_formatter` is not a supported profile.
 Every delegation records the requested and selected model and reasoning
 effort. With required multi-agent v2 enabled, every delegation is routed
-independently from its profile, task kind, and risk. Luna handles reading,
-discovery/data gathering, CRUD-level edits, and small fixes with low or
-moderate risk regardless of the parent task's C1/C2/C3 classification. Terra
-handles all other non-security work. Security task kind,
+independently from its declared work intent, profile, and risk. Luna handles
+reading, discovery/data gathering, investigation, diagnosis, research, code
+review, CRUD-level edits, and small fixes whenever the `task_kind` declares
+that intent, regardless of low/moderate/high/critical risk or the parent
+task's C1/C2/C3 classification. A read-only profile alone does not force Luna:
+non-analysis work such as implementation, architecture, migration, or
+debugging remains Terra. Security task kind,
 the security gate, and the
 `security_auditor` profile always use Sol; contradictory task kinds are
 normalized to security. A non-security Sol route must carry a structured
@@ -236,7 +239,10 @@ exception. The supported auditable-extreme criteria are
 `irreversible_multi_system_recovery`, `safety_critical_incident_response`,
 and `novel_cross_system_failure_without_bounded_rollback`. Reasoning effort is
 selected independently of the routing category: requested effort `none`
-becomes `low`, and Sol uses at least `high`.
+becomes `low`; for Luna analysis/lightweight work the minimum/default is
+`medium` at low/moderate risk, `high` at high risk, and `xhigh` at critical
+risk, while explicitly higher requested effort is preserved. Sol uses at least
+`high`.
 
 Each delegation first produces an `awaiting_host_spawn` intent plus a complete
 native `spawn_agent` request. The main Codex agent calls that host tool, then

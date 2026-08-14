@@ -111,9 +111,17 @@ successful worker.
 Use only the 21 profiles declared in `plugins/cortex/profiles.json`;
 `task_formatter` is retired. Record task kind, risk, complexity, requested
 capability, and the resolved capability. With multi-agent v2 enabled, every
-delegation is evaluated independently. Luna is used for reading, discovery/data
-gathering, CRUD-level edits, and small fixes at low or moderate risk regardless
-of the parent task's C1/C2/C3 classification. All other non-security work uses Terra.
+delegation is evaluated independently from its declared work intent and risk.
+Use Luna for reading, discovery/data gathering, investigation, diagnosis,
+research, code review, CRUD-level edits, and small fixes when `task_kind`
+explicitly declares that intent, at any risk and regardless of the parent
+task's C1/C2/C3 classification. A read-only profile alone does not imply Luna:
+non-analysis work such as architecture, migration, debugging, or implementation
+uses Terra.
+Use canonical task kinds such as `discover`, `data_gathering`,
+`runtime_investigation`, `diagnosis`, `research`, or `code_review` when the
+worker is collecting facts or analyzing a bounded problem; do not hide that
+intent behind a generic `implementation` task kind.
 Security task kind,
 the security gate, and the `security_auditor` profile always use Sol;
 contradictory task kinds are normalized to security.
@@ -123,9 +131,11 @@ a failed Terra attempt in the current ledger. Free-form `escalation_reason`
 text is context only and cannot authorize Sol. Supported auditable-extreme
 criteria are `irreversible_multi_system_recovery`,
 `safety_critical_incident_response`, and
-`novel_cross_system_failure_without_bounded_rollback`. Reasoning effort is
-otherwise selected independently of routing; requested effort `none` becomes
-`low`.
+`novel_cross_system_failure_without_bounded_rollback`. For Luna
+analysis/lightweight work, default/minimum reasoning is `medium` at
+low/moderate risk, `high` at high risk, and `xhigh` at critical risk; explicit
+higher requested effort is preserved. Otherwise reasoning is selected
+independently of routing; requested effort `none` becomes `low`.
 
 Internal worker execution is English-only: worker prompts, tool arguments,
 reports, findings, question records, handoffs, and audit events must be in

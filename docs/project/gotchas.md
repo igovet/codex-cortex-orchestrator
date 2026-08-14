@@ -86,10 +86,15 @@
   records, receipts, indexes, tombstones, and Markdown files; use
   `reconcile_report_bus` after suspected interruption, but never expect it to
   revive a consumed receipt.
-- Routing is binding: multi-agent v2 is required for explicit Luna dispatch.
-  Every delegation is evaluated separately; Luna handles lightweight work at
-  low or moderate risk regardless of the task's C1/C2/C3 classification, and
-  all other non-security work uses Terra.
+- Routing is binding: multi-agent v2 is required for explicit model dispatch.
+  Every delegation is evaluated separately from its declared `task_kind` and
+  risk. Luna handles explicit reading, discovery/data gathering,
+  investigation, diagnosis, research, code review, CRUD-level edits, and
+  small fixes at any risk. A read-only profile alone does not imply Luna;
+  non-analysis work such as architecture, migration, debugging, and
+  implementation uses Terra. Luna analysis/lightweight work defaults to and
+  floors at medium effort for low/moderate risk, high for high risk, and xhigh
+  for critical risk.
 - Host model confirmation is strict: `confirm_host_spawn` requires the actual
   `host_model`, verifies it against the requested dispatch model, and marks a
   mismatch such as requested Luna/actual Terra as `host_model_mismatch` rather

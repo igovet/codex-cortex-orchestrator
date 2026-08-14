@@ -110,17 +110,22 @@ worker report contract. The removed `task_formatter` profile is not accepted by
 the server. Model selection remains a main-agent dispatch decision, but Cortex
 resolves it against the current host capabilities and persists requested,
 selected, policy, and fallback fields. With multi-agent v2 enabled, every
-delegation is evaluated independently from task kind and risk; Luna handles
-lightweight work at low or moderate risk regardless of task complexity. Terra
-handles all other non-security work. Security task kind, the security gate, and the
+delegation is evaluated independently from its declared work intent and risk.
+Luna handles explicit reading, discovery/data gathering, investigation,
+diagnosis, research, code review, CRUD-level edits, and small fixes at any
+risk; a read-only profile alone does not imply Luna. Terra handles
+non-analysis work such as architecture, migration, debugging, and
+implementation. Security task kind, the security gate, and the
 `security_auditor` profile always select Sol, normalizing contradictory task
 kinds to security. A non-security Sol exception must be structurally auditable: a supported
 extreme criterion with an audit reference, or a ledger-validated failed Terra
 attempt. The supported auditable-extreme criteria are
 `irreversible_multi_system_recovery`, `safety_critical_incident_response`,
-and `novel_cross_system_failure_without_bounded_rollback`. Reasoning effort is
-otherwise selected independently of routing; `none` normalizes to `low` and
-Sol is at least `high`.
+and `novel_cross_system_failure_without_bounded_rollback`. Luna
+analysis/lightweight work has a `medium` minimum/default at low/moderate risk,
+`high` at high risk, and `xhigh` at critical risk; explicit higher effort is
+preserved. Other reasoning effort is selected independently of routing;
+`none` normalizes to `low` and Sol is at least `high`.
 
 ## Scoped worker report bus
 

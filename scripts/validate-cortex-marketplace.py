@@ -94,8 +94,8 @@ def main() -> int:
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
-    if manifest.get("name") != EXPECTED_PLUGIN or not isinstance(version, str) or not version.startswith("1.0.1+codex."):
-        fail("plugin manifest must identify cortex with one 1.0.1+codex cachebuster")
+    if manifest.get("name") != EXPECTED_PLUGIN or version != "1.0.2":
+        fail("plugin manifest must identify cortex at release version 1.0.2")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:

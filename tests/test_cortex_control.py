@@ -368,11 +368,56 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegation["state"]["attempts"][-1]["task_kind"], "security")
 
     def test_each_lightweight_dispatch_routes_independently_of_task_complexity(self):
-        for complexity, risk, expected in (("C1", "low", "gpt-5.6-luna"), ("C2", "low", "gpt-5.6-luna"), ("C3", "moderate", "gpt-5.6-luna"), ("C1", "high", "gpt-5.6-terra"), ("C2", "critical", "gpt-5.6-terra")):
+        for complexity, risk, expected_model, expected_effort in (
+            ("C1", "low", "gpt-5.6-luna", "medium"),
+            ("C2", "low", "gpt-5.6-luna", "medium"),
+            ("C3", "moderate", "gpt-5.6-luna", "medium"),
+            ("C1", "high", "gpt-5.6-luna", "high"),
+            ("C2", "critical", "gpt-5.6-luna", "xhigh"),
+        ):
             with self.subTest(complexity=complexity, risk=risk):
                 route = control.resolve_dispatch_route({"agent": "explorer", "task_kind": "reading", "risk": risk, "complexity": complexity})
-                self.assertEqual(route["policy_model"], expected)
-                self.assertEqual(route["selected_model"], expected)
+                self.assertEqual(route["policy_model"], expected_model)
+                self.assertEqual(route["selected_model"], expected_model)
+                self.assertEqual(route["selected_reasoning_effort"], expected_effort)
+
+    def test_runtime_investigation_routes_to_luna_with_medium_effort(self):
+        route = control.resolve_dispatch_route({
+            "agent": "explorer",
+            "task_kind": "runtime_investigation",
+            "risk": "moderate",
+            "complexity": "C3",
+            "requested_model": "gpt-5.6-terra",
+            "requested_reasoning_effort": "medium",
+        })
+        self.assertEqual(route["policy_model"], "gpt-5.6-luna")
+        self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(route["selected_reasoning_effort"], "medium")
+        self.assertEqual(route["fallback_reason"], "policy_model_enforced")
+        self.assertTrue(route["read_only"])
+
+    def test_read_only_profile_alone_does_not_force_luna(self):
+        route = control.resolve_dispatch_route({
+            "agent": "explorer",
+            "task_kind": "implementation",
+            "risk": "high",
+            "complexity": "C3",
+        })
+        self.assertEqual(route["policy_model"], "gpt-5.6-terra")
+        self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+
+    def test_analysis_task_kinds_route_to_luna_even_for_workspace_profiles(self):
+        for task_kind in ("analysis", "diagnosis", "research", "runtime_investigation", "root_cause_analysis", "code_review"):
+            with self.subTest(task_kind=task_kind):
+                route = control.resolve_dispatch_route({
+                    "agent": "general",
+                    "task_kind": task_kind,
+                    "risk": "high",
+                    "complexity": "C3",
+                })
+                self.assertEqual(route["policy_model"], "gpt-5.6-luna")
+                self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+                self.assertEqual(route["selected_reasoning_effort"], "high")
 
     def test_record_gate_returns_revision_correction_instead_of_stale_revision_error(self):
         state = self.init(task_id="gate-revision", complexity="C1")["state"]
@@ -406,7 +451,7 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(route["selected_model"], "gpt-5.6-terra")
 
     def test_terra_style_task_kind_is_canonicalized_at_the_mcp_boundary(self):
-        for supplied, expected, model in (("Code Review", "code_review", "gpt-5.6-terra"), ("READ-ONLY", "read_only", "gpt-5.6-luna"), ("data   gathering", "data_gathering", "gpt-5.6-luna")):
+        for supplied, expected, model in (("Code Review", "code_review", "gpt-5.6-luna"), ("READ-ONLY", "read_only", "gpt-5.6-luna"), ("data   gathering", "data_gathering", "gpt-5.6-luna")):
             with self.subTest(supplied=supplied):
                 route = control.resolve_dispatch_route({"agent": "explorer", "task_kind": supplied, "risk": "low", "complexity": "C1"})
                 self.assertEqual(route["task_kind"], expected)
@@ -1269,6 +1314,31 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(committed["state"]["current_gate"], "discover")
 
+    def test_record_evidence_resolves_exact_report_id_to_owned_receipt(self):
+        state = self.init(task_id="report-id-receipt", complexity="C2")["state"]
+        delegated = self.delegate(state, "report-id-receipt", "plan", "planner")
+        report = self.report("report-id-receipt", delegated["attempt_id"])
+        evidence = control.record_evidence({
+            "task_id": "report-id-receipt",
+            "principal": "thread-a",
+            "expected_revision": delegated["state"]["revision"],
+            "gate": "plan",
+            "attempt_id": delegated["attempt_id"],
+            # Coordinators may recover from a lost worker-local receipt only
+            # when this exact report id resolves to their active attempt.
+            "report_receipt": report["report"]["report_id"],
+            "summary": "report-backed plan evidence",
+        })
+        self.assertEqual(evidence["evidence"]["report_receipt"], report["receipt"]["receipt_id"])
+        self.assertEqual(
+            evidence["receipt_correction"],
+            {
+                "requested": report["report"]["report_id"],
+                "used": report["receipt"]["receipt_id"],
+                "reason": "report id resolved to its exact active report receipt",
+            },
+        )
+
     def test_commit_gate_repeated_invalid_receipt_terminalizes_instead_of_hanging(self):
         state = self.init(task_id="receipt-circuit-breaker", complexity="C2")["state"]
         delegated = self.delegate(state, "receipt-circuit-breaker", "plan", "planner")
@@ -1441,6 +1511,22 @@ class ControlPlaneTests(unittest.TestCase):
         finally:
             control.sys.stdin, control.sys.stdout = original_stdin, original_stdout
 
+    def test_mcp_resource_discovery_returns_an_empty_catalogue(self):
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        requests = "\n".join((
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "resources/templates/list", "params": {}}),
+        )) + "\n"
+        result = subprocess.run(
+            [sys.executable, str(script)], input=requests, text=True,
+            capture_output=True, check=True,
+        )
+        responses = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(responses[0]["result"]["capabilities"]["resources"], {"subscribe": False, "listChanged": False})
+        self.assertEqual(responses[1]["result"], {"resources": []})
+        self.assertEqual(responses[2]["result"], {"resourceTemplates": []})
+
     def test_openai_form_extension_is_used_when_host_advertises_it(self):
         original_stdin, original_stdout = control.sys.stdin, control.sys.stdout
         try:
@@ -1553,8 +1639,35 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(granted["grant"]["report_ids"], [report["report"]["report_id"]])
         bodies = control.get_delegation_reports({"task_id": "context", "principal": "thread-a", "attempt_id": first["attempt_id"], "report_ids": [report["report"]["report_id"]]})
         self.assertEqual(len(bodies["reports"]), 1)
+        self.assertEqual(bodies["reports"][0]["receipt"]["receipt_id"], report["receipt"]["receipt_id"])
         with self.assertRaisesRegex(ValueError, "not granted"):
             control.get_delegation_reports({"task_id": "context", "principal": "thread-a", "attempt_id": first["attempt_id"], "report_ids": ["report-9999"]})
+
+    def test_context_grant_does_not_transfer_another_attempts_receipt(self):
+        state = self.init(task_id="receipt-scope", complexity="C2")["state"]
+        producer = self.delegate(state, "receipt-scope", "plan", "planner")
+        report = self.report("receipt-scope", producer["attempt_id"])
+        evidence = control.record_evidence({
+            "task_id": "receipt-scope", "principal": "thread-a",
+            "expected_revision": producer["state"]["revision"], "gate": "plan",
+            "attempt_id": producer["attempt_id"],
+            "report_receipt": report["receipt"]["receipt_id"],
+            "summary": "producer evidence",
+        })
+        advanced = control.record_gate({
+            "task_id": "receipt-scope", "principal": "thread-a",
+            "expected_revision": evidence["state"]["revision"], "gate": "plan", "outcome": "passed",
+        })
+        consumer = self.delegate(advanced["state"], "receipt-scope", "discover", "explorer")
+        control.grant_report_context({
+            "task_id": "receipt-scope", "principal": "thread-a", "attempt_id": consumer["attempt_id"],
+            "report_ids": [report["report"]["report_id"]], "reason": "downstream review",
+        })
+        bodies = control.get_delegation_reports({
+            "task_id": "receipt-scope", "principal": "thread-a", "attempt_id": consumer["attempt_id"],
+            "report_ids": [report["report"]["report_id"]],
+        })
+        self.assertNotIn("receipt", bodies["reports"][0])
 
     def test_concurrent_report_publishers_are_serialized(self):
         state = self.init(task_id="publishers", complexity="C2")["state"]
