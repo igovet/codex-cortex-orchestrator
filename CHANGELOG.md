@@ -6,6 +6,17 @@ same base version.
 
 ## [Unreleased]
 
+- Expand all 21 bundled agents into role-specific professional playbooks and
+  add a validated 13-gate briefing registry so every worker receives the
+  overall task outcome, a concrete gate mission, scoped success criteria,
+  validation requirements, context, and stopping rules. Planner now follows a
+  repository-grounded, decision-complete planning workflow.
+- Separate task-level acceptance and validation from gate-level criteria,
+  preserve explicit worker overrides, and remove duplicated worker-language
+  guidance from generated prompts without changing the public v3 facade.
+- Warn operators to start a new Codex thread before dispatching agents after a
+  plugin update because an existing thread can retain absolute lifecycle-hook
+  paths into the retired cachebusted plugin directory.
 - Replace the v2 `orchestrate` facade with the relative v3 public tools
   `start_orchestration`, `continue_orchestration`, and
   `manage_orchestration`; keep v7 lifecycle state and receipts private for
@@ -53,7 +64,7 @@ same base version.
   redacted Cortex tool-error journal.
 - Catalog submission, remote provenance, and tagged installation remain
   pending external release authorization and verification.
-- The 3.0 working-tree changes remain uncommitted; a committed release tree and
+- The 3.1 working-tree changes remain uncommitted; a committed release tree and
   a passing `verify-cortex-release.py --require-tracked` check remain
   prerequisites to any publication claim.
 

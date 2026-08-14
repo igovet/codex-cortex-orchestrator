@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 - The plugin’s machine-readable contracts live under [plugins/cortex](../../plugins/cortex/), including the manifest, MCP configuration, profile registry, and hook configuration.
-- The supported profile names and shared worker-report fields are declared in [profiles.json](../../plugins/cortex/profiles.json); profile files must match that registry.
+- The supported profile names, structured professional playbooks, 13 gate-specific briefing defaults, and shared worker-report fields are declared in [profiles.json](../../plugins/cortex/profiles.json) and the profile TOML files; profile files must match that registry. Generated worker prompts layer the selected playbook, overall task context, and current gate mission/criteria. Explicit coordinator overrides win over gate defaults.
 - `cortex/report/v1` payloads contain exactly `summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`, and `next_action`; the server sanitizes report data before persistence. See [cortex.py](../../plugins/cortex/scripts/cortex.py).
 - Report persistence is bounded: one report is at most 64 KiB; an attempt can publish 32 reports; a task can publish 256 reports totaling at most 1 MiB; and an attempt can receive at most 256 explicit context grants. Stranded-report recovery allocates a new record and never overwrites an authoritative record.
 - Ledger, report-bus, journal, and lifecycle-telemetry paths reject symlink traversal and require regular-file targets before reads or writes. Report JSON is authoritative; `reconcile_report_bus` repairs derived indexes, receipts, and Markdown after an interrupted multi-file publication.

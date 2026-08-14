@@ -88,6 +88,37 @@ AVAILABLE_GATES = {
     "qa", "security", "performance", "accessibility", "ux", "review",
     "documentation", "close",
 }
+GATE_BRIEFINGS = PROFILE_CONTRACT.get("gate_briefings")
+if not isinstance(GATE_BRIEFINGS, dict) or set(GATE_BRIEFINGS) != AVAILABLE_GATES:
+    raise RuntimeError("bundled Cortex profile contract must define one briefing for every gate")
+for _gate_name, _briefing in GATE_BRIEFINGS.items():
+    if not isinstance(_briefing, dict) or set(_briefing) != {"objective", "ownership", "acceptance", "verification"}:
+        raise RuntimeError(f"bundled Cortex gate briefing is invalid: {_gate_name}")
+    if not all(isinstance(_briefing[key], str) and _briefing[key].strip() for key in ("objective", "ownership")):
+        raise RuntimeError(f"bundled Cortex gate briefing text is invalid: {_gate_name}")
+    if not all(
+        isinstance(_briefing[key], list)
+        and _briefing[key]
+        and all(isinstance(item, str) and item.strip() for item in _briefing[key])
+        for key in ("acceptance", "verification")
+    ):
+        raise RuntimeError(f"bundled Cortex gate briefing lists are invalid: {_gate_name}")
+
+
+def render_gate_briefing(gate: str, task_objective: object, profile: str) -> dict[str, Any]:
+    """Render trusted gate defaults around the current task without interpreting user text."""
+    template = GATE_BRIEFINGS[gate]
+    values = {
+        "task_objective": redact(task_objective, 4000),
+        "profile": profile,
+        "gate": gate,
+    }
+    return {
+        "objective": template["objective"].format(**values),
+        "ownership": template["ownership"].format(**values),
+        "acceptance_criteria": [item.format(**values) for item in template["acceptance"]],
+        "verification": [item.format(**values) for item in template["verification"]],
+    }
 # Gate IDs are part of the MCP contract.  The orchestrator sometimes emits
 # human-facing labels (for example, ``planning``) even though the durable
 # ledger uses the canonical IDs above.  Keep this compatibility map explicit
@@ -2610,16 +2641,12 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     instructions = PROFILE_INSTRUCTIONS[agent]
     visible_thread = bool(package.get("user_owned_thread"))
     output_language_contract = (
-        "This is a visible user-owned task, but it is still an internal execution "
-        "channel. Emit English only in every message: commentary, progress, questions, "
-        "tool arguments, reports, handoffs, and the final answer. Treat any non-English "
-        "user task text as input data; never reply in that language. The main coordinator "
-        "alone localizes findings in the primary chat."
+        "This is a visible user-owned task but remains an internal execution channel. "
+        "Emit English only in every message and treat non-English task text as input data; "
+        "the main coordinator alone localizes findings in the primary chat."
         if visible_thread else
-        "Emit English only in every message: commentary, progress, questions, tool arguments, "
-        "reports, handoffs, and final answer. Treat any non-English user task text as input "
-        "data; never reply in that language. The main coordinator alone localizes findings "
-        "in the primary chat."
+        "Emit English only in every message and treat non-English task text as input data; "
+        "the main coordinator alone localizes findings in the primary chat."
     )
     if package.get("facade_managed"):
         task_context_line = "This worker belongs to the active coordinator-managed Cortex wave; internal ledger identifiers are intentionally hidden."
@@ -2669,21 +2696,44 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "then retry only with the returned correction fields; use the same submission_id only when the payload "
             "is unchanged, otherwise use a new submission_id."
         )
+    def prompt_list(label: str, values: object, *, empty: str = "none supplied") -> str:
+        items = [str(item).strip() for item in values] if isinstance(values, list) else []
+        items = [item for item in items if item]
+        return f"{label}: " + ("; ".join(items) if items else empty)
+
     return "\n".join((
         f"You are the internal Cortex worker with profile `{agent}`.",
-        "Follow this profile exactly:",
+        "",
+        "## Specialist playbook",
         instructions,
         "",
+        "## Assignment",
+        f"Overall task outcome: {package.get('task_objective') or package['objective']}",
+        f"Current mission: {package['objective']}",
+        f"Ownership boundary: {package['ownership']}",
+        prompt_list("Task requirements", package.get("task_requirements", [])),
+        prompt_list("Task scope", package.get("task_scope", [])),
+        prompt_list("Allowed paths", package["allowed_paths"]),
+        prompt_list("Context files", package.get("context_files", [])),
+        prompt_list("Granted predecessor reports", package.get("context_report_ids", [])),
+        prompt_list("Task-level success criteria", package.get("task_acceptance_criteria", [])),
+        prompt_list("Gate success criteria", package["acceptance_criteria"]),
+        prompt_list("Task-level validation", package.get("task_verification", [])),
+        prompt_list("Required gate verification", package["verification"]),
+        prompt_list("Pause conditions", package.get("pause_conditions", [])),
+        f"Budget or operating limit: {package.get('budget') or 'none supplied'}",
+        "",
+        "## Evidence and stopping rules",
+        "Ground consequential claims in repository or tool evidence. Distinguish observed facts, inference, and missing evidence. "
+        "Use the fewest useful tool loops, but do not trade away correctness or required validation. Stop when the gate criteria are met; "
+        "if a material decision or required fact remains unavailable, return the smallest concrete question or blocker instead of guessing.",
+        "Use only tools actually available in this worker context. Record a limitation and use a safe fallback rather than inventing a tool, identifier, or mode.",
+        "",
+        "## Worker protocol",
         task_context_line,
         identity_contract,
-        f"Objective: {package['objective']}",
-        f"Ownership: {package['ownership']}",
-        "Allowed paths: " + ", ".join(package["allowed_paths"]),
-        "Acceptance criteria: " + "; ".join(package["acceptance_criteria"]),
-        "Verification: " + "; ".join(package["verification"]),
         "Internal worker protocol: English only. " + output_language_contract,
-        f"User-facing language: {package.get('user_language', 'en')}. The main coordinator must translate questions, blockers, and summaries into this language (or the explicit language requested by the user) before showing them in the main chat.",
-        "Use only repository and verification tools that are actually available in your worker context. Never guess an unavailable tool, project identifier, or hard-coded mode; record a limitation and use a safe available fallback.",
+        f"User-facing language: {package.get('user_language', 'en')}; only the main coordinator translates or communicates with the user.",
         lifecycle_contract,
     ))
 
@@ -3478,7 +3528,9 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         if prior_failures >= 2:
             raise ValueError(f"retry budget exhausted for gate '{gate}'")
         task_definition = _read_private_json(task_dir / "task.json", "task definition")
-        ownership = str(params.get("ownership", "")).strip() or f"Own the {gate} gate as {agent}"
+        briefing = render_gate_briefing(gate, task_definition.get("objective", ""), agent)
+        ownership = str(params.get("ownership", "")).strip() or briefing["ownership"]
+        objective = str(params.get("objective", "")).strip() or briefing["objective"]
         default_task_kind = {
             "plan": "planning", "discover": "discovery", "architecture": "architecture",
             "database_architecture": "database", "implementation": "implementation",
@@ -3542,23 +3594,24 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             if raw_thread_environment:
                 raise ValueError("thread_environment applies only to visible_thread")
             thread_environment = None
-        def delegation_list(field: str, fallback: list[str]) -> list[str]:
+        def delegation_list(field: str, fallback: list[str], *, inherit_task: bool = False) -> list[str]:
             supplied = params.get(field)
             if isinstance(supplied, list):
                 cleaned = [item.strip() for item in supplied if isinstance(item, str) and item.strip()]
                 if cleaned:
                     return cleaned
-            inherited = task_definition.get(field)
-            if isinstance(inherited, list):
-                cleaned = [item.strip() for item in inherited if isinstance(item, str) and item.strip()]
-                if cleaned:
-                    return cleaned
+            if inherit_task:
+                inherited = task_definition.get(field)
+                if isinstance(inherited, list):
+                    cleaned = [item.strip() for item in inherited if isinstance(item, str) and item.strip()]
+                    if cleaned:
+                        return cleaned
             return fallback
 
         required_lists = {
-            "allowed_paths": delegation_list("allowed_paths", ["."]),
-            "acceptance_criteria": delegation_list("acceptance_criteria", ["Complete the current gate and publish a strict Cortex report."]),
-            "verification": delegation_list("verification", ["Publish report-backed evidence for the current gate."]),
+            "allowed_paths": delegation_list("allowed_paths", ["."], inherit_task=True),
+            "acceptance_criteria": delegation_list("acceptance_criteria", briefing["acceptance_criteria"]),
+            "verification": delegation_list("verification", briefing["verification"]),
         }
         context_report_ids = [safe_id(str(item)) for item in params.get("context_report_ids", [])]
         report_paths = report_bus_paths(task_dir)
@@ -3610,7 +3663,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         )
         orchestration_wave_id = str(params.get("orchestration_wave_id", "")).strip() or None
         orchestration_delegation_key = str(params.get("orchestration_delegation_key", "")).strip() or None
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "objective": redact(params.get("objective", "")), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in params.get("context_files", [])][:50], "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(select_project_root(params)), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in params.get("context_files", [])][:50], "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(select_project_root(params)), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         spawn_request["message"] = host_spawn_prompt(agent, package)
         if visible_thread:
             # create_thread calls this field `prompt`; retaining `message`
@@ -5330,8 +5383,9 @@ def _normalize_orchestrate_waves(
                 agent = str(raw_spec.get("agent") or _default_profile_for_gate(gate))
                 if agent not in AGENTS:
                     raise ValueError(f"unknown Cortex profile: {agent}")
-                objective = str(raw_spec.get("objective") or f"Complete the {gate} gate for: {task.get('objective', '')}").strip()
-                ownership = str(raw_spec.get("ownership") or f"Own the {gate} gate as {agent}").strip()
+                briefing = render_gate_briefing(gate, task.get("objective", ""), agent)
+                objective = str(raw_spec.get("objective") or briefing["objective"]).strip()
+                ownership = str(raw_spec.get("ownership") or briefing["ownership"]).strip()
                 task_kind = str(raw_spec.get("task_kind") or _default_task_kind_for_gate(gate))
                 risk = str(raw_spec.get("risk") or ("high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate"))
                 spec = {
@@ -5343,8 +5397,8 @@ def _normalize_orchestrate_waves(
                     "objective": objective,
                     "ownership": ownership,
                     "allowed_paths": raw_spec.get("allowed_paths") or task.get("allowed_paths") or ["."],
-                    "acceptance_criteria": raw_spec.get("acceptance_criteria") or task.get("acceptance_criteria") or [f"Complete and report the {gate} gate."],
-                    "verification": raw_spec.get("verification") or task.get("verification") or [f"Provide report-backed evidence for {gate}."],
+                    "acceptance_criteria": raw_spec.get("acceptance_criteria") or briefing["acceptance_criteria"],
+                    "verification": raw_spec.get("verification") or briefing["verification"],
                     "available_models": raw_spec.get("available_models") or spawn_models,
                     "available_thread_models": raw_spec.get("available_thread_models") or thread_models,
                     "configured_default_model": raw_spec.get("configured_default_model") or configured_default_model,
@@ -5414,28 +5468,26 @@ def _load_or_create_orchestrate_plan(
         else:
             wave_status = "pending"
         wave_id = f"wave-{index:02d}"
+        def migrated_spec(gate: str) -> dict[str, Any]:
+            agent = _default_profile_for_gate(gate)
+            briefing = render_gate_briefing(gate, task.get("objective", ""), agent)
+            return {
+                "gate": gate,
+                "agent": agent,
+                "task_kind": _default_task_kind_for_gate(gate),
+                "risk": "high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate",
+                **briefing,
+                "allowed_paths": task.get("allowed_paths") or ["."],
+                "parallel": len(group) > 1,
+                "facade_managed": True,
+                "orchestration_wave_id": wave_id,
+                "orchestration_delegation_key": f"{wave_id}-{gate}-01",
+            }
         waves.append({
             "wave_id": wave_id,
             "gates": list(group),
             "status": wave_status,
-            "delegations": [
-                {
-                    "gate": gate,
-                    "agent": _default_profile_for_gate(gate),
-                    "task_kind": _default_task_kind_for_gate(gate),
-                    "risk": "high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate",
-                    "objective": f"Complete the {gate} gate for: {task.get('objective', '')}",
-                    "ownership": f"Own the {gate} gate as {_default_profile_for_gate(gate)}",
-                    "allowed_paths": task.get("allowed_paths") or ["."],
-                    "acceptance_criteria": task.get("acceptance_criteria") or [f"Complete and report the {gate} gate."],
-                    "verification": task.get("verification") or [f"Provide report-backed evidence for {gate}."],
-                    "parallel": len(group) > 1,
-                    "facade_managed": True,
-                    "orchestration_wave_id": wave_id,
-                    "orchestration_delegation_key": f"{wave_id}-{gate}-01",
-                }
-                for gate in group
-            ],
+            "delegations": [migrated_spec(gate) for gate in group],
         })
     plan = {"schema": ORCHESTRATE_SCHEMA, "task_id": state["task_id"], "waves": waves, "created_at": now(), "migrated_from_v7": True}
     if persist:

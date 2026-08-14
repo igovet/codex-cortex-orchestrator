@@ -95,8 +95,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "3.0.0":
-        fail("plugin manifest must identify cortex at release version 3.0.0")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "3.1.0":
+        fail("plugin manifest must identify cortex at release version 3.1.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:
@@ -105,6 +105,20 @@ def main() -> int:
         fail(f"invalid profile contract: {exc}")
     if profile_contract.get("schema") != "cortex/profile-contract/v1" or len(profile_contract.get("profiles", [])) != 21:
         fail("profile contract must define exactly 21 Cortex profiles")
+    expected_gates = {
+        "plan", "discover", "architecture", "database_architecture", "implementation",
+        "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",
+    }
+    gate_briefings = profile_contract.get("gate_briefings")
+    if not isinstance(gate_briefings, dict) or set(gate_briefings) != expected_gates:
+        fail("profile contract must define exactly one briefing for every Cortex gate")
+    for gate, briefing in gate_briefings.items():
+        if not isinstance(briefing, dict) or set(briefing) != {"objective", "ownership", "acceptance", "verification"}:
+            fail(f"invalid gate briefing shape: {gate}")
+        if not all(isinstance(briefing.get(key), str) and briefing[key].strip() for key in ("objective", "ownership")):
+            fail(f"gate briefing lacks objective or ownership: {gate}")
+        if not all(isinstance(briefing.get(key), list) and briefing[key] for key in ("acceptance", "verification")):
+            fail(f"gate briefing lacks acceptance or verification: {gate}")
     shared = profile_contract.get("shared_worker_contract", {})
     required_report_fields = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
     if shared.get("report_schema") != "cortex/report/v1" or set(shared.get("required_report_fields", [])) != required_report_fields:
@@ -147,6 +161,8 @@ def main() -> int:
         prompt_lower = prompt.lower()
         if not all(marker in prompt_lower for marker in ("select this profile", "do not select", "report", "escalate")):
             fail(f"profile prompt lacks selection, exclusion, evidence, or escalation guidance: {path.name}")
+        if not all(marker in prompt_lower for marker in ("role and mission:", "operating workflow:", "quality bar:")):
+            fail(f"profile prompt lacks the professional playbook structure: {path.name}")
         if "gpt-" in prompt or "model_reasoning_effort" in prompt:
             fail(f"profile prompt must not pin a model or effort: {path.name}")
     if (root / "agents").exists() or (root / "skills").exists():

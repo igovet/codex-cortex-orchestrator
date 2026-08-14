@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**3.0.0**. The public MCP surface is the relative v3 trio
+**3.1.0**. The public MCP surface is the relative v3 trio
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`; existing v7 ledgers remain readable through a private
 compatibility adapter. Ledgers older than v7 have no compatibility reader and
@@ -143,8 +143,12 @@ Those backups are local operator data: they are never uploaded or included in
 the repository release archive. Restoring or deleting them is an explicit
 manual operation so unrelated user-owned configuration is never overwritten.
 
-Start a **new Codex thread** after installing or updating so its skills and MCP
-tools are picked up. Test an isolated fresh registration with:
+Start a **new Codex thread** after installing or updating before dispatching
+agents. Existing threads can retain absolute paths to lifecycle hooks in the
+retired cachebusted plugin directory; a worker may finish its task but fail to
+return its lifecycle result after that directory is replaced. The new thread
+also picks up the updated skills and MCP tools. Test an isolated fresh
+registration with:
 
 ```bash
 python3 scripts/probe-fresh-cortex-plugin.py
@@ -160,10 +164,10 @@ for the new installation.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 3.0
+and secret-prone paths before validating the package again. The Cortex 3.1
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` still validates the
-previous `HEAD` and fails its 3.0 package contract. Commit only with explicit
+previous `HEAD` and fails its 3.1 package contract. Commit only with explicit
 authorization, then rerun the blocking check against that committed tree before
 any push, tag, or catalog submission.
 
@@ -278,7 +282,16 @@ project identifiers, or hard-coded output modes into every worker prompt.
 ## Profiles, routing, and reports
 
 `plugins/cortex/profiles.json` is the runtime contract for the 21 bundled
-profiles and their exact names. `task_formatter` is not a supported profile.
+profiles and their exact names. Each profile carries a structured professional
+playbook. A generated worker briefing then combines that playbook with the
+overall task context and the current gate's mission, ownership, acceptance, and
+verification defaults. Task-level criteria remain separate from gate-level
+criteria; explicit coordinator overrides take precedence over gate defaults,
+and omitted values are filled from the validated 13-gate registry. The
+`planner` profile is read-only and must ground a decision-complete plan in
+repository evidence, resolve discoverable facts before asking questions, and
+leave no material implementation decisions for the executor. `task_formatter`
+is not a supported profile.
 Every delegation records requested/expected model metadata separately from
 the native request override and always records reasoning effort. A
 configured-default Luna request omits native `model`; confirmation and

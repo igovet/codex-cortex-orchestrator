@@ -723,6 +723,38 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(len(list((repository / "plugins/cortex/agents").glob("*.toml"))), 21)
         self.assertEqual(len(list((repository / "plugins/cortex/skills").glob("*/SKILL.md"))), 10)
 
+    def test_all_profiles_ship_complete_professional_playbooks(self):
+        import tomllib
+
+        repository = Path(__file__).parents[1]
+        prompts = {}
+        for path in (repository / "plugins/cortex/agents").glob("*.toml"):
+            payload = tomllib.loads(path.read_text(encoding="utf-8"))
+            prompt = payload["developer_instructions"]
+            prompts[payload["name"]] = prompt
+            for marker in ("Role and mission:", "Operating workflow:", "Quality bar:", "Report", "Escalate"):
+                self.assertIn(marker, prompt, f"{marker!r} missing from {path.name}")
+            self.assertGreaterEqual(len(prompt.split()), 180, path.name)
+            self.assertNotIn("gpt-", prompt.lower())
+        planner = prompts["planner"]
+        for marker in (
+            "Ground in the environment before planning",
+            "Separate unknowns",
+            "Close the implementation contract",
+            "another engineer can execute without making design decisions",
+        ):
+            self.assertIn(marker, planner)
+
+    def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
+        contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(contract["gate_briefings"]), control.AVAILABLE_GATES)
+        for gate, briefing in contract["gate_briefings"].items():
+            self.assertEqual(set(briefing), {"objective", "ownership", "acceptance", "verification"})
+            self.assertIn("{task_objective}", briefing["objective"], gate)
+            self.assertGreaterEqual(len(briefing["acceptance"]), 2, gate)
+            self.assertGreaterEqual(len(briefing["verification"]), 2, gate)
+            self.assertNotIn(f"Complete and report the {gate} gate", json.dumps(briefing))
+
     def test_default_cortex_ledger_is_excluded_from_manifest(self):
         ledger = control.ledger_root({"project_root": str(self.project)})
         (ledger / "generated.txt").write_text("runtime\n", encoding="utf-8")

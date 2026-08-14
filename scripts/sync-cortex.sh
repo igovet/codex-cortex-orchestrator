@@ -230,8 +230,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "3.0.0":
-    raise SystemExit("plugin/server version must match the 3.0.0 release manifest")
+if module.SERVER_VERSION != version or base_version != "3.1.0":
+    raise SystemExit("plugin/server version must match the 3.1.0 release manifest")
 PY
 }
 
@@ -665,4 +665,8 @@ remove_authenticated_legacy_cache || status=1
 remove_legacy_marketplace_entry || status=1
 install_or_check || status=1
 [[ "${status}" -eq 0 ]] || exit "${status}"
-[[ "${mode}" == "check" ]] && echo "Cortex is up to date." || echo "Cortex installed from this repository. Start a new Codex thread to pick up its skills and MCP tools."
+if [[ "${mode}" == "check" ]]; then
+  echo "Cortex is up to date."
+else
+  echo "Cortex installed from this repository. Start a new Codex thread before dispatching agents: existing threads can retain absolute paths to hooks in the retired plugin cache."
+fi

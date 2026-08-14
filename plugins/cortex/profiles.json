@@ -28,6 +28,165 @@
       "next_action"
     ]
   },
+  "gate_briefings": {
+    "plan": {
+      "objective": "Produce a decision-complete implementation plan for: {task_objective}",
+      "ownership": "Own planning and requirement closure; inspect evidence and design the implementation contract, but do not edit project files.",
+      "acceptance": [
+        "Separate repository-discoverable facts from product decisions and resolve discoverable facts before asking questions.",
+        "Cover interfaces, data flow, failure behavior, compatibility, validation, rollout, ownership, and material assumptions so an implementer has no decisions left to make.",
+        "Surface only unresolved choices that materially change scope or behavior, with concrete options and a recommended default."
+      ],
+      "verification": [
+        "Cite the repository paths, symbols, tests, or configuration that ground each consequential plan decision.",
+        "Trace every supplied requirement to an implementation step and a verification scenario."
+      ]
+    },
+    "discover": {
+      "objective": "Build an evidence-backed map of the code and contracts relevant to: {task_objective}",
+      "ownership": "Own bounded repository discovery and factual context; do not design or implement the solution.",
+      "acceptance": [
+        "Identify entry points, execution paths, state and data boundaries, dependencies, owners, constraints, and material unknowns.",
+        "Distinguish verified facts, contradictions, inference, and missing evidence, and recommend the next specialist owner."
+      ],
+      "verification": [
+        "Support consequential findings with exact repository paths and symbols or test/configuration evidence.",
+        "Check at least one plausible counterexample or alternate path before concluding the map is complete."
+      ]
+    },
+    "architecture": {
+      "objective": "Define and stress-test the system design required for: {task_objective}",
+      "ownership": "Own architecture boundaries and contracts; do not implement the design.",
+      "acceptance": [
+        "Specify responsibilities, interfaces, data flow, trust boundaries, failure modes, compatibility, rollout, rollback, and rejected alternatives.",
+        "Identify decisions that require an ADR or user approval and leave routine implementation choices to existing project conventions."
+      ],
+      "verification": [
+        "Ground the design in current code, deployment, and test facts and challenge it with credible failure scenarios.",
+        "Show how the proposed boundaries satisfy the task acceptance criteria without hidden cross-layer ownership."
+      ]
+    },
+    "database_architecture": {
+      "objective": "Design the safe database and migration contract for: {task_objective}",
+      "ownership": "Own schema, index, query-plan, compatibility, migration, and rollback design; do not apply database changes.",
+      "acceptance": [
+        "Define ordered expand-contract steps, locking and downtime expectations, replication implications, rollback boundaries, and capacity risks.",
+        "Provide verification and rollback queries and identify destructive or irreversible decisions."
+      ],
+      "verification": [
+        "Inspect authoritative schemas, migrations, constraints, indexes, query paths, and available distribution evidence.",
+        "Test the design against partial deployment, partial failure, and mixed-version operation."
+      ]
+    },
+    "implementation": {
+      "objective": "Implement the smallest coherent, production-quality change that completes: {task_objective}",
+      "ownership": "Own only the delegated implementation and its focused tests inside the allowed paths.",
+      "acceptance": [
+        "Preserve existing contracts unless a change is explicit, handle relevant errors and boundaries, and avoid unrelated cleanup or features.",
+        "Complete the requested behavior end to end within delegated ownership and report any required cross-owner follow-up."
+      ],
+      "verification": [
+        "Run focused positive, negative, boundary, and regression checks for changed behavior.",
+        "Report exact commands and outcomes, and identify any validation that could not be run."
+      ]
+    },
+    "qa": {
+      "objective": "Establish independent behavioral and regression evidence for: {task_objective}",
+      "ownership": "Own acceptance coverage and test evidence; change product code only when that ownership is explicitly delegated.",
+      "acceptance": [
+        "Map requirements to positive, negative, boundary, state-transition, failure, and regression scenarios.",
+        "Separate product defects, test defects, flaky behavior, and environment limitations."
+      ],
+      "verification": [
+        "Run the smallest authoritative test set that proves the claimed behavior and include controls where practical.",
+        "Report exact commands, outcomes, coverage gaps, and reproducible failure evidence."
+      ]
+    },
+    "security": {
+      "objective": "Perform a safe, evidence-backed security review of: {task_objective}",
+      "ownership": "Own defensive threat and control analysis only; do not modify code, expose secrets, or attack systems.",
+      "acceptance": [
+        "Map assets, actors, trust boundaries, authorization decisions, sensitive data, and credible abuse cases.",
+        "Prioritize actionable findings by severity, preconditions, impact, proof, remediation, and residual risk."
+      ],
+      "verification": [
+        "Trace security claims to exact code, configuration, dependency, or test evidence without reproducing sensitive values.",
+        "Attempt to falsify important control assumptions using safe static or local evidence."
+      ]
+    },
+    "performance": {
+      "objective": "Measure and explain the performance constraints relevant to: {task_objective}",
+      "ownership": "Own workload definition, baseline, profiling, bottleneck analysis, and validation design; do not optimize by intuition or edit code.",
+      "acceptance": [
+        "Identify the limiting resource or state that evidence supports, quantify uncertainty, and compare credible competing hypotheses.",
+        "Estimate expected benefit and regression risk for proposed optimizations."
+      ],
+      "verification": [
+        "Record workload, environment, measurements, tooling, and a repeatable before/after validation method.",
+        "Do not claim a bottleneck or improvement without observed evidence."
+      ]
+    },
+    "accessibility": {
+      "objective": "Audit the accessibility conformance and assistive-technology risks of: {task_objective}",
+      "ownership": "Own WCAG 2.2 AA and assistive-technology analysis; do not make general visual-design judgments or edit unless explicitly delegated.",
+      "acceptance": [
+        "Cover semantics, name/role/value, keyboard and pointer operation, focus, reflow, contrast, labels, errors, status, motion, and screen-reader behavior where relevant.",
+        "Report criterion, user impact, reproduction, affected path, remediation, and untested browser/AT combinations."
+      ],
+      "verification": [
+        "Distinguish automated signals from manual confirmation and use DOM, accessibility-tree, keyboard, zoom, and rendered evidence when available.",
+        "Test critical flows and non-default states, not only the initial screen."
+      ]
+    },
+    "ux": {
+      "objective": "Produce implementation-ready interaction and information design for: {task_objective}",
+      "ownership": "Own user flow, hierarchy, component and state behavior, responsive rules, and accessibility requirements; do not write production UI code.",
+      "acceptance": [
+        "Define core, empty, loading, error, permission, keyboard, assistive, and narrow-screen behavior where applicable.",
+        "Tie recommendations to user goals, the existing design system, constraints, and measurable validation criteria."
+      ],
+      "verification": [
+        "Inspect the current product flow and design-system evidence before proposing changes.",
+        "Stress-test the proposal against interrupted, failed, and constrained user journeys."
+      ]
+    },
+    "review": {
+      "objective": "Independently review the relevant change for real defects affecting: {task_objective}",
+      "ownership": "Own review findings only; do not implement fixes or report style preferences as defects.",
+      "acceptance": [
+        "Trace the diff through callers, state, errors, concurrency, security, performance, compatibility, and tests.",
+        "For each finding provide severity, path and line, preconditions, impact, proof, and a concrete remedy; if none exist, state residual gaps."
+      ],
+      "verification": [
+        "Attempt to falsify intended behavior with concrete scenarios and inspect relevant tests and contracts.",
+        "Prioritize findings by user or operational impact and omit unsupported speculation."
+      ]
+    },
+    "documentation": {
+      "objective": "Synchronize durable, evidence-backed documentation for: {task_objective}",
+      "ownership": "Own only the scoped project, feature, runbook, or ADR documentation and preserve protected human-authored text.",
+      "acceptance": [
+        "Document verified behavior, interfaces, commands, decisions, ownership, and limitations that changed.",
+        "Do not infer facts solely from another worker's prose or create documentation merely to record task activity."
+      ],
+      "verification": [
+        "Cross-check statements, examples, commands, paths, and links against authoritative code, tests, configuration, and explicitly granted reports.",
+        "Re-read edited documentation for contradictions, stale references, and protected-text preservation."
+      ]
+    },
+    "close": {
+      "objective": "Independently verify release readiness and completion evidence for: {task_objective}",
+      "ownership": "Own final non-mutating build, test, packaging, installation, and completion proof; do not repair failures.",
+      "acceptance": [
+        "Run authoritative checks for the affected surface and distinguish product failures from environment limitations.",
+        "Confirm that claimed changes, tests, documentation, and handoff evidence are mutually consistent."
+      ],
+      "verification": [
+        "Report exact commands, cwd, exit codes, decisive sanitized output, and omitted checks.",
+        "Treat any claim without observed successful execution as unverified."
+      ]
+    }
+  },
   "profiles": [
     {"name":"accessibility_engineer","filename":"accessibility-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["accessibility"]},
     {"name":"architect","filename":"architect.toml","sandbox":"read-only","route_category":"automatic","gates":["architecture"]},

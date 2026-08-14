@@ -1467,7 +1467,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(delegated["gate_correction"], {"requested": "discover", "used": "plan"})
         package = json.loads(Path(delegated["delegation_file"]).read_text(encoding="utf-8"))
-        self.assertEqual(package["ownership"], "Own the plan gate as planner")
+        self.assertIn("Own planning and requirement closure", package["ownership"])
         self.assertEqual(package["allowed_paths"], ["."])
         self.assertTrue(package["acceptance_criteria"])
         self.assertTrue(package["verification"])
@@ -1653,14 +1653,14 @@ class ControlPlaneTests(unittest.TestCase):
         created = control.init_task({"task_id": "language-contract", "objective": "Проверить язык", "classification_id": classified["classification_id"], "principal": "thread-a", "user_language": "ru"})
         self.assertEqual(created["state"]["user_language"], "ru")
         delegation = self.delegate(created["state"], "language-contract", "discover", "explorer")
-        self.assertIn("Internal worker protocol: English only", delegation["spawn_request"]["message"])
-        self.assertIn("Emit English only in every message", delegation["spawn_request"]["message"])
-        self.assertIn("Treat any non-English user task text as input data", delegation["spawn_request"]["message"])
-        self.assertIn("never reply in that language", delegation["spawn_request"]["message"])
-        self.assertIn("User-facing language: ru", delegation["spawn_request"]["message"])
-        self.assertIn("Use only repository and verification tools that are actually available", delegation["spawn_request"]["message"])
-        self.assertNotIn("mcp__codebase_memory__", delegation["spawn_request"]["message"])
-        self.assertNotIn("mode=compact|full|files", delegation["spawn_request"]["message"])
+        prompt = delegation["spawn_request"]["message"]
+        self.assertIn("Internal worker protocol: English only", prompt)
+        self.assertEqual(prompt.count("Emit English only in every message"), 1)
+        self.assertIn("treat non-English task text as input data", prompt)
+        self.assertIn("User-facing language: ru", prompt)
+        self.assertIn("Use only tools actually available in this worker context", prompt)
+        self.assertNotIn("mcp__codebase_memory__", prompt)
+        self.assertNotIn("mode=compact|full|files", prompt)
 
     def test_composite_delegation_and_completion_fast_paths(self):
         self.init(task_id="composites")
@@ -1940,6 +1940,47 @@ class ControlPlaneTests(unittest.TestCase):
         tasks = list((self.ledger / "tasks").iterdir())
         definition = json.loads((tasks[0] / "task.json").read_text(encoding="utf-8"))
         self.assertEqual(definition["complexity"], "C2")
+
+    def test_v3_automatic_prompt_uses_gate_briefing_and_task_context(self):
+        started = self.v3_start(
+            "add a durable worker prompt contract",
+            requirements=["Preserve the public facade"],
+            acceptance_criteria=["Every agent receives the overall outcome"],
+            scope=["plugins/cortex"],
+            verification=["Run prompt contract tests"],
+            budget="No external writes",
+            pause_conditions=["A public schema change becomes necessary"],
+        )
+        prompt = started["dispatches"][0]["arguments"]["message"]
+        self.assertIn("## Specialist playbook", prompt)
+        self.assertIn("## Assignment", prompt)
+        self.assertIn("Overall task outcome: add a durable worker prompt contract", prompt)
+        self.assertIn("Current mission: Produce a decision-complete implementation plan", prompt)
+        self.assertIn("Task requirements: Preserve the public facade", prompt)
+        self.assertIn("Task scope: plugins/cortex", prompt)
+        self.assertIn("Task-level success criteria: Every agent receives the overall outcome", prompt)
+        self.assertIn("Gate success criteria: Separate repository-discoverable facts", prompt)
+        self.assertIn("Task-level validation: Run prompt contract tests", prompt)
+        self.assertIn("Pause conditions: A public schema change becomes necessary", prompt)
+        self.assertIn("Budget or operating limit: No external writes", prompt)
+        self.assertNotIn("Complete and report the discover gate", prompt)
+
+    def test_v3_explicit_worker_contract_overrides_gate_defaults_only(self):
+        started = self.v3_start(
+            "explicit contract",
+            waves=[{"workers": [{
+                "phase": "plan", "objective": "Plan the exact adapter change",
+                "acceptance": ["Adapter plan is decision complete"],
+                "verification": ["Cite adapter tests"],
+            }]}],
+            acceptance_criteria=["Public behavior remains compatible"],
+        )
+        prompt = started["dispatches"][0]["arguments"]["message"]
+        self.assertIn("Current mission: Plan the exact adapter change", prompt)
+        self.assertIn("Gate success criteria: Adapter plan is decision complete", prompt)
+        self.assertIn("Required gate verification: Cite adapter tests", prompt)
+        self.assertIn("Task-level success criteria: Public behavior remains compatible", prompt)
+        self.assertNotIn("Produce a decision-complete implementation plan", prompt)
 
     def test_v3_repeated_start_with_changed_wording_resumes_the_unique_active_task(self):
         first = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
@@ -3115,7 +3156,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.0.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.1.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 3.0 task ledger, staged waves,
+The local MCP server implements the Cortex 3.1 task ledger, staged waves,
 worker reports, and optional execution lanes through three public tools:
 `start_orchestration`, `continue_orchestration`, and `manage_orchestration`.
 The private `cortex/v7` primitives and legacy v2 facade remain compatibility
@@ -12,7 +12,7 @@ details; existing v7 tasks are inspectable and resumable through the v3 adapter.
 ## Key files and dependencies
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) implements task, report, and lane tools.
-- [profiles.json](../../../plugins/cortex/profiles.json) defines the 21 supported profiles and the `cortex/report/v1` field contract.
+- [profiles.json](../../../plugins/cortex/profiles.json) defines the 21 supported profiles, their gate assignments, the 13 gate briefings, and the `cortex/report/v1` field contract.
 - [test_cortex_control.py](../../../tests/test_cortex_control.py) covers report-bus scoping/reconciliation and lane lifecycle behavior.
 
 ## Behavior and status
@@ -34,6 +34,24 @@ part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
 
+Worker prompts have three deliberate layers: the role-specific professional
+playbook from the selected profile, the overall task assignment and context,
+and the current gate mission with its ownership, acceptance, and verification
+defaults. Task-level requirements and validation stay distinct from gate-level
+criteria. Explicit coordinator-supplied objective, ownership, acceptance, or
+verification values override the corresponding gate defaults; omitted values
+are filled from the validated briefing registry. Context files and explicitly
+granted predecessor reports are included in the assignment so workers can
+ground their work without inventing missing context.
+
+The `planner` profile is read-only and follows a repository-grounded,
+decision-complete workflow: it resolves discoverable facts, separates product
+decisions from repository evidence, closes interfaces/data flow/failure,
+compatibility, validation, rollout, and ownership concerns, and asks only
+questions that materially change scope or behavior. Its plan must leave the
+implementer no unmade design decisions and must cite evidence for consequential
+choices.
+
 Reports are sanitized, task- and attempt-bound, and use one-use receipts.
 Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
 so reconciliation can repair derived receipts, indexes, and Markdown but
@@ -47,7 +65,10 @@ conflict before partial writes. Expected facade validation failures return
 `ok: false` and do not enter the exception log. Host model/tool/effort values
 are selected routing metadata; v3 does not claim actual host attestation
 unless the host supplies observable evidence.
-Profiles are preloaded and validated at MCP startup. Recovery and nested
+Profiles and all 13 gate briefings are preloaded and validated at MCP startup;
+invariant coverage checks that all 21 playbooks contain the required
+professional sections and that every gate briefing has non-generic acceptance
+and verification lists. Recovery and nested
 operations are `inspect`, `resume`, `deactivate`, `lane`, `resource`, and
 `question`.
 
