@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "3.1.0+codex.20260814184718",
+  "version": "3.2.1+codex.20260814203024",
   "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, and three narrow Cortex v3 tools over the local Cortex v7 ledger. Luna coordinators start once, continue by relative step and worker slot, and use a separate management path for recovery while Cortex preserves receipt-backed reports, gates, verification, and handoff state.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, three coordinator lifecycle operations, and scoped worker report transport over the local Cortex v7 ledger. Coordinators own and adapt the pipeline, workers persist compactly referenced reports, and Cortex preserves receipt-backed gates, verification, and handoff state.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

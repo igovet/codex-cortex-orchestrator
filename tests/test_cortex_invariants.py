@@ -608,6 +608,50 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertTrue(lifecycle.exists())
         self.assertEqual(lifecycle.stat().st_mode & 0o777, 0o600)
 
+    def test_session_hook_reasserts_root_coordinator_lock(self):
+        self.init(task_id="coordinator-lock")
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        event = {"hook_event_name": "SessionStart", "thread_id": "owner"}
+        completed = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            env=os.environ.copy(),
+            check=True,
+        )
+        context = json.loads(completed.stdout)["additionalContext"]
+        self.assertIn("COORDINATOR LOCK", context)
+        self.assertIn("must not inspect", context)
+        self.assertIn("Remain idle while workers run", context)
+
+    def test_lifecycle_hook_commands_fail_open_when_a_retired_cache_path_disappears(self):
+        manifest = json.loads(
+            (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
+        )
+        commands = [
+            hook["command"]
+            for registrations in manifest["hooks"].values()
+            for registration in registrations
+            for hook in registration["hooks"]
+        ]
+        self.assertEqual(len(commands), 4)
+        for command in commands:
+            self.assertIn("if test -f", command)
+            self.assertIn("else printf '{}\\n'", command)
+            environment = {**os.environ, "PLUGIN_ROOT": str(self.base / "retired-plugin-cache")}
+            completed = subprocess.run(
+                command,
+                shell=True,
+                text=True,
+                input="{}\n",
+                capture_output=True,
+                env=environment,
+                check=True,
+            )
+            self.assertEqual(completed.stdout, "{}\n")
+            self.assertEqual(completed.stderr, "")
+
     def test_hook_refuses_symlinked_lifecycle_event_file(self):
         created = self.init(task_id="hook-symlink")
         task_dir = self.ledger / "tasks" / created["task_directory"]
@@ -632,8 +676,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         context = json.loads(completed.stdout)["additionalContext"]
         self.assertIn("internal worker, never user-facing", context)
         self.assertIn("native parent channel", context)
-        self.assertIn("Return your final sanitized cortex/report/v1 directly to the parent", context)
-        self.assertNotIn("record_report", context)
+        self.assertIn("call only the public record_report operation once", context)
+        self.assertIn("REPORT_RECORDED report_ref=<value>", context)
+        self.assertIn("never paste the report JSON", context)
+        self.assertIn("Never call Cortex lifecycle", context)
         self.assertNotIn("mcp__codebase_memory__", context)
 
     def test_hook_hashes_thread_and_allowlists_telemetry_fields(self):
@@ -695,11 +741,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Cortex v3 exposes three public MCP tools", skill)
-        self.assertIn("`start_orchestration` and `continue_orchestration`", skill)
+        self.assertIn("Cortex v3 exposes three coordinator lifecycle operations plus scoped report", skill)
+        self.assertIn("Coordinators use `start_orchestration`", skill)
+        self.assertIn("`continue_orchestration` for normal work", skill)
         self.assertIn("Invoke each returned dispatch", skill)
         self.assertIn("Expected routes are metadata, not proof", skill)
-        self.assertIn("Workers do not call Cortex", skill)
+        self.assertIn("Workers do not call lifecycle operations", skill)
+        self.assertIn("`record_report`", skill)
+        self.assertIn("`read_worker_report`", skill)
         self.assertIn("question intent", skill)
 
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
@@ -708,9 +757,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "## Normal flow",
             "Call `start_orchestration` once",
             "Invoke each returned dispatch",
-            "Workers do not call Cortex",
+            "Workers do not call lifecycle operations",
             "After all workers finish",
-            "call `continue_orchestration` exactly once",
+            "then call `continue_orchestration` exactly",
             "Repeat one continue per completed wave",
         ]
         positions = [skill.index(marker) for marker in markers]
@@ -745,6 +794,23 @@ class OrchestrationInvariantTests(unittest.TestCase):
         ):
             self.assertIn(marker, planner)
 
+    def test_installable_orchestration_contract_forbids_root_project_work(self):
+        repository = Path(__file__).parents[1]
+        for relative in (
+            "plugins/cortex/skills/orchestrator/SKILL.md",
+            "plugins/cortex/skills/cortex-control/SKILL.md",
+        ):
+            contract = (repository / relative).read_text(encoding="utf-8").lower()
+            self.assertIn("coordinator", contract, relative)
+            self.assertIn("must not", contract, relative)
+            self.assertIn("patch", contract, relative)
+            self.assertIn("remain idle", contract, relative)
+            self.assertIn("worker", contract, relative)
+
+        hook = (repository / "plugins/cortex/scripts/cortex_hook.py").read_text(encoding="utf-8")
+        self.assertIn("COORDINATOR LOCK", hook)
+        self.assertIn("never permission for direct coordinator work", hook)
+
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
         contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
         self.assertEqual(set(contract["gate_briefings"]), control.AVAILABLE_GATES)
@@ -754,6 +820,42 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertGreaterEqual(len(briefing["acceptance"]), 2, gate)
             self.assertGreaterEqual(len(briefing["verification"]), 2, gate)
             self.assertNotIn(f"Complete and report the {gate} gate", json.dumps(briefing))
+
+    def test_profile_contract_is_the_complete_team_and_routing_source(self):
+        repository = Path(__file__).parents[1]
+        contract = json.loads((repository / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
+        profiles = {item["name"]: item for item in contract["profiles"]}
+        self.assertEqual(set(profiles), control.AGENTS)
+        for name, profile in profiles.items():
+            self.assertTrue(profile["description"], name)
+            self.assertTrue(profile["select_when"], name)
+            self.assertTrue(profile["avoid_when"], name)
+            self.assertIn(profile["sandbox"], {"read-only", "workspace-write"})
+            self.assertIn(profile["route_category"], {"automatic", "manual"})
+        routed = {rule["profile"] for rule in contract["implementation_routing"]["rules"]}
+        manual_writers = {
+            name for name, profile in profiles.items()
+            if profile["route_category"] == "manual" and profile["sandbox"] == "workspace-write"
+        }
+        self.assertEqual(routed, manual_writers)
+        shared = contract["shared_worker_contract"]
+        self.assertEqual(
+            shared["repository_intelligence"],
+            "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
+        )
+        self.assertEqual(
+            set(shared["codebase_memory_refresh_profiles"]),
+            {"planner", "explorer", "architect", "database_architect"},
+        )
+        self.assertEqual(set(shared["codebase_memory_refresh_profiles"]), control.CODEBASE_MEMORY_REFRESH_PROFILES)
+        self.assertEqual(contract["implementation_routing"]["fallback"], "general")
+
+        skill = (repository / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        generated = control.render_profile_catalog(markdown=True)
+        catalog = skill.split("<!-- BEGIN GENERATED PROFILE CATALOG -->", 1)[1].split(
+            "<!-- END GENERATED PROFILE CATALOG -->", 1
+        )[0].strip()
+        self.assertEqual(catalog, generated)
 
     def test_default_cortex_ledger_is_excluded_from_manifest(self):
         ledger = control.ledger_root({"project_root": str(self.project)})

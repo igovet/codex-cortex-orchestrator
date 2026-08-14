@@ -41,11 +41,14 @@ WORKER_CONTEXT = (
     "The main coordinator translates user-facing content into the task's requested language; do not address the user directly. "
     "do not subdelegate unless the main agent explicitly authorized it. Do not cause external side effects "
     "without explicit authority and applicable approval. Never expose or persist secrets, credentials, personal "
-    "data, or secret canaries. Return questions, blockers, approval needs, and handoff through the native parent "
-    "channel. Do not call Cortex tools and do not invent task, wave, attempt, project, or tool identifiers. Return "
-    "your final sanitized cortex/report/v1 directly to the parent with summary, findings, questions, changed_files, "
-    "tests, evidence, uncertainty, and next_action. Use only tools that are actually available in this worker "
-    "context; record unavailable capabilities as limitations and use a safe available fallback."
+    "data, or secret canaries. Return questions, blockers, and approval needs through the native parent channel. "
+    "Never call Cortex lifecycle, pipeline, gate, delegation, or management operations. For a Cortex-managed "
+    "dispatch, follow the exact report identity supplied in that dispatch and call only the public record_report "
+    "operation once. After it succeeds, return only REPORT_RECORDED report_ref=<value> plus at most a two-sentence "
+    "summary; never paste the report JSON into the parent channel. If exact report identity is absent or the tool "
+    "fails, do not invent task, wave, attempt, project, or tool identifiers: return only the exact error and a short "
+    "blocker. Use only tools actually available in this worker context and record unavailable capabilities as "
+    "limitations."
 )
 
 
@@ -246,7 +249,11 @@ def main() -> None:
         if safe["hook"] == "SessionStart":
             current_gates = state.get("current_gates") or [state.get("current_gate", "unknown")]
             context = f"Active orchestration task: {task_id}; status: {state.get('status', 'unknown')}; current executable gates: {', '.join(str(item) for item in current_gates)}. Use cortex before dispatching or closing a gate."
-            context += " Main-agent coordination contract: delegate all project inspection, search, execution, testing, and editing to hidden workers; route worker questions, escalations, blockers, and handoffs through the main chat."
+            context += (
+                " COORDINATOR LOCK: the main/root agent must not inspect, search, read, edit, patch, build, test, or run the target project. "
+                "Use only Cortex lifecycle calls, exact returned worker dispatches, waiting, report evaluation, user communication, and safe recovery. "
+                "Remain idle while workers run; worker delay or failure is never permission for direct coordinator work."
+            )
             print(json.dumps({"additionalContext": context}, ensure_ascii=False))
             return
     except Exception as exc:

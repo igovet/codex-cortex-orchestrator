@@ -23,7 +23,7 @@ commands. Do not use the deprecated `/prompts` mechanism.
 Do not guess unknown arguments. Show help and ask the user to choose.
 
 The help route explains invocation, opt-in behavior, the project-local
-`.codex/cortex` ledger, the three v3 public tools, internal workers, and that
+`.codex/cortex` ledger, the five v3 public tools, internal workers, and that
 source/tests outrank generated docs. Help performs no activation, dispatch, or
 write.
 
@@ -32,21 +32,126 @@ Ordinary work never activates Cortex. The normal route uses
 `manage_orchestration` with intent `deactivate` only when a Cortex task is
 active.
 
+## Coordinator isolation invariant
+
+While Cortex orchestration is active, the main/root agent is a coordinator,
+not a project worker. It must not inspect, search, read, edit, patch, generate,
+format, build, test, or run project code itself. This prohibition includes
+repository shell commands and direct filesystem or patch tools, even when the
+next implementation step appears obvious from a worker report.
+
+The coordinator may only clarify the user's goal, call the public Cortex
+lifecycle and report-read tools, invoke the exact returned native dispatches,
+wait for workers, relay questions, evaluate reports and gate evidence, adjust
+future waves through Cortex, and communicate the integrated result to the user. All project
+operations, including follow-up inspection and implementation after a planning
+report, belong to a dispatched worker. The coordinator must remain idle while
+a worker is active. Never work in parallel with an active
+worker or substitute coordinator work for a missing, slow, failed, or blocked
+worker. If dispatch is unavailable, stop and report the blocker; do not fall
+back to direct project work.
+
+## Team intelligence and routing
+
+The main/root agent is the user-facing mission commander and integration
+authority. It owns goal clarification, routing, wave decisions, evidence
+gates, recovery, and the final answer. It is never a hidden implementer.
+Workers are internal specialists with bounded ownership; they report to the
+main coordinator and never become an alternate user-facing authority.
+
+`profiles.json` is the canonical team source. Use only the exact profile names
+below. `automatic` means the profile is the default owner of one or more
+pipeline gates. `manual` means Cortex selects it for the implementation gate
+only when task signals or worker evidence justify that specialist. Access is a
+hard capability boundary, not a suggestion.
+
+<!-- BEGIN GENERATED PROFILE CATALOG -->
+| Profile | Route | Access | Select when | Avoid when |
+| --- | --- | --- | --- | --- |
+| `accessibility_engineer` | automatic | read-only | Accessibility conformance or assistive-technology behavior needs independent analysis. | General visual design or production UI implementation is the primary task. |
+| `architect` | automatic | read-only | System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided. | The design is already settled and the remaining work is bounded implementation. |
+| `backend_dev` | manual | workspace-write | A bounded server, API, service, business-logic, or persistence change must be implemented. | The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery. |
+| `build_verification` | automatic | read-only | Independent non-mutating build, test, packaging, installation, or release-readiness proof is required. | A failing check must be diagnosed or repaired. |
+| `code_reviewer` | automatic | read-only | A completed or proposed change needs independent defect-focused review. | The primary need is implementation, planning, or broad repository discovery. |
+| `data_engineer` | manual | workspace-write | Data movement, transformation, backfill, migration execution, or integrity validation must be implemented. | Only database schema design is needed, with no data-operation implementation. |
+| `database_architect` | automatic | read-only | Schema, index, query-plan, migration, locking, or rollback design needs specialist review. | The approved design only needs migration or data-pipeline implementation. |
+| `debugger` | manual | workspace-write | A failure must be reproduced and its root cause proven before a focused repair. | The desired behavior and implementation path are already known. |
+| `devops_engineer` | manual | workspace-write | Infrastructure, delivery, deployment, runtime configuration, or operational automation must change. | The task is application implementation without delivery or runtime ownership. |
+| `explorer` | automatic | read-only | Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known. | The task requires design decisions or source changes. |
+| `frontend_dev` | manual | workspace-write | A browser UI, component, client state, styling, or frontend test change must be implemented. | The task spans material server ownership or is only interaction design. |
+| `fullstack_dev` | manual | workspace-write | One coherent change spans both browser-facing and server-facing contracts. | The work can be cleanly owned by one narrower frontend or backend specialist. |
+| `general` | automatic | workspace-write | The work is bounded but no specialist profile has a justified capability match. | A narrower supported specialist clearly owns the task. |
+| `mobile_dev` | manual | workspace-write | An iOS, Android, React Native, Flutter, or native mobile change must be implemented. | The task is browser web UI or a platform-neutral backend. |
+| `performance_engineer` | automatic | read-only | Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis. | The bottleneck is already proven and only an approved implementation remains. |
+| `planner` | automatic | read-only | A decision-complete plan, dependency order, ownership map, or acceptance matrix is needed. | The task is a simple bounded execution step or requires editing project files. |
+| `qa_engineer` | automatic | workspace-write | Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created. | Only a non-mutating final command run or source-code review is needed. |
+| `refactorer` | manual | workspace-write | The explicit goal is behavior-preserving structural improvement with regression proof. | New behavior, unresolved defects, or architecture decisions dominate the task. |
+| `security_auditor` | automatic | read-only | Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review. | The task is to implement a known security fix rather than audit it. |
+| `technical_writer` | automatic | workspace-write | Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs. | Facts are unverified or production code changes are still required. |
+| `ux_designer` | automatic | read-only | User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed. | The design is settled and production frontend code must be written. |
+<!-- END GENERATED PROFILE CATALOG -->
+
+Routing is evidence-driven:
+
+1. Use the canonical gate owner for planning, discovery, architecture,
+   specialist audits, review, documentation, QA, and close.
+2. For implementation, prefer the narrowest justified writer:
+   `debugger` for reproduce-and-prove failures; `refactorer` for explicit
+   behavior-preserving structure work; `frontend_dev`, `backend_dev`,
+   `fullstack_dev`, or `mobile_dev` for their application surfaces;
+   `data_engineer` for data movement and migration execution; and
+   `devops_engineer` for infrastructure and delivery. Use `general` only when
+   no specialist match is supported.
+3. The coordinator owns the pipeline decision. Build or consciously accept the
+   initial canonical pipeline, then follow the exact `pipeline.waves` snapshot
+   returned by Cortex. Planner and explorer reports are advisory evidence, not
+   commands to rebuild the pipeline. Change `future_waves` only when the
+   coordinator concludes that verified evidence materially changes ownership,
+   dependencies, risk gates, sequencing, or validation. Include a concise
+   reason. Never restate or relabel an unchanged pipeline merely because a
+   report completed.
+4. A profile may own only its declared automatic gate, or—when it is a manual
+   workspace writer—the implementation gate. Do not assign a writer to plan,
+   discovery, review, audit, or close work. Do not assign a read-only analyst
+   to implement a fix.
+5. Each returned dispatch explains `phase`, `profile`, `capability`, `sandbox`,
+   and `selection_reason`. Check that rationale against the latest evidence
+   before invoking the dispatch. Never invent a role name or silently replace
+   Cortex's native arguments.
+
+Canonical phases are `plan`, `discover`, `architecture`,
+`database_architecture`, `implementation`, `qa`, `security`, `performance`,
+`accessibility`, `ux`, `review`, `documentation`, and `close`. A phase may
+appear in only one wave; multiple valid owners for the same phase belong in
+the same wave. `build_verification` is a profile and is also accepted as a
+human alias for the final `close` phase. Generic `verification` maps to `qa`.
+Cortex normalizes common aliases such as `implement`, but the coordinator
+should use canonical phases from the returned snapshot rather than guessing.
+
 ## Relative one-call-per-wave workflow
 
 1. Form the task objective, success criteria, constraints, paths, approval
-   boundaries, and user language. Usually let Cortex use its safe C2 default.
+   boundaries, and user language. The coordinator owns the initial plan: it
+   may supply compact waves or consciously accept Cortex's safe standard C2
+   proposal. In either case, treat the returned `pipeline` snapshot as the
+   authoritative current coordinator plan.
 2. Call `start_orchestration` with exact absolute `project_root` and the task.
    Omit waves for the standard pipeline. A compact override is
    `{waves: [{workers: [{phase, ...}]}]}`; only phase is required.
 3. Invoke each returned `{worker, call, arguments}` exactly. Native arguments
    are already filtered. Do not add IDs or turn expected model metadata into a
    native model override.
-4. Wait for the complete wave. Workers use the native parent channel and
-   return the strict eight-section `cortex/report/v1`; they never call Cortex.
-5. Call `continue_orchestration` once with `project_root`, returned relative
-   `step`, and results. Omit worker for one result; repeat the returned integer
-   worker slot for parallel results.
+4. Wait idly for the complete wave. Do not inspect or modify the project while
+   any worker is active. Each worker publishes its strict eight-section
+   `cortex/report/v1` through the scoped public `record_report` tool, then
+   returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
+   summary. A worker must never paste the report JSON into the parent channel.
+5. Read every returned ref with `read_worker_report`. Evaluate the full report,
+   decide whether the coordinator-owned pipeline still fits, then call
+   `continue_orchestration` once with `project_root`, the returned relative
+   `step`, and results containing `report_ref`. Omit worker for one result;
+   repeat the returned integer worker slot for parallel results. Inline report
+   objects are compatibility-only and must not be requested from new workers.
 6. Repeat until `outcome: completed`. If evidence changes future scope, send a
    compact `future_waves` replacement in the same continue call. Set
    `rework: true` only for intentional repetition of a completed phase.
@@ -65,25 +170,39 @@ lane, resource, or a durable MCP UI question.
 ## Luna high and dispatch contract
 
 This contract is designed for a Luna high parent: two narrow normal tools,
-relative slots only for parallel waves, aliases at runtime rather than schema
-enums, and compact dispatches containing real native arguments only.
+relative slots only for parallel waves, a canonical profile enum at the public
+boundary, legacy alias normalization inside the runtime, and compact native
+arguments separated from auditable profile-selection metadata.
 Configured-default Luna dispatches omit native `model` while preserving
 reasoning effort. Explicit model overrides retain `model`. Expected routing is
 not host attestation; claim the actual model only from host runtime metadata.
 
-Use bundled profiles by exact name. Workers remain internal, English-only,
-bounded to ownership and allowed paths, and cannot subdelegate without explicit
-authorization. The main coordinator alone communicates with and localizes for
-the user.
+Workers remain internal, English-only, bounded to ownership and allowed paths,
+and cannot subdelegate without explicit authorization. The main coordinator
+alone communicates with and localizes for the user.
+
+When Codebase Memory tools are present, generated worker briefings require an
+exact-root `list_projects` match and prefer indexed architecture, graph search,
+call/data-flow tracing, and impact analysis before broad filesystem search.
+Workers confirm consequential indexed facts in current source or tests.
+Planner, explorer, architect, and database architect may refresh one missing or
+stale index; other profiles use a bounded fallback without setup loops. This is
+worker project work: the root coordinator must never call Codebase Memory
+itself.
 
 ## Reports, questions, and completion
 
-Every successful result contains exactly `summary`, `findings`, `questions`,
+Every persisted report contains exactly `summary`, `findings`, `questions`,
 `changed_files`, `tests`, `evidence`, `uncertainty`, and `next_action`.
-Non-success omits report and carries status plus reason. Cortex validates all
-parallel slots and reports before task-state writes and preserves quotas,
-redaction, one-use receipts, documentation/close, rework invalidation, and
-manifest-backed handoff.
+`record_report` returns a compact `report_ref`; `read_worker_report` is the
+coordinator's bounded read path. A successful native worker response contains
+only that ref and a short summary. Non-success returns only a normalized status
+and reason. Cortex validates all parallel slots and report refs before gate
+state writes and preserves quotas, redaction, one-use receipts,
+documentation/close, rework invalidation, and manifest-backed handoff. If a
+native worker is interrupted after persisting but before returning its ack,
+use `manage_orchestration` inspect to recover `available_reports`; do not ask
+the worker to regenerate a large inline report.
 
 Questions normally return through the native parent channel. For a durable UI
 prompt, call `manage_orchestration` with intent `question`; Cortex projects it

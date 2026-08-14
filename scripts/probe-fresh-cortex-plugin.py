@@ -112,7 +112,7 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: cached Cortex MCP failed to start")
         rows = [json.loads(line) for line in rpc.stdout.splitlines() if line.strip()]
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
-        expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration"}
+        expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"}
         if set(tools) != expected_tools:
             raise SystemExit("fresh plugin probe: Cortex v3 public tool set is incomplete")
         workspace = base / "workspace"

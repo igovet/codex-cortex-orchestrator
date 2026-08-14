@@ -9,17 +9,30 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative three-tool public coordinator facade
+## Relative five-tool public facade
 
-The breaking 3.0 public API exposes `start_orchestration`,
-`continue_orchestration`, and `manage_orchestration`. A coordinator starts a
-task with the compact task contract, then continues once per completed wave.
+The public API exposes exactly five tools. Coordinators use the three lifecycle
+operations `start_orchestration`, `continue_orchestration`, and
+`manage_orchestration`; workers use only `record_report`, and coordinators read
+the resulting refs with `read_worker_report`. A coordinator starts a task with
+the compact task contract, then continues once per completed wave.
 The active-wave cursor is a relative `step`; parallel results use only
 relative worker slots. Start owns classification, ledger initialization,
-full-plan persistence, and first-wave preparation. Continue validates all
-parallel completions before state writes, records strict eight-field
-`cortex/report/v1` reports, evidence, gates, and returns the next step. It can
-replace future waves; changing a completed gate requires explicit rework.
+full-plan persistence, and first-wave preparation. Every worker persists its
+exact eight-field `cortex/report/v1` through `record_report`, returns only
+`REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary (or
+the exact report-tool error), and never sends the report body in its native
+final. The coordinator reads each ref, then Continue validates all parallel
+refs before state writes, records evidence and gates, and returns the next
+step. Interrupted native acknowledgement is recoverable because inspect lists
+persisted `available_reports`.
+
+The coordinator is the sole pipeline authority: it builds or consciously
+accepts the initial waves, follows the returned pipeline snapshot by default,
+and changes `future_waves` only when verified evidence materially changes
+ownership, dependencies, risk, sequencing, or validation. Planner and explorer
+recommendations are advisory, and every replacement carries the coordinator's
+concise reason. Changing a completed gate requires explicit rework.
 Semantically unchanged future-wave reassessment records an unchanged receipt
 and continues, while v3 future waves are internally renumbered so public
 relative steps never move backward or collide.
@@ -43,7 +56,21 @@ Human-readable complexity, phase, profile, status, and common language aliases
 are normalized before task-state creation. This keeps the public schema small
 without pushing fragile enums or BCP-47 spelling repairs onto a Luna parent;
 unknown phase/profile values still fail before ledger writes with bounded
-suggestions.
+suggestions. In particular, `implement` normalizes to `implementation` and
+`build_verification` to the final `close` phase, preventing retry loops caused
+by treating common phase labels as new work.
+
+## Conditional indexed repository intelligence
+
+Codebase Memory is an optional worker-side accelerator, not a source of truth
+and never a root-coordinator inspection path. A worker uses it only when the
+tools are available and `list_projects` returns an entry whose root exactly
+matches the task project. Graph, architecture, and trace operations are
+preferred for initial discovery and impact analysis, but consequential facts
+must be confirmed in current source and tests. If the service, matching index,
+or result is unavailable or stale, the worker falls back once to ordinary
+repository tools and does not loop on recovery. This preserves useful indexed
+context without weakening source authority or the coordination-only root lock.
 
 ## Atomic records, repairable projections, best-effort telemetry
 

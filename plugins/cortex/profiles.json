@@ -14,9 +14,16 @@
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
     "user_facing_language": "task_language_or_explicit_user_language",
-    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration"],
-    "normal_flow": ["start_orchestration", "continue_orchestration"],
+    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"],
+    "coordinator_operations": ["start_orchestration", "read_worker_report", "continue_orchestration", "manage_orchestration"],
+    "worker_operations": ["record_report"],
+    "normal_flow": ["start_orchestration", "record_report", "read_worker_report", "continue_orchestration"],
     "recovery_operations": ["manage_orchestration"],
+    "worker_final_response": "compact_report_ref_and_at_most_two_sentence_summary_or_exact_error",
+    "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
+    "codebase_memory_project_resolution": "list_projects_exact_project_root_match_never_guess",
+    "codebase_memory_refresh_profiles": ["planner", "explorer", "architect", "database_architect"],
+    "codebase_memory_fallback": "one_bounded_attempt_then_repository_native_tools_without_looping",
     "required_report_fields": [
       "summary",
       "findings",
@@ -187,27 +194,75 @@
       ]
     }
   },
+  "implementation_routing": {
+    "fallback": "general",
+    "rules": [
+      {
+        "profile": "fullstack_dev",
+        "reason": "The task explicitly spans both browser-facing and server-facing implementation.",
+        "all": [
+          ["frontend", "front-end", "browser", "web ui", "client-side", "react", "vue", "фронтенд", "браузер", "интерфейс"],
+          ["backend", "back-end", "server-side", "api", "endpoint", "service", "бэкенд", "бекенд", "сервер", "эндпоинт"]
+        ]
+      },
+      {
+        "profile": "mobile_dev",
+        "reason": "The task explicitly targets a mobile platform or mobile framework.",
+        "any": ["ios", "android", "react native", "flutter", "swiftui", "uikit", "jetpack compose", "mobile app", "мобильн", "андроид"]
+      },
+      {
+        "profile": "devops_engineer",
+        "reason": "The task explicitly concerns infrastructure, delivery, deployment, or operational configuration.",
+        "any": ["docker", "kubernetes", "terraform", "ci/cd", "github actions", "deployment", "deploy", "infrastructure", "helm", "ci pipeline", "build pipeline", "delivery pipeline", "деплой", "развертыван", "инфраструктур", "докер", "кубернет"]
+      },
+      {
+        "profile": "data_engineer",
+        "reason": "The task explicitly concerns data movement, transformation, backfill, or integrity-sensitive data migration.",
+        "any": ["etl", "elt", "data pipeline", "data warehouse", "backfill", "data import", "data export", "data migration", "stream processing", "поток данных", "хранилищ данных", "импорт данных", "экспорт данных", "миграци данных"]
+      },
+      {
+        "profile": "debugger",
+        "reason": "The task explicitly requires reproducing a failure or proving root cause before a focused fix.",
+        "any": ["root cause", "reproduce failure", "reproduce the failure", "traceback", "stack trace", "crash", "failing test", "intermittent failure", "race condition", "корневую причину", "воспроизвести ошиб", "трассиров", "падает", "сбой"]
+      },
+      {
+        "profile": "refactorer",
+        "reason": "The task explicitly requests a behavior-preserving structural refactor.",
+        "any": ["refactor", "behavior-preserving", "preserve behavior", "no behavior change", "without changing behavior", "рефактор", "без изменения поведения", "не меняя поведение"]
+      },
+      {
+        "profile": "frontend_dev",
+        "reason": "The task explicitly concerns browser UI implementation without a server-side ownership signal.",
+        "any": ["frontend", "front-end", "browser", "web ui", "client-side", "react", "vue", "svelte", "css", "component", "фронтенд", "браузер", "верстк", "интерфейс", "компонент"]
+      },
+      {
+        "profile": "backend_dev",
+        "reason": "The task explicitly concerns server APIs, services, business logic, or persistence implementation.",
+        "any": ["backend", "back-end", "server-side", "api", "endpoint", "service", "business logic", "persistence", "бэкенд", "бекенд", "сервер", "эндпоинт", "бизнес-логик"]
+      }
+    ]
+  },
   "profiles": [
-    {"name":"accessibility_engineer","filename":"accessibility-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["accessibility"]},
-    {"name":"architect","filename":"architect.toml","sandbox":"read-only","route_category":"automatic","gates":["architecture"]},
-    {"name":"backend_dev","filename":"backend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"build_verification","filename":"build-verification.toml","sandbox":"read-only","route_category":"automatic","gates":["qa","close"]},
-    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","route_category":"automatic","gates":["review"]},
-    {"name":"data_engineer","filename":"data-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"database_architect","filename":"database-architect.toml","sandbox":"read-only","route_category":"automatic","gates":["database_architecture"]},
-    {"name":"debugger","filename":"debugger.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"devops_engineer","filename":"devops-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"explorer","filename":"explorer.toml","sandbox":"read-only","route_category":"automatic","gates":["discover"]},
-    {"name":"frontend_dev","filename":"frontend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"fullstack_dev","filename":"fullstack-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"general","filename":"general.toml","sandbox":"workspace-write","route_category":"automatic","gates":["implementation"]},
-    {"name":"mobile_dev","filename":"mobile-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"performance_engineer","filename":"performance-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["performance"]},
-    {"name":"planner","filename":"planner.toml","sandbox":"read-only","route_category":"automatic","gates":["plan"]},
-    {"name":"qa_engineer","filename":"qa-engineer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["qa"]},
-    {"name":"refactorer","filename":"refactorer.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
-    {"name":"security_auditor","filename":"security-auditor.toml","sandbox":"read-only","route_category":"automatic","gates":["security"]},
-    {"name":"technical_writer","filename":"technical-writer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["documentation"]},
-    {"name":"ux_designer","filename":"ux-designer.toml","sandbox":"read-only","route_category":"automatic","gates":["ux"]}
+    {"name":"accessibility_engineer","filename":"accessibility-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["accessibility"],"description":"Read-only accessibility specialist for WCAG audits, keyboard navigation, and screen-reader risks.","select_when":"Accessibility conformance or assistive-technology behavior needs independent analysis.","avoid_when":"General visual design or production UI implementation is the primary task."},
+    {"name":"architect","filename":"architect.toml","sandbox":"read-only","route_category":"automatic","gates":["architecture"],"description":"Read-only system architect for component boundaries, data flow, API contracts, and architecture decisions.","select_when":"System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.","avoid_when":"The design is already settled and the remaining work is bounded implementation."},
+    {"name":"backend_dev","filename":"backend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Backend implementation specialist for APIs, business logic, persistence, and server-side tests.","select_when":"A bounded server, API, service, business-logic, or persistence change must be implemented.","avoid_when":"The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery."},
+    {"name":"build_verification","filename":"build-verification.toml","sandbox":"read-only","route_category":"automatic","gates":["qa","close"],"description":"Read-only build and test verifier that reports exact command outcomes without changing source files.","select_when":"Independent non-mutating build, test, packaging, installation, or release-readiness proof is required.","avoid_when":"A failing check must be diagnosed or repaired."},
+    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","route_category":"automatic","gates":["review"],"description":"Read-only code reviewer for correctness, regressions, security, performance, and missing tests.","select_when":"A completed or proposed change needs independent defect-focused review.","avoid_when":"The primary need is implementation, planning, or broad repository discovery."},
+    {"name":"data_engineer","filename":"data-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Data engineering specialist for ETL, migrations, validation, rollbacks, and data-integrity checks.","select_when":"Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.","avoid_when":"Only database schema design is needed, with no data-operation implementation."},
+    {"name":"database_architect","filename":"database-architect.toml","sandbox":"read-only","route_category":"automatic","gates":["database_architecture"],"description":"Read-only database architect for schemas, indexes, migrations, query plans, and compatibility risks.","select_when":"Schema, index, query-plan, migration, locking, or rollback design needs specialist review.","avoid_when":"The approved design only needs migration or data-pipeline implementation."},
+    {"name":"debugger","filename":"debugger.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Debugging specialist that reproduces failures, proves root cause, implements focused fixes, and verifies regressions.","select_when":"A failure must be reproduced and its root cause proven before a focused repair.","avoid_when":"The desired behavior and implementation path are already known."},
+    {"name":"devops_engineer","filename":"devops-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Infrastructure specialist for Docker, CI/CD, Kubernetes, Terraform, deployment safety, and operational diagnostics.","select_when":"Infrastructure, delivery, deployment, runtime configuration, or operational automation must change.","avoid_when":"The task is application implementation without delivery or runtime ownership."},
+    {"name":"explorer","filename":"explorer.toml","sandbox":"read-only","route_category":"automatic","gates":["discover"],"description":"Read-only codebase investigator that maps execution paths, ownership, dependencies, and relevant files.","select_when":"Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.","avoid_when":"The task requires design decisions or source changes."},
+    {"name":"frontend_dev","filename":"frontend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.","select_when":"A browser UI, component, client state, styling, or frontend test change must be implemented.","avoid_when":"The task spans material server ownership or is only interaction design."},
+    {"name":"fullstack_dev","filename":"fullstack-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.","select_when":"One coherent change spans both browser-facing and server-facing contracts.","avoid_when":"The work can be cleanly owned by one narrower frontend or backend specialist."},
+    {"name":"general","filename":"general.toml","sandbox":"workspace-write","route_category":"automatic","gates":["implementation"],"description":"General-purpose fallback agent for bounded research, analysis, or implementation when no specialty fits.","select_when":"The work is bounded but no specialist profile has a justified capability match.","avoid_when":"A narrower supported specialist clearly owns the task."},
+    {"name":"mobile_dev","filename":"mobile-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.","select_when":"An iOS, Android, React Native, Flutter, or native mobile change must be implemented.","avoid_when":"The task is browser web UI or a platform-neutral backend."},
+    {"name":"performance_engineer","filename":"performance-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["performance"],"description":"Read-only performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.","select_when":"Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.","avoid_when":"The bottleneck is already proven and only an approved implementation remains."},
+    {"name":"planner","filename":"planner.toml","sandbox":"read-only","route_category":"automatic","gates":["plan"],"description":"Read-only task planner for implementation decomposition, requirement coverage, dependencies, risks, and delegation.","select_when":"A decision-complete plan, dependency order, ownership map, or acceptance matrix is needed.","avoid_when":"The task is a simple bounded execution step or requires editing project files."},
+    {"name":"qa_engineer","filename":"qa-engineer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["qa"],"description":"QA specialist for acceptance-criteria coverage, automated tests, reproduction, and quality-risk reporting.","select_when":"Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created.","avoid_when":"Only a non-mutating final command run or source-code review is needed."},
+    {"name":"refactorer","filename":"refactorer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Refactoring specialist for safe structural improvements that preserve public behavior and contracts.","select_when":"The explicit goal is behavior-preserving structural improvement with regression proof.","avoid_when":"New behavior, unresolved defects, or architecture decisions dominate the task."},
+    {"name":"security_auditor","filename":"security-auditor.toml","sandbox":"read-only","route_category":"automatic","gates":["security"],"description":"Read-only security auditor for authentication, authorization, secrets, crypto, dependency, and data-protection risks.","select_when":"Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review.","avoid_when":"The task is to implement a known security fix rather than audit it."},
+    {"name":"technical_writer","filename":"technical-writer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["documentation"],"description":"Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.","select_when":"Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs.","avoid_when":"Facts are unverified or production code changes are still required."},
+    {"name":"ux_designer","filename":"ux-designer.toml","sandbox":"read-only","route_category":"automatic","gates":["ux"],"description":"Read-only UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.","select_when":"User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed.","avoid_when":"The design is settled and production frontend code must be written."}
   ]
 }

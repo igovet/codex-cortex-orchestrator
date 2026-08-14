@@ -11,7 +11,7 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `3.1.0` (the installed build may carry a `+codex.<build>` suffix).
+  `3.2.1` (the installed build may carry a `+codex.<build>` suffix).
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
@@ -37,9 +37,19 @@ pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
 tracked-release archive validation.
 
+The current candidate is installed as `3.2.1+codex.20260814203024`. Verified
+repository evidence includes 220 passing Python tests, marketplace validation,
+content-verified installer check with `agents.default_subagent_model` set to
+Luna, cold-boot smoke, deterministic fixture evaluation, composite benchmark,
+isolated fresh-plugin probe, Python compilation, shell syntax, and installer
+dry-run. The live Luna-high route was not attempted because `--live` was not
+supplied. The blocking tracked-release check correctly remains blocked because
+committed `HEAD` lacks the uncommitted 3.2.1 package contract. Commit, tag,
+push, catalog submission, approval, and publication remain unverified.
+
 ## External release gates
 
-- Create the Cortex 3.1 release commit only with explicit authorization.
+- Create the Cortex 3.2.1 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

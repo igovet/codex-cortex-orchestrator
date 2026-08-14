@@ -47,6 +47,21 @@ def reject_symlinks(root: Path, label: str) -> None:
                 fail(f"{label} must not contain symlinks: {path.relative_to(root)}")
 
 
+def render_profile_catalog(profiles: list[dict[str, object]]) -> str:
+    by_name = {str(item["name"]): item for item in profiles}
+    lines = [
+        "| Profile | Route | Access | Select when | Avoid when |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for name in sorted(by_name):
+        profile = by_name[name]
+        lines.append(
+            f"| `{name}` | {profile['route_category']} | {profile['sandbox']} | "
+            f"{profile['select_when']} | {profile['avoid_when']} |"
+        )
+    return "\n".join(lines)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="repository tree to validate")
@@ -95,8 +110,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "3.1.0":
-        fail("plugin manifest must identify cortex at release version 3.1.0")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "3.2.1":
+        fail("plugin manifest must identify cortex at release version 3.2.1")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:
@@ -105,6 +120,26 @@ def main() -> int:
         fail(f"invalid profile contract: {exc}")
     if profile_contract.get("schema") != "cortex/profile-contract/v1" or len(profile_contract.get("profiles", [])) != 21:
         fail("profile contract must define exactly 21 Cortex profiles")
+    profile_fields = {
+        "name", "filename", "sandbox", "route_category", "gates",
+        "description", "select_when", "avoid_when",
+    }
+    for item in profile_contract["profiles"]:
+        if not isinstance(item, dict) or not profile_fields.issubset(item):
+            fail("every profile must define complete identity and routing metadata")
+        if item.get("sandbox") not in {"read-only", "workspace-write"}:
+            fail(f"invalid profile sandbox: {item.get('name')}")
+        if item.get("route_category") not in {"automatic", "manual"}:
+            fail(f"invalid profile route category: {item.get('name')}")
+        gates = item.get("gates")
+        if not isinstance(gates, list) or len(gates) != len(set(gates)):
+            fail(f"invalid or duplicate profile gates: {item.get('name')}")
+        if item.get("route_category") == "automatic" and not gates:
+            fail(f"automatic profile must own a gate: {item.get('name')}")
+        if item.get("route_category") == "manual" and gates:
+            fail(f"manual profile must be implementation-selected: {item.get('name')}")
+        if not all(isinstance(item.get(field), str) and item[field].strip() for field in ("description", "select_when", "avoid_when")):
+            fail(f"incomplete profile routing text: {item.get('name')}")
     expected_gates = {
         "plan", "discover", "architecture", "database_architecture", "implementation",
         "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",
@@ -123,6 +158,31 @@ def main() -> int:
     required_report_fields = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
     if shared.get("report_schema") != "cortex/report/v1" or set(shared.get("required_report_fields", [])) != required_report_fields:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
+    expected_public_operations = {
+        "start_orchestration", "continue_orchestration", "manage_orchestration",
+        "record_report", "read_worker_report",
+    }
+    if set(shared.get("public_operations", [])) != expected_public_operations:
+        fail("shared worker contract must declare the five public Cortex operations")
+    if shared.get("worker_operations") != ["record_report"]:
+        fail("workers must receive only the scoped record_report operation")
+    if set(shared.get("coordinator_operations", [])) != {
+        "start_orchestration", "continue_orchestration", "manage_orchestration", "read_worker_report",
+    }:
+        fail("coordinator operations must own lifecycle and report reading")
+    if shared.get("worker_final_response") != "compact_report_ref_and_at_most_two_sentence_summary_or_exact_error":
+        fail("worker final response must be compact and must not contain report JSON")
+    if (
+        shared.get("repository_intelligence")
+        != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
+        or shared.get("codebase_memory_project_resolution")
+        != "list_projects_exact_project_root_match_never_guess"
+        or set(shared.get("codebase_memory_refresh_profiles", []))
+        != {"planner", "explorer", "architect", "database_architect"}
+        or shared.get("codebase_memory_fallback")
+        != "one_bounded_attempt_then_repository_native_tools_without_looping"
+    ):
+        fail("shared worker contract must define bounded Codebase Memory discovery and fallback")
     EXPECTED_AGENTS = {item.get("name") for item in profile_contract["profiles"]}
     # MCP configuration supports a plugin-relative working directory.  Unlike
     # hook commands, ${PLUGIN_ROOT} is not expanded in stdio-MCP arguments by
@@ -145,6 +205,14 @@ def main() -> int:
     required_invocation_guidance = ("Skills picker", "`$cortex:orchestrator`", "`/skills`", "not registered native slash", "Do not use the deprecated `/prompts`")
     if not all(marker in cortex_skill for marker in required_invocation_guidance):
         fail("Cortex skill must document Desktop/CLI invocation and textual shorthand")
+    expected_catalog = render_profile_catalog(profile_contract["profiles"])
+    catalog_start = "<!-- BEGIN GENERATED PROFILE CATALOG -->"
+    catalog_end = "<!-- END GENERATED PROFILE CATALOG -->"
+    if cortex_skill.count(catalog_start) != 1 or cortex_skill.count(catalog_end) != 1:
+        fail("Cortex skill must contain exactly one generated profile catalog")
+    actual_catalog = cortex_skill.split(catalog_start, 1)[1].split(catalog_end, 1)[0].strip()
+    if actual_catalog != expected_catalog:
+        fail("Cortex skill profile catalog is stale relative to profiles.json")
     agent_files = sorted((plugin / "agents").glob("*.toml"))
     try:
         agent_names = {tomllib.loads(path.read_text(encoding="utf-8"))["name"] for path in agent_files}
@@ -155,7 +223,7 @@ def main() -> int:
     for item in profile_contract["profiles"]:
         path = plugin / "agents" / str(item.get("filename", ""))
         parsed = tomllib.loads(path.read_text(encoding="utf-8"))
-        if parsed.get("name") != item.get("name") or parsed.get("sandbox_mode") != item.get("sandbox"):
+        if parsed.get("name") != item.get("name") or parsed.get("sandbox_mode") != item.get("sandbox") or parsed.get("description") != item.get("description"):
             fail(f"profile contract does not match {path.name}")
         prompt = str(parsed.get("developer_instructions", ""))
         prompt_lower = prompt.lower()
@@ -165,6 +233,13 @@ def main() -> int:
             fail(f"profile prompt lacks the professional playbook structure: {path.name}")
         if "gpt-" in prompt or "model_reasoning_effort" in prompt:
             fail(f"profile prompt must not pin a model or effort: {path.name}")
+    routing = profile_contract.get("implementation_routing")
+    if not isinstance(routing, dict) or routing.get("fallback") != "general" or not isinstance(routing.get("rules"), list):
+        fail("implementation routing must define a general fallback and ordered specialist rules")
+    rule_profiles = [item.get("profile") for item in routing["rules"] if isinstance(item, dict)]
+    expected_writers = {"backend_dev", "data_engineer", "debugger", "devops_engineer", "frontend_dev", "fullstack_dev", "mobile_dev", "refactorer"}
+    if set(rule_profiles) != expected_writers or len(rule_profiles) != len(set(rule_profiles)):
+        fail("implementation routing must cover every specialist writer exactly once")
     if (root / "agents").exists() or (root / "skills").exists():
         fail("installable agent and skill sources must exist only inside plugins/cortex")
     if (root / "agents/orchestrator.toml").exists():

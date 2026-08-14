@@ -3,9 +3,11 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**3.1.0**. The public MCP surface is the relative v3 trio
+**3.2.1**. The public MCP surface has exactly five tools: three coordinator
+lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; existing v7 ledgers remain readable through a private
+`manage_orchestration`—plus worker `record_report` and coordinator
+`read_worker_report`; existing v7 ledgers remain readable through a private
 compatibility adapter. Ledgers older than v7 have no compatibility reader and
 must be recreated.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
@@ -145,9 +147,11 @@ manual operation so unrelated user-owned configuration is never overwritten.
 
 Start a **new Codex thread** after installing or updating before dispatching
 agents. Existing threads can retain absolute paths to lifecycle hooks in the
-retired cachebusted plugin directory; a worker may finish its task but fail to
-return its lifecycle result after that directory is replaced. The new thread
-also picks up the updated skills and MCP tools. Test an isolated fresh
+retired cachebusted plugin directory. Cortex hook commands now detect that
+missing script and return the empty JSON object `{}` successfully, without the
+Python missing-file error; the stale thread simply receives no hook context or
+telemetry from that call. A new thread is still required to pick up the updated
+skills, hooks, and MCP tools. Test an isolated fresh
 registration with:
 
 ```bash
@@ -164,10 +168,10 @@ for the new installation.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 3.1
+and secret-prone paths before validating the package again. The Cortex 3.2.1
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` still validates the
-previous `HEAD` and fails its 3.1 package contract. Commit only with explicit
+previous `HEAD` and fails its 3.2.1 package contract. Commit only with explicit
 authorization, then rerun the blocking check against that committed tree before
 any push, tag, or catalog submission.
 
@@ -229,15 +233,22 @@ each activation and task remains authorized only by its own
 unwritable, or mismatched root, a set `CORTEX_ROOT`, or a `/tmp` fallback fails
 closed before task state is created.
 
-The public normal flow has two narrow tools. A minimal
+The public normal flow has a narrow lifecycle plus scoped report transport. A minimal
 `start_orchestration` call contains only the absolute `project_root` and
 `task.objective`; complexity safely defaults to C2 and Cortex constructs the
 pipeline. Optional compact overrides use `waves[].workers[]`, where only
 `phase` is required. Common human language names normalize to compact tags
-before ledger creation. `continue_orchestration` is called once per completed
+before ledger creation; in particular, `implement` maps to `implementation`
+and `build_verification` maps to the final `close` phase, avoiding repeated
+correction/retry loops around those common labels. `continue_orchestration` is called once per completed
 wave with the prior relative `step` and worker results. A sequential result
 needs no worker reference; a parallel wave uses only the returned slots
-`worker: 1..N`. Slots and all eight report sections are validated atomically
+`worker: 1..N`. Workers persist all eight report sections with `record_report`,
+return only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
+summary (or the exact report-tool error), and the coordinator reads each ref
+with `read_worker_report`. If a native acknowledgement is interrupted after
+persistence, `manage_orchestration` inspect exposes the ref in
+`available_reports`. Slots and report refs are validated atomically
 before lifecycle state is written.
 
 Caller-generated submission, task, wave, attempt, coordinator, and host IDs
@@ -245,15 +256,21 @@ do not cross the normal-flow boundary. Cortex owns transaction idempotency:
 an identical retry replays, a changed payload conflicts, and a stale relative
 step is rejected. `manage_orchestration` keeps inspect, resume, deactivate,
 lane, resource, and durable-question recovery outside the common path.
-Semantically unchanged future-wave reassessment is accepted as unchanged and
-keeps subsequent relative steps monotonic. A completed response explicitly
+The coordinator owns the pipeline: it builds or consciously accepts the
+initial waves, follows the returned `pipeline` snapshot by default, and alone
+decides whether verified evidence justifies changing `future_waves`, with a
+concise reason. Planner and explorer findings are advisory. Semantically
+unchanged reassessment is accepted as unchanged and keeps subsequent relative
+steps monotonic. A completed response explicitly
 reports `close_verified` and `handoff_ready` so Luna does not start a second
 run merely to rediscover terminal proof.
 Existing `cortex/v7` ledgers remain inspectable and resumable through this v3
 adapter; the legacy `orchestrate` facade is not published in `tools/list`.
 
-Workers do not call Cortex: they use the native parent/child channel for questions and
-return one strict eight-field `cortex/report/v1` object. Expected validation
+Workers never call Cortex lifecycle operations. They use the native parent/child
+channel for questions, call only scoped `record_report` for their strict
+eight-field `cortex/report/v1`, and never paste that JSON into the native final
+response. Expected validation
 and recovery outcomes return `ok: false`, bounded diagnostics, and an exact
 `next_action` without being appended to the exception log. Unexpected MCP
 failures are appended as redacted JSONL under
@@ -275,15 +292,30 @@ subagents does **not** activate a durable ledger. After activation, the main
 agent remains user-facing while internal workers inspect, implement, test, and
 report through the main chat.
 
-Cortex recommends repository tools only when they are actually present in a
-worker's context. It does not inject a generic codebase-memory protocol,
-project identifiers, or hard-coded output modes into every worker prompt.
+While Cortex is active, the main/root agent is coordination-only. It must not
+inspect, search, read, edit, patch, build, test, or run the target project and
+must remain idle while a worker is active. It may call Cortex, launch the exact
+returned dispatches, wait, evaluate reports, route questions, and communicate
+with the user. Worker failure or delay is handled as rework or a blocker, never
+by falling back to direct root implementation.
+
+Codebase Memory is an optional worker accelerator, not a root-coordinator
+capability. When its tools are actually present, a worker first calls
+`list_projects` and selects only the entry whose root exactly matches the task
+project. It should prefer graph, architecture, and trace operations for
+discovery and impact analysis, then confirm consequential findings in current
+source and tests. If the service, matching index, or returned data is
+unavailable or stale, the worker falls back once to normal repository tools
+without retry loops. The coordination-only root never uses Codebase Memory to
+inspect the target project itself.
 
 ## Profiles, routing, and reports
 
-`plugins/cortex/profiles.json` is the runtime contract for the 21 bundled
-profiles and their exact names. Each profile carries a structured professional
-playbook. A generated worker briefing then combines that playbook with the
+`plugins/cortex/profiles.json` is the canonical machine-validated contract for
+all 21 bundled profiles. Each entry defines the exact name, description,
+sandbox, automatic/manual route category, owned gates, `select_when`, and
+`avoid_when`; the matching TOML must agree on identity, description, and
+sandbox. Each profile carries a structured professional playbook. A generated worker briefing then combines that playbook with the
 overall task context and the current gate's mission, ownership, acceptance, and
 verification defaults. Task-level criteria remain separate from gate-level
 criteria; explicit coordinator overrides take precedence over gate defaults,
@@ -292,6 +324,26 @@ and omitted values are filled from the validated 13-gate registry. The
 repository evidence, resolve discoverable facts before asking questions, and
 leave no material implementation decisions for the executor. `task_formatter`
 is not a supported profile.
+
+Automatic implementation routing conservatively scans bounded explicit
+signals in the objective, requirements, acceptance criteria, scope, allowed
+paths, and verification, including relevant English and Russian terms. The
+ordered specialist precedence is `fullstack_dev`, `mobile_dev`,
+`devops_engineer`, `data_engineer`, `debugger`, `refactorer`, `frontend_dev`,
+then `backend_dev`; `general` is used only when no specialist signal is strong
+enough. This initial route is provisional: repository evidence from `planner`
+or `explorer` is advisory, and the coordinator alone decides whether it
+justifies replacing not-yet-started `future_waves`. Both worker profiles
+receive the complete generated team catalog, and the root
+orchestrator skill carries the synchronized generated roster and evidence-led
+routing rules while remaining coordination-only.
+
+The public compact worker schema advertises an exact enum of all 21 canonical
+profile names. Legacy aliases are accepted only as runtime compatibility input,
+and a profile that cannot own the requested phase is rejected before ledger
+writes. Every returned dispatch exposes `worker`, `phase`, `profile`,
+`capability`, `sandbox`, and `selection_reason` alongside `call` and unchanged
+native `arguments`.
 Every delegation records requested/expected model metadata separately from
 the native request override and always records reasoning effort. A
 configured-default Luna request omits native `model`; confirmation and
@@ -332,8 +384,9 @@ these five pairs after normal policy resolution:
 
 Every other pair is preserved unchanged.
 
-Each v3 dispatch is only `{worker, call, arguments}`. `arguments` contains the
-real native `spawn_agent` or `create_thread` parameters; expected-model
+Each v3 dispatch is `{worker, phase, profile, capability, sandbox,
+selection_reason, call, arguments}`. `arguments` contains only the real native
+`spawn_agent` or `create_thread` parameters; routing and expected-model
 metadata is never copied into native `model`. The main Codex agent invokes all
 independent requests in a wave, waits for them, and submits their reports in
 one relative continue call. A malformed report, duplicate/foreign slot, or
@@ -341,15 +394,19 @@ incomplete wave is rejected before partial acceptance. Native spawn failures
 are submitted as explicit non-success results with a normalized status and
 reason.
 
-Each worker returns exactly the `cortex/report/v1` fields: `summary`,
+Each worker writes exactly the `cortex/report/v1` fields—`summary`,
 `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
-and `next_action`. The private report primitive stores sanitized authoritative JSON, creates
+and `next_action`—through public `record_report`. The operation stores sanitized authoritative JSON, creates
 a one-use attempt receipt, updates task- and delegation-scoped indexes, and
 generates an escaped Markdown view. Evidence consumption creates an
 irreversible `reports/consumptions/` tombstone; reconciliation may repair
 derived receipts and indexes but never makes a consumed receipt reusable.
-Worker briefings contain no task, wave, or attempt identifiers. The parent
-maps the native result to the current relative slot; Cortex privately creates
+Worker briefings contain only the exact task and attempt identifiers required
+for that one report write and explicitly forbid using them with lifecycle or
+pipeline tools. The native result is only `REPORT_RECORDED report_ref=<value>`
+plus at most a two-sentence summary, or the exact report-tool error; the
+coordinator reads the durable report and maps its ref
+to the current relative slot. Cortex privately creates
 the durable report receipt, evidence, gate transitions, reconciliation, and
 handoff. The coordinator waits for every native worker in the current wave
 before calling `continue_orchestration`.
@@ -403,3 +460,14 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 # Optional: run the plugin-creator validator from its installed skill directory.
 bash -n scripts/sync-cortex.sh
 ```
+
+The current candidate is installed as
+`3.2.1+codex.20260814203024`. Verification includes 220 passing Python tests,
+marketplace validation, content-verified installer check with the Luna default,
+cold-boot smoke, all three deterministic Luna-high fixtures, the composite
+benchmark target, isolated fresh-plugin registration, Python compilation,
+shell syntax, and installer dry-run. The live Luna-high route was not attempted
+because `--live` was not supplied. The blocking tracked-release check correctly
+remains blocked because committed `HEAD` does not contain the uncommitted 3.2.1
+package contract; no commit, tag, push, catalog publication, or public release
+is claimed.

@@ -45,19 +45,14 @@ def waves() -> list[dict[str, object]]:
     ]
 
 
-def result(worker: int, step: int, parallel: bool) -> dict[str, object]:
-    value: dict[str, object] = {
-        "report": {
-            "summary": f"relative step {step} worker {worker} completed",
-            "findings": [], "questions": [], "changed_files": [],
-            "tests": ["cold-boot v3 simulation"],
-            "evidence": [f"step {step} worker {worker} evidence"],
-            "uncertainty": [], "next_action": "advance",
-        }
+def report(worker: int, step: int) -> dict[str, object]:
+    return {
+        "summary": f"relative step {step} worker {worker} completed",
+        "findings": [], "questions": [], "changed_files": [],
+        "tests": ["cold-boot v3 simulation"],
+        "evidence": [f"step {step} worker {worker} evidence"],
+        "uncertainty": [], "next_action": "advance",
     }
-    if parallel:
-        value["worker"] = worker
-    return value
 
 
 def run(base: Path) -> dict[str, object]:
@@ -76,7 +71,7 @@ def run(base: Path) -> dict[str, object]:
     with JsonRpcHarness(SERVER, project, ledger) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration"]:
+        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"]:
             raise AssertionError(f"unexpected Cortex v3 public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
@@ -102,9 +97,31 @@ def run(base: Path) -> dict[str, object]:
             parallel = len(dispatches) > 1
             parallel_wave_seen |= parallel
             continue_calls += 1
+            state = json.loads((ledger / "tasks" / task_directory / "current.json").read_text(encoding="utf-8"))
+            active_attempts = [
+                item for item in state["attempts"]
+                if item.get("status") == "awaiting_host_spawn" and not item.get("invalidated")
+            ][-len(dispatches):]
+            results = []
+            for index, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
+                published = rpc.tool("record_report", {
+                    "task_id": state["task_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "profile": dispatch["profile"],
+                    "report": report(index, int(current["step"])),
+                })
+                if not published.get("ok"):
+                    raise AssertionError(f"record_report failed: {published}")
+                read = rpc.tool("read_worker_report", {"report_ref": published["report_ref"]})
+                if not read.get("ok") or read.get("report", {}).get("summary") != published.get("summary"):
+                    raise AssertionError(f"read_worker_report failed: {read}")
+                result_value: dict[str, object] = {"report_ref": published["report_ref"]}
+                if parallel:
+                    result_value["worker"] = index
+                results.append(result_value)
             last_payload = {
                 "step": current["step"],
-                "results": [result(index, int(current["step"]), parallel) for index in range(1, len(dispatches) + 1)],
+                "results": results,
             }
             current = rpc.tool("continue_orchestration", last_payload)
             if not current.get("ok"):

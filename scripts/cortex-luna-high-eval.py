@@ -99,7 +99,8 @@ def live_prompt(scenario: str, project: Path) -> str:
     common = (
         "Use the Cortex v3 MCP public tools to complete this isolated task. "
         "You are the parent orchestrator. Use start_orchestration and one continue_orchestration per wave; "
-        "never call orchestrate or any private Cortex tool. Execute every native dispatch, require all eight report sections, "
+        "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "
+        "Read every ref with read_worker_report and advance with report_ref. "
         "and finish only after close evidence and handoff. Do not ask for manual argument corrections. "
         f"The exact project_root is {project}. "
     )

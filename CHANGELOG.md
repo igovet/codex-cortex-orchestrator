@@ -6,6 +6,42 @@ same base version.
 
 ## [Unreleased]
 
+- Make the coordinator the explicit pipeline authority: Cortex validates and
+  persists its plan, planner/explorer reports remain advisory, and only the
+  coordinator may replace future waves with a stated evidence-based reason.
+- Restore scoped worker `record_report` and add coordinator
+  `read_worker_report`. Workers persist the full eight-field report, return
+  only a compact `report_ref` plus at most a two-sentence summary, and the
+  coordinator advances by ref. Persisted refs remain recoverable after a
+  native worker acknowledgement is interrupted. Together with the three
+  coordinator lifecycle operations, these make the public surface five tools.
+- Normalize common pipeline labels such as `implement` and
+  `build_verification`, reject a canonical phase duplicated across later
+  waves, and return the current pipeline snapshot with every lifecycle result
+  to prevent correction loops.
+- Make Codebase Memory conditional worker tooling: resolve an exact-root index,
+  prefer graph/architecture/trace queries for discovery and impact, confirm
+  consequential findings in source/tests, and fall back once without looping.
+  The coordination-only root never uses it to inspect the target project.
+- Make `profiles.json` the canonical machine-validated catalog for all 21
+  profiles, including exact descriptions, sandbox and route metadata, owned
+  gates, and selection/avoidance guidance; keep TOML identities and the
+  generated root roster synchronized with that contract.
+- Add conservative evidence-revisable implementation routing across the eight
+  specialist writers before the `general` fallback, using bounded English and
+  Russian task signals. Planner and explorer receive the complete team catalog
+  so their evidence can inform the coordinator's decision to replace future
+  waves with a narrower owner.
+- Publish the exact 21-profile enum in the compact v3 worker schema, reject
+  unsupported phase/profile pairs before ledger writes, and expose phase,
+  profile, capability, sandbox, and selection rationale separately from
+  unchanged native dispatch arguments.
+- Enforce a coordinator-only root during active Cortex work through the
+  installable orchestration skills, SessionStart context, and every public v3
+  next action: root must remain idle while workers run and may never inspect,
+  edit, patch, build, or test the target project itself.
+- Stop recording expected public v3 `ok: false` validation and recovery
+  responses as private server exceptions; actual MCP exceptions remain logged.
 - Expand all 21 bundled agents into role-specific professional playbooks and
   add a validated 13-gate briefing registry so every worker receives the
   overall task outcome, a concrete gate mission, scoped success criteria,
@@ -16,7 +52,8 @@ same base version.
   guidance from generated prompts without changing the public v3 facade.
 - Warn operators to start a new Codex thread before dispatching agents after a
   plugin update because an existing thread can retain absolute lifecycle-hook
-  paths into the retired cachebusted plugin directory.
+  paths into the retired cachebusted plugin directory; stale hook commands now
+  fail open with an empty JSON result instead of a Python missing-file error.
 - Replace the v2 `orchestrate` facade with the relative v3 public tools
   `start_orchestration`, `continue_orchestration`, and
   `manage_orchestration`; keep v7 lifecycle state and receipts private for
@@ -37,9 +74,9 @@ same base version.
 - Return compact native dispatches without internal task/wave/attempt IDs;
   keep expected routing separate from actual host attestation and never copy
   an expected configured-default Luna model into native `model`.
-- Simplify the worker contract to the strict eight-section parent result,
-  remove private `record_report` and generic identifier-heavy tool guidance,
-  and retire unsuccessful attempts before a fresh relative retry.
+- Keep the worker contract to one strict eight-section persisted report,
+  expose only the identifiers needed for its scoped report write, and retire
+  unsuccessful attempts before a fresh relative retry.
 - Keep inspect/resume/deactivate/lane/resource/question on the rare management
   path and add regression coverage for the modern Codex
   `extensions["openai/form"]` elicitation capability.
@@ -64,7 +101,7 @@ same base version.
   redacted Cortex tool-error journal.
 - Catalog submission, remote provenance, and tagged installation remain
   pending external release authorization and verification.
-- The 3.1 working-tree changes remain uncommitted; a committed release tree and
+- The 3.2.1 working-tree changes remain uncommitted; a committed release tree and
   a passing `verify-cortex-release.py --require-tracked` check remain
   prerequisites to any publication claim.
 

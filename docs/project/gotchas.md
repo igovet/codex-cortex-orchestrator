@@ -6,7 +6,9 @@
   `continue_orchestration` once per completed relative `step`.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
   lane/resource/durable-question work. The legacy `orchestrate` facade and v7
-  primitives below are private compatibility internals.
+  primitives below are private compatibility internals. Together with
+  worker-only `record_report` and coordinator-only `read_worker_report`, the
+  public surface is exactly five tools.
 - Every public call requires the exact absolute `project_root`. Start needs
   only `task.objective`; complexity defaults to C2. Compact wave overrides use
   `waves[].workers[]`, with only `phase` required.
@@ -14,10 +16,17 @@
   `worker`; a parallel wave must return every unique integer worker slot once.
   Stale, duplicate, missing, foreign, or changed retries fail before task-state
   writes.
-- Successful results carry all eight `cortex/report/v1` sections. Non-success
-  results omit report and require normalized status plus reason. Workers
-  return reports through the native parent result and never call Cortex,
-  `record_report`, or identifier-heavy tools.
+- Successful results carry a compact `report_ref`. Workers persist all eight
+  `cortex/report/v1` sections through the scoped public `record_report` tool,
+  then return only `REPORT_RECORDED report_ref=<value>` plus at most a
+  two-sentence summary. The coordinator reads the full report through
+  `read_worker_report`. Non-success results omit report refs and require a
+  normalized status plus reason. Workers never call lifecycle, pipeline,
+  gate, delegation, or management operations and never paste report JSON into
+  the native parent result. If `record_report` fails, the native final contains
+  only the exact report-tool error. If persistence succeeds
+  but the native acknowledgement is interrupted, inspect with
+  `manage_orchestration` and recover the ref from `available_reports`.
 - Idempotency is server-owned. Callers do not send submission, task, wave,
   attempt, coordinator identity, or host metadata. A repeated start while one
   task is active reconstructs that task instead of creating an accidental
@@ -25,6 +34,10 @@
 - Human-readable language names normalize before ledger creation. Repeating a
   semantically unchanged `future_waves` assessment is valid and keeps the next
   relative step monotonic; it must not fail after committing the current gate.
+- Common phase labels are bounded aliases, not new waves: `implement` maps to
+  `implementation`, while `build_verification` maps to final `close`. Cortex
+  rejects the same canonical phase repeated across later waves, so use the
+  returned pipeline snapshot instead of relabeling completed work and retrying.
 - Dispatch arguments contain only native parameters. Expected model/tool/
   effort is routing metadata, not actual host attestation. Do not add a native
   model when configured-default Luna intentionally omits it.
@@ -35,6 +48,39 @@
   render elicitation.
 - Fixture Luna-high evaluation covers sequential, compact parallel, and
   blocked/resume flows. A live `SKIP` means missing release evidence, not pass.
+- The compact worker `profile` value must be one of the 21 canonical
+  `profiles.json` names and must support the requested phase. Legacy aliases
+  are runtime compatibility only; they are not part of the advertised enum.
+  An unsupported phase/profile pair is rejected before ledger writes.
+- Omitted implementation profiles are selected conservatively from bounded
+  explicit signals in objective, requirements, acceptance criteria, scope,
+  allowed paths, and verification. Rule order is `fullstack_dev`,
+  `mobile_dev`, `devops_engineer`, `data_engineer`, `debugger`, `refactorer`,
+  `frontend_dev`, then `backend_dev`; `general` is only the fallback. Do not
+  treat this initial route as repository evidence: planner/explorer findings
+  are advisory. The coordinator alone decides whether they justify replacing
+  not-yet-started `future_waves`, and must include a concise reason.
+- The coordinator builds or consciously accepts the initial pipeline, follows
+  the returned snapshot by default, and owns every later pipeline decision.
+  Planner and explorer reports can supply evidence but cannot command a
+  replacement.
+- Dispatch routing metadata is not part of the native host call. Read `phase`,
+  `profile`, `capability`, `sandbox`, and `selection_reason` from the dispatch,
+  then pass only `call` and its unchanged `arguments` to the native tool.
+- Once Cortex is active, the main/root agent is coordination-only. It must not
+  inspect, search, read, edit, patch, build, test, or run the target project,
+  even when a worker is delayed, fails, or is unavailable. Dispatch only the
+  workers returned by Cortex, remain idle while they run, and use recovery,
+  rework, or a blocker instead of taking over their project work. `SessionStart`
+  and every public v3 `next_action` repeat this rule so compaction or a resumed
+  turn does not weaken it.
+- Codebase Memory is worker-only and conditional. When its tools are present,
+  call `list_projects` first and use only the project whose root exactly matches
+  the task root; prefer graph, architecture, and trace operations, then confirm
+  consequential facts in source/tests. If the service, matching index, or data
+  is missing or stale, fall back once to normal repository tools and do not
+  loop. An indexed repository never authorizes the root coordinator to inspect
+  the project.
 
 ## Private v2/v7 compatibility internals
 
@@ -84,12 +130,13 @@ private adapter. They are not valid public v3 request envelopes.
   `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
   the chat/thread session id, JSON-RPC request id, and any task/attempt or
   other call ids, but never stores secret-like input values verbatim.
-- Every `orchestrate` result with `ok: false`—including an expected coordinator
-  correction rather than an MCP exception—is recorded as redacted JSONL in
-  `~/.codex/logs/cortex-tool-errors.jsonl`. Expected input failures still return
-  a recoverable result with `diagnostics` and `next_action`, and are validated
-  before lifecycle writes where possible. Correct the complete payload and use
-  a fresh `submission_id`; reuse an id only for a byte-identical replay.
+- Expected public v3 validation and recovery failures return structured
+  `ok: false` results with bounded `diagnostics` and a corrective `next_action`.
+  They are caller-correctable protocol outcomes and are not written to
+  `~/.codex/logs/cortex-tool-errors.jsonl`; only raised MCP-boundary exceptions
+  enter that private redacted log. Public v3 validation occurs before lifecycle
+  writes where possible. Correct every diagnostic and retry according to the
+  returned action.
 - Preflight aggregates independent request mistakes into one `ok: false`
   response. Each diagnostic has `path`, `message`, and `expected`; repair every
   listed path before retrying. Do not treat the first diagnostic as the only

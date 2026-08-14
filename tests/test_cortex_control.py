@@ -1659,8 +1659,14 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("treat non-English task text as input data", prompt)
         self.assertIn("User-facing language: ru", prompt)
         self.assertIn("Use only tools actually available in this worker context", prompt)
-        self.assertNotIn("mcp__codebase_memory__", prompt)
-        self.assertNotIn("mode=compact|full|files", prompt)
+        self.assertIn("mcp__codebase_memory__list_projects", prompt)
+        self.assertIn(f"matching the exact root_path {str(self.project)!r}", prompt)
+        self.assertIn("prefer `get_architecture`, `search_graph`, `trace_path`, `detect_changes`", prompt)
+        self.assertIn("Confirm consequential indexed claims in current source or tests", prompt)
+        self.assertIn("you may call `index_repository` once", prompt)
+        self.assertIn("do not loop on Codebase Memory setup", prompt)
+        self.assertIn("REPORT_RECORDED report_ref=<report_id>", prompt)
+        self.assertIn("do not paste or reproduce its JSON", prompt)
 
     def test_composite_delegation_and_completion_fast_paths(self):
         self.init(task_id="composites")
@@ -1933,7 +1939,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started["schema"], control.PUBLIC_ORCHESTRATION_SCHEMA)
         self.assertEqual(started["step"], 1)
         self.assertEqual(len(started["dispatches"]), 1)
-        self.assertEqual(set(started["dispatches"][0]), {"worker", "call", "arguments"})
+        self.assertEqual(set(started["dispatches"][0]), {
+            "worker", "phase", "profile", "capability", "sandbox",
+            "selection_reason", "call", "arguments",
+        })
+        self.assertEqual(started["dispatches"][0]["phase"], "plan")
+        self.assertEqual(started["dispatches"][0]["profile"], "planner")
+        self.assertEqual(started["dispatches"][0]["sandbox"], "read-only")
+        self.assertIn("canonical automatic owner", started["dispatches"][0]["selection_reason"])
+        self.assertIn("COORDINATOR LOCK", started["next_action"])
+        self.assertIn("remain idle", started["next_action"])
+        self.assertIn("All project operations belong to workers", started["next_action"])
         self.assertNotIn("model", started["dispatches"][0]["arguments"])
         self.assertNotIn("task_id", started)
         self.assertNotIn("wave_id", started)
@@ -1964,6 +1980,73 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Pause conditions: A public schema change becomes necessary", prompt)
         self.assertIn("Budget or operating limit: No external writes", prompt)
         self.assertNotIn("Complete and report the discover gate", prompt)
+        self.assertIn("## Canonical Cortex team", prompt)
+        for profile in control.AGENTS:
+            self.assertIn(f"- {profile} [", prompt)
+
+    def test_implementation_router_prefers_narrow_specialists_and_conservative_fallback(self):
+        cases = {
+            "Build a React frontend and an API backend for this workflow": "fullstack_dev",
+            "Implement an Android screen in Jetpack Compose": "mobile_dev",
+            "Update Docker and GitHub Actions deployment": "devops_engineer",
+            "Implement an ETL backfill into the data warehouse": "data_engineer",
+            "Build a data pipeline for warehouse imports": "data_engineer",
+            "Reproduce the failing test, prove root cause, and fix it": "debugger",
+            "Refactor the module without changing behavior": "refactorer",
+            "Implement a browser component and CSS states": "frontend_dev",
+            "Add a server API endpoint and business logic": "backend_dev",
+            "Исправь почему сервис падает и найди корневую причину": "debugger",
+            "Implement the bounded requested change": "general",
+        }
+        for objective, expected in cases.items():
+            with self.subTest(objective=objective):
+                selected = control.select_implementation_profile({"objective": objective})
+                self.assertEqual(selected["profile"], expected)
+                self.assertTrue(selected["reason"])
+                self.assertIn(selected["source"], {"bounded_task_signals", "conservative_fallback"})
+
+    def test_automatic_waves_embed_specialist_implementation_rationale(self):
+        waves = control._v3_auto_waves({
+            "objective": "Add a browser UI backed by a server API",
+            "requirements": [],
+            "complexity": "C2",
+        })
+        implementation = next(
+            spec
+            for wave in waves
+            for spec in wave["delegations"]
+            if spec["gate"] == "implementation"
+        )
+        self.assertEqual(implementation["agent"], "fullstack_dev")
+        self.assertIn("both browser-facing and server-facing", implementation["selection_reason"])
+
+    def test_automatic_pipeline_reads_the_full_task_and_multilingual_specialist_signals(self):
+        cases = {
+            "Audit authorization security before changing the API": "security",
+            "Проверь доступность интерфейса с клавиатуры": "accessibility",
+            "Оптимизируй производительность и задержку сервиса": "performance",
+            "Спроектируй миграцию схемы базы данных": "database_architecture",
+        }
+        for objective, expected_gate in cases.items():
+            with self.subTest(objective=objective):
+                waves = control._v3_auto_waves({
+                    "objective": objective,
+                    "requirements": [],
+                    "complexity": "C2",
+                })
+                gates = {spec["gate"] for wave in waves for spec in wave["delegations"]}
+                self.assertIn(expected_gate, gates)
+
+    def test_v3_profile_schema_exposes_exact_roster_and_rejects_wrong_gate_owner(self):
+        self.assertEqual(set(control.V3_WORKER_SCHEMA["properties"]["profile"]["enum"]), control.AGENTS)
+        rejected = self.v3_start(
+            "invalid planner owner",
+            waves=[{"workers": [{"phase": "plan", "profile": "backend_dev"}]}],
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertIn("cannot own phase", rejected["diagnostics"][0]["message"])
+        tasks = self.ledger / "tasks"
+        self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
     def test_v3_explicit_worker_contract_overrides_gate_defaults_only(self):
         started = self.v3_start(
@@ -2089,6 +2172,129 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(completed_attempts[0]["dispatch_correlation"], "unattested_parent_result")
         self.assertNotIn("host_spawn", completed_attempts[0])
 
+    def test_v3_worker_records_report_returns_compact_ref_and_next_worker_receives_context(self):
+        started = self.v3_start("tool-backed reports", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        self.assertEqual(started["pipeline"]["authority"], "coordinator")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self.v3_report("repository-grounded discovery handoff")
+        report["findings"] = ["Use the discovered service boundary."]
+        published = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertTrue(published["ok"])
+        self.assertEqual(published["outcome"], "report_recorded")
+        self.assertNotIn("report", published)
+        self.assertNotIn("state", published)
+
+        read = control.read_worker_report({
+            "project_root": str(self.project),
+            "report_ref": published["report_ref"],
+        })
+        self.assertEqual(read["report"], report)
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project),
+            "step": started["step"],
+            "results": [{"report_ref": published["report_ref"]}],
+        })
+        self.assertTrue(advanced["ok"])
+        self.assertEqual(advanced["dispatches"][0]["phase"], "implementation")
+        prompt = advanced["dispatches"][0]["arguments"]["message"]
+        self.assertIn("repository-grounded discovery handoff", prompt)
+        self.assertIn("Use the discovered service boundary.", prompt)
+        self.assertIn("mcp__codebase_memory__list_projects", prompt)
+        self.assertIn("If no exact usable index exists, do not create or refresh one in this gate.", prompt)
+        records = list((task_dir / "reports/records").glob("*.json"))
+        self.assertEqual(len(records), 1)
+
+    def test_v3_inspect_recovers_report_when_native_worker_ack_is_interrupted(self):
+        started = self.v3_start("recover persisted report", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        published = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": self.v3_report("persisted before native acknowledgement interruption"),
+        })
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"])
+        self.assertEqual(inspected["step"], started["step"])
+        self.assertEqual(
+            inspected["result"]["available_reports"],
+            [{
+                "report_ref": published["report_ref"],
+                "phase": "discover",
+                "profile": "explorer",
+                "summary": "persisted before native acknowledgement interruption",
+            }],
+        )
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project),
+            "step": inspected["step"],
+            "results": [{"report_ref": published["report_ref"]}],
+        })
+        self.assertTrue(advanced["ok"])
+        self.assertEqual(advanced["dispatches"][0]["phase"], "implementation")
+
+    def test_v3_public_schema_never_advertises_inline_worker_reports(self):
+        result_schema = control.CONTINUE_ORCHESTRATION_SCHEMA["properties"]["results"]["items"]
+        self.assertNotIn("report", result_schema["properties"])
+        self.assertIn("report_ref", result_schema["properties"])
+        self.assertIn("never an inline report body", result_schema["properties"]["report_ref"]["description"])
+
+    def test_v3_phase_aliases_accept_common_labels_and_reject_cross_wave_duplicates(self):
+        task = {"objective": "phase aliases", "complexity": "C2"}
+        compact = control._v3_compact_waves([
+            {"workers": [{"phase": "implement", "profile": "backend_dev"}]},
+            {"workers": [{"phase": "build_verification", "profile": "build_verification"}]},
+        ], task)
+        self.assertEqual(
+            [wave["delegations"][0]["gate"] for wave in compact],
+            ["implementation", "close"],
+        )
+        with self.assertRaisesRegex(ValueError, "repeat canonical phase 'qa'"):
+            control._v3_compact_waves([
+                {"workers": [{"phase": "qa"}]},
+                {"workers": [{"phase": "verification"}]},
+            ], task)
+        parallel_qa = control._v3_compact_waves([
+            {"workers": [
+                {"phase": "qa", "profile": "qa_engineer"},
+                {"phase": "verification", "profile": "build_verification"},
+            ]},
+        ], task)
+        self.assertEqual(len(parallel_qa[0]["delegations"]), 2)
+        human_labels = control._v3_compact_waves([
+            {"workers": [{"phase": "analysis", "profile": "discovery"}]},
+            {"workers": [{"phase": "implement", "profile": "implementer"}]},
+        ], {
+            "objective": "Implement the backend API endpoint",
+            "requirements": ["server-side service logic"],
+            "complexity": "C2",
+        })
+        self.assertEqual(human_labels[0]["delegations"][0]["gate"], "discover")
+        self.assertEqual(human_labels[0]["delegations"][0]["agent"], "explorer")
+        self.assertEqual(human_labels[1]["delegations"][0]["gate"], "implementation")
+        self.assertEqual(human_labels[1]["delegations"][0]["agent"], "backend_dev")
+        self.assertIn("generic implementation worker", human_labels[1]["delegations"][0]["selection_reason"])
+
     def test_v3_failed_worker_is_retired_before_a_successful_relative_retry(self):
         started = self.v3_start("worker retry", waves=[{"workers": [{"phase": "discover"}]}])
         failed = control.continue_orchestration({
@@ -2168,6 +2374,7 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "step": started["step"],
             "results": [{"report": self.v3_report("discovery complete")}],
             "future_waves": [{"workers": [{"phase": "discover"}, {"phase": "implementation"}]}],
+            "reason": "new evidence requires discovery rework",
         }
         denied = control.continue_orchestration(common)
         self.assertFalse(denied["ok"])
@@ -2185,6 +2392,7 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "step": started["step"],
             "results": [{"report": self.v3_report("discovery complete")}],
             "future_waves": [{"workers": [{"phase": "implementation"}]}],
+            "reason": "confirm the coordinator-selected implementation route",
         })
         self.assertTrue(advanced["ok"])
         self.assertEqual(advanced["step"], 2)
@@ -2211,7 +2419,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(replayed["idempotent"])
         self.assertEqual(replayed["transaction_id"], started["transaction_id"])
         self.assertEqual(len(started["spawn_requests"]), 1)
-        self.assertIn("Do not call Cortex MCP tools", started["spawn_requests"][0]["message"])
+        self.assertIn("call the public `record_report` tool exactly once", started["spawn_requests"][0]["message"])
+        self.assertIn("do not paste or reproduce that JSON", started["spawn_requests"][0]["message"])
 
         discovery = control.orchestrate({
             "operation": "advance", "submission_id": "facade-waves-advance-plan",
@@ -2973,14 +3182,14 @@ class ControlPlaneTests(unittest.TestCase):
         finally:
             os.environ.pop("CORTEX_ROOT", None)
 
-    def test_mcp_smoke_exposes_only_v3_relative_orchestration_tools(self):
+    def test_mcp_smoke_exposes_v3_lifecycle_and_scoped_report_tools(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration"})
+        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "record_report", "read_worker_report"})
         self.assertNotIn("orchestrate", names)
-        self.assertEqual(len(tools), 3)
+        self.assertEqual(len(tools), 5)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
         by_name = {item["name"]: item for item in tools}
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["required"], ["project_root", "task"])
@@ -3033,7 +3242,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(record["input"]["api_key"], "<REDACTED>")
             self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
 
-    def test_mcp_logs_structured_facade_validation_results(self):
+    def test_mcp_does_not_log_structured_facade_validation_results(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         with tempfile.TemporaryDirectory() as home:
             environment = os.environ.copy()
@@ -3065,11 +3274,9 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(structured["ok"], False)
             self.assertEqual(structured["code"], "start_validation_failed")
             self.assertIn("unknown worker phase", structured["diagnostics"][0]["message"])
+            self.assertIn("COORDINATOR LOCK", structured["next_action"])
             log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
-            self.assertTrue(log_path.is_file())
-            record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
-            self.assertEqual(record["tool"], "start_orchestration")
-            self.assertIn("unknown worker phase", record["error"])
+            self.assertFalse(log_path.exists())
 
     def test_facade_aggregates_all_start_contract_errors_before_writing_ledger(self):
         malformed = control.orchestrate({
@@ -3156,7 +3363,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.1.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "3.2.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
