@@ -114,7 +114,12 @@ managed legacy artifacts after a backup, registers the repo-local marketplace,
 reinstalls Cortex, and verifies same-version file content. Cleanup is limited
 to the known profile hash, an authenticated retired 4.4.0 cache layout, and the
 exact retired local marketplace entry. Unexpected files, symlinks, versions,
-or paths cause refusal. Preview or check without changing the installation:
+or paths cause refusal. If `~/.codex/config.toml` already contains Cortex's
+`plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
+override, the installer preserves that value across the remove/add cycle; it
+does not create the override for users who have not configured it. Use
+`--dry-run` to report the planned update without writing, or `--check` for a
+read-only installed-content and legacy-artifact check:
 
 ```bash
 ./scripts/sync-cortex.sh --dry-run

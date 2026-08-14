@@ -18,6 +18,8 @@ legacy_marketplace="${home_root}/.agents/plugins/marketplace.json"
 # Only the exact retired profile distributed by this project is eligible for automatic removal.
 legacy_profile_sha256="6b74fa45aa5e2312aca5472a17b39a638bdba7a74da7c36ce9a2fa9db925c367"
 mode="install"
+# Preserve only an explicit user override; never introduce a default during install.
+cortex_mcp_approval_override=""
 
 usage() {
   cat <<'EOF'
@@ -295,6 +297,142 @@ raise SystemExit(0 if manifest(pathlib.Path(sys.argv[1])) == manifest(pathlib.Pa
 PY
 }
 
+capture_cortex_mcp_approval_override() {
+  local config_path="${codex_home}/config.toml"
+  cortex_mcp_approval_override=""
+  [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
+  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
+    echo "error: refusing to inspect non-regular Codex config: ${config_path}" >&2
+    return 1
+  }
+  cortex_mcp_approval_override="$({
+    python3 - "${config_path}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: cannot parse Codex config for Cortex approval override: {exc}")
+
+try:
+    value = payload["plugins"]["cortex@cortex"]["mcp_servers"]["cortex"]["default_tools_approval_mode"]
+except (KeyError, TypeError):
+    raise SystemExit(0)
+
+allowed = {"auto", "prompt", "writes", "approve"}
+if value not in allowed:
+    raise SystemExit(
+        "error: Cortex MCP default_tools_approval_mode must be one of "
+        + ", ".join(sorted(allowed))
+    )
+print(value)
+PY
+  })" || return 1
+}
+
+restore_cortex_mcp_approval_override() {
+  [[ -n "${cortex_mcp_approval_override}" ]] || return 0
+  local config_path="${codex_home}/config.toml"
+  if [[ "${mode}" == "dry-run" ]]; then
+    echo "would preserve Cortex MCP default_tools_approval_mode=${cortex_mcp_approval_override}"
+    return 0
+  fi
+  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
+    echo "error: Codex config disappeared or became non-regular during Cortex update: ${config_path}" >&2
+    return 1
+  }
+  python3 - "${config_path}" "${cortex_mcp_approval_override}" <<'PY'
+import os
+import re
+import stat
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = sys.argv[2]
+allowed = {"auto", "prompt", "writes", "approve"}
+if value not in allowed:
+    raise SystemExit(f"error: invalid captured Cortex MCP approval mode: {value}")
+if path.is_symlink() or not path.is_file():
+    raise SystemExit(f"error: refusing to update non-regular Codex config: {path}")
+
+original = path.read_text(encoding="utf-8")
+text = original
+lines = text.splitlines(keepends=True)
+header = '[plugins."cortex@cortex".mcp_servers.cortex]'
+header_indexes = [index for index, line in enumerate(lines) if line.strip() == header]
+if len(header_indexes) > 1:
+    raise SystemExit("error: Codex config contains duplicate Cortex MCP approval tables")
+
+if not header_indexes:
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
+    if text and not text.endswith("\n\n"):
+        text += "\n"
+    text += f'{header}\ndefault_tools_approval_mode = "{value}"\n'
+else:
+    start = header_indexes[0] + 1
+    end = start
+    table_header = re.compile(r"^\s*\[(?!\[).+\]\s*(?:#.*)?$")
+    while end < len(lines) and not table_header.match(lines[end]):
+        end += 1
+    key_indexes = [
+        index
+        for index in range(start, end)
+        if re.match(r"^\s*default_tools_approval_mode\s*=", lines[index])
+    ]
+    if len(key_indexes) > 1:
+        raise SystemExit("error: Codex config contains duplicate Cortex MCP approval keys")
+    if not key_indexes:
+        lines.insert(start, f'default_tools_approval_mode = "{value}"\n')
+        text = "".join(lines)
+    else:
+        index = key_indexes[0]
+        line = lines[index]
+        newline = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+        body = line[:-len(newline)] if newline else line
+        prefix_match = re.match(r"^(\s*default_tools_approval_mode\s*=\s*)", body)
+        if prefix_match is None:
+            raise SystemExit("error: unable to locate Cortex MCP approval key")
+        comment = ""
+        if "#" in body[prefix_match.end():]:
+            comment = " #" + body[prefix_match.end():].split("#", 1)[1].lstrip()
+        lines[index] = f'{prefix_match.group(1)}"{value}"{comment}{newline}'
+        text = "".join(lines)
+
+try:
+    parsed = tomllib.loads(text)
+    observed = parsed["plugins"]["cortex@cortex"]["mcp_servers"]["cortex"]["default_tools_approval_mode"]
+except (KeyError, TypeError, OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+    raise SystemExit(f"error: restored Codex config is invalid: {exc}")
+if observed != value:
+    raise SystemExit("error: restored Cortex MCP approval override was not retained")
+if text == original:
+    raise SystemExit(0)
+
+mode = stat.S_IMODE(path.stat().st_mode)
+fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+except Exception:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
 installed_version() {
   codex plugin list --json 2>/dev/null | python3 -c 'import json,sys; value=json.load(sys.stdin); rows=value.get("installed", value) if isinstance(value, dict) else value; print(next((row.get("version", "") for row in rows if row.get("pluginId") == "cortex@cortex"), ""))' 2>/dev/null || true
 }
@@ -307,9 +445,20 @@ install_or_check() {
     content_matches || { echo "outdated ${plugin_name}@${marketplace_name}: same-version content drift"; return 1; }
     echo "ok      ${plugin_name}@${marketplace_name} (${expected_version}, content verified)"; return 0
   fi
-  run codex plugin marketplace add "${marketplace_root}" --json >/dev/null
-  if [[ -n "${version}" ]]; then run codex plugin remove "${plugin_name}@${marketplace_name}" --json >/dev/null; fi
-  run codex plugin add "${plugin_name}@${marketplace_name}" --json >/dev/null
+  capture_cortex_mcp_approval_override || return 1
+  if ! run codex plugin marketplace add "${marketplace_root}" --json >/dev/null; then
+    restore_cortex_mcp_approval_override || true
+    return 1
+  fi
+  if [[ -n "${version}" ]] && ! run codex plugin remove "${plugin_name}@${marketplace_name}" --json >/dev/null; then
+    restore_cortex_mcp_approval_override || true
+    return 1
+  fi
+  if ! run codex plugin add "${plugin_name}@${marketplace_name}" --json >/dev/null; then
+    restore_cortex_mcp_approval_override || true
+    return 1
+  fi
+  restore_cortex_mcp_approval_override || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
   echo "installed ${plugin_name}@${marketplace_name} from ${marketplace_root}"
 }

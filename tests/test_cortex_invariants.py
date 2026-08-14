@@ -388,6 +388,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         isolated = self.base / "sync-home"
         codex_home = isolated / ".codex"
         codex_home.mkdir(parents=True)
+        config = codex_home / "config.toml"
+        config.write_text(
+            '[plugins."cortex@cortex".mcp_servers.cortex]\n'
+            'default_tools_approval_mode = "approve"\n',
+            encoding="utf-8",
+        )
         retired = codex_home / "agents" / "orchestrator.toml"
         retired.parent.mkdir()
         retired.write_bytes(base64.b64decode("bmFtZSA9ICJvcmNoZXN0cmF0b3IiCmRlc2NyaXB0aW9uID0gIkRlbGVnYXRpb24tb25seSBjb25kdWN0b3IgZm9yIHJvdXRpbmcgd29yayB0byBzcGVjaWFsaXN0IGFnZW50cyBhbmQgbWFuYWdpbmcgb3JjaGVzdHJhdGlvbiBzdGF0ZS4iCnNhbmRib3hfbW9kZSA9ICJyZWFkLW9ubHkiCmRldmVsb3Blcl9pbnN0cnVjdGlvbnMgPSAiIiIKWW91IGFyZSB0aGUgb3JjaGVzdHJhdGlvbiBjb25kdWN0b3IsIG5vdCBhbiBpbXBsZW1lbnRhdGlvbiBvciBpbnZlc3RpZ2F0aW9uIGFnZW50LgpEbyBub3QgaW5zcGVjdCwgc2VhcmNoLCByZWFkLCB0ZXN0LCBidWlsZCwgb3IgZWRpdCB0aGUgdGFyZ2V0IHByb2plY3QgeW91cnNlbGYuClVzZSBvbmx5IG9yY2hlc3RyYXRpb24gY29udHJvbCwgYWdlbnQgZGlzcGF0Y2gsIGFnZW50IG1lc3NhZ2luZywgdGFzayBzdGF0dXMsCmdhdGUsIGV2aWRlbmNlLCBhbmQgaGFuZG9mZiBvcGVyYXRpb25zLiBDb252ZXJ0IHRoZSB1c2VyJ3MgcmVxdWVzdCBpbnRvCmJvdW5kZWQgZGVsZWdhdGlvbnMgd2l0aCBleHBsaWNpdCBvd25lcnNoaXAsIGFsbG93ZWQgcGF0aHMsIGFjY2VwdGFuY2UKY3JpdGVyaWEsIGFuZCB2ZXJpZmljYXRpb24gcmVzcG9uc2liaWxpdGllcy4gV2FpdCBmb3Igd29ya2VyIHJlcG9ydHMsIHJvdXRlCmZvbGxvdy11cCB3b3JrLCBhZHZhbmNlIGdhdGVzIGZyb20gcmVjb3JkZWQgZXZpZGVuY2UsIGFuZCBzdXJmYWNlIGJsb2NrZXJzLgpOZXZlciBjb21wZW5zYXRlIGZvciBhIG1pc3Npbmcgd29ya2VyIHJlc3VsdCBieSBleGFtaW5pbmcgb3IgY2hhbmdpbmcgdGhlCnJlcG9zaXRvcnkgeW91cnNlbGYuIFRoZSBmaW5hbCByZXNwb25zZSBtdXN0IHN1bW1hcml6ZSB3b3JrZXIgZXZpZGVuY2UgYW5kCnJlbWFpbmluZyByaXNrLCBub3QgY2xhaW0gbG9jYWxseSBwZXJmb3JtZWQgd29yay4KIiIiCg=="))
@@ -399,8 +405,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
         environment = os.environ.copy()
         environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home)})
         script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
+        before_preview = config.read_text(encoding="utf-8")
+        preview = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertIn("would preserve Cortex MCP default_tools_approval_mode=approve", preview.stdout)
+        self.assertEqual(config.read_text(encoding="utf-8"), before_preview)
         installed = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertIn('[plugins."cortex@cortex".mcp_servers.cortex]', config.read_text(encoding="utf-8"))
+        self.assertIn('default_tools_approval_mode = "approve"', config.read_text(encoding="utf-8"))
         self.assertFalse(retired.exists())
         self.assertFalse(retired_cache.parent.exists())
         backup_root = codex_home / "backups/cortex-upgrade"
@@ -414,6 +427,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("content drift", drift.stdout)
         repaired = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertIn('default_tools_approval_mode = "approve"', config.read_text(encoding="utf-8"))
         checked = subprocess.run(["bash", str(script), "--check"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(checked.returncode, 0, checked.stderr)
 

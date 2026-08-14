@@ -10,6 +10,7 @@ python3 scripts/verify-cortex-release.py --require-tracked
 python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py
 bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --check
+./scripts/sync-cortex.sh --dry-run
 ```
 
 `cortex-cold-boot-smoke.py` uses a fresh temporary Git project and its
@@ -97,5 +98,6 @@ the blocking command against the committed tree before publication.
 - `python -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py` — Python syntax compilation for runtime and helper modules; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
 - `bash -n scripts/sync-cortex.sh` — shell syntax check; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
 - `./scripts/sync-cortex.sh --check` — read-only installed-content/legacy-artifact check; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
+- `./scripts/sync-cortex.sh --dry-run` — no-write report of the planned installation and managed legacy cleanup; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
 
 <!-- GENERATED:END -->

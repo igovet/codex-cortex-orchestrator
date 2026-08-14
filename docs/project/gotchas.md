@@ -163,7 +163,11 @@
 - The installer removes only authenticated known legacy artifacts and backs
   them up. Modified, symlinked, unexpected-version, or unexpected-path targets
   are refused rather than removed. Start a fresh thread after installation so
-  the host discovers the new skills, profiles, hooks, and MCP server.
+  the host discovers the new skills, profiles, hooks, and MCP server. During
+  the managed Cortex remove/add cycle, an existing
+  `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
+  override is captured and restored; no override is created when the user did
+  not configure one.
 - The main orchestrator owns the complete optional pipeline: it selects every
   gate except `documentation` and `close` and passes the full list through
   `classify_task.pipeline`. Cortex validates the list and appends only those
