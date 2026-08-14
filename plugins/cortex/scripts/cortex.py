@@ -115,6 +115,7 @@ MAX_REPORT_AGGREGATE_BYTES = 1024 * 1024
 MAX_REPORT_GRANTS = 256
 MAX_GATE_RECOVERY_FAILURES = 3
 MAX_GATE_RECOVERY_EVENTS = 64
+MAX_TOOL_ERROR_LOG_INPUT_BYTES = 16384
 MAX_QUESTIONS_PER_ATTEMPT = 64
 MAX_QUESTIONS_PER_TASK = 512
 MAX_METRIC_EVENTS = 1000
@@ -164,6 +165,10 @@ VERIFICATION_COMMANDS = {
     "benign_failure": {"argv": ["/usr/bin/false"], "cwd": "."},
 }
 SENSITIVE_KEY_RE = re.compile(r"(?i)(?:^|[_ -])(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|token|password|passwd|secret|private[_ -]?key|authorization)(?:$|[_ -])")
+SENSITIVE_LOG_KEY_NAMES = {
+    "apikey", "accesstoken", "refreshtoken", "clientsecret", "token",
+    "password", "passwd", "secret", "privatekey", "authorization",
+}
 
 
 def now() -> str:
@@ -860,6 +865,148 @@ def sanitize_structured(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize_structured(item) for item in value[:100]]
     return redact(value, 2000)
+
+
+def _is_sensitive_log_key(value: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(value).lower())
+    return normalized in SENSITIVE_LOG_KEY_NAMES or any(
+        normalized.endswith(suffix) for suffix in ("apikey", "token", "secret", "password", "privatekey")
+    )
+
+
+def _sanitize_tool_error_value(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:
+    """Bound and redact arbitrary tool input before it reaches the error log."""
+    budget = budget if budget is not None else [512]
+    if budget[0] <= 0 or depth > 6:
+        return "<TRUNCATED>"
+    budget[0] -= 1
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 100:
+                result["<TRUNCATED_KEYS>"] = "<TRUNCATED>"
+                break
+            key_text = redact(key, 256)
+            result[key_text] = "<REDACTED>" if _is_sensitive_log_key(key) else _sanitize_tool_error_value(item, depth=depth + 1, budget=budget)
+        return result
+    if isinstance(value, (list, tuple)):
+        items = [_sanitize_tool_error_value(item, depth=depth + 1, budget=budget) for item in value[:100]]
+        if len(value) > 100:
+            items.append("<TRUNCATED>")
+        return items
+    if value is None or isinstance(value, (bool, int, float)):
+        return value if not isinstance(value, float) or math.isfinite(value) else "<NON_FINITE>"
+    return redact(value, 2000)
+
+
+def _bounded_error_input(value: Any) -> Any:
+    sanitized = _sanitize_tool_error_value(value)
+    try:
+        encoded = json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        encoded = json.dumps(redact(repr(value), MAX_TOOL_ERROR_LOG_INPUT_BYTES), ensure_ascii=False)
+    if len(encoded.encode("utf-8")) <= MAX_TOOL_ERROR_LOG_INPUT_BYTES:
+        return sanitized
+    return {
+        "truncated": True,
+        "preview": redact(encoded[:MAX_TOOL_ERROR_LOG_INPUT_BYTES], MAX_TOOL_ERROR_LOG_INPUT_BYTES),
+    }
+
+
+def _tool_error_log_path() -> Path:
+    """Return the private per-user system log path for MCP tool errors."""
+    return Path.home() / ".codex" / "logs" / "cortex-tool-errors.jsonl"
+
+
+def _tool_error_context(request: Any, request_id: Any, raw_line: str) -> dict[str, Any]:
+    request_dict = request if isinstance(request, dict) else {}
+    params = request_dict.get("params") if isinstance(request_dict.get("params"), dict) else {}
+    arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+    request_meta = request_dict.get("_meta") if isinstance(request_dict.get("_meta"), dict) else {}
+    params_meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+    source = {**request_meta, **params_meta, **params, **arguments}
+    ids: dict[str, Any] = {}
+    for key in (
+        "id", "call_id", "task_id", "attempt_id", "question_id", "submission_id",
+        "status_receipt", "report_receipt", "verification_id", "lane_id", "run_id",
+        "host_agent_id", "turn_id",
+    ):
+        value = request_id if key == "id" else source.get(key)
+        if value not in (None, ""):
+            ids[key] = redact(value, 256)
+    thread_id = source.get("thread_id") or request_dict.get("thread_id")
+    session_id = source.get("session_id") or source.get("chat_session_id") or request_dict.get("session_id") or thread_id
+    return {
+        "method": redact(request_dict.get("method", ""), 128) or None,
+        "tool": redact(params.get("name", ""), 128) or None,
+        "chat_session_id": redact(session_id, 256) if session_id else None,
+        "thread_id": redact(thread_id, 256) if thread_id else None,
+        "request_id": redact(request_id, 256) if request_id is not None else None,
+        "ids": ids,
+        "input": _bounded_error_input(arguments if arguments else params if params else raw_line),
+    }
+
+
+def log_tool_error(request: Any, request_id: Any, raw_line: str, error: BaseException, structured_result: Any = None) -> None:
+    """Append a redacted MCP tool failure without masking the original error."""
+    try:
+        context = _tool_error_context(request, request_id, raw_line)
+        if structured_result is not None:
+            context["structured_result"] = _bounded_error_input(structured_result)
+        record = {
+            "timestamp": now(),
+            "event": "tool_error",
+            "server_version": SERVER_VERSION,
+            "pid": os.getpid(),
+            "error_type": type(error).__name__,
+            "error": redact(str(error), 2000),
+            **context,
+        }
+        encoded = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        path = _tool_error_log_path()
+        parent = _reject_symlink_ancestry(path.parent, "tool error log parent", allow_missing_leaf=True)
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(parent, 0o700)
+        _reject_symlink_ancestry(path, "tool error log", allow_missing_leaf=True)
+        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            written = 0
+            while written < len(encoded):
+                count = os.write(descriptor, encoded[written:])
+                if count <= 0:
+                    raise OSError("tool error log write made no progress")
+                written += count
+            os.fsync(descriptor)
+        finally:
+            if fcntl is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+    except Exception:
+        # Logging must never replace the MCP error or make a bad request hang.
+        # Do not write raw input to stderr or another less controlled channel.
+        pass
+
+
+def _tool_result_error(value: Any) -> str | None:
+    """Identify recoverable error-shaped tool results that never raise."""
+    if not isinstance(value, dict):
+        return None
+    if value.get("recorded") is False:
+        return str(value.get("error") or value.get("reason") or value.get("next_action") or "tool returned recorded=false")
+    if value.get("status") in {"invalid_answer", "invalid_declaration"}:
+        return str(value.get("error") or value.get("reason") or f"tool returned {value['status']}")
+    if value.get("atomic") is False:
+        confirmation = value.get("confirmed")
+        if isinstance(confirmation, dict) and (
+            confirmation.get("confirmed") is False or confirmation.get("error") or confirmation.get("reason")
+        ):
+            return str(confirmation.get("error") or confirmation.get("reason") or "host confirmation failed")
+    return None
 
 
 def profiles_for_gate(gate: str) -> list[str]:
@@ -4513,6 +4660,7 @@ def main() -> None:
         if not line:
             break
         request_id = None
+        request: Any = None
         try:
             request = json.loads(line)
             method, request_id = request.get("method"), request.get("id")
@@ -4542,6 +4690,9 @@ def main() -> None:
                     raise ValueError("Cortex MCP process is already bound to a different project_root")
                 MCP_PROJECT_ROOT = requested_root
                 value = TOOLS[name][0](arguments)
+                structured_error = _tool_result_error(value)
+                if structured_error:
+                    log_tool_error(request, request_id, line.rstrip("\n"), ValueError(structured_error), value)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
             elif method == "ping":
                 result = {}
@@ -4550,6 +4701,7 @@ def main() -> None:
             if request_id is not None:
                 respond({"jsonrpc": "2.0", "id": request_id, "result": result})
         except Exception as exc:
+            log_tool_error(request, request_id, line.rstrip("\n"), exc)
             if request_id is not None:
                 respond({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": str(exc)}})
 

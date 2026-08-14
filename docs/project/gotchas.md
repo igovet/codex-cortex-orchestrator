@@ -35,6 +35,10 @@
   rejected. The host's `/root` spelling is normalized to the durable `root`
   coordinator principal when resuming a root task; other principal changes
   remain authorization failures.
+- MCP boundary failures are logged to the per-user system path
+  `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
+  the chat/thread session id, JSON-RPC request id, and any task/attempt or
+  other call ids, but never stores secret-like input values verbatim.
 - Every control-plane call for a real task must include its exact absolute
   `project_root`. Do not touch the project or dispatch a worker until
   activate → classify → `init_task` → `get_task_status` confirms

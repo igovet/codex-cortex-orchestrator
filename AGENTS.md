@@ -40,6 +40,46 @@ development-only support files.
 - Before finishing a change, run the relevant non-destructive verification and state any limitation plainly.
 - Treat source code, tests, and configuration as authoritative when they conflict with generated documentation.
 
+## Cortex MCP tool-error log
+
+Cortex appends one JSON object per line for every MCP exception and for
+recoverable error-shaped tool result to the private per-user log
+`~/.codex/logs/cortex-tool-errors.jsonl`. The `~` is the home directory of the
+user running the MCP process, not the project directory or the Cortex ledger.
+The log is not rotated by this plugin.
+
+Each record normally contains `timestamp`, `event` (`tool_error`),
+`server_version`, `pid`, `error_type`, `error`, `method`, `tool`,
+`chat_session_id`, `thread_id`, `request_id`, `ids`, and `input`. A successful
+MCP call whose returned structure is classified as an error also has
+`structured_result`. Use `chat_session_id`/`thread_id`, `request_id`, and the
+optional `ids` map to correlate one failure across retries. The `ids` map may
+contain `id`, `call_id`, `task_id`, `attempt_id`, `question_id`, `submission_id`,
+`status_receipt`, `report_receipt`, `verification_id`, `lane_id`, `run_id`,
+`host_agent_id`, and `turn_id` when those values were supplied.
+
+Treat this file as sensitive diagnostic data. Cortex redacts common credential
+keys and values, bounds nested input/results, truncates oversized payloads,
+creates the directory with mode `0700`, opens the file with mode `0600`, and
+rejects symlink paths. This is defensive redaction, not a guarantee that
+arbitrary input contains no sensitive data: never put secrets in tool inputs,
+relax permissions, commit the log, or copy raw records into chat, tickets, or
+external systems.
+
+For local, read-only diagnosis, inspect a small tail first and then extract
+only correlation and error metadata:
+
+```bash
+tail -n 50 ~/.codex/logs/cortex-tool-errors.jsonl
+jq -c '{timestamp, event, method, tool, error_type, error, chat_session_id, thread_id, request_id, ids}' \
+  ~/.codex/logs/cortex-tool-errors.jsonl | tail -n 50
+```
+
+If `jq` is unavailable, parse the UTF-8 JSONL with Python and keep the same
+field allowlist. Do not paste the full file into a prompt. If the host rejects
+the request before it reaches the MCP server, this server cannot log that
+rejection; inspect the host/session diagnostics as well.
+
 ## Project knowledge
 
 For a non-trivial repository task, read the relevant `docs/project/` and `docs/features/` material if it exists. After C2/C3 work that changes behavior, architecture, verification, conventions, or feature ownership, use `documentation-sync`.

@@ -1953,6 +1953,90 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("attempt_id", report_tool["inputSchema"]["required"])
         self.assertNotIn("submission_id", report_tool["inputSchema"]["required"])
 
+    def test_mcp_logs_invalid_tool_input_with_session_and_call_ids(self):
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        with tempfile.TemporaryDirectory() as home:
+            environment = os.environ.copy()
+            environment["HOME"] = home
+            environment.pop("CORTEX_ROOT", None)
+            request = {
+                "jsonrpc": "2.0",
+                "id": "call-17",
+                "method": "tools/call",
+                "params": {
+                    "name": "get_task_status",
+                    "arguments": {
+                        "task_id": "missing-log-task",
+                        "attempt_id": "attempt-9",
+                        "thread_id": "chat-session-42",
+                        "principal": "owner",
+                        "api_key": "do-not-persist",
+                        "project_root": str(self.project),
+                    },
+                },
+            }
+            completed = subprocess.run(
+                [sys.executable, str(script)],
+                input=json.dumps(request) + "\n",
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=True,
+            )
+            response = json.loads(completed.stdout)
+            self.assertIn("error", response)
+            log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
+            self.assertTrue(log_path.is_file())
+            record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(record["event"], "tool_error")
+            self.assertEqual(record["tool"], "get_task_status")
+            self.assertEqual(record["chat_session_id"], "chat-session-42")
+            self.assertEqual(record["request_id"], "call-17")
+            self.assertEqual(record["ids"]["task_id"], "missing-log-task")
+            self.assertEqual(record["ids"]["attempt_id"], "attempt-9")
+            self.assertEqual(record["input"]["api_key"], "<REDACTED>")
+            self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+
+    def test_mcp_logs_structured_recoverable_tool_errors(self):
+        self.init(task_id="structured-log", complexity="C2")
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        with tempfile.TemporaryDirectory() as home:
+            environment = os.environ.copy()
+            environment["HOME"] = home
+            environment.pop("CORTEX_ROOT", None)
+            request = {
+                "jsonrpc": "2.0",
+                "id": "call-18",
+                "method": "tools/call",
+                "params": {
+                    "name": "record_evidence",
+                    "arguments": {
+                        "task_id": "structured-log",
+                        "principal": "thread-a",
+                        "thread_id": "thread-a",
+                        "expected_revision": 0,
+                        "gate": "plan",
+                        "summary": "missing delegation evidence",
+                        "project_root": str(self.project),
+                    },
+                },
+            }
+            completed = subprocess.run(
+                [sys.executable, str(script)],
+                input=json.dumps(request) + "\n",
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=True,
+            )
+            response = json.loads(completed.stdout)
+            self.assertEqual(response["result"]["structuredContent"]["recorded"], False)
+            log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
+            record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(record["request_id"], "call-18")
+            self.assertEqual(record["chat_session_id"], "thread-a")
+            self.assertEqual(record["structured_result"]["reason"], "delegation_attempt_required")
+
     def test_mcp_rejects_root_fallbacks_and_reports_canonical_ledger(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
 

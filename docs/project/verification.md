@@ -43,6 +43,11 @@ also covers principal-bound classification and recoverable stale status/revision
 manifest reconciliation, global resource claims, numbered task/hook resolution,
 and lane lifecycle safety.
 
+The JSON-RPC regression also sends an invalid tool request through a subprocess
+and verifies that `~/.codex/logs/cortex-tool-errors.jsonl` records the redacted
+input, chat/thread session id, request id, and task/attempt ids with restrictive
+file permissions.
+
 Pipeline classification regressions prove that the bounded compatibility aliases
 `planning`, `discovery`, and `verification` normalize to the canonical `plan`,
 `discover`, and `qa` gate IDs in both the pipeline and parallel-group waves;

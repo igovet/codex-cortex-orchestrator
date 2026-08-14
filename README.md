@@ -144,6 +144,11 @@ reused status receipts, and stale requested gates are corrected against the
 serialized ledger state and reported as correction metadata rather than MCP
 errors. Premature gate passes and missing-but-ambiguous evidence links return
 `recorded: false` with a machine-readable `next_action`.
+Every MCP tool failure is also appended as a redacted JSONL record under
+`~/.codex/logs/cortex-tool-errors.jsonl`. Each record includes the tool input
+summary, chat/thread session id, JSON-RPC request id, and any task/attempt or
+other call ids that were present; the log directory is `0700` and the file is
+`0600`.
 The classification receipt is also authoritative for the initial pipeline:
 the main orchestrator chooses the complete optional gate list from
 `available_gates` and passes it as `classify_task.pipeline`. Cortex validates
