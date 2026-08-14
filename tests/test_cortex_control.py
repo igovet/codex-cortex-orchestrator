@@ -1486,6 +1486,27 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(committed["state"]["current_gate"], "discover")
 
+    def test_commit_gate_retry_after_completed_transition_is_idempotent(self):
+        self.init(task_id="commit-idempotent")
+        delegated = self.delegate(control.status({"task_id": "commit-idempotent", "principal": "thread-a"})["state"], "commit-idempotent", "discover", "explorer")
+        report = self.report("commit-idempotent", delegated["attempt_id"])
+        first = control.commit_gate({
+            "task_id": "commit-idempotent", "principal": "thread-a", "gate": "discover",
+            "mode": "verification", "attempt_id": delegated["attempt_id"],
+            "report_receipt": report["receipt"]["receipt_id"], "summary": "verify discovery",
+            "verification_id": "benign_success",
+        })
+        retry = control.commit_gate({
+            "task_id": "commit-idempotent", "principal": "thread-a", "gate": "discovery",
+            "mode": "verification", "attempt_id": delegated["attempt_id"],
+            "report_receipt": report["receipt"]["receipt_id"], "summary": "retry after timeout",
+            "verification_id": "benign_success",
+        })
+        self.assertTrue(first["recorded"])
+        self.assertTrue(retry["recorded"])
+        self.assertTrue(retry["idempotent"])
+        self.assertEqual(retry["state"]["current_gate"], "implementation")
+
     def test_record_evidence_resolves_exact_report_id_to_owned_receipt(self):
         state = self.init(task_id="report-id-receipt", complexity="C2")["state"]
         delegated = self.delegate(state, "report-id-receipt", "plan", "planner")

@@ -4433,18 +4433,35 @@ def commit_gate(params: dict[str, Any]) -> dict[str, Any]:
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
         mode = str(params.get("mode") or "verification").strip().lower()
+        requested_gate = canonical_pipeline_gate(params.get("gate") or state.get("current_gate") or "")
+        # Host adapters may retry a completed composite call after a timeout.
+        # Treat that exact gate transition as idempotent instead of trying to
+        # consume a one-use report receipt a second time and opening a false
+        # recovery event (the common source of "commit gate keeps failing").
+        if requested_gate in set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])):
+            existing_gate = state.get("gates", {}).get(requested_gate, {})
+            return {
+                "recorded": True,
+                "atomic": True,
+                "idempotent": True,
+                "mode": mode,
+                "outcome": existing_gate.get("outcome", "passed"),
+                "evidence": None,
+                "gate": existing_gate,
+                "state": state,
+            }
         evidence = None
         outcome = str(params.get("outcome") or "failed")
         try:
             if mode == "verification":
-                evidence = execute_verification({**params, "gate": params.get("gate") or ""})
+                evidence = execute_verification({**params, "gate": requested_gate})
                 state = evidence["state"]
                 if evidence.get("recorded") is False:
                     raise ValueError(str(evidence.get("reason") or "verification evidence was not recorded"))
                 exit_code = evidence.get("execution", {}).get("exit_code")
                 outcome = str(params.get("outcome") or ("passed" if exit_code == 0 else "failed"))
             elif mode == "documentation":
-                evidence_params = {**params, "gate": params.get("gate") or "documentation", "kind": "documentation"}
+                evidence_params = {**params, "gate": requested_gate or "documentation", "kind": "documentation"}
                 evidence = record_evidence(evidence_params)
                 state = evidence["state"]
                 if evidence.get("recorded") is False:
@@ -4454,7 +4471,7 @@ def commit_gate(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("commit_gate mode must be verification or documentation")
             gate_result = record_gate({
                 **params,
-                "gate": params.get("gate") or state["current_gate"],
+                "gate": requested_gate or state["current_gate"],
                 "expected_revision": state["revision"],
                 "outcome": outcome,
             })

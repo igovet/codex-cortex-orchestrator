@@ -203,6 +203,10 @@
   failures for the same gate/mode terminalize the task as `blocked` and return
   `create_handoff_and_resume_after_gate_repair`; do not keep retrying the same
   request indefinitely.
+- `commit_gate` is idempotent for a gate that already completed. A host timeout
+  may safely replay the same request (including a consumed report receipt);
+  Cortex returns the existing transition instead of creating a spurious
+  recovery failure.
 - `complete_attempt` uses the same bounded recovery ledger for malformed host
   reports or terminalization payloads. A corrected payload may be submitted on
   the same attempt; repeated failures for that gate/mode eventually block the

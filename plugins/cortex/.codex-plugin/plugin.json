@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.0.4+codex.20260814143000",
+  "version": "1.0.5+codex.20260814150000",
   "description": "Durable Cortex control plane for staged agent work: tasks, gates, delegations, locks, and handoffs.",
   "author": {
     "name": "igovet"

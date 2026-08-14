@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**1.0.4**. The `cortex/v7` ledger is a breaking upgrade from older task and
+**1.0.5**. The `cortex/v7` ledger is a breaking upgrade from older task and
 lane records; those records have no compatibility reader and must be recreated.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
