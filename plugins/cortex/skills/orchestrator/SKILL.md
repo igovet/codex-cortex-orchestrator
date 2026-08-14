@@ -130,6 +130,14 @@ monitor with `wait_threads`, read with `read_thread`, and send follow-ups with
 sidebar; it must not be created implicitly merely because `spawn_agent` lacks
 Luna.
 
+When the user explicitly requests that Luna be used through a task if native
+`spawn_agent` cannot accept it, do not leave `dispatch_mode` at its hidden
+default and accept Terra. Pass both host catalogs plus
+`luna_fallback: visible_thread` to `record_delegation`. Cortex then keeps a
+hidden Luna subagent when that tool supports Luna, but returns a `create_thread`
+Luna request when it does not. This is the only automatic decision in that
+explicitly authorized fallback mode.
+
 Use only the 21 profiles declared in `plugins/cortex/profiles.json`;
 `task_formatter` is retired. Record task kind, risk, complexity, requested
 capability, and the resolved capability. With multi-agent v2 enabled, every

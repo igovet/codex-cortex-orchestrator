@@ -40,6 +40,12 @@ emits a `create_thread` request with Luna and the routing policy's calculated
 reasoning effort (it does not force `max`). This is an opt-in, user-owned task,
 not a hidden subagent and not an automatic fallback.
 
+If the user explicitly requires a Luna task when `spawn_agent` cannot accept
+Luna, the coordinator passes `luna_fallback: visible_thread` together with both
+host catalogs. Cortex retains a hidden Luna dispatch where possible; otherwise
+it returns a visible `create_thread` Luna request and never degrades that
+explicit fallback to Terra.
+
 Run one command from this repository:
 
 ```bash

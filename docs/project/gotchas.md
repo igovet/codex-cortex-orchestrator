@@ -70,6 +70,11 @@
   coordinator-recorded correlation, not independent proof from the host. Hooks
   remain best-effort, privacy-limited lifecycle telemetry rather than command
   or spawn proof.
+- When the user explicitly requires Luna through a task if `spawn_agent` cannot
+  accept it, supply `luna_fallback: visible_thread` and both host catalogs to
+  `record_delegation`. The fallback then produces a Luna `create_thread`
+  request rather than a Terra worker. Without that explicit authorization,
+  normal hidden-subagent routing may still use its Terra fallback.
 - If a task is rejected with `orchestration is inactive`, explicitly select a
   non-help Cortex skill route. The skill supplies the server's canonical
   `/cortex` activation token.

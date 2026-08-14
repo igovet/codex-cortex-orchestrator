@@ -562,6 +562,43 @@ class ControlPlaneTests(unittest.TestCase):
                 "allowed_paths": ["."], "acceptance_criteria": ["Report"], "verification": ["Cite"],
             })
 
+    def test_explicit_luna_thread_fallback_uses_create_thread_not_terra(self):
+        state = self.init(task_id="luna-thread-fallback")["state"]
+        observed = control.status({"task_id": "luna-thread-fallback", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "luna-thread-fallback", "principal": "thread-a",
+            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+            "gate": "discover", "agent": "explorer", "task_kind": "discover", "risk": "low",
+            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+            "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            "luna_fallback": "visible_thread",
+            "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
+            "allowed_paths": ["."], "acceptance_criteria": ["Report findings"],
+            "verification": ["Cite paths"],
+        })
+        attempt = delegated["state"]["attempts"][-1]
+        self.assertEqual(delegated["spawn_request"]["host_tool"], "create_thread")
+        self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
+        self.assertEqual(delegated["spawn_request"]["reasoning_effort"], "medium")
+        self.assertEqual(attempt["fallback_reason"], "spawn_agent_luna_unavailable")
+        self.assertEqual(attempt["fallback_from_host_tool"], "spawn_agent")
+        self.assertTrue(attempt["user_owned_thread"])
+
+    def test_luna_thread_fallback_keeps_hidden_luna_when_spawn_agent_supports_it(self):
+        state = self.init(task_id="luna-fallback-not-needed")["state"]
+        delegated = self.delegate(
+            state,
+            "luna-fallback-not-needed",
+            "discover",
+            "explorer",
+            task_kind="discover",
+            available_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            available_thread_models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            luna_fallback="visible_thread",
+        )
+        self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
+        self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
+
     def test_all_ordinary_non_security_complexities_route_to_terra(self):
         for complexity in ("C1", "C2", "C3"):
             for risk in ("low", "moderate", "high", "critical"):
