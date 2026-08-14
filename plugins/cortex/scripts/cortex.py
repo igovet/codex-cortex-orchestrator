@@ -88,6 +88,20 @@ PIPELINE_GATE_ALIASES = {
     "finalization": "close",
     "closing": "close",
 }
+# Native host adapters and older coordinator prompts sometimes use the
+# human-facing gate/profile label instead of the durable profile id.  Keep
+# these aliases at the MCP boundary so a harmless naming variation cannot
+# create a failed attempt (or, worse, leave a task half-dispatched).
+PROFILE_ALIASES = {
+    "performance": "performance_engineer",
+    "accessibility": "accessibility_engineer",
+    "ux": "ux_designer",
+    "code_reviewer": "code_reviewer",
+    "security": "security_auditor",
+    "qa": "qa_engineer",
+    "build_verification": "build_verification",
+    "technical_writer": "technical_writer",
+}
 MANDATORY_PIPELINE_GATES = {
     "C1": ["documentation", "close"],
     "C2": ["documentation", "close"],
@@ -1077,7 +1091,7 @@ def is_analysis_task_kind(task_kind: str) -> bool:
 
 def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     select_project_root(params)
-    profile_name = str(params.get("agent") or params.get("profile") or "").strip()
+    profile_name = canonical_profile(params.get("agent") or params.get("profile") or "")
     profile = PROFILES.get(profile_name)
     if profile is None:
         raise ValueError(f"unknown agent '{profile_name}'")
@@ -1757,6 +1771,12 @@ def canonical_pipeline_gate(gate: Any) -> str:
     value = str(gate).strip().lower()
     value = re.sub(r"[\s-]+", "_", value)
     return PIPELINE_GATE_ALIASES.get(value, value)
+
+
+def canonical_profile(profile: Any) -> str:
+    """Normalize a documented human-facing profile alias."""
+    value = str(profile).strip().lower().replace("-", "_").replace(" ", "_")
+    return PROFILE_ALIASES.get(value, value)
 
 
 def normalize_pipeline(pipeline: list[Any]) -> list[str]:
@@ -3297,7 +3317,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "ux": "ux_designer", "review": "code_reviewer",
             "documentation": "technical_writer", "close": "build_verification",
         }
-        requested_agent = str(params.get("agent") or "").strip()
+        requested_agent = canonical_profile(params.get("agent") or "")
         agent = requested_agent or default_agents.get(gate) or (profiles_for_gate(gate) or ["general"])[0]
         agent_correction = ({"requested": requested_agent or None, "used": agent} if requested_agent != agent else None)
         if agent not in AGENTS:
@@ -3517,7 +3537,12 @@ def prepare_delegation(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
         spec = params.get("delegation") if isinstance(params.get("delegation"), dict) else {}
-        merged = {**params, **spec}
+        # Do not leak the wrapper object into routing.  Besides being
+        # redundant, nested delegation data has historically triggered
+        # ``unhashable type: dict`` in downstream adapters that inspect the
+        # flattened request.  The spec is the authoritative override.
+        merged = {key: value for key, value in params.items() if key != "delegation"}
+        merged.update(spec)
         observed = status(merged)
         merged["expected_revision"] = observed["state"]["revision"]
         merged["status_receipt"] = observed["status_receipt"]
@@ -3544,8 +3569,11 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
         for index, raw in enumerate(specs):
             if not isinstance(raw, dict):
                 return {"recorded": False, "reason": "invalid_batch_spec", "index": index, "prepared": prepared, "recoverable": True}
-            if raw.get("parallel") is not True:
-                return {"recorded": False, "reason": "batch_requires_parallel_true", "index": index, "prepared": prepared, "recoverable": True}
+            # The batch endpoint itself is the explicit parallel declaration;
+            # tolerate omitted/false per-item flags and persist the canonical
+            # value instead of forcing the coordinator into a recoverable
+            # error/retry loop.
+            raw = {**raw, "parallel": True}
             gate = str(raw.get("gate") or (current_wave[0] if current_wave else "")).strip()
             if gate not in current_wave:
                 return {"recorded": False, "reason": "batch_requires_one_gate", "current_gates": current_wave, "index": index, "prepared": prepared, "recoverable": True}

@@ -10,7 +10,7 @@ approval exists.
 - `plugins/cortex` is the only installable Cortex source tree.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
-- The plugin and MCP server versions must match the release version `1.0.3`.
+- The plugin and MCP server versions must match the release version `1.0.4`.
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
