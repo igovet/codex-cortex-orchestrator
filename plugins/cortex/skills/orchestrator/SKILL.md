@@ -101,12 +101,34 @@ weakening mandatory gates.
 3. Classify by shape: C1 is local and low-risk; C2 spans a component or has uncertainty; C3 crosses systems, data, security, infrastructure, or has high rollback cost.
 4. Choose models and reasoning effort per dispatch. Use one writer for overlapping paths, parallelize independent read-only work, and run independent verification before completion.
 
-After every native `spawn_agent` call, confirm the returned child with the
+Before every native `spawn_agent` call, inspect the host tool's accepted model
+values and pass the exact list as `available_models` when preparing the Cortex
+delegation. If the lightweight Luna route is unavailable but Terra is accepted,
+Cortex selects Terra and records `fallback_reason=host_model_unavailable` and
+`fallback_from_model=gpt-5.6-luna`; the coordinator must report it as a Terra
+worker. Other missing required routes fail closed. After every native
+`spawn_agent` call, confirm the returned child with the
 actual `host_model` and `host_reasoning_effort`, not only the child id. Cortex
 requires the actual host model for model-routed attempts; a missing model is
 recoverable, while a requested/actual mismatch (for example Luna requested but
 Terra started) records `host_model_mismatch` and must not be reported as a
 successful worker.
+
+`visible_thread` is a separate, opt-in Desktop route, not a hidden-subagent
+fallback. Use it only when the user explicitly asks to create a visible task
+and the narrow work is eligible for Luna. Inspect native `create_thread`, pass
+its exact model catalog as `available_thread_models`, and record
+`dispatch_mode: visible_thread`; Cortex returns `spawn_request.host_tool` as
+`create_thread`, with `prompt`, `title`, Luna, and the dynamically selected
+reasoning effort. Never force `max`: keep the route's effort unless the task
+shape itself warrants a higher one. Call `list_projects` before creating a
+repository task and use a worktree for a Git project unless the user explicitly
+asks for the saved project directly. Confirm the returned `threadId` through
+`confirm_host_spawn` as `host_agent_id`, with `host_tool: create_thread`, then
+monitor with `wait_threads`, read with `read_thread`, and send follow-ups with
+`send_message_to_thread`. A visible task is user-owned and may appear in the
+sidebar; it must not be created implicitly merely because `spawn_agent` lacks
+Luna.
 
 Use only the 21 profiles declared in `plugins/cortex/profiles.json`;
 `task_formatter` is retired. Record task kind, risk, complexity, requested

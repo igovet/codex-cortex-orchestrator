@@ -476,6 +476,90 @@ class ControlPlaneTests(unittest.TestCase):
         route = control.resolve_dispatch_route({"agent": "explorer", "task_kind": "reading", "risk": "low", "complexity": "C1", "requested_model": "gpt-5.6-luna"})
         self.assertEqual(route["selected_model"], "gpt-5.6-luna")
 
+    def test_luna_route_falls_back_to_terra_when_the_native_host_does_not_offer_luna(self):
+        route = control.resolve_dispatch_route({
+            "agent": "explorer",
+            "task_kind": "reading",
+            "risk": "low",
+            "complexity": "C1",
+            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+        })
+        self.assertEqual(route["policy_model"], "gpt-5.6-luna")
+        self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(route["fallback_reason"], "host_model_unavailable")
+        self.assertEqual(route["fallback_from_model"], "gpt-5.6-luna")
+        self.assertEqual(route["host_available_models"], ["gpt-5.6-sol", "gpt-5.6-terra"])
+
+    def test_luna_route_requires_terra_when_the_native_host_does_not_offer_luna(self):
+        with self.assertRaisesRegex(ValueError, "native host does not expose required model gpt-5.6-luna"):
+            control.resolve_dispatch_route({
+                "agent": "explorer",
+                "task_kind": "reading",
+                "risk": "low",
+                "complexity": "C1",
+                "available_models": ["gpt-5.6-sol"],
+            })
+
+    def test_delegation_records_a_host_capability_fallback_without_model_mismatch(self):
+        state = self.init(task_id="host-model-fallback")["state"]
+        delegation = self.delegate(
+            state,
+            "host-model-fallback",
+            "discover",
+            "explorer",
+            task_kind="reading",
+            available_models=["gpt-5.6-sol", "gpt-5.6-terra"],
+        )
+        attempt = delegation["state"]["attempts"][-1]
+        self.assertEqual(attempt["policy_model"], "gpt-5.6-luna")
+        self.assertEqual(attempt["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(attempt["fallback_reason"], "host_model_unavailable")
+        self.assertEqual(attempt["host_spawn"]["model_verification"], "verified")
+
+    def test_explicit_visible_thread_keeps_luna_and_dynamic_reasoning_effort(self):
+        state = self.init(task_id="visible-luna-thread")["state"]
+        observed = control.status({"task_id": "visible-luna-thread", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "visible-luna-thread", "principal": "thread-a",
+            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+            "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
+            "dispatch_mode": "visible_thread",
+            "available_models": ["gpt-5.6-sol", "gpt-5.6-terra"],
+            "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
+            "allowed_paths": ["."], "acceptance_criteria": ["Report findings"],
+            "verification": ["Cite paths"],
+        })
+        request = delegated["spawn_request"]
+        self.assertEqual(request["host_tool"], "create_thread")
+        self.assertEqual(request["model"], "gpt-5.6-luna")
+        self.assertEqual(request["reasoning_effort"], "medium")
+        self.assertEqual(request["prompt"], request["message"])
+        attempt = delegated["state"]["attempts"][-1]
+        self.assertTrue(attempt["user_owned_thread"])
+        self.assertEqual(attempt["visibility"], "visible")
+        confirmed = control.confirm_host_spawn({
+            "task_id": "visible-luna-thread", "principal": "thread-a",
+            "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
+            "host_tool": "create_thread", "host_agent_id": "thread-visible-123",
+            "host_task_name": request["task_name"], "host_model": "gpt-5.6-luna",
+            "host_reasoning_effort": "medium",
+        })
+        self.assertTrue(confirmed["confirmed"])
+        self.assertEqual(confirmed["host_spawn"]["tool"], "create_thread")
+
+    def test_visible_thread_requires_its_own_host_model_catalog(self):
+        state = self.init(task_id="visible-thread-catalog")["state"]
+        observed = control.status({"task_id": "visible-thread-catalog", "principal": "thread-a"})
+        with self.assertRaisesRegex(ValueError, "visible_thread requires exact available_thread_models"):
+            control.record_delegation({
+                "task_id": "visible-thread-catalog", "principal": "thread-a",
+                "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+                "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
+                "dispatch_mode": "visible_thread", "objective": "Inspect", "ownership": "Read-only",
+                "allowed_paths": ["."], "acceptance_criteria": ["Report"], "verification": ["Cite"],
+            })
+
     def test_all_ordinary_non_security_complexities_route_to_terra(self):
         for complexity in ("C1", "C2", "C3"):
             for risk in ("low", "moderate", "high", "critical"):

@@ -120,6 +120,9 @@ MAX_QUESTIONS_PER_ATTEMPT = 64
 MAX_QUESTIONS_PER_TASK = 512
 MAX_METRIC_EVENTS = 1000
 MAX_METRIC_BYTES = 512 * 1024
+# These are Cortex policy models, not a claim about the native host catalog.
+# The coordinator may supply the exact models exposed by its native
+# ``spawn_agent`` tool for an individual dispatch.
 SUPPORTED_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 REQUESTABLE_MODELS = SUPPORTED_MODELS
 SUPPORTED_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
@@ -1137,7 +1140,19 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         minimum_effort = ANALYSIS_REASONING_FLOORS[risk]
         if REASONING_EFFORT_ORDER[selected_effort] < REASONING_EFFORT_ORDER[minimum_effort]:
             selected_effort = minimum_effort
+    available_models_param = params.get("available_models")
+    host_available_models: list[str] | None = None
+    if available_models_param is not None:
+        if not isinstance(available_models_param, list) or not available_models_param:
+            raise ValueError("available_models must be a non-empty list when supplied")
+        if any(not isinstance(model, str) for model in available_models_param):
+            raise ValueError("available_models must contain only model identifiers")
+        host_available_models = sorted({model.strip() for model in available_models_param if model.strip()})
+        if not host_available_models:
+            raise ValueError("available_models must contain at least one non-empty model identifier")
+
     fallback_reason = None
+    fallback_from_model = None
     escalation_reason = redact(params.get("escalation_reason", ""), 1000) or None
     if policy_model == "gpt-5.6-sol":
         selected_model = "gpt-5.6-sol"
@@ -1156,7 +1171,21 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         if requested_model != selected_model:
             fallback_reason = "policy_model_enforced"
     if selected_model not in SUPPORTED_MODELS:
-        raise ValueError("dispatch route cannot be resolved to a host-supported model")
+        raise ValueError("dispatch route cannot be resolved to a Cortex policy model")
+    if host_available_models is not None and selected_model not in host_available_models:
+        # Luna is the preferred policy route for lightweight work.  A host can
+        # legitimately expose only Terra/Sol, so use Terra when it is actually
+        # dispatchable and retain an explicit audit trail instead of attempting
+        # an invalid native spawn or claiming that Terra was Luna.
+        if selected_model == "gpt-5.6-luna" and "gpt-5.6-terra" in host_available_models:
+            fallback_from_model = selected_model
+            selected_model = "gpt-5.6-terra"
+            fallback_reason = "host_model_unavailable"
+        else:
+            raise ValueError(
+                f"native host does not expose required model {selected_model}; "
+                f"available_models={','.join(host_available_models)}"
+            )
     return {
         "requested_model": requested_model,
         "selected_model": selected_model,
@@ -1170,6 +1199,8 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         "policy_model": policy_model,
         "policy_reason": policy_reason,
         "fallback_reason": fallback_reason,
+        "fallback_from_model": fallback_from_model,
+        "host_available_models": host_available_models,
         "escalation_reason": escalation_reason,
         "sol_escalation": sol_escalation,
     }
@@ -2422,7 +2453,7 @@ def _attempt(state: dict[str, Any], attempt_id: str) -> dict[str, Any]:
 
 
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
-    """Build the exact bounded briefing for Codex's native spawn_agent tool."""
+    """Build the exact bounded briefing for a native Codex worker dispatch."""
     profile = PROFILES[agent]
     profile_path = _contained_path(
         PLUGIN_ROOT / "agents",
@@ -3281,6 +3312,9 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         task_kind = requested_task_kind or default_task_kind
         requested_risk = str(params.get("risk") or "").strip().lower()
         risk = requested_risk or ("high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate")
+        dispatch_mode = str(params.get("dispatch_mode", "hidden_subagent")).strip() or "hidden_subagent"
+        if dispatch_mode not in {"hidden_subagent", "visible_thread"}:
+            raise ValueError("dispatch_mode must be hidden_subagent or visible_thread")
         route_params = {
             **params,
             "agent": agent,
@@ -3291,6 +3325,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             # direct routing parameter claim this trusted security context.
             "_security_gate": gate == "security",
         }
+        if dispatch_mode == "visible_thread":
+            # A Desktop visible task has its own model catalog.  Do not use the
+            # more restricted spawn_agent catalog to downgrade a requested
+            # Luna task before the coordinator can create that task.
+            route_params["available_models"] = params.get("available_thread_models")
         raw_escalation = params.get("sol_escalation")
         if isinstance(raw_escalation, dict) and raw_escalation.get("kind") == "terra_failure":
             prior_attempt_id = safe_id(str(raw_escalation.get("prior_terra_attempt_id", "")))
@@ -3299,6 +3338,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("terra_failure Sol escalation requires a validated failed Terra attempt in this task ledger")
             route_params["_validated_terra_failure"] = {"attempt_id": prior_attempt_id}
         route = resolve_dispatch_route(route_params)
+        if dispatch_mode == "visible_thread":
+            if route["selected_model"] != "gpt-5.6-luna":
+                raise ValueError("visible_thread is reserved for a Luna policy route")
+            if route.get("host_available_models") is None:
+                raise ValueError("visible_thread requires exact available_thread_models from native create_thread")
         def delegation_list(field: str, fallback: list[str]) -> list[str]:
             supplied = params.get(field)
             if isinstance(supplied, list):
@@ -3328,8 +3372,9 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         # profile name; `attempt_id` remains the durable unique correlation
         # key and must never leak into the worker label.
         task_name = agent
+        host_tool = "create_thread" if dispatch_mode == "visible_thread" else "spawn_agent"
         spawn_request = {
-            "host_tool": "spawn_agent",
+            "host_tool": host_tool,
             "profile": agent,
             "display_name": agent,
             "task_name": task_name,
@@ -3346,15 +3391,21 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "coordinator_ui_tool": "cortex.question",
             "answer_location": "main_chat",
         }
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "retry": retry, "parallel": bool(params.get("parallel", False)), "objective": redact(params.get("objective", "")), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in params.get("context_files", [])][:50], "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(select_project_root(params)), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "hidden", "user_facing": False, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        visible_thread = dispatch_mode == "visible_thread"
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "retry": retry, "parallel": bool(params.get("parallel", False)), "objective": redact(params.get("objective", "")), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in params.get("context_files", [])][:50], "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(select_project_root(params)), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         spawn_request["message"] = host_spawn_prompt(agent, package)
+        if visible_thread:
+            # create_thread calls this field `prompt`; retaining `message`
+            # keeps the package readable by existing coordinator adapters.
+            spawn_request["prompt"] = spawn_request["message"]
+            spawn_request["title"] = task_name
         package_path = task_dir / "delegations" / f"{attempt_id}.json"
         write_json(package_path, package)
         if observed is not None and status_path is not None:
             observed["consumed_at"] = now()
             observed["attempt_id"] = attempt_id
             write_json(status_path, observed)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "ownership": package["ownership"], "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_report_ids": context_report_ids, "visibility": "hidden", "user_facing": False, "return_route": "main_chat", "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "ownership": package["ownership"], "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "return_route": "main_chat", "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
         delegation_index_path, delegation_index = _delegation_report_index(report_paths, state["task_id"], attempt_id)
         delegation_index["context_report_ids"] = context_report_ids
         delegation_index["updated_at"] = now()
@@ -3449,7 +3500,7 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
-    """Bind a ledger attempt to a native Codex spawn after the host confirms it."""
+    """Bind a ledger attempt to a native Codex worker dispatch after confirmation."""
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -3463,11 +3514,25 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
         attempt = _attempt(state, attempt_id)
         host_agent_id = redact(str(params.get("host_agent_id", "")).strip(), 256)
         host_task_name = redact(str(params.get("host_task_name", "")).strip(), 128)
-        if not host_agent_id or not host_task_name:
+        expected_host_tool = str((attempt.get("spawn_request") or {}).get("host_tool", "spawn_agent"))
+        host_tool = redact(str(params.get("host_tool", "")).strip(), 64)
+        if not host_tool and expected_host_tool == "spawn_agent":
+            host_tool = "spawn_agent"
+        if not host_agent_id or not host_task_name or not host_tool:
             return {
                 "confirmed": False,
                 "attempt_id": attempt_id,
-                "next_action": "retry confirm_host_spawn with the native spawn_agent host_agent_id and host_task_name",
+                "next_action": "retry confirm_host_spawn with the native host_tool, host_agent_id, and host_task_name",
+                "recoverable": True,
+                "revision_correction": revision_correction,
+                "state": state,
+            }
+        if host_tool != expected_host_tool:
+            return {
+                "confirmed": False,
+                "attempt_id": attempt_id,
+                "reason": "host_tool_mismatch",
+                "next_action": f"retry confirm_host_spawn with host_tool={expected_host_tool}",
                 "recoverable": True,
                 "revision_correction": revision_correction,
                 "state": state,
@@ -3488,7 +3553,7 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
                 "confirmed": False,
                 "attempt_id": attempt_id,
                 "reason": "host_model_required",
-                "next_action": "retry confirm_host_spawn with the actual host_model returned by native spawn_agent",
+                "next_action": "retry confirm_host_spawn with the actual host_model returned by the native host",
                 "required_fields": ["host_model"],
                 "recoverable": True,
                 "task_name_correction": task_name_correction,
@@ -3496,7 +3561,7 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
                 "state": state,
             }
         host_spawn = {
-            "tool": "spawn_agent",
+            "tool": host_tool,
             "agent_id": host_agent_id,
             "task_name": expected_task_name,
             "model": host_model,
@@ -4653,13 +4718,13 @@ TOOLS = {
     "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; Cortex appends only documentation and close when missing."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
     "init_task": (init_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "objective": {"type": "string"}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "classification_id": {"type": "string"}, "requirements": {"type": "array", "items": {"type": "string"}}, "acceptance_criteria": {"type": "array", "items": {"type": "string"}}, "scope": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "items": {"type": "string"}}, "verification": {"type": "array", "items": {"type": "string"}}, "budget": {"type": "string"}, "pause_conditions": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "thread_id": {"type": "string"}, "principal": {"type": "string"}, "user_language": {"type": "string"}, "replan_limit": {"type": "integer", "minimum": 0}}, "required": ["task_id", "objective", "classification_id"]}),
     "get_task_status": (status, {"type": "object", "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
-    "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}}, "required": ["agent", "task_kind", "risk"]}),
-    "record_delegation": (record_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "status_receipt": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}, "retry": {"type": "integer"}, "parallel": {"type": "boolean"}, "objective": {"type": "string"}, "ownership": {"type": "string", "minLength": 1}, "context_files": {"type": "array", "items": {"type": "string"}}, "context_report_ids": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}, "required": ["task_id", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"]}),
+    "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}}, "required": ["agent", "task_kind", "risk"]}),
+    "record_delegation": (record_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "status_receipt": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "dispatch_mode": {"type": "string", "enum": ["hidden_subagent", "visible_thread"], "description": "visible_thread creates a user-owned Luna task through the native create_thread tool; use only with explicit user authorization."}, "available_thread_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by native create_thread; required for visible_thread."}, "requested_reasoning_effort": {"type": "string"}, "escalation_reason": {"type": "string"}, "sol_escalation": {"type": "object", "additionalProperties": False, "properties": {"kind": {"type": "string", "enum": ["auditable_extreme", "terra_failure"]}, "criterion": {"type": "string", "enum": sorted(AUDITABLE_EXTREME_CRITERIA)}, "audit_ref": {"type": "string", "minLength": 1}, "prior_terra_attempt_id": {"type": "string", "minLength": 1}}, "required": ["kind"]}, "retry": {"type": "integer"}, "parallel": {"type": "boolean"}, "objective": {"type": "string"}, "ownership": {"type": "string", "minLength": 1}, "context_files": {"type": "array", "items": {"type": "string"}}, "context_report_ids": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}, "required": ["task_id", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"]}),
     "prepare_delegation": (prepare_delegation, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "delegation": {"type": "object"}}, "required": ["task_id", "principal", "delegation"]}),
     "prepare_delegations": (prepare_delegations, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "delegations": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "object"}}}, "required": ["task_id", "principal", "delegations"]}),
-    "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_agent_id": {"type": "string", "minLength": 1}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
+    "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string", "minLength": 1, "description": "Native child id; for create_thread pass the returned threadId here."}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
     "finalize_attempt": (finalize_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "status"]}),
-    "complete_attempt": (complete_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "host_agent_id": {"type": "string"}, "host_task_name": {"type": "string"}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}, "submission_id": {"type": "string"}, "report": {"type": "object"}}, "required": ["task_id", "principal", "attempt_id"]}),
+    "complete_attempt": (complete_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string"}, "host_task_name": {"type": "string"}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}, "submission_id": {"type": "string"}, "report": {"type": "object"}}, "required": ["task_id", "principal", "attempt_id"]}),
     "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}, "next_action": {"type": "string"}}, "required": sorted(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
     "cortex.question": (cortex_question, QUESTION_TOOL_SCHEMA),
     "publish_worker_question": (publish_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "submission_id": {"type": "string"}, "question": {"type": "string", "minLength": 1}, "header": {"type": "string"}, "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA}, "multiple": {"type": "boolean"}, "custom_label": {"type": "string"}, "context": {}, "blocking": {"type": "boolean"}}, "required": ["task_id", "principal", "attempt_id", "submission_id", "question"]}),

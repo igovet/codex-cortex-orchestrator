@@ -60,10 +60,16 @@
 - The ledger serializes each mutation and atomically replaces individual JSON
   files, but does not provide cross-file crash atomicity or remote/distributed
   locking. `record_delegation` leaves an attempt `awaiting_host_spawn`; the
-  coordinator must invoke native `spawn_agent`, then use `confirm_host_spawn`
-  with the returned child id before it can run. That id is a coordinator-recorded
-  correlation, not independent proof from the host. Hooks remain best-effort,
-  privacy-limited lifecycle telemetry rather than command or spawn proof.
+  coordinator must invoke native `spawn_agent`, or an explicitly user-authorized
+  `create_thread` for `dispatch_mode: visible_thread`, then use
+  `confirm_host_spawn` with the returned child/thread id before it can run.
+  The visible-thread route requires the exact `create_thread` catalog in
+  `available_thread_models`, stays on the Luna policy route, and preserves the
+  dynamically selected reasoning effort rather than forcing `max`. It is never
+  an automatic replacement for a hidden subagent. That id is a
+  coordinator-recorded correlation, not independent proof from the host. Hooks
+  remain best-effort, privacy-limited lifecycle telemetry rather than command
+  or spawn proof.
 - If a task is rejected with `orchestration is inactive`, explicitly select a
   non-help Cortex skill route. The skill supplies the server's canonical
   `/cortex` activation token.

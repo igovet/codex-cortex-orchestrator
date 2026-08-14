@@ -26,6 +26,20 @@ multi-agent adapter selected when they were created; with v1, an explicit
 `gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to dispatch
 Luna explicitly for eligible lightweight work.
 
+The main coordinator must also pass the exact model identifiers accepted by
+the native `spawn_agent` host as `available_models` on each delegation. When
+the host does not expose Luna but does expose Terra, Cortex records the
+policy preference for Luna and dispatches Terra with
+`fallback_reason: host_model_unavailable`. It never labels that worker as
+Luna. Missing Sol or other non-fallback policy routes remain blocked.
+
+When the user explicitly requests a separate, visible Luna task, the
+coordinator may choose `dispatch_mode: visible_thread` instead. It must pass
+the exact `create_thread` catalog as `available_thread_models`; Cortex then
+emits a `create_thread` request with Luna and the routing policy's calculated
+reasoning effort (it does not force `max`). This is an opt-in, user-owned task,
+not a hidden subagent and not an automatic fallback.
+
 Run one command from this repository:
 
 ```bash
@@ -245,7 +259,8 @@ risk, while explicitly higher requested effort is preserved. Sol uses at least
 `high`.
 
 Each delegation first produces an `awaiting_host_spawn` intent plus a complete
-native `spawn_agent` request. The main Codex agent calls that host tool, then
+native `spawn_agent` request (or, for an explicitly authorized visible Luna
+task, a `create_thread` request). The main Codex agent calls that host tool, then
 records its returned child id, actual `host_model`, and actual
 `host_reasoning_effort` with `confirm_host_spawn`; only model-verified
 confirmation may make the attempt running or allow successful completion. A
