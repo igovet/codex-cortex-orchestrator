@@ -3,8 +3,8 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**1.0.2**. This is a breaking ledger upgrade: older tasks and lanes have no
-compatibility reader and must be recreated as v7 records.
+**1.0.3**. The `cortex/v7` ledger is a breaking upgrade from older task and
+lane records; those records have no compatibility reader and must be recreated.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
 configuration, and runtime code live below `plugins/cortex/`; root-level
@@ -26,6 +26,36 @@ multi-agent adapter selected when they were created; with v1, an explicit
 `gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to dispatch
 Luna explicitly for eligible lightweight work.
 
+### MCP tool approvals and auto-review
+
+To approve every tool exposed by Cortex's `cortex` MCP server by default, add
+this to `~/.codex/config.toml`:
+
+```toml
+[plugins."cortex@cortex".mcp_servers.cortex]
+default_tools_approval_mode = "approve"
+```
+
+The `cortex` name is the MCP server name from the plugin's `.mcp.json`. A
+server-level default also applies to tools added by later plugin versions. An
+individual `[...tools.<tool>]` block can still override it, so remove the
+per-tool `approval_mode` blocks if every Cortex tool should inherit the same
+setting. This affects Cortex MCP calls only; shell, patch, and native Codex
+tool approvals keep their own policies.
+
+Keep approval review routed to the user instead of the automatic reviewer:
+
+```toml
+approval_policy = "on-request"
+approvals_reviewer = "user"
+```
+
+Do not enable `auto_review`/`guardian_subagent` for this workflow and do not
+use the `--approve-for-me` CLI option unless automatic review is intentional.
+Auto-review invokes an additional model-based review for approval requests,
+which consumes token and model budget; `approvals_reviewer = "user"` keeps the
+decision manual.
+
 The main coordinator must also pass the exact model identifiers accepted by
 the native `spawn_agent` host as `available_models` on each delegation. When
 the host does not expose Luna but does expose Terra, Cortex records the
@@ -45,6 +75,33 @@ Luna, the coordinator passes `luna_fallback: visible_thread` together with both
 host catalogs. Cortex retains a hidden Luna dispatch where possible; otherwise
 it returns a visible `create_thread` Luna request and never degrades that
 explicit fallback to Terra.
+
+### Visible-thread workspace
+
+For a visible `create_thread` task, Cortex now emits
+`spawn_request.thread_environment = "local"` by default. The coordinator maps
+that value to the native request
+`target.environment: { "type": "local" }`, so the task stays in the saved
+project checkout instead of being moved to a managed Git worktree. To opt into
+isolation for a writer or a concurrent task, pass
+`thread_environment = "worktree"`; the coordinator then uses
+`target.environment: { "type": "worktree" }`.
+
+The visible task still runs with the selected Cortex profile in its generated
+prompt (for example, `explorer`) and the routed model (for example, Luna), but
+it is a separate user-owned Codex task rather than the hidden `spawn_agent`
+worker. Local tasks share files, branches, and uncommitted changes with the
+main checkout, so concurrent writers must be serialized. Existing worktree
+tasks can be moved with the thread header's **Hand off → Local** action.
+
+If the child must stay out of the normal chat list, keep the default
+`dispatch_mode = "hidden_subagent"` and leave `luna_fallback` unset (or set it
+to `"terra"`). The native `spawn_agent` route is hidden; `create_thread` is
+intentionally user-visible and has no hidden flag. On hosts where
+`spawn_agent` does not expose Luna, this hidden route uses the policy's Terra
+fallback. Hidden Luna requires the host to advertise `gpt-5.6-luna` for
+`spawn_agent`; otherwise the only way to preserve Luna is the visible-thread
+route.
 
 Run one command from this repository:
 

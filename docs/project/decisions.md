@@ -80,6 +80,17 @@ Literal `/cortex` and `/normal` are textual shorthand, not registered native
 slash commands. Classification, task creation, delegation, gates, lanes, and
 claims cannot mutate state before activation.
 
+## Visible-thread checkout selection
+
+Visible `create_thread` dispatches are user-owned tasks created by the host,
+not hidden `spawn_agent` workers. Cortex records the selected profile and
+model in the request and supplies the profile instructions in the generated
+prompt. Their checkout is explicit: `thread_environment` defaults to `local`
+so a read-only visible task stays in the saved project, while callers can
+request `worktree` for concurrent or write-heavy work. The coordinator maps
+the value to the native `target.environment.type`; local sharing is a
+deliberate trade-off and requires serializing writers.
+
 ## Project-local runtime state
 
 Production orchestration is fail-closed and binds every control-plane call to

@@ -119,11 +119,15 @@ fallback. Use it only when the user explicitly asks to create a visible task
 and the narrow work is eligible for Luna. Inspect native `create_thread`, pass
 its exact model catalog as `available_thread_models`, and record
 `dispatch_mode: visible_thread`; Cortex returns `spawn_request.host_tool` as
-`create_thread`, with `prompt`, `title`, Luna, and the dynamically selected
-reasoning effort. Never force `max`: keep the route's effort unless the task
-shape itself warrants a higher one. Call `list_projects` before creating a
-repository task and use a worktree for a Git project unless the user explicitly
-asks for the saved project directly. Confirm the returned `threadId` through
+`create_thread`, with `prompt`, `title`, Luna, the dynamically selected
+reasoning effort, and `thread_environment` (default `local`). Never force
+`max`: keep the route's effort unless the task shape itself warrants a higher
+one. Call `list_projects` before creating a repository task and map
+`thread_environment` to the native target: pass `environment: {type: "local"}`
+to use the saved checkout, or `environment: {type: "worktree"}` only when
+isolation was explicitly requested. Local threads share files and uncommitted
+changes, so serialize writers; worktrees remain the isolation option for
+concurrent edits. Confirm the returned `threadId` through
 `confirm_host_spawn` as `host_agent_id`, with `host_tool: create_thread`, then
 monitor with `wait_threads`, read with `read_thread`, and send follow-ups with
 `send_message_to_thread`. A visible task is user-owned and may appear in the

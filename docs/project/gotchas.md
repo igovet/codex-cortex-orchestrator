@@ -70,6 +70,15 @@
   coordinator-recorded correlation, not independent proof from the host. Hooks
   remain best-effort, privacy-limited lifecycle telemetry rather than command
   or spawn proof.
+  Visible threads also carry `thread_environment`, which defaults to `local`
+  and must be passed as `target.environment.type` to `create_thread`; use
+  `worktree` explicitly when isolation is needed. Local threads share the
+  saved checkout and uncommitted changes, so concurrent writers must be
+  serialized.
+- `create_thread` is inherently visible/user-owned; it has no hidden mode.
+  Keep `dispatch_mode` at `hidden_subagent` to stay out of the normal chat
+  list. If the host cannot spawn Luna invisibly, choose the hidden Terra
+  fallback instead of `luna_fallback: visible_thread`.
 - When the user explicitly requires Luna through a task if `spawn_agent` cannot
   accept it, supply `luna_fallback: visible_thread` and both host catalogs to
   `record_delegation`. The fallback then produces a Luna `create_thread`

@@ -534,6 +534,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(request["host_tool"], "create_thread")
         self.assertEqual(request["model"], "gpt-5.6-luna")
         self.assertEqual(request["reasoning_effort"], "medium")
+        self.assertEqual(request["thread_environment"], "local")
         self.assertEqual(request["prompt"], request["message"])
         self.assertIn("visible user-owned task", request["prompt"])
         self.assertIn("Emit English only in every message", request["prompt"])
@@ -549,6 +550,34 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(confirmed["confirmed"])
         self.assertEqual(confirmed["host_spawn"]["tool"], "create_thread")
+
+    def test_visible_thread_can_opt_into_an_isolated_worktree(self):
+        state = self.init(task_id="visible-worktree-thread")["state"]
+        observed = control.status({"task_id": "visible-worktree-thread", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "visible-worktree-thread", "principal": "thread-a",
+            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+            "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
+            "dispatch_mode": "visible_thread", "thread_environment": "worktree",
+            "available_thread_models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            "objective": "Inspect a narrow question", "ownership": "Read-only discovery",
+            "allowed_paths": ["."], "acceptance_criteria": ["Report findings"],
+            "verification": ["Cite paths"],
+        })
+        self.assertEqual(delegated["spawn_request"]["thread_environment"], "worktree")
+        self.assertEqual(delegated["state"]["attempts"][-1]["thread_environment"], "worktree")
+
+    def test_thread_environment_is_rejected_for_hidden_subagents(self):
+        state = self.init(task_id="hidden-thread-environment")["state"]
+        observed = control.status({"task_id": "hidden-thread-environment", "principal": "thread-a"})
+        with self.assertRaisesRegex(ValueError, "applies only to visible_thread"):
+            control.record_delegation({
+                "task_id": "hidden-thread-environment", "principal": "thread-a",
+                "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+                "gate": "discover", "agent": "explorer", "task_kind": "reading", "risk": "low",
+                "thread_environment": "local", "objective": "Inspect", "ownership": "Read-only",
+                "allowed_paths": ["."], "acceptance_criteria": ["Report"], "verification": ["Cite"],
+            })
 
     def test_visible_thread_requires_its_own_host_model_catalog(self):
         state = self.init(task_id="visible-thread-catalog")["state"]
