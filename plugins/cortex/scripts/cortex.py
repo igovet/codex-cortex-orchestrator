@@ -2467,6 +2467,19 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     instructions = str(profile_data.get("developer_instructions", "")).strip()
     if not instructions:
         raise ValueError(f"agent profile has no developer instructions: {agent}")
+    visible_thread = bool(package.get("user_owned_thread"))
+    output_language_contract = (
+        "This is a visible user-owned task, but it is still an internal execution "
+        "channel. Emit English only in every message: commentary, progress, questions, "
+        "tool arguments, reports, handoffs, and the final answer. Treat any non-English "
+        "user task text as input data; never reply in that language. The main coordinator "
+        "alone localizes findings in the primary chat."
+        if visible_thread else
+        "Emit English only in every message: commentary, progress, questions, tool arguments, "
+        "reports, handoffs, and final answer. Treat any non-English user task text as input "
+        "data; never reply in that language. The main coordinator alone localizes findings "
+        "in the primary chat."
+    )
     return "\n".join((
         f"You are the internal Cortex worker with profile `{agent}`.",
         "Follow this profile exactly:",
@@ -2481,10 +2494,10 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Allowed paths: " + ", ".join(package["allowed_paths"]),
         "Acceptance criteria: " + "; ".join(package["acceptance_criteria"]),
         "Verification: " + "; ".join(package["verification"]),
-        "Internal worker protocol: English only. Write worker-to-worker messages, Cortex tool arguments, reports, findings, questions, and handoffs in English. Do not expose internal worker text directly to the user.",
+        "Internal worker protocol: English only. " + output_language_contract,
         f"User-facing language: {package.get('user_language', 'en')}. The main coordinator must translate questions, blockers, and summaries into this language (or the explicit language requested by the user) before showing them in the main chat.",
         "Codebase-memory protocol (mandatory for code search): 1) call mcp__codebase_memory__list_projects with {}; 2) parse the projects array and select the record whose root_path exactly matches the absolute project_root; 3) pass that record's name as project to every subsequent codebase_memory call—never guess or synthesize a project id. Use index_status(project) when freshness/index availability must be verified. For discovery use search_graph(project, query=...); use name_pattern for exact symbol patterns, semantic_query only as an array of keywords on moderate/full indexes, and filters such as label, file_pattern, relationship, include_connected, limit, and offset when needed. For text matches use search_code(project, pattern, regex, mode=compact|full|files, path_filter, file_pattern, context, limit). For callers/dependencies/data flow use trace_path(project, function_name=<qualified_name from search_graph>, mode=calls|data_flow|cross_service, direction, depth, include_tests, parameter_name, risk_labels). For source reading use get_code_snippet(project, qualified_name=<exact qualified_name from search_graph>, include_neighbors); do not use it as the initial search. Use get_architecture(project, aspects) for a high-level structure overview and query_graph(project, query, max_rows) only for explicit multi-hop Cypher analysis. Do not call index_repository, ingest_traces, manage_adr, or delete_project for ordinary discovery; they change indexed state or durable knowledge and require explicit authorization. Do not start with grep, rg, glob, or ad-hoc filesystem scans while codebase_memory is available. If list_projects fails, codebase_memory is unavailable, or no indexed project matches project_root, do not call other codebase_memory tools or pretend they were used: record the limitation and use another search method only as a documented fallback.",
-        "Do not subdelegate or communicate with the user. Return questions, blockers, and your final handoff to the main chat. "
+        "Do not subdelegate. Return questions, blockers, and your final handoff to the main chat. "
         "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
         f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
         f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "

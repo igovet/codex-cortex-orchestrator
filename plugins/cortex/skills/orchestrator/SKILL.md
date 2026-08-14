@@ -165,6 +165,10 @@ English. The main coordinator owns user-facing language and must use the
 language of the task or an explicit `user_language` when presenting questions,
 blockers, decisions, and summaries. It may pass localized display fields to
 `cortex.question`; durable English worker records remain authoritative.
+This applies to every worker-emitted message, including commentary, progress
+updates, and final answers. A visible Luna task remains an English-only
+execution channel even though it appears in the sidebar; non-English task text
+is input data, and only the main coordinator may localize it for the user.
 
 For repository/code discovery, every worker must first call
 `mcp__codebase_memory__list_projects`, match the exact absolute `project_root`

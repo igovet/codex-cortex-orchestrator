@@ -535,6 +535,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(request["model"], "gpt-5.6-luna")
         self.assertEqual(request["reasoning_effort"], "medium")
         self.assertEqual(request["prompt"], request["message"])
+        self.assertIn("visible user-owned task", request["prompt"])
+        self.assertIn("Emit English only in every message", request["prompt"])
         attempt = delegated["state"]["attempts"][-1]
         self.assertTrue(attempt["user_owned_thread"])
         self.assertEqual(attempt["visibility"], "visible")
@@ -1325,6 +1327,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(created["state"]["user_language"], "ru")
         delegation = self.delegate(created["state"], "language-contract", "discover", "explorer")
         self.assertIn("Internal worker protocol: English only", delegation["spawn_request"]["message"])
+        self.assertIn("Emit English only in every message", delegation["spawn_request"]["message"])
+        self.assertIn("Treat any non-English user task text as input data", delegation["spawn_request"]["message"])
+        self.assertIn("never reply in that language", delegation["spawn_request"]["message"])
         self.assertIn("User-facing language: ru", delegation["spawn_request"]["message"])
         self.assertIn("call mcp__codebase_memory__list_projects with {}", delegation["spawn_request"]["message"])
         self.assertIn("select the record whose root_path exactly matches the absolute project_root", delegation["spawn_request"]["message"])
