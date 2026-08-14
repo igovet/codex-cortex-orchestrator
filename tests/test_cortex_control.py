@@ -2747,7 +2747,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(record["input"]["api_key"], "<REDACTED>")
             self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
 
-    def test_mcp_does_not_log_structured_facade_validation_results(self):
+    def test_mcp_logs_structured_facade_validation_results(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
         with tempfile.TemporaryDirectory() as home:
             environment = os.environ.copy()
@@ -2783,9 +2783,36 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(structured["ok"], False)
             self.assertEqual(structured["next_operation"], "start")
             self.assertEqual(structured["phase"], structured["diagnostics"][0]["phase"])
-            self.assertEqual(structured["code"], structured["diagnostics"][0]["code"])
+            self.assertIn(structured["diagnostics"][0]["code"], {"invalid_request", structured["code"]})
             log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
-            self.assertFalse(log_path.exists())
+            self.assertTrue(log_path.is_file())
+            record = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertEqual(record["tool"], "orchestrate")
+            self.assertIn("waves", record["error"])
+            self.assertIn("waves", {item["path"] for item in record["structured_result"]["diagnostics"]})
+
+    def test_facade_aggregates_all_start_contract_errors_before_writing_ledger(self):
+        malformed = control.orchestrate({
+            "operation": "start",
+            "project_root": str(self.project),
+            "principal": "thread-a",
+            "thread_id": "thread-a",
+            "submission_id": "aggregate-start",
+            "task": {"objective": "missing task id", "complexity": "C3"},
+            "waves": [{
+                "id": "plan",
+                "gates": [{"id": "plan", "owner": "coordinator"}],
+            }],
+            "host_capabilities": {"available_models": ["gpt-5.6-terra"]},
+        })
+        self.assertFalse(malformed["ok"])
+        paths = {item["path"] for item in malformed["diagnostics"]}
+        self.assertIn("task.task_id", paths)
+        self.assertIn("waves[0].wave_id", paths)
+        self.assertIn("waves[0].gates", paths)
+        self.assertIn("waves[0].delegations", paths)
+        self.assertIn("host_capabilities.spawn_agent_models", paths)
+        self.assertFalse((self.ledger / "tasks").exists())
 
     def test_mcp_rejects_root_fallbacks_and_starts_in_the_canonical_ledger(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -2795,7 +2822,7 @@ class ControlPlaneTests(unittest.TestCase):
             completed = subprocess.run([sys.executable, str(script)], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
             return json.loads(completed.stdout)
 
-        common = {"operation": "start", "submission_id": "root-start", "principal": "mcp", "thread_id": "mcp", "task": {"task_id": "root-task", "objective": "root test", "complexity": "C1"}, "waves": [{"delegations": [{"gate": "discover"}]}, {"delegations": [{"gate": "implementation"}]}, {"delegations": [{"gate": "review"}]}, {"delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}
+        common = {"operation": "start", "submission_id": "root-start", "principal": "mcp", "thread_id": "mcp", "task": {"task_id": "root-task", "objective": "root test", "complexity": "C1"}, "waves": [{"wave_id": "discover", "delegations": [{"gate": "discover"}]}, {"wave_id": "implementation", "delegations": [{"gate": "implementation"}]}, {"wave_id": "review", "delegations": [{"gate": "review"}]}, {"wave_id": "close", "delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}
         missing_root = call(common)["result"]["structuredContent"]
         self.assertFalse(missing_root["ok"])
         self.assertIn("project_root is required", missing_root["diagnostics"][0]["message"])
@@ -2820,7 +2847,7 @@ class ControlPlaneTests(unittest.TestCase):
         other = self.base / "other-project"
         other.mkdir()
         def start(root, task_id, submission_id):
-            return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "orchestrate", "arguments": {"operation": "start", "submission_id": submission_id, "project_root": str(root), "principal": "mcp", "thread_id": submission_id, "task": {"task_id": task_id, "objective": task_id, "complexity": "C1"}, "waves": [{"delegations": [{"gate": "discover"}]}, {"delegations": [{"gate": "implementation"}]}, {"delegations": [{"gate": "review"}]}, {"delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}}}
+            return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "orchestrate", "arguments": {"operation": "start", "submission_id": submission_id, "project_root": str(root), "principal": "mcp", "thread_id": submission_id, "task": {"task_id": task_id, "objective": task_id, "complexity": "C1"}, "waves": [{"wave_id": "discover", "delegations": [{"gate": "discover"}]}, {"wave_id": "implementation", "delegations": [{"gate": "implementation"}]}, {"wave_id": "review", "delegations": [{"gate": "review"}]}, {"wave_id": "close", "delegations": [{"gate": "close"}]}], "host_capabilities": {"spawn_agent_models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"], "create_thread_models": ["gpt-5.6-luna"]}}}}
         requests = [start(self.project, "first-root", "first-root-start"), start(other, "second-root", "second-root-start")]
         completed = subprocess.run([sys.executable, str(script)], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
         first, second = [json.loads(line) for line in completed.stdout.splitlines()]

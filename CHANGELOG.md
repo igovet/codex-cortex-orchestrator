@@ -24,6 +24,9 @@ same base version.
   preview/apply reassessment, stale-attempt recovery, strict report retries,
   evidence receipts, mandatory gates, and blocked-gate handoffs. Confirmed host
   child ids are now accepted as aliases only for their own worker reports.
+- Add aggregate facade preflight diagnostics with exact nested `start` and
+  `advance` schemas, and record every `orchestrate` `ok: false` result in the
+  redacted Cortex tool-error journal.
 - Catalog submission, remote provenance, and tagged installation remain
   pending external release authorization and verification.
 - The 2.0 working-tree changes remain uncommitted; a committed release tree and

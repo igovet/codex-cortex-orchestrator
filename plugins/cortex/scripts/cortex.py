@@ -1064,6 +1064,17 @@ def _tool_result_error(value: Any) -> str | None:
     """Identify recoverable error-shaped tool results that never raise."""
     if not isinstance(value, dict):
         return None
+    if value.get("ok") is False:
+        diagnostics = value.get("diagnostics")
+        if isinstance(diagnostics, list):
+            messages = [
+                str(item.get("message", "")).strip()
+                for item in diagnostics
+                if isinstance(item, dict) and str(item.get("message", "")).strip()
+            ]
+            if messages:
+                return "; ".join(messages)
+        return str(value.get("error") or value.get("code") or "orchestrate returned ok=false")
     if value.get("recorded") is False:
         return str(value.get("error") or value.get("reason") or value.get("next_action") or "tool returned recorded=false")
     if value.get("status") in {"invalid_answer", "invalid_declaration"}:
@@ -4913,6 +4924,170 @@ ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate",
 ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question"}
 
 
+def _request_diagnostic(path: str, message: str, expected: str | None = None) -> dict[str, Any]:
+    diagnostic = {
+        "code": "invalid_request",
+        "phase": "preflight",
+        "path": path,
+        "message": redact(message, 1000),
+    }
+    if expected:
+        diagnostic["expected"] = redact(expected, 500)
+    return diagnostic
+
+
+def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate the complete public facade envelope before any ledger write.
+
+    The runtime handlers still perform authoritative checks, but this pass is
+    intentionally non-throwing and aggregates independent request mistakes so
+    a coordinator can repair one payload instead of discovering errors one at
+    a time.
+    """
+    diagnostics: list[dict[str, Any]] = []
+    allowed_top_level = {
+        "operation", "submission_id", "project_root", "principal", "thread_id",
+        "task", "task_id", "wave_id", "waves", "host_capabilities", "completions", "payload",
+        "gate_outcomes", "future_waves", "allow_rework", "reason",
+    }
+    for key in sorted(set(params) - allowed_top_level):
+        diagnostics.append(_request_diagnostic(key, "unsupported orchestrate parameter", "a documented orchestrate parameter"))
+    operation = params.get("operation")
+    if not isinstance(operation, str) or operation.strip() not in ORCHESTRATE_OPERATIONS:
+        diagnostics.append(_request_diagnostic(
+            "operation",
+            "operation is required and must be one of start, advance, inspect, resume, deactivate, lane, resource, or question",
+            "a supported orchestrate operation",
+        ))
+        operation = str(operation or "").strip()
+    else:
+        operation = operation.strip()
+
+    root = params.get("project_root")
+    if not isinstance(root, str) or not root.strip():
+        diagnostics.append(_request_diagnostic("project_root", "project_root is required", "an existing absolute project directory"))
+    elif not Path(root).expanduser().is_absolute():
+        diagnostics.append(_request_diagnostic("project_root", "project_root must be an absolute path", "an existing absolute project directory"))
+
+    if os.environ.get("CORTEX_ROOT"):
+        diagnostics.append(_request_diagnostic("environment.CORTEX_ROOT", "CORTEX_ROOT is not supported; use project_root", "no CORTEX_ROOT override"))
+
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    mutating = operation in ORCHESTRATE_MUTATING_OPERATIONS
+    if operation == "lane" and str(payload.get("command", "")) == "inspect":
+        mutating = False
+    if operation == "question" and str(payload.get("command", "ask")) in {"list", "updates"}:
+        mutating = False
+    if mutating:
+        submission_id = params.get("submission_id")
+        if not isinstance(submission_id, str) or not submission_id.strip():
+            diagnostics.append(_request_diagnostic("submission_id", f"{operation} requires submission_id", "a stable lowercase submission id"))
+        else:
+            require_submission = submission_id.strip()
+            if "/" in require_submission or "\\" in require_submission or not SAFE_ID_RE.fullmatch(require_submission.lower()):
+                diagnostics.append(_request_diagnostic("submission_id", "submission_id is not a valid identifier", "lowercase letters, numbers, hyphens, or underscores only"))
+
+    if operation in {"start", "advance", "inspect", "resume", "lane", "resource", "question"}:
+        if not isinstance(params.get("principal"), str) or not str(params.get("principal")).strip():
+            diagnostics.append(_request_diagnostic("principal", f"{operation} requires principal", "the bound coordinator principal"))
+    if operation == "start":
+        if not isinstance(params.get("thread_id"), str) or not str(params.get("thread_id")).strip():
+            diagnostics.append(_request_diagnostic("thread_id", "start requires thread_id", "the bound coordinator thread id"))
+
+    def require_identifier(path: str, value: Any) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            diagnostics.append(_request_diagnostic(path, f"{path} is required", "a non-empty lowercase identifier using letters, numbers, hyphens, or underscores"))
+        elif "/" in raw or "\\" in raw or not SAFE_ID_RE.fullmatch(raw.lower()):
+            diagnostics.append(_request_diagnostic(path, f"{path} is not a valid identifier: {raw!r}", "lowercase letters, numbers, hyphens, or underscores only"))
+
+    if operation == "start":
+        task = params.get("task")
+        if not isinstance(task, dict):
+            diagnostics.append(_request_diagnostic("task", "start requires a task object", "an object containing task_id, objective, and complexity"))
+        else:
+            require_identifier("task.task_id", task.get("task_id"))
+            if not isinstance(task.get("objective"), str) or not task.get("objective", "").strip():
+                diagnostics.append(_request_diagnostic("task.objective", "task.objective is required", "a non-empty task objective"))
+            complexity = str(task.get("complexity", "")).strip().upper()
+            if complexity not in {"C1", "C2", "C3"}:
+                diagnostics.append(_request_diagnostic("task.complexity", "task.complexity must be C1, C2, or C3", "C1, C2, or C3"))
+
+        waves = params.get("waves")
+        if not isinstance(waves, list) or not waves:
+            diagnostics.append(_request_diagnostic("waves", "start requires a non-empty waves array", "an ordered array of {wave_id, delegations} objects"))
+        else:
+            allowed_wave_keys = {"wave_id", "delegations"}
+            allowed_delegation_keys = {
+                "gate", "agent", "task_kind", "risk", "requested_model", "configured_default_model",
+                "available_models", "available_thread_models", "dispatch_mode", "thread_environment",
+                "requested_reasoning_effort", "escalation_reason", "sol_escalation", "retry", "parallel",
+                "objective", "ownership", "context_files", "context_report_ids", "allowed_paths",
+                "acceptance_criteria", "verification",
+            }
+            for index, wave in enumerate(waves, 1):
+                wave_path = f"waves[{index - 1}]"
+                if not isinstance(wave, dict):
+                    diagnostics.append(_request_diagnostic(wave_path, "wave must be an object", "{wave_id, delegations}"))
+                    continue
+                if not str(wave.get("wave_id", "")).strip():
+                    diagnostics.append(_request_diagnostic(f"{wave_path}.wave_id", "wave_id is required; do not use id", "a stable lowercase wave identifier"))
+                else:
+                    require_identifier(f"{wave_path}.wave_id", wave.get("wave_id"))
+                if "id" in wave:
+                    diagnostics.append(_request_diagnostic(f"{wave_path}.id", "id is deprecated; use wave_id", "wave_id"))
+                if "gates" in wave:
+                    diagnostics.append(_request_diagnostic(f"{wave_path}.gates", "gates is deprecated; use delegations", "delegations: [{gate, agent, ...}]"))
+                for key in sorted(set(wave) - allowed_wave_keys):
+                    if key not in {"id", "gates"}:
+                        diagnostics.append(_request_diagnostic(f"{wave_path}.{key}", "unsupported wave parameter", "wave_id or delegations"))
+                delegations = wave.get("delegations")
+                if not isinstance(delegations, list) or not delegations:
+                    diagnostics.append(_request_diagnostic(f"{wave_path}.delegations", "wave requires a non-empty delegations array", "an array of delegation objects"))
+                    continue
+                for delegation_index, delegation in enumerate(delegations, 1):
+                    delegation_path = f"{wave_path}.delegations[{delegation_index - 1}]"
+                    if not isinstance(delegation, dict):
+                        diagnostics.append(_request_diagnostic(delegation_path, "delegation must be an object", "{gate, agent, objective, ownership, allowed_paths, acceptance_criteria, verification}"))
+                        continue
+                    if "id" in delegation:
+                        diagnostics.append(_request_diagnostic(f"{delegation_path}.id", "id is not supported for delegations; use gate", "gate"))
+                    if "owner" in delegation:
+                        diagnostics.append(_request_diagnostic(f"{delegation_path}.owner", "owner is not supported; use agent and ownership", "agent, ownership"))
+                    for key in sorted(set(delegation) - allowed_delegation_keys - {"id", "owner"}):
+                        diagnostics.append(_request_diagnostic(f"{delegation_path}.{key}", "unsupported delegation parameter", "a documented delegation field"))
+                    if not str(delegation.get("gate", "")).strip():
+                        diagnostics.append(_request_diagnostic(f"{delegation_path}.gate", "delegation requires gate", "a supported pipeline gate"))
+
+        host = params.get("host_capabilities")
+        if not isinstance(host, dict):
+            diagnostics.append(_request_diagnostic("host_capabilities", "start requires host_capabilities", "an object with spawn_agent_models and optional confirmed default"))
+        else:
+            models = host.get("spawn_agent_models")
+            if not isinstance(models, list) or not models:
+                diagnostics.append(_request_diagnostic("host_capabilities.spawn_agent_models", "host_capabilities requires a non-empty spawn_agent_models array; available_models is deprecated", "exact native spawn_agent model identifiers"))
+            for key in ("spawn_agent_models", "available_models", "create_thread_models", "available_thread_models"):
+                if key in host and not isinstance(host[key], list):
+                    diagnostics.append(_request_diagnostic(f"host_capabilities.{key}", "model catalog must be an array", "an array of model identifiers"))
+            if "spawn_agent_default_model" in host and not isinstance(host["spawn_agent_default_model"], str):
+                diagnostics.append(_request_diagnostic("host_capabilities.spawn_agent_default_model", "configured default model must be a string", "a supported model identifier"))
+
+    elif operation in {"advance", "inspect", "resume"}:
+        require_identifier("task_id", params.get("task_id"))
+        if operation == "advance":
+            require_identifier("wave_id", params.get("wave_id"))
+            completions = params.get("completions")
+            if not isinstance(completions, list) or not completions:
+                diagnostics.append(_request_diagnostic("completions", "advance requires a non-empty completions array", "one terminal completion object per active attempt"))
+            elif any(not isinstance(item, dict) for item in completions):
+                diagnostics.append(_request_diagnostic("completions", "every completion must be an object", "completion objects with attempt_id and report"))
+
+    elif operation in {"lane", "resource", "question"} and not isinstance(params.get("payload"), dict):
+        diagnostics.append(_request_diagnostic("payload", f"{operation} requires an operation-specific payload object", "an object with a supported command"))
+
+    return diagnostics
+
+
 def _orchestrate_error(
     operation: str,
     code: str,
@@ -4922,6 +5097,7 @@ def _orchestrate_error(
     recoverable: bool = True,
     next_operation: str | None = None,
     task_id: str | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     resolved_next_operation = next_operation or (operation if operation in ORCHESTRATE_OPERATIONS else None)
     return {
@@ -4935,7 +5111,7 @@ def _orchestrate_error(
         "spawn_requests": [],
         "phase": phase,
         "code": code,
-        "diagnostics": [{"code": code, "phase": phase, "message": redact(message, 1000)}],
+        "diagnostics": diagnostics or [{"code": code, "phase": phase, "message": redact(message, 1000)}],
         "recoverable": recoverable,
         "next_operation": resolved_next_operation,
         "next_action": (
@@ -5889,6 +6065,18 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
     if operation not in ORCHESTRATE_OPERATIONS:
         return _orchestrate_error(operation or "unknown", "unsupported_operation", "operation must be start, advance, inspect, resume, deactivate, lane, resource, or question", recoverable=True)
     try:
+        preflight_diagnostics = _collect_orchestrate_diagnostics(params)
+        if preflight_diagnostics:
+            return _orchestrate_error(
+                operation,
+                "orchestrate_validation_failed",
+                "request failed preflight validation",
+                phase="preflight",
+                recoverable=True,
+                next_operation=operation,
+                task_id=str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None,
+                diagnostics=preflight_diagnostics,
+            )
         select_project_root(params)
         if operation == "inspect":
             return _orchestrate_inspect(params)
@@ -5989,6 +6177,91 @@ QUESTION_TOOL_SCHEMA = {
     },
     "required": ["task_id", "principal"],
 }
+ORCHESTRATE_TASK_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "task_id": {"type": "string", "minLength": 1, "description": "Required durable lowercase task identifier."},
+        "objective": {"type": "string", "minLength": 1},
+        "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]},
+        "requirements": {"type": "array", "items": {"type": "string"}},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+        "scope": {"type": "array", "items": {"type": "string"}},
+        "allowed_paths": {"type": "array", "items": {"type": "string"}},
+        "verification": {"type": "array", "items": {"type": "string"}},
+        "budget": {"type": "string"},
+        "pause_conditions": {"type": "array", "items": {"type": "string"}},
+        "user_language": {"type": "string"},
+        "replan_limit": {"type": "integer", "minimum": 0},
+    },
+    "required": ["task_id", "objective", "complexity"],
+}
+ORCHESTRATE_DELEGATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "gate": {"type": "string", "minLength": 1},
+        "agent": {"type": "string", "enum": sorted(AGENTS)},
+        "task_kind": {"type": "string"},
+        "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]},
+        "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)},
+        "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)},
+        "available_models": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "available_thread_models": {"type": "array", "items": {"type": "string"}},
+        "dispatch_mode": {"type": "string", "enum": ["hidden_subagent", "visible_thread"]},
+        "thread_environment": {"type": "string", "enum": ["local", "worktree"]},
+        "requested_reasoning_effort": {"type": "string"},
+        "escalation_reason": {"type": "string"},
+        "sol_escalation": {"type": "object"},
+        "retry": {"type": "integer", "minimum": 0},
+        "parallel": {"type": "boolean"},
+        "objective": {"type": "string"},
+        "ownership": {"type": "string", "minLength": 1},
+        "context_files": {"type": "array", "items": {"type": "string"}},
+        "context_report_ids": {"type": "array", "items": {"type": "string"}},
+        "allowed_paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    },
+    "required": ["gate"],
+}
+ORCHESTRATE_WAVE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "wave_id": {"type": "string", "minLength": 1, "description": "Stable wave identifier; do not use id."},
+        "delegations": {"type": "array", "minItems": 1, "maxItems": 32, "items": ORCHESTRATE_DELEGATION_SCHEMA},
+    },
+    "required": ["wave_id", "delegations"],
+}
+ORCHESTRATE_HOST_CAPABILITIES_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "spawn_agent_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "spawn_agent_default_model": {"type": "string", "enum": sorted(SUPPORTED_MODELS)},
+        "create_thread_models": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "available_thread_models": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    },
+    "required": ["spawn_agent_models"],
+}
+ORCHESTRATE_COMPLETION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "attempt_id": {"type": "string", "minLength": 1},
+        "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]},
+        "host_agent_id": {"type": "string", "minLength": 1},
+        "host_task_name": {"type": "string", "minLength": 1},
+        "host_model": {"type": "string", "minLength": 1},
+        "host_reasoning_effort": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)},
+        "reason": {"type": "string"},
+        "report": {"type": "object", "additionalProperties": False, "properties": {field: {} for field in sorted(REPORT_FIELDS)}, "required": sorted(REPORT_FIELDS)},
+    },
+    "required": ["attempt_id", "host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort", "status"],
+}
 ORCHESTRATE_TOOL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -6000,10 +6273,10 @@ ORCHESTRATE_TOOL_SCHEMA = {
         "thread_id": {"type": "string"},
         "task_id": {"type": "string"},
         "wave_id": {"type": "string"},
-        "task": {"type": "object", "description": "Start-only immutable task contract."},
-        "waves": {"type": "array", "items": {"type": "object"}, "description": "Start-only full ordered execution-wave plan."},
-        "host_capabilities": {"type": "object", "description": "Start-only native model catalogs plus the optional confirmed spawn_agent_default_model."},
-        "completions": {"type": "array", "items": {"type": "object"}, "description": "Advance-only host completions with strict cortex/report/v1 reports."},
+        "task": {**ORCHESTRATE_TASK_SCHEMA, "description": "Start-only immutable task contract."},
+        "waves": {"type": "array", "minItems": 1, "items": ORCHESTRATE_WAVE_SCHEMA, "description": "Start-only full ordered execution-wave plan."},
+        "host_capabilities": {**ORCHESTRATE_HOST_CAPABILITIES_SCHEMA, "description": "Start-only native model catalogs plus the optional confirmed spawn_agent_default_model."},
+        "completions": {"type": "array", "minItems": 1, "items": ORCHESTRATE_COMPLETION_SCHEMA, "description": "Advance-only host completions with strict cortex/report/v1 reports."},
         "gate_outcomes": {"type": "object", "description": "Optional explicit gate outcome overrides for advance."},
         "future_waves": {"type": "array", "items": {"type": "object"}, "description": "Optional replacement for not-yet-started waves during advance."},
         "allow_rework": {"type": "boolean", "default": False},
@@ -6183,7 +6456,7 @@ def main() -> None:
                     select_project_root(arguments)
                 value = PUBLIC_TOOLS[name][0](arguments)
                 structured_error = _tool_result_error(value)
-                if structured_error and name != "orchestrate":
+                if structured_error:
                     log_tool_error(request, request_id, line.rstrip("\n"), ValueError(structured_error), value)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
             elif method == "ping":

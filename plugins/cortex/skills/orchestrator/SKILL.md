@@ -94,6 +94,17 @@ and `deactivate` are recovery/session operations; `lane`, `resource`, and
 `question` are uncommon nested modes. Never retry through removed legacy tool
 names.
 
+The public facade schema is authoritative and complete. Before calling it,
+ensure `task.task_id`, `task.objective`, and `task.complexity` are present;
+provide `host_capabilities.spawn_agent_models`; and encode every wave as
+`{wave_id, delegations: [{gate, agent, objective, ownership, allowed_paths,
+acceptance_criteria, verification}]}`. Do not send the deprecated
+`{id, gates: [{id, owner}]}` form. `advance` must include the active
+`task_id`, `wave_id`, and all terminal host completion fields plus the strict
+eight-key report. Cortex aggregates all preflight diagnostics and logs every
+`ok: false` facade result to the protected `~/.codex/logs/cortex-tool-errors.jsonl`
+journal; fix every reported path before retrying with a new submission id.
+
 ## Dispatch and worker contract
 
 Use the bundled profiles (`explorer`, `planner`, `architect`, `general`,

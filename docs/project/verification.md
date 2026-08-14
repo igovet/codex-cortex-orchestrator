@@ -35,10 +35,12 @@ when changing the public lifecycle; it is not correctness or performance
 evidence.
 
 Facade validation regressions cover malformed requests and completions,
-including missing/relative roots, invalid reports, and actual-host-model
-mismatches. They assert a recoverable structured `ok: false` result, no
-partial attempt transition after preflight failure, and no corresponding entry
-in the MCP exception journal for an expected coordinator correction.
+including missing/relative roots, malformed nested start waves, invalid
+reports, and actual-host-model mismatches. They assert one recoverable
+structured `ok: false` result containing all independent preflight
+diagnostics, no partial attempt transition after preflight failure, and a
+redacted entry in `~/.codex/logs/cortex-tool-errors.jsonl` for every facade
+`ok: false` result, including an expected coordinator correction.
 
 `probe-fresh-cortex-plugin.py` copies the full root-layout checkout into a
 temporary directory, uses temporary `HOME` and `CODEX_HOME`, installs it with fresh Codex CLI
@@ -60,9 +62,10 @@ also covers principal-bound classification and recoverable stale status/revision
 manifest reconciliation, global resource claims, numbered task/hook resolution,
 and lane lifecycle safety.
 
-The JSON-RPC regression also sends an invalid tool request through a subprocess
-and verifies that `~/.codex/logs/cortex-tool-errors.jsonl` records the redacted
-input, chat/thread session id, request id, and task/attempt ids with restrictive
+The JSON-RPC regression also sends invalid tool requests through a subprocess
+and verifies that `~/.codex/logs/cortex-tool-errors.jsonl` records every
+redacted facade `ok: false` result as well as MCP exceptions. Records retain
+the chat/thread session id, request id, and task/attempt ids with restrictive
 file permissions.
 
 Pipeline classification regressions prove that the bounded compatibility aliases

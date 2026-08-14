@@ -46,6 +46,36 @@ non-`normal` `cortex:orchestrator` route is still required.
 Never reconstruct the old activation/classification/status/delegation/report/
 evidence/gate sequence. Legacy tool names are removed from the public MCP API.
 
+## Exact request contract
+
+The coordinator must construct every field itself; do not improvise aliases or
+old v7 shapes. A `start` request contains `operation`, `project_root`,
+`principal`, `thread_id`, `submission_id`, `host_capabilities`, `task`, and
+`waves`. `task` requires `task_id`, `objective`, and `complexity` (`C1`, `C2`,
+or `C3`), plus the documented requirements, acceptance criteria, scope,
+allowed paths, verification, budget, pause conditions, user language, and
+replan limit when applicable. `host_capabilities` requires the exact native
+`spawn_agent_models` catalog and may include the confirmed
+`spawn_agent_default_model`, `create_thread_models`, and
+`available_thread_models` catalogs.
+
+Each wave requires `{wave_id, delegations}`. Each delegation uses `gate` and may
+specify `agent`, `task_kind`, `risk`, model/effort routing, dispatch mode,
+ownership, objective, allowed paths, acceptance criteria, verification, and
+context fields. The old `{id, gates: [{id, owner}]}` shape is invalid: use
+`wave_id`, `delegations`, `gate`, `agent`, and `ownership`.
+
+An `advance` request requires `task_id`, `wave_id`, and one completion object
+per active attempt. Every completion carries the actual host tool, child id,
+task name, model, reasoning effort, terminal status, and the exact eight-field
+`cortex/report/v1` report when passed. All mutating operations require a fresh
+lowercase `submission_id`; only byte-identical retries reuse an id.
+
+The facade performs an aggregate preflight. If several fields are wrong, the
+single `ok: false` response contains every diagnostic with its `path`,
+`message`, and `expected` shape. Correct all listed paths before retrying; do
+not fix one error at a time or reuse the failed submission id.
+
 ## Recovery and adaptation
 
 - `inspect` is read-only and reconstructs the active wave, pending host

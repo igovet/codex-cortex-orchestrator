@@ -43,13 +43,47 @@
   `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
   the chat/thread session id, JSON-RPC request id, and any task/attempt or
   other call ids, but never stores secret-like input values verbatim.
-- Expected facade input failures (for example, a missing or relative
-  `project_root`, malformed start plan, invalid completion report, or host-model
-  mismatch) return a recoverable `orchestrate` result with `ok: false`,
-  diagnostics, and `next_action`. They are validated before lifecycle writes
-  where possible and are not MCP transport exceptions or tool-error-journal
-  events. Correct the payload and use a fresh `submission_id`; reuse an id only
-  for a byte-identical replay.
+- Every `orchestrate` result with `ok: false`—including an expected coordinator
+  correction rather than an MCP exception—is recorded as redacted JSONL in
+  `~/.codex/logs/cortex-tool-errors.jsonl`. Expected input failures still return
+  a recoverable result with `diagnostics` and `next_action`, and are validated
+  before lifecycle writes where possible. Correct the complete payload and use
+  a fresh `submission_id`; reuse an id only for a byte-identical replay.
+- Preflight aggregates independent request mistakes into one `ok: false`
+  response. Each diagnostic has `path`, `message`, and `expected`; repair every
+  listed path before retrying. Do not treat the first diagnostic as the only
+  error or submit a sequence of one-field fixes.
+- The exact `start` envelope is `{operation:"start", project_root, principal,
+  thread_id, submission_id, host_capabilities, task, waves}`. `task` requires
+  `{task_id, objective, complexity}` where complexity is `C1`, `C2`, or `C3`;
+  it additionally accepts `requirements`, `acceptance_criteria`, `scope`,
+  `allowed_paths`, `verification`, `budget`, `pause_conditions`,
+  `user_language`, and non-negative `replan_limit`. `host_capabilities`
+  requires a non-empty `spawn_agent_models` array and additionally accepts
+  `available_models`, `spawn_agent_default_model`, `create_thread_models`, and
+  `available_thread_models`. `task` and `host_capabilities` reject every other
+  nested key.
+- Each start wave is exactly `{wave_id, delegations}`; `delegations` is a
+  non-empty array (at most 32) whose entries require `gate`. A delegation may
+  also contain `agent`, `task_kind`, `risk`, `requested_model`,
+  `configured_default_model`, `available_models`, `available_thread_models`,
+  `dispatch_mode`, `thread_environment`, `requested_reasoning_effort`,
+  `escalation_reason`, `sol_escalation`, `retry`, `parallel`, `objective`,
+  `ownership`, `context_files`, `context_report_ids`, `allowed_paths`,
+  `acceptance_criteria`, and `verification`. Do not use the retired
+  `{id, gates: [{id, owner}]}` form: use `wave_id`, `delegations`, `gate`,
+  `agent`, and `ownership`; waves and delegations reject every other nested
+  key.
+- The exact `advance` envelope is `{operation:"advance", project_root,
+  principal, submission_id, task_id, wave_id, completions}` with optional
+  `thread_id`, `gate_outcomes`, `future_waves`, `allow_rework`, and `reason`.
+  `completions` is non-empty and has one terminal object per active attempt.
+  Every object requires `attempt_id`, `host_tool` (`spawn_agent` or
+  `create_thread`), `host_agent_id`, `host_task_name`, `host_model`,
+  `host_reasoning_effort`, and terminal `status`; it may include `reason` and,
+  when passed, a `report` containing exactly `summary`, `findings`,
+  `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`, and
+  `next_action`. Completion and report objects reject every other nested key.
 - Every `orchestrate` call for a real task must include its exact absolute
   `project_root`. The server is multi-root: do not assume a process-wide root
   binding. A failed, read-only, or mismatched selected root is a hard blocker,
