@@ -1020,6 +1020,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegated["spawn_request"]["task_name"], "explorer")
         self.assertIn("Use attempt_id='discover-01' exactly", delegated["spawn_request"]["message"])
         self.assertIn("stable lowercase submission_id", delegated["spawn_request"]["message"])
+        self.assertIn("exactly these eight keys", delegated["spawn_request"]["message"])
+        self.assertIn("byte-identical retry", delegated["spawn_request"]["message"])
+        self.assertIn("Do not activate or initialize Cortex", delegated["spawn_request"]["message"])
         corrected = control.confirm_host_spawn({
                 "task_id": "host-name-contract", "principal": "thread-a",
                 "expected_revision": delegated["state"]["revision"],
@@ -1116,6 +1119,20 @@ class ControlPlaneTests(unittest.TestCase):
             "changed_files": [], "tests": [], "evidence": ["evidence"], "uncertainty": [], "next_action": "advance"},
         })
         self.assertEqual(report["principal_correction"], {"requested": "planner", "used": "thread-a"})
+
+    def test_worker_host_agent_alias_can_publish_its_own_report_with_correction(self):
+        state = self.init(task_id="worker-host-alias")["state"]
+        delegated = self.delegate(state, "worker-host-alias", "plan", "planner")
+        host_id = delegated["host_spawn"]["agent_id"]
+        report = control.record_report({
+            "task_id": "worker-host-alias", "principal": host_id,
+            "attempt_id": delegated["attempt_id"], "submission_id": "host-report",
+            "report": {"summary": "done", "findings": [], "questions": [],
+            "changed_files": [], "tests": [], "evidence": ["evidence"],
+            "uncertainty": [], "next_action": "advance"},
+        })
+        self.assertEqual(report["principal_correction"], {"requested": host_id, "used": "thread-a"})
+        self.assertEqual(report["report"]["attempt_id"], delegated["attempt_id"])
 
     def test_worker_report_infers_missing_attempt_and_submission_identifiers(self):
         state = self.init(task_id="worker-report-inference")["state"]

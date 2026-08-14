@@ -221,6 +221,13 @@ reused status receipts, and stale requested gates are corrected against the
 serialized ledger state and reported as correction metadata rather than MCP
 errors. Premature gate passes and missing-but-ambiguous evidence links return
 `recorded: false` with a machine-readable `next_action`.
+Coordinator calls must keep the activation-bound `principal`/`thread_id` pair;
+workers must not substitute profiles or native child ids for coordinator
+identity. Reassessment previews use `decision: unchanged` and `apply: false`,
+while reviewed changes use the returned revision with `decision: updated` and
+`apply: true`. Reports always contain all eight fields, reuse a submission id
+only for identical content, and link evidence only to running/passed attempts;
+stale attempts are finalized instead of retried.
 Every MCP tool failure is also appended as a redacted JSONL record under
 `~/.codex/logs/cortex-tool-errors.jsonl`. Each record includes the tool input
 summary, chat/thread session id, JSON-RPC request id, and any task/attempt or

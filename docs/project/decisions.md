@@ -58,6 +58,10 @@ replacement is fsync-backed; related task, lane, index, and journal writes are
 not a single crash-atomic transaction. These limits keep the guarantees
 explicit rather than overstating local-file durability.
 
+The confirmed host child/thread id is additionally indexed as a narrow alias
+for that attempt's worker report. It is never accepted as a coordinator
+principal and cannot authorize task, gate, evidence, or pipeline mutations.
+
 ## Optional execution lanes
 
 The task ledger remains the default orchestration surface. A lane is an

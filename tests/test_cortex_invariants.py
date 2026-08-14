@@ -275,6 +275,16 @@ class OrchestrationInvariantTests(unittest.TestCase):
         success = control.execute_verification(base)
         self.assertEqual(success["execution"]["exit_code"], 0)
 
+    def test_malformed_sol_escalation_is_rejected_as_value_error(self):
+        with self.assertRaisesRegex(ValueError, "sol_escalation.kind must be a string"):
+            control.resolve_dispatch_route({
+                "project_root": str(self.project),
+                "agent": "general",
+                "task_kind": "implementation",
+                "risk": "moderate",
+                "sol_escalation": {"kind": {}},
+            })
+
     def test_record_gate_cannot_remove_mandatory_c2_gates(self):
         state = self.init(complexity="C2")["state"]
         delegation = self.delegate(state, "task", "plan", "planner")

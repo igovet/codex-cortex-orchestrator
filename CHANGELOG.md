@@ -8,6 +8,10 @@ same base version.
 
 - Let visible Cortex threads request the saved Local checkout by default, with
   an explicit worktree option for isolation.
+- Harden coordinator/worker protocol guidance for bound identities,
+  preview/apply reassessment, stale-attempt recovery, strict report retries,
+  evidence receipts, mandatory gates, and blocked-gate handoffs. Confirmed host
+  child ids are now accepted as aliases only for their own worker reports.
 - Catalog submission, remote provenance, and tagged installation remain
   pending external release authorization and verification.
 - This checkout has an unborn `HEAD`; a committed release tree and a passing

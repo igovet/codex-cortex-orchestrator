@@ -1050,7 +1050,10 @@ def resolve_sol_escalation(params: dict[str, Any]) -> dict[str, str] | None:
         return None
     if not isinstance(raw, dict):
         raise ValueError("sol_escalation must be a structured object")
-    kind = str(raw.get("kind", "")).strip()
+    raw_kind = raw.get("kind", "")
+    if not isinstance(raw_kind, str):
+        raise ValueError("sol_escalation.kind must be a string")
+    kind = raw_kind.strip()
     if kind == "auditable_extreme":
         criterion = str(raw.get("criterion", "")).strip()
         audit_ref = str(raw.get("audit_ref", "")).strip()
@@ -2452,6 +2455,29 @@ def _attempt(state: dict[str, Any], attempt_id: str) -> dict[str, Any]:
     return attempt
 
 
+def _attempt_identity_aliases(attempt: dict[str, Any]) -> set[str]:
+    """Return identities a native worker may use for its own active attempt.
+
+    The coordinator principal/thread remains the authorization boundary for
+    task mutations.  A worker report is the one scoped exception: after the
+    host confirms a spawn, the worker may identify itself by the returned
+    child/thread id as well as the canonical profile/task labels.  Keeping the
+    aliases derived from one attempt prevents a host id from being used to
+    publish for a different attempt.
+    """
+    spawn_request = attempt.get("spawn_request") or {}
+    host_spawn = attempt.get("host_spawn") or {}
+    values = (
+        attempt.get("agent"),
+        attempt.get("profile"),
+        attempt.get("display_name"),
+        spawn_request.get("task_name"),
+        host_spawn.get("agent_id"),
+        host_spawn.get("task_name"),
+    )
+    return {str(value).strip() for value in values if str(value or "").strip()}
+
+
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     """Build the exact bounded briefing for a native Codex worker dispatch."""
     profile = PROFILES[agent]
@@ -2488,7 +2514,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         f"Cortex task: {package['task_id']}; gate: {package['gate']}; attempt: {package['attempt_id']}.",
         f"When calling Cortex MCP tools, use project_root={package.get('project_root') or '(the coordinator-provided project root)'!r}, "
         f"principal={package.get('coordinator_principal')!r}, and thread_id={package.get('coordinator_thread_id')!r}. "
-        "Do not substitute the worker profile name for the coordinator principal.",
+        "These are the coordinator's bound identities: use them exactly and never substitute the worker profile, "
+        "native child/thread id, `/root`, or a new host thread for either value. If a call reports a different "
+        "thread or principal, stop and preserve that exact error for the coordinator instead of guessing an identity.",
         f"Objective: {package['objective']}",
         f"Ownership: {package['ownership']}",
         "Allowed paths: " + ", ".join(package["allowed_paths"]),
@@ -2497,10 +2525,20 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Internal worker protocol: English only. " + output_language_contract,
         f"User-facing language: {package.get('user_language', 'en')}. The main coordinator must translate questions, blockers, and summaries into this language (or the explicit language requested by the user) before showing them in the main chat.",
         "Codebase-memory protocol (mandatory for code search): 1) call mcp__codebase_memory__list_projects with {}; 2) parse the projects array and select the record whose root_path exactly matches the absolute project_root; 3) pass that record's name as project to every subsequent codebase_memory call—never guess or synthesize a project id. Use index_status(project) when freshness/index availability must be verified. For discovery use search_graph(project, query=...); use name_pattern for exact symbol patterns, semantic_query only as an array of keywords on moderate/full indexes, and filters such as label, file_pattern, relationship, include_connected, limit, and offset when needed. For text matches use search_code(project, pattern, regex, mode=compact|full|files, path_filter, file_pattern, context, limit). For callers/dependencies/data flow use trace_path(project, function_name=<qualified_name from search_graph>, mode=calls|data_flow|cross_service, direction, depth, include_tests, parameter_name, risk_labels). For source reading use get_code_snippet(project, qualified_name=<exact qualified_name from search_graph>, include_neighbors); do not use it as the initial search. Use get_architecture(project, aspects) for a high-level structure overview and query_graph(project, query, max_rows) only for explicit multi-hop Cypher analysis. Do not call index_repository, ingest_traces, manage_adr, or delete_project for ordinary discovery; they change indexed state or durable knowledge and require explicit authorization. Do not start with grep, rg, glob, or ad-hoc filesystem scans while codebase_memory is available. If list_projects fails, codebase_memory is unavailable, or no indexed project matches project_root, do not call other codebase_memory tools or pretend they were used: record the limitation and use another search method only as a documented fallback.",
+        "Do not activate or initialize Cortex, classify a task, reassess a pipeline, or call coordinator-only "
+        "lifecycle/gate tools such as init_task, get_task_status, record_delegation, record_gate_outcome, "
+        "commit_gate, or create_handoff. The main coordinator owns those calls. You may publish your own "
+        "question/report and poll your own question updates with the exact attempt context above. "
         "Do not subdelegate. Return questions, blockers, and your final handoff to the main chat. "
         "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
         f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
         f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
+        "The report object must contain exactly these eight keys: summary, findings, questions, changed_files, "
+        "tests, evidence, uncertainty, and next_action. Use an empty list when a list has no entries; never "
+        "omit evidence or any other key. Reuse the same submission_id only for a byte-identical retry. If the "
+        "report content changes after validation, increment the suffix (for example, -report-2) instead of "
+        "reusing the prior id. Do not publish after the coordinator has cancelled, superseded, or reworked this "
+        "attempt; preserve the stale-attempt error and stop rather than retrying with another attempt id. "
         "If a requirement, branch, trade-off, missing fact, or implementation choice needs user approval, "
         "do not decide silently: call cortex.question with this task_id, the coordinator principal, "
         f"attempt_id={package['attempt_id']!r}, and a stable lowercase submission_id such as "
@@ -2510,7 +2548,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "The coordinator will surface the question in the main chat, answer it, and you must poll "
         "get_worker_question_updates before continuing. Never choose a user decision on the user's behalf. "
         "If a Cortex call returns an error, preserve the exact error in report.questions or report.findings, "
-        "then retry only with the returned correction fields and the same submission_id.",
+        "then retry only with the returned correction fields; use the same submission_id only when the payload "
+        "is unchanged, otherwise use a new submission_id.",
     ))
 
 
@@ -2526,12 +2565,7 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             for item in state.get("attempts", []):
                 if item.get("invalidated") or item.get("status") not in {"running", AWAITING_HOST_SPAWN}:
                     continue
-                aliases = {
-                    str(item.get("agent") or "").strip(),
-                    str(item.get("profile") or "").strip(),
-                    str(item.get("display_name") or "").strip(),
-                    str((item.get("spawn_request") or {}).get("task_name") or "").strip(),
-                }
+                aliases = _attempt_identity_aliases(item)
                 if supplied_identity in aliases:
                     identity_candidates.append(item)
         principal_correction = None
@@ -2544,12 +2578,7 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
                 candidate_attempt_id = candidate_attempt["attempt_id"]
             worker_aliases = set()
             if candidate_attempt:
-                worker_aliases.update({
-                    str(candidate_attempt.get("agent") or "").strip(),
-                    str(candidate_attempt.get("profile") or "").strip(),
-                    str(candidate_attempt.get("display_name") or "").strip(),
-                    str((candidate_attempt.get("spawn_request") or {}).get("task_name") or "").strip(),
-                })
+                worker_aliases.update(_attempt_identity_aliases(candidate_attempt))
             if "different principal" not in str(exc) or not supplied_identity or not identity_candidates:
                 raise
             if candidate_attempt and supplied_identity not in worker_aliases:

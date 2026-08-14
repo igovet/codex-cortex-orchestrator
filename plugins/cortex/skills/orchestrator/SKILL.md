@@ -77,6 +77,16 @@ gates, and hand off, but project search, reads, execution, tests, builds, and
 edits belong to internal workers. Workers are never user-facing: all
 clarifications, escalations, blockers, and handoffs return to the main chat.
 
+Identity is part of the task contract. Every coordinator control-plane call
+must use the exact `principal` and bound `thread_id` returned by activation or
+task status; do not copy a native host thread id, child id, worker profile, or
+`/root` spelling into the other field. If a resumed host turn does not know the
+bound thread, omit `thread_id` and let the server restore the task-bound value;
+never guess a replacement. Worker reports are the only scoped exception and
+may use the confirmed host child id only when it maps unambiguously to that
+active attempt. An identity error is a stop-and-reconcile condition, not a
+prompt to retry with a different principal or thread.
+
 The classification receipt is authoritative for initial complexity,
 requirements, and pipeline. The main orchestrator must choose the complete
 optional gate list from the available gates and pass it as `classify_task.pipeline`.
@@ -97,6 +107,16 @@ weakening mandatory gates.
 ## Intake and dispatch
 
 1. State the goal, acceptance criteria, constraints, affected area, and approval boundaries. Select the full initial gate list from Cortex's available gates and pass it to `classify_task.pipeline`; use the requirements as the evidence/rationale for that choice. Pass `parallel_groups` when two or more selected gates are independent; never group conflicting writers or gates with a dependency. Cortex will append only `documentation` and `close` when they are absent. If discovery changes the scope or dependencies, call `reassess_pipeline` with a new complete `pipeline` and (when needed) `parallel_groups`; apply it only after reviewing the proposed replacement, and set `allow_rework: true` when intentionally removing a completed gate.
+
+   Reassessment has an explicit preview/apply protocol. For a preview, send
+   `apply: false` with `decision: unchanged` and inspect `operations`, the
+   suggested pipeline, and the returned revision. Apply only a reviewed
+   change with `apply: true`, the returned `expected_revision`, and
+   `decision: updated`; if there are no pipeline or wave operations, keep the
+   decision `unchanged`. A `rework_gate` is an applied update and therefore
+   also requires `decision: updated`, a reason, and `allow_rework: true` when
+   completed evidence is being invalidated. Never send `decision: updated`
+   with `apply: false`, and never omit the decision on C2/C3.
 2. Inspect relevant project and feature documentation when present; source and tests win if they conflict.
 3. Classify by shape: C1 is local and low-risk; C2 spans a component or has uncertainty; C3 crosses systems, data, security, infrastructure, or has high rollback cost.
 4. Choose models and reasoning effort per dispatch. Use one writer for overlapping paths, parallelize independent read-only work, and run independent verification before completion.
@@ -265,6 +285,31 @@ inspect `get_task_status` and the report/question buses after every completion,
 timeout, or newly listed question, preserve exact Cortex tool errors in the
 worker report, and finalize a worker with the exact error as the reason if it
 cannot report.
+
+Treat the following as protocol violations with one deterministic recovery,
+not as reasons to start another worker:
+
+- Do not rework a gate, advance a wave, or consume evidence while any prior
+  attempt is still active. Finalize cancelled/stale workers first. After an
+  attempt becomes terminal or invalidated, its worker must not publish a late
+  report; preserve the stale-attempt error and stop. A retry-budget response
+  means rework the gate with new evidence (or create a handoff and pause), not
+  a third delegation to the same gate.
+- Reuse a `submission_id` only for an identical report payload. A corrected
+  report gets a new lowercase id. The report must contain exactly all eight
+  fields, including `evidence: []` when there is no evidence; do not send a
+  partial object and do not retry a changed payload under the old id.
+- Link evidence only to an attempt whose current status is `running` or
+  `passed` and whose gate is the current gate. Failed, blocked, cancelled, and
+  superseded attempts do not receive report evidence. Use the exact
+  `report_receipt` returned for that attempt; consume it once, then never
+  replay it. For command proof, pass the exact `verification_id` from the
+  fixed verification catalog—never a report, attempt, or guessed id.
+- C2/C3 never skip `documentation` or `close`. Delegate `documentation` to
+  `technical_writer`, record its `updated`/`not_applicable` decision evidence,
+  and create a current-gate handoff before recording a blocked outcome. A
+  blocked pause without that handoff is incomplete; repair the handoff before
+  retrying the gate.
 
 ### User decisions and question UI
 

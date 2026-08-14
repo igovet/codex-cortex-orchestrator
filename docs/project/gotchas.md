@@ -20,6 +20,11 @@
   delegated to `technical_writer` and record `updated` or justified
   `not_applicable`; close also requires at least one reassessment receipt.
   Other skipped C2/C3 gates require an explicit reason.
+- `reassess_pipeline` uses a two-step preview/apply contract: preview with
+  `apply=false, decision=unchanged`, then apply a reviewed change with the
+  returned revision and `apply=true, decision=updated`. A no-op stays
+  `unchanged`; never omit the C2/C3 decision or claim `updated` without
+  applied operations.
 - Call `classify_task` before `init_task`; its classification receipt is bound
   to the activated principal, complexity, and requirements. Before every
   delegation, obtain a current `get_task_status` receipt: it is single-use and
@@ -35,6 +40,12 @@
   rejected. The host's `/root` spelling is normalized to the durable `root`
   coordinator principal when resuming a root task; other principal changes
   remain authorization failures.
+- Keep the coordinator identity pair stable across a task: use the exact
+  bound `principal`/`thread_id` from activation or status, never a worker
+  profile, native child id, or guessed `/root` value. If the resumed host turn
+  does not know the bound thread, omit `thread_id` and let Cortex restore it.
+  A worker's confirmed host id is accepted only for its own unambiguous report;
+  it does not authorize coordinator mutations.
 - MCP boundary failures are logged to the per-user system path
   `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
   the chat/thread session id, JSON-RPC request id, and any task/attempt or
@@ -49,6 +60,10 @@
   account for all changed project-relative files under the manifest policy;
   `reconcile_project_files` is useful to find omitted additions, deletions,
   modifications, or renames before handoff.
+- Retry-budget exhaustion, a stale attempt, an invalid receipt, or an unknown
+  verification id is a repair signal, not permission to dispatch another
+  worker. Finalize old attempts, use the exact active receipt/catalog id, and
+  create the current-gate handoff before recording `blocked`.
 - Lane materialization is limited to declared absolute Git paths and requires
   a live lease plus `confirm=true`; process startup and database setup remain
   outside this executor and require their own implementation/evidence.
@@ -98,8 +113,12 @@
   produce a no-change second planning pass before close.
 - A worker report must contain exactly the eight `cortex/report/v1` fields.
   Reports are size/item bounded, sanitized, task-bound, and tied to a real
-  delegation attempt. C2/C3 evidence consumes its attempt receipt once.
-  Listing returns metadata; report bodies require explicit context grants.
+  delegation attempt. Use an empty list rather than omitting a field; reuse a
+  `submission_id` only for an identical payload and mint a new id for a
+  correction. C2/C3 evidence consumes its attempt receipt once and only
+  `running`/`passed` attempts on the current gate may receive it. Do not send
+  late reports after an attempt is terminal or reworked. Listing returns
+  metadata; report bodies require explicit context grants.
 - Report JSON records are authoritative and Markdown is an escaped generated
   view. A consumed report receipt has an irreversible
   `reports/consumptions/` tombstone. Writes are atomic per file, not across the
