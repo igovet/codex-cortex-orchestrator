@@ -1,0 +1,52 @@
+{
+  "schema": "cortex/profile-contract/v1",
+  "shared_worker_contract": {
+    "visibility": "internal",
+    "user_facing": false,
+    "return_route": "main_chat",
+    "subdelegation": "forbidden_unless_explicitly_authorized",
+    "scope": "operate_only_within_delegated_ownership_and_allowed_paths",
+    "external_side_effects": "require_explicit_main_agent_authorization_and_applicable_approval",
+    "sensitive_data": "never_expose_or_persist_secrets_credentials_personal_data_or_secret_canaries",
+    "report_schema": "cortex/report/v1",
+    "question_schema": "cortex/question/v2",
+    "question_route": "worker_publish_main_chat_ui_worker_poll",
+    "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
+    "internal_language": "en",
+    "user_facing_language": "task_language_or_explicit_user_language",
+    "composite_operations": ["prepare_delegation", "prepare_delegations", "complete_attempt", "commit_gate", "close_audit"],
+    "required_report_fields": [
+      "summary",
+      "findings",
+      "questions",
+      "changed_files",
+      "tests",
+      "evidence",
+      "uncertainty",
+      "next_action"
+    ]
+  },
+  "profiles": [
+    {"name":"accessibility_engineer","filename":"accessibility-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["accessibility"]},
+    {"name":"architect","filename":"architect.toml","sandbox":"read-only","route_category":"automatic","gates":["architecture"]},
+    {"name":"backend_dev","filename":"backend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"build_verification","filename":"build-verification.toml","sandbox":"read-only","route_category":"automatic","gates":["qa","close"]},
+    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","route_category":"automatic","gates":["review"]},
+    {"name":"data_engineer","filename":"data-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"database_architect","filename":"database-architect.toml","sandbox":"read-only","route_category":"automatic","gates":["database_architecture"]},
+    {"name":"debugger","filename":"debugger.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"devops_engineer","filename":"devops-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"explorer","filename":"explorer.toml","sandbox":"read-only","route_category":"automatic","gates":["discover"]},
+    {"name":"frontend_dev","filename":"frontend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"fullstack_dev","filename":"fullstack-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"general","filename":"general.toml","sandbox":"workspace-write","route_category":"automatic","gates":["implementation"]},
+    {"name":"mobile_dev","filename":"mobile-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"performance_engineer","filename":"performance-engineer.toml","sandbox":"read-only","route_category":"automatic","gates":["performance"]},
+    {"name":"planner","filename":"planner.toml","sandbox":"read-only","route_category":"automatic","gates":["plan"]},
+    {"name":"qa_engineer","filename":"qa-engineer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["qa"]},
+    {"name":"refactorer","filename":"refactorer.toml","sandbox":"workspace-write","route_category":"manual","gates":[]},
+    {"name":"security_auditor","filename":"security-auditor.toml","sandbox":"read-only","route_category":"automatic","gates":["security"]},
+    {"name":"technical_writer","filename":"technical-writer.toml","sandbox":"workspace-write","route_category":"automatic","gates":["documentation"]},
+    {"name":"ux_designer","filename":"ux-designer.toml","sandbox":"read-only","route_category":"automatic","gates":["ux"]}
+  ]
+}

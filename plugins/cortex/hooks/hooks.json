@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "SessionStart": [{"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": "python3 ${PLUGIN_ROOT}/scripts/cortex_hook.py", "timeout": 5, "additionalContextLimit": 800}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "python3 ${PLUGIN_ROOT}/scripts/cortex_hook.py", "timeout": 5}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "python3 ${PLUGIN_ROOT}/scripts/cortex_hook.py", "timeout": 5}]}],
+    "PostToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": "python3 ${PLUGIN_ROOT}/scripts/cortex_hook.py", "timeout": 5}]}]
+  }
+}

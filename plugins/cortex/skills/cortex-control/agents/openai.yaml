@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cortex Control"
+  short_description: "Operate the durable task ledger for complex coding work."
+  default_prompt: "Select the cortex:orchestrator skill for explicit activation, then coordinate a durable orchestration task."

@@ -1,0 +1,22 @@
+# Knowledge-route contract
+
+<!-- GENERATED:START -->
+## Purpose
+
+The Cortex skill defines deterministic `harvest` and `harvest-refresh` routes for source-backed repository knowledge maintenance.
+
+## Key files and dependencies
+
+- [Cortex Orchestrator skill](../../../plugins/cortex/skills/orchestrator/SKILL.md) defines native invocation, activation, route selection, and knowledge-route workflow.
+- [Knowledge Harvest skill](../../../plugins/cortex/skills/knowledge-harvest/SKILL.md) defines generated-block preservation and required project/feature documentation.
+- [Documentation Sync skill](../../../plugins/cortex/skills/documentation-sync/SKILL.md) limits updates to knowledge affected by completed, verified work.
+- [test_cortex_invariants.py](../../../tests/test_cortex_invariants.py) exercises route and refresh preservation/idempotence regressions.
+
+## Behavior and status
+
+`harvest` updates only missing or stale evidence-backed facts. `harvest-refresh` re-audits allowed documentation, preserves text outside generated markers, validates paths and applicable commands, and requires a second planning pass with no proposed changes. The `help` route is read-only; `harvest` and `harvest-refresh` require explicit Cortex activation. Before scanning or dispatching, knowledge routes must bind the exact absolute `project_root` during activation and confirm the project-local `.codex/cortex` ledger; no `CORTEX_ROOT`, `/tmp`, root switch, or unledgered fallback is valid.
+
+## Verification
+
+Run the unittest suite and the cold-boot smoke test listed in [verification.md](../../project/verification.md); the route contract is also checked by [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py).
+<!-- GENERATED:END -->

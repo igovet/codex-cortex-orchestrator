@@ -1,0 +1,87 @@
+# Verification
+
+The control plane is validated with the standard-library test suite:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 scripts/cortex-cold-boot-smoke.py
+python3 scripts/probe-fresh-cortex-plugin.py
+python3 scripts/verify-cortex-release.py --require-tracked
+python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py
+bash -n scripts/sync-cortex.sh
+./scripts/sync-cortex.sh --check
+```
+
+`cortex-cold-boot-smoke.py` uses a fresh temporary Git project and its
+`${project_root}/.codex/cortex` ledger root, then
+drives the server through its stdio JSON-RPC interface. It restarts the server
+mid-lifecycle and proves a C2 task can complete only after classification,
+fresh status-backed delegation receipts, documentation and reassessment
+receipts, one consumed `cortex/report/v1` receipt per worker attempt,
+server-observed successful command evidence, a complete final file manifest,
+and a close-gate handoff. It also confirms that a nonzero command is not
+accepted as a passing gate and that report-bus reconciliation preserves the
+indexed report count.
+
+`probe-fresh-cortex-plugin.py` copies the full root-layout checkout into a
+temporary directory, uses temporary `HOME` and `CODEX_HOME`, installs it with fresh Codex CLI
+processes, and checks that `cortex` is exposed. It reports
+`SKIP` when the Codex CLI is unavailable; treat that as an environment
+limitation, not plugin-registration evidence.
+
+The lane regression creates a real temporary Git repository, materializes a
+declared branch/worktree, reconciles branch and dirty state, and retires the
+clean worktree without force removal.
+
+Activation regression coverage proves that mutations fail before explicit
+skill-route activation. It also verifies that the skill normalizes activation
+to the MCP server's canonical internal `/cortex` token and deactivation to its
+canonical `/normal` token; neither is a promised host slash command. Activation
+becomes bound to the initialized task and active-thread mapping. Completing a
+task cleans that mapping, not the activating principal's session. The v7 suite
+also covers principal-bound classification and recoverable stale status/revision hints,
+manifest reconciliation, global resource claims, numbered task/hook resolution,
+and lane lifecycle safety.
+
+The isolated route regressions parse the canonical bundled skill contract and
+exercise fixture documentation trees. They prove help is read-only, an
+incremental harvest changes only evidence-justified generated facts while
+accounting for its manifest, and a refresh preserves manual notes and produces
+an idempotent second pass.
+
+The v7 report regressions cover strict shape and redaction, task/attempt scope,
+one-use evidence receipts, explicit context grants, idempotent submissions,
+concurrent publishers, generated-Markdown repair, and capability-aware routing.
+The repository validator additionally checks that all installable sources live
+under `plugins/cortex/`, `profiles.json` matches exactly 21 profile files,
+exactly 10 skills ship, all eight report fields are required, and the retired
+`task_formatter`/dedicated-orchestrator profiles are absent.
+
+`verify-cortex-release.py --require-tracked` is the blocking release boundary:
+it validates a fresh `git archive HEAD` rather than the mutable working tree,
+and rejects nested marketplace artifacts, symlinks, ledger state, bytecode,
+secret-prone filenames and credential-store paths, missing public release
+policies, private local home paths in public release files, and release
+placeholders. Its regression fixture proves `.env`, `.env.*`, private-key,
+credential-file, and SSH-key paths are rejected while ordinary Markdown that
+documents secure configuration remains allowed.
+
+It requires a committed `HEAD`. Without one, the non-blocking command reports
+`SKIP` and `--require-tracked` fails intentionally; neither result validates a
+release archive. Create the initial commit only with authorization and rerun
+the blocking command against the committed tree before publication.
+
+<!-- GENERATED:START -->
+
+## Authoritative command inventory
+
+- `python -m unittest discover -s tests -v` — standard-library regression suite; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
+- `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [cortex-cold-boot-smoke.py](../../scripts/cortex-cold-boot-smoke.py).
+- `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [probe-fresh-cortex-plugin.py](../../scripts/probe-fresh-cortex-plugin.py). `SKIP` means the Codex CLI is unavailable.
+- `python3 scripts/verify-cortex-release.py --require-tracked` — blocking tracked-release archive boundary; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [verify-cortex-release.py](../../scripts/verify-cortex-release.py).
+- `python scripts/validate-cortex-marketplace.py` — repository marketplace and plugin-contract validation; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [validate-cortex-marketplace.py](../../scripts/validate-cortex-marketplace.py).
+- `python -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py` — Python syntax compilation for runtime and helper modules; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
+- `bash -n scripts/sync-cortex.sh` — shell syntax check; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
+- `./scripts/sync-cortex.sh --check` — read-only installed-content/legacy-artifact check; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
+
+<!-- GENERATED:END -->

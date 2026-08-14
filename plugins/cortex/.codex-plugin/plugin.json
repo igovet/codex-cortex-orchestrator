@@ -1,0 +1,27 @@
+{
+  "name": "cortex",
+  "version": "1.0.1+codex.20260814003542",
+  "description": "Durable Cortex control plane for staged agent work: tasks, gates, delegations, locks, and handoffs.",
+  "author": {
+    "name": "igovet"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Cortex",
+    "shortDescription": "Coordinate staged work across Codex agents",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, and a local opt-in Cortex v7 ledger with receipt-backed worker reports, staged gates, incremental knowledge harvests, and full source-backed refreshes. Requested model and reasoning effort remain the parent Codex dispatch decision and are resolved against host capabilities.",
+    "developerName": "igovet",
+    "category": "DeveloperTools",
+    "capabilities": [
+      "Local MCP control plane",
+      "Task ledger",
+      "Scoped worker report bus",
+      "Agent profiles",
+      "Knowledge harvest routes",
+      "Lifecycle hooks"
+    ],
+    "logo": "./assets/logo.png",
+    "defaultPrompt": "Coordinate this task with Cortex. Use help, harvest, or harvest-refresh when that exact route is requested."
+  }
+}
