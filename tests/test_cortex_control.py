@@ -148,6 +148,20 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(inferred["identity_inferred"])
         self.assertEqual(inferred["activation"]["principal"], "thread-a")
 
+    def test_resumed_root_coordinator_alias_does_not_lose_task_ownership(self):
+        self.activate(principal="root")
+        classified = control.classify_task({
+            "complexity": "C1", "requirements": [], "principal": "root", "thread_id": "root",
+        })
+        control.init_task({
+            "task_id": "root-alias", "objective": "resume root task",
+            "classification_id": classified["classification_id"],
+            "principal": "root", "thread_id": "root",
+        })
+        resumed = control.status({"task_id": "root-alias", "principal": "/root"})
+        self.assertTrue(resumed["active"])
+        self.assertEqual(resumed["state"]["principal"], "root")
+
     def test_init_consumes_classification_contract_without_duplicate_inputs(self):
         self.activate()
         requirements = ["implementation, verification, and documentation", "preserve the durable ledger"]
@@ -1224,6 +1238,93 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(committed["state"]["current_gate"], "implementation")
         audited = control.close_audit({"task_id": "composites", "principal": "thread-a"})
         self.assertEqual(audited["report_count"], 1)
+
+    def test_commit_gate_resolves_unique_context_grant_to_report_receipt(self):
+        state = self.init(task_id="grant-receipt", complexity="C2")["state"]
+        delegated = self.delegate(state, "grant-receipt", "plan", "planner")
+        report = self.report("grant-receipt", delegated["attempt_id"])
+        grant = control.grant_report_context({
+            "task_id": "grant-receipt",
+            "principal": "thread-a",
+            "attempt_id": delegated["attempt_id"],
+            "report_ids": [report["report"]["report_id"]],
+            "reason": "coordinator context grant",
+        })
+        committed = control.commit_gate({
+            "task_id": "grant-receipt",
+            "principal": "thread-a",
+            "gate": "plan",
+            "mode": "verification",
+            "attempt_id": delegated["attempt_id"],
+            # Older adapters incorrectly supplied the grant id here.  The
+            # server can repair this only when the grant names one receipt.
+            "report_receipt": grant["grant"]["grant_id"],
+            "summary": "verify plan",
+            "verification_id": "benign_success",
+        })
+        self.assertTrue(committed["recorded"])
+        self.assertEqual(
+            committed["evidence"]["receipt_correction"],
+            {"requested": grant["grant"]["grant_id"], "used": report["receipt"]["receipt_id"], "reason": "context grant resolved to its unique report receipt"},
+        )
+        self.assertEqual(committed["state"]["current_gate"], "discover")
+
+    def test_commit_gate_repeated_invalid_receipt_terminalizes_instead_of_hanging(self):
+        state = self.init(task_id="receipt-circuit-breaker", complexity="C2")["state"]
+        delegated = self.delegate(state, "receipt-circuit-breaker", "plan", "planner")
+        results = []
+        for _ in range(control.MAX_GATE_RECOVERY_FAILURES):
+            results.append(control.commit_gate({
+                "task_id": "receipt-circuit-breaker",
+                "principal": "thread-a",
+                "gate": "plan",
+                "mode": "verification",
+                "attempt_id": delegated["attempt_id"],
+                "report_receipt": "not-a-real-receipt",
+                "summary": "verify plan",
+                "verification_id": "benign_success",
+            }))
+        self.assertEqual([item["recorded"] for item in results], [False] * control.MAX_GATE_RECOVERY_FAILURES)
+        self.assertTrue(results[0]["recoverable"])
+        self.assertTrue(results[1]["recoverable"])
+        self.assertTrue(results[2]["terminal"])
+        self.assertFalse(results[2]["recoverable"])
+        self.assertEqual(results[2]["state"]["status"], "blocked")
+        self.assertEqual(results[2]["next_action"], "create_handoff_and_resume_after_gate_repair")
+        self.assertEqual(len(results[2]["state"]["recovery_events"]), control.MAX_GATE_RECOVERY_FAILURES)
+
+    def test_complete_attempt_invalid_report_is_recoverable_and_can_be_corrected(self):
+        self.init(task_id="attempt-recovery", complexity="C2")
+        prepared = control.prepare_delegation({
+            "task_id": "attempt-recovery", "principal": "thread-a", "delegation": {
+                "gate": "plan", "agent": "planner", "task_kind": "planning", "risk": "moderate",
+                "objective": "plan", "ownership": "Own plan", "allowed_paths": ["."],
+                "acceptance_criteria": ["Publish a report"], "verification": ["Report evidence"],
+            },
+        })
+        attempt_id = prepared["delegation"]["attempt_id"]
+        bad = control.complete_attempt({
+            "task_id": "attempt-recovery", "principal": "thread-a", "attempt_id": attempt_id,
+            "host_agent_id": "host-attempt-recovery", "host_task_name": "planner",
+            "host_model": prepared["delegation"]["spawn_request"]["model"],
+            "host_reasoning_effort": prepared["delegation"]["spawn_request"]["reasoning_effort"],
+            "status": "passed", "report": {"summary": "missing required report fields"},
+        })
+        self.assertFalse(bad["recorded"])
+        self.assertTrue(bad["recoverable"])
+        self.assertEqual(bad["state"]["attempts"][0]["status"], "running")
+        good = control.complete_attempt({
+            "task_id": "attempt-recovery", "principal": "thread-a", "attempt_id": attempt_id,
+            "host_agent_id": "host-attempt-recovery", "host_task_name": "planner",
+            "host_model": prepared["delegation"]["spawn_request"]["model"],
+            "host_reasoning_effort": prepared["delegation"]["spawn_request"]["reasoning_effort"],
+            "status": "passed", "submission_id": "corrected-report", "report": {
+                "summary": "complete", "findings": [], "questions": [], "changed_files": [],
+                "tests": [], "evidence": ["report"], "uncertainty": [], "next_action": "advance",
+            },
+        })
+        self.assertTrue(good["atomic"])
+        self.assertEqual(good["state"]["attempts"][0]["status"], "passed")
 
     def test_prepare_delegations_rejects_mixed_gates(self):
         self.init(task_id="composite-batch")

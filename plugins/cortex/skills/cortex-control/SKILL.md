@@ -50,6 +50,10 @@ testing, and editing belong to hidden/internal workers.
    For repository/code search, workers must first call `mcp__codebase_memory__list_projects`, match the exact absolute `project_root` to an indexed project, and pass the returned project identifier/path to later codebase-memory tools; never guess the identifier. Only then prefer `search_graph` for definitions and relationships, `search_code` for textual matches, `trace_path` for callers/dependencies/data flow, and `get_code_snippet` after locating an exact symbol. Do not begin with `grep`, `rg`, globbing, or ad-hoc filesystem scans when it is available. If `list_projects` fails, it is unavailable, or no indexed project matches, do not call other codebase-memory tools; record that limitation and use another search method only as a documented fallback; never claim a lookup that did not run.
 8. Use lanes only when execution needs a durable workstream: `create_lane` → `claim_lane` → `bind_task_lane` → optional `materialize_lane` → task gates → `reconcile_lane` → resource release → `release_lane`/`retire_lane`. Claims collide globally across tasks and lanes; use expiration and release them. Materialization requires a live lease and explicit `confirm=true`, uses only declared absolute paths, never force-removes worktrees, and refuses dirty retirement. Expired leases require explicit `reclaim=true`; attached worktrees are not treated as managed and are never removed.
 
+Continuation note: a resumed root coordinator may be spelled `/root` by the
+host even when the durable task owner is `root`; Cortex normalizes that exact
+alias. Other principal changes remain authorization failures.
+
 ## Main-agent close protocol
 
 After any dispatch, the main agent must complete this protocol in order. Host

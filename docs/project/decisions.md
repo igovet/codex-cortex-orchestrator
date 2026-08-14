@@ -18,6 +18,16 @@ records. Related files are not one crash-atomic transaction. Lifecycle hook
 telemetry and model metrics are observational and must never block task
 execution; their durability is intentionally weaker.
 
+## Bounded gate recovery
+
+Composite gate commits must not turn adapter mistakes into an active task that
+can be retried forever. A unique context grant may be normalized to its
+attempt-bound report receipt because the server can verify task, gate, attempt,
+and one-use ownership. Any other repeated `commit_gate` validation failure for
+the same gate/mode is persisted as a recovery event; after three failures the task is
+blocked with a handoff/resume action. This preserves the exact failure for
+repair while guaranteeing a terminal control-plane outcome.
+
 ## C2/C3 proof requirements
 
 C2 and C3 tasks require delegation-linked evidence and a final handoff before

@@ -113,6 +113,8 @@ MAX_REPORTS_PER_ATTEMPT = 32
 MAX_REPORTS_PER_TASK = 256
 MAX_REPORT_AGGREGATE_BYTES = 1024 * 1024
 MAX_REPORT_GRANTS = 256
+MAX_GATE_RECOVERY_FAILURES = 3
+MAX_GATE_RECOVERY_EVENTS = 64
 MAX_QUESTIONS_PER_ATTEMPT = 64
 MAX_QUESTIONS_PER_TASK = 512
 MAX_METRIC_EVENTS = 1000
@@ -414,6 +416,12 @@ def authorize(state: dict[str, Any], params: dict[str, Any]) -> None:
     require_activation(activation_params, state.get("task_id"))
 
 
+def _canonical_principal(value: object) -> str:
+    """Normalize the host's two spellings for the main/root coordinator."""
+    principal = str(value or "").strip()
+    return "root" if principal == "/root" else principal
+
+
 def authorize_principal(state: dict[str, Any], params: dict[str, Any]) -> None:
     expected = str(state.get("principal") or "local")
     supplied_principal = str(params.get("principal") or "").strip()
@@ -421,8 +429,15 @@ def authorize_principal(state: dict[str, Any], params: dict[str, Any]) -> None:
     bound_thread = str(state.get("thread_id") or "").strip()
 
     if supplied_principal:
-        if expected != "local" and supplied_principal != expected:
+        if expected != "local" and _canonical_principal(supplied_principal) != _canonical_principal(expected):
             raise ValueError("task is owned by a different principal")
+        # A resumed root coordinator can be represented by `/root` after a
+        # host turn while the durable task was initialized as `root`.  Keep
+        # the durable owner authoritative for subsequent activation lookup
+        # and receipts instead of treating the spelling change as a new
+        # principal.
+        if expected != "local" and supplied_principal != expected:
+            params["principal"] = expected
         if supplied_thread and bound_thread and supplied_thread != bound_thread:
             raise ValueError("task is bound to a different thread")
         return
@@ -1046,6 +1061,61 @@ def report_bus_paths(task_dir: Path) -> dict[str, Path]:
                 raise ValueError(f"report bus {key} must be a real directory")
         os.chmod(path, 0o700, follow_symlinks=False)
     return paths
+
+
+def _resolve_report_receipt_hint(
+    task_dir: Path,
+    state: dict[str, Any],
+    gate: str,
+    attempt_id: str | None,
+    value: object,
+) -> tuple[str, dict[str, str] | None]:
+    """Resolve a stale adapter hint without weakening receipt ownership.
+
+    Some host adapters previously passed a context-grant id where the
+    one-use report receipt was required.  A grant is safe to resolve only
+    when it belongs to this task/attempt and names exactly one report whose
+    receipt still matches the current gate.  Ambiguous or foreign hints are
+    returned unchanged and are handled by the normal bounded recovery path.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return raw, None
+    candidate = safe_id(raw)
+    paths = report_bus_paths(task_dir)
+    receipt_path = paths["receipts"] / f"{candidate}.json"
+    if receipt_path.exists() and not receipt_path.is_symlink():
+        return candidate, None
+
+    grant_path = paths["grants"] / f"{candidate}.json"
+    if not grant_path.exists() or grant_path.is_symlink():
+        return candidate, None
+    grant = _read_private_json(grant_path, "report grant")
+    if (
+        grant.get("schema") != REPORT_SCHEMA
+        or grant.get("task_id") != state["task_id"]
+        or grant.get("attempt_id") != attempt_id
+        or not isinstance(grant.get("report_ids"), list)
+        or len(grant["report_ids"]) != 1
+    ):
+        return candidate, None
+    report_id = safe_id(str(grant["report_ids"][0]))
+    resolved = f"report-receipt-{report_id}"
+    resolved_path = paths["receipts"] / f"{resolved}.json"
+    if not resolved_path.exists() or resolved_path.is_symlink():
+        return candidate, None
+    receipt = _read_private_json(resolved_path, "report receipt")
+    if (
+        receipt.get("schema") != REPORT_SCHEMA
+        or receipt.get("task_id") != state["task_id"]
+        or receipt.get("gate") != gate
+        or receipt.get("attempt_id") != attempt_id
+        or receipt.get("invalidated")
+        or receipt.get("consumed_at")
+        or receipt.get("consumed_by_evidence_id")
+    ):
+        return candidate, None
+    return resolved, {"requested": candidate, "used": resolved, "reason": "context grant resolved to its unique report receipt"}
 
 
 def question_bus_paths(task_dir: Path) -> dict[str, Path]:
@@ -2079,11 +2149,11 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         baseline = capture_project_manifest(select_project_root(params))
         user_language = normalize_user_language(params.get("user_language"), params.get("objective", ""))
         task = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "objective": redact(params.get("objective", "")), "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "tracker_policy": TRACKER_POLICY, "created_at": now()}
-        state = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gate": pipeline[0], "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gate": pipeline[0], "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         write_json(task_dir / "task.json", task)
         write_json(task_dir / "baseline-manifest.json", baseline)
         write_json(state_path, state)
-        write_json(task_dir / "metrics.json", {"schema": SCHEMA, "task_id": task_id, "gate_outcomes": [], "evidence_count": 0, "delegation_count": 0, "retries": 0, "telemetry": []})
+        write_json(task_dir / "metrics.json", {"schema": SCHEMA, "task_id": task_id, "gate_outcomes": [], "evidence_count": 0, "delegation_count": 0, "retries": 0, "gate_recovery_failures": 0, "telemetry": []})
         report_paths = report_bus_paths(task_dir)
         write_json(report_paths["index"], {"schema": REPORT_SCHEMA, "task_id": task_id, "reports": [], "submissions": {}, "updated_at": now()})
         index = read_task_index(root)
@@ -3353,28 +3423,48 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     with state_lock(root):
         task_id = str(params["task_id"])
         attempt_id = safe_id(str(params.get("attempt_id", "")))
+        _, task_dir, initial_state = load_state(task_id, params)
+        authorize(initial_state, params)
         status_value = str(params.get("status", "passed")).strip().lower()
-        confirmed = None
-        if params.get("host_agent_id") or params.get("host_task_name"):
-            confirmed = confirm_host_spawn({**params, "attempt_id": attempt_id})
-            if confirmed.get("confirmed") is False:
-                return {
-                    "atomic": False,
-                    "attempt_id": attempt_id,
-                    "confirmed": confirmed,
-                    "report": None,
-                    "finalized": None,
-                    "state": confirmed["state"],
-                }
-        report_result = None
-        if isinstance(params.get("report"), dict):
-            report_result = record_report({**params, "attempt_id": attempt_id, "report": params["report"]})
-        state = (report_result or confirmed or status({"task_id": task_id, **params}))["state"]
-        final_params = {**params, "attempt_id": attempt_id, "expected_revision": state["revision"], "status": status_value}
-        if status_value != "passed" and not str(final_params.get("reason", "")).strip():
-            final_params["reason"] = "host adapter reported terminal non-success"
-        finalized = finalize_attempt(final_params)
-        return {"atomic": True, "attempt_id": attempt_id, "confirmed": confirmed, "report": report_result, "finalized": finalized, "state": finalized["state"]}
+        try:
+            confirmed = None
+            if params.get("host_agent_id") or params.get("host_task_name"):
+                confirmed = confirm_host_spawn({**params, "attempt_id": attempt_id})
+                if confirmed.get("confirmed") is False:
+                    return {
+                        "atomic": False,
+                        "attempt_id": attempt_id,
+                        "confirmed": confirmed,
+                        "report": None,
+                        "finalized": None,
+                        "state": confirmed["state"],
+                    }
+            report_result = None
+            if isinstance(params.get("report"), dict):
+                report_result = record_report({**params, "attempt_id": attempt_id, "report": params["report"]})
+            state = (report_result or confirmed or status({"task_id": task_id, **params}))["state"]
+            final_params = {**params, "attempt_id": attempt_id, "expected_revision": state["revision"], "status": status_value}
+            if status_value != "passed" and not str(final_params.get("reason", "")).strip():
+                final_params["reason"] = "host adapter reported terminal non-success"
+            finalized = finalize_attempt(final_params)
+            return {"atomic": True, "attempt_id": attempt_id, "confirmed": confirmed, "report": report_result, "finalized": finalized, "state": finalized["state"]}
+        except ValueError as exc:
+            _, current_task_dir, current_state = load_state(task_id, params)
+            attempt = _attempt(current_state, attempt_id)
+            recovery = _record_commit_gate_recovery(
+                current_task_dir,
+                current_state,
+                {**params, "gate": attempt.get("gate")},
+                "complete_attempt",
+                str(exc),
+            )
+            return {
+                "atomic": False,
+                "recorded": False,
+                "attempt_id": attempt_id,
+                "error": redact(str(exc), 1000),
+                **recovery,
+            }
 
 
 def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[str, Any], verified: bool = False, execution: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3527,12 +3617,18 @@ def record_evidence(params: dict[str, Any]) -> dict[str, Any]:
                     "state": state,
                 }
             resolved["report_receipt"] = receipts[0]["receipt_id"]
+        receipt_correction = None
+        if state.get("require_delegation") and resolved.get("report_receipt"):
+            resolved["report_receipt"], receipt_correction = _resolve_report_receipt_hint(
+                task_dir, state, resolved["gate"], resolved.get("attempt_id"), resolved["report_receipt"]
+            )
         result = _record_evidence_locked(task_dir, state, resolved)
         result["inferred"] = {
             "gate": params.get("gate") != resolved.get("gate"),
             "attempt_id": not bool(params.get("attempt_id")),
             "report_receipt": not bool(params.get("report_receipt")),
         }
+        result["receipt_correction"] = receipt_correction
         return result
 
 
@@ -3591,6 +3687,11 @@ def execute_verification(params: dict[str, Any]) -> dict[str, Any]:
                     "revision_correction": revision_correction,
                     "state": state,
                 }
+        receipt_correction = None
+        if state.get("require_delegation") and resolved.get("report_receipt"):
+            resolved["report_receipt"], receipt_correction = _resolve_report_receipt_hint(
+                task_dir, state, resolved["gate"], resolved.get("attempt_id"), resolved["report_receipt"]
+            )
         forbidden = {"argv", "command", "cwd", "env", "environment", "executable", "shell", "args"} & set(params)
         if forbidden:
             raise ValueError("verification commands accept only a fixed verification_id; caller-selected command, cwd, or environment is forbidden")
@@ -3619,6 +3720,7 @@ def execute_verification(params: dict[str, Any]) -> dict[str, Any]:
         result = _record_evidence_locked(task_dir, state, evidence_params, verified=True, execution={"argv": argv, "cwd": str(cwd.relative_to(base)), "stdout": stdout, "stderr": stderr, "exit_code": exit_code})
         result["execution"] = {"exit_code": exit_code, "stdout": redact(stdout, 4000), "stderr": redact(stderr, 4000)}
         result["revision_correction"] = revision_correction
+        result["receipt_correction"] = receipt_correction
         return result
 
 
@@ -3837,28 +3939,119 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
         return {"state": state, "revision_correction": revision_correction}
 
 
+def _record_commit_gate_recovery(
+    task_dir: Path,
+    state: dict[str, Any],
+    params: dict[str, Any],
+    mode: str,
+    error: str,
+) -> dict[str, Any]:
+    """Persist bounded fast-path failures so a bad adapter cannot hang a task."""
+    gate = str(params.get("gate") or state.get("current_gate") or "unknown")
+    reason = redact(error, 1000)
+    failure_key = digest_text(json.dumps({"gate": gate, "mode": mode, "error": reason}, sort_keys=True))
+    events = state.setdefault("recovery_events", [])
+    previous = [
+        item for item in events
+        if item.get("kind") == "commit_gate_failure" and item.get("failure_key") == failure_key
+    ]
+    gate_failures = [
+        item for item in events
+        if item.get("kind") == "commit_gate_failure"
+        and item.get("gate") == gate
+        and item.get("mode") == mode
+    ]
+    count = len(gate_failures) + 1
+    same_error_count = len(previous) + 1
+    terminal = count >= MAX_GATE_RECOVERY_FAILURES
+    event = {
+        "kind": "commit_gate_failure",
+        "failure_key": failure_key,
+        "gate": gate,
+        "mode": mode,
+        "count": count,
+        "same_error_count": same_error_count,
+        "error": reason,
+        "at": now(),
+        "terminal": terminal,
+    }
+    events.append(event)
+    if len(events) > MAX_GATE_RECOVERY_EVENTS:
+        del events[:-MAX_GATE_RECOVERY_EVENTS]
+    if terminal:
+        state["status"] = "blocked"
+        state["blocked_gate"] = gate
+        state["blocked_reason"] = f"commit_gate recovery budget exhausted: {reason}"
+        next_action = "create_handoff_and_resume_after_gate_repair"
+    elif "report receipt" in reason.lower() or "receipt" in reason.lower():
+        next_action = "repair_report_receipt_then_retry_commit_gate_once"
+    else:
+        next_action = "inspect_commit_gate_error_then_retry_once"
+    metrics_path = task_dir / "metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    metrics["gate_recovery_failures"] = int(metrics.get("gate_recovery_failures", 0)) + 1
+    write_json(metrics_path, metrics)
+    save_state(task_dir, task_dir / "current.json", state, "gate_recovery", f"{gate}: {reason}")
+    return {
+        "failure": event,
+        "recoverable": not terminal,
+        "terminal": terminal,
+        "retry_count": count,
+        "retry_limit": MAX_GATE_RECOVERY_FAILURES,
+        "next_action": next_action,
+        "state": state,
+    }
+
+
 def commit_gate(params: dict[str, Any]) -> dict[str, Any]:
-    """Fast path for server verification/evidence and the gate transition."""
+    """Fast path for server verification/evidence and the gate transition.
+
+    Validation failures are returned as bounded recovery data instead of
+    escaping as repeated MCP errors.  After three failures for the same
+    gate/mode the task is durably blocked, giving the coordinator a terminal
+    handoff path.
+    """
     root = ledger_root(params)
     with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize(state, params)
         mode = str(params.get("mode") or "verification").strip().lower()
         evidence = None
-        if mode == "verification":
-            evidence = execute_verification({**params, "gate": params.get("gate") or ""})
-            state = evidence["state"]
-            exit_code = evidence.get("execution", {}).get("exit_code")
-            outcome = str(params.get("outcome") or ("passed" if exit_code == 0 else "failed"))
-        elif mode == "documentation":
-            evidence_params = {**params, "gate": params.get("gate") or "documentation", "kind": "documentation"}
-            evidence = record_evidence(evidence_params)
-            state = evidence["state"]
-            outcome = str(params.get("outcome") or "passed")
-        else:
-            raise ValueError("commit_gate mode must be verification or documentation")
+        outcome = str(params.get("outcome") or "failed")
         try:
-            gate_result = record_gate({**params, "gate": params.get("gate") or state["current_gate"], "expected_revision": state["revision"], "outcome": outcome})
+            if mode == "verification":
+                evidence = execute_verification({**params, "gate": params.get("gate") or ""})
+                state = evidence["state"]
+                if evidence.get("recorded") is False:
+                    raise ValueError(str(evidence.get("reason") or "verification evidence was not recorded"))
+                exit_code = evidence.get("execution", {}).get("exit_code")
+                outcome = str(params.get("outcome") or ("passed" if exit_code == 0 else "failed"))
+            elif mode == "documentation":
+                evidence_params = {**params, "gate": params.get("gate") or "documentation", "kind": "documentation"}
+                evidence = record_evidence(evidence_params)
+                state = evidence["state"]
+                if evidence.get("recorded") is False:
+                    raise ValueError(str(evidence.get("reason") or "documentation evidence was not recorded"))
+                outcome = str(params.get("outcome") or "passed")
+            else:
+                raise ValueError("commit_gate mode must be verification or documentation")
+            gate_result = record_gate({
+                **params,
+                "gate": params.get("gate") or state["current_gate"],
+                "expected_revision": state["revision"],
+                "outcome": outcome,
+            })
         except ValueError as exc:
-            return {"recorded": False, "atomic": True, "mode": mode, "outcome": outcome, "error": redact(str(exc), 1000), "next_action": "inspect evidence and retry record_gate_outcome", "evidence": evidence, "state": state, "recoverable": True}
+            recovery = _record_commit_gate_recovery(task_dir, state, params, mode, str(exc))
+            return {
+                "recorded": False,
+                "atomic": True,
+                "mode": mode,
+                "outcome": outcome,
+                "error": redact(str(exc), 1000),
+                "evidence": evidence,
+                **recovery,
+            }
         return {"recorded": True, "atomic": True, "mode": mode, "outcome": outcome, "evidence": evidence, "gate": gate_result, "state": gate_result["state"]}
 
 

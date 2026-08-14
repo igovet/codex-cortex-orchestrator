@@ -269,6 +269,12 @@ or locks: `prepare_delegation`, `prepare_delegations` for independent
 same-wave workers (including multiple gates in `parallel_groups`),
 `complete_attempt`, `commit_gate`, and `close_audit`.
 Legacy calls remain available for older adapters and recovery.
+If a host adapter submits a unique context-grant id where a report receipt is
+expected, the server corrects it to the attempt-bound receipt. Other
+`commit_gate` and `complete_attempt` validation failures are persisted as
+bounded recovery events; after three failures for the same gate/mode, Cortex
+marks the task `blocked` and returns a handoff/resume action instead of
+allowing an active retry loop.
 Individual files are atomically replaced; the whole multi-file publication is
 not crash-atomic. Report bodies are task-bound and require an explicit
 per-attempt context grant. Hooks inject the report contract and internal-worker

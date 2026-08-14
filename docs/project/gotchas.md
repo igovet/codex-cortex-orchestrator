@@ -32,7 +32,9 @@
 - `principal` and `thread_id` are separate identity fields. Every coordinator
   call should send both. If a native call omits `principal`, Cortex may recover
   it only from the exact task-bound `thread_id`; an unrelated thread is
-  rejected.
+  rejected. The host's `/root` spelling is normalized to the durable `root`
+  coordinator principal when resuming a root task; other principal changes
+  remain authorization failures.
 - Every control-plane call for a real task must include its exact absolute
   `project_root`. Do not touch the project or dispatch a worker until
   activate → classify → `init_task` → `get_task_status` confirms
@@ -143,3 +145,13 @@
   `next_action: retry_create_handoff_with_complete_files`. The coordinator
   should add the reported paths and retry; no handoff state is written by the
   incomplete attempt.
+- `commit_gate` is a bounded recovery path. A unique context-grant id is
+  repaired to its attempt-bound report receipt, while an invalid or otherwise
+  unrecoverable gate proof is recorded in `state.recovery_events`. Three
+  failures for the same gate/mode terminalize the task as `blocked` and return
+  `create_handoff_and_resume_after_gate_repair`; do not keep retrying the same
+  request indefinitely.
+- `complete_attempt` uses the same bounded recovery ledger for malformed host
+  reports or terminalization payloads. A corrected payload may be submitted on
+  the same attempt; repeated failures for that gate/mode eventually block the
+  task instead of leaving an active worker forever.
