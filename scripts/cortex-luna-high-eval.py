@@ -49,7 +49,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     sequential = base / "sequential"
     sequential.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(sequential), "task": {"objective": "sequential Luna fixture"},
+        "project_root": str(sequential), "task": {"user_request": "sequential Luna fixture"},
     })
     completed = finish(sequential, current)
     scenarios.append({"name": "automatic_sequential", "outcome": completed["outcome"]})
@@ -57,7 +57,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     parallel = base / "parallel"
     parallel.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(parallel), "task": {"objective": "parallel Luna fixture", "complexity": "standard"},
+        "project_root": str(parallel), "task": {"user_request": "parallel Luna fixture", "complexity": "standard"},
         "waves": [{"workers": [{"phase": "research"}, {"phase": "architecture"}]}],
     })
     if len(current.get("dispatches") or []) != 2:
@@ -68,7 +68,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     blocked = base / "blocked"
     blocked.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(blocked), "task": {"objective": "blocked resume Luna fixture", "complexity": "C2"},
+        "project_root": str(blocked), "task": {"user_request": "blocked resume Luna fixture", "complexity": "C2"},
         "waves": [{"workers": [{"phase": "discover"}]}],
     })
     blocked_result = cortex.continue_orchestration({
@@ -98,7 +98,8 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
 def live_prompt(scenario: str, project: Path) -> str:
     common = (
         "Use the Cortex v3 MCP public tools to complete this isolated task. "
-        "You are the parent orchestrator. Use start_orchestration and one continue_orchestration per wave; "
+        "You are the parent orchestrator. Preserve the task text exactly in start_orchestration task.user_request, "
+        "and use one continue_orchestration per wave; "
         "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "
         "Read every ref with read_worker_report and advance with report_ref. "
         "and finish only after close evidence and handoff. Do not ask for manual argument corrections. "

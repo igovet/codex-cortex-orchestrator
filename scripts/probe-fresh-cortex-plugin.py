@@ -119,7 +119,7 @@ def main() -> int:
         workspace.mkdir()
         created = mcp_tool(server, environment, workspace, "start_orchestration", {
             "task": {
-                "objective": "verify the installed MCP workspace binding",
+                "user_request": "verify the installed MCP workspace binding",
                 "complexity": "C1", "requirements": [],
             },
             "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],

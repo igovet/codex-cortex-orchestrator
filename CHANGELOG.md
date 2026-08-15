@@ -6,6 +6,13 @@ same base version.
 
 ## [Unreleased]
 
+- Keep caller-correctable public `record_report` failures out of the private
+  MCP exception journal. Worker briefings now repeat the exact generated
+  predecessor/knowledge evidence markers next to the report protocol, and
+  report identity, acknowledgement, changed-path, harvest-manifest, and
+  payload corrections return structured `ok: false` diagnostics while genuine
+  ledger/server failures remain exceptions.
+
 - Simplify model routing around a strong Luna default: explorer is always Luna
   except hidden host fallback, planner and ordinary profiles default to Luna
   at exactly `max`, normal Terra selection ranges from `medium` through `max`,

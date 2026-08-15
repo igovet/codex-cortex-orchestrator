@@ -28,7 +28,9 @@ signal, never permission for the root to perform the work directly.
 ## Normal flow
 
 1. Call `start_orchestration` once with the exact absolute `project_root` and
-   the user's actual `task.objective`. Add requirements, acceptance criteria,
+   the user's exact, unexpanded text in `task.user_request`. Omit
+   `task.objective`; its compatibility form is accepted only when it exactly
+   matches `user_request`. Add requirements, acceptance criteria,
    scope, allowed paths, verification, budget, pause conditions, language, or
    complexity only when the user supplied them or they are established facts.
    Do not make an abstract request look decision-complete by inventing product
@@ -54,11 +56,15 @@ signal, never permission for the root to perform the work directly.
    `worker_question(action="ask")` when repository evidence cannot resolve a
    material user decision. It returns a compact `question_ref`; the worker
    sends only that ref and a concise question summary through the native parent
-   channel, remains available, and does not publish a report. The coordinator
-   surfaces the durable question with `manage_orchestration(intent="question")`,
-   obtains the user's answer, signals the same native worker, and that worker
+   channel, publishes no report, and finishes its native turn into an
+   idle/resumable state rather than busy-waiting. The coordinator calls
+   `manage_orchestration(intent="question", payload={"question_ref": "<exact
+   ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
+   the host-native question UI. Never ask the question in commentary/final
+   prose or guess an internal identity. After the answer is durably recorded,
+   resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
-   resuming. Never replace the worker or advance the wave for a question.
+   continuing. Never replace the worker or advance the wave for a question.
    After work completes, the worker publishes one strict `cortex/report/v1`
    through `record_report` and returns only
    `REPORT_RECORDED report_ref=<value>` plus at most a
@@ -66,6 +72,9 @@ signal, never permission for the root to perform the work directly.
    channel. When predecessor handoffs are supplied, they review all of them and
    include the generated `Predecessor review:` acknowledgement in report
    evidence; the report tool enforces complete acknowledgement.
+   A final report always has `questions: []`: material decisions must complete
+   the durable question lifecycle first, and non-blocking evidence gaps belong
+   in `uncertainty`.
 5. After all workers finish, read every ref with `read_worker_report`, evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
@@ -118,14 +127,19 @@ writer. Repeating a completed phase requires `rework: true`. Use
 `resource`, or `question`; these intents do not belong in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
-The question intent requests main-chat MCP UI elicitation through
-`elicitation/create` for the exact `question_ref` published by a worker. Every
+The question intent accepts only the worker's exact `question_ref` on the
+normal path, resolves all durable identity internally, and requests main-chat
+MCP UI elicitation through `elicitation/create`. Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;
 existing code is current-state evidence, not evidence of desired product
 intent. Cortex rejects `record_report` and `continue_orchestration` while a
-blocking question remains open. Lack of advertised host elicitation support is
-a host limitation, not permission to invent an answer.
+blocking question remains open, rejects any non-empty final report question
+list, and requires an answered blocking question before decision-bearing
+phases can complete when deterministic intent preflight marks a short product
+surface request as underspecified. Lack of advertised host elicitation support
+is a fail-closed host limitation, not permission to invent an answer or ask the
+question as an ordinary message.
 
 Project maintenance uses `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` only after the user

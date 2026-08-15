@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**3.3.0**. The public MCP surface has exactly six tools: three coordinator
+**4.0.4**. The public MCP surface has exactly six tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question` and `record_report`, and coordinator
@@ -168,12 +168,12 @@ for the new installation.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 3.3.0
+and secret-prone paths before validating the package again. The Cortex 4.0.4
 changes in this working tree are intentionally uncommitted, so
-`python3 scripts/verify-cortex-release.py --require-tracked` still validates the
-previous `HEAD` and fails its 3.3.0 package contract. Commit only with explicit
-authorization, then rerun the blocking check against that committed tree before
-any push, tag, or catalog submission.
+`python3 scripts/verify-cortex-release.py --require-tracked` cannot attest the
+mutable candidate. Commit only with explicit authorization, then rerun the
+blocking check against that committed tree before any push, tag, or catalog
+submission.
 
 See [release readiness](docs/release-readiness.md) for the external gates:
 verified public-manifest schema, confidential vulnerability reporting route,
@@ -242,10 +242,14 @@ each activation and task remains authorized only by its own
 unwritable, or mismatched root, a set `CORTEX_ROOT`, or a `/tmp` fallback fails
 closed before task state is created.
 
-The public normal flow has a narrow lifecycle plus scoped report transport. A minimal
-`start_orchestration` call contains only the absolute `project_root` and
-`task.objective`; complexity safely defaults to C2 and Cortex constructs the
-pipeline. Optional compact overrides use `waves[].workers[]`, where only
+The public normal flow has a narrow lifecycle plus scoped report transport. A
+minimal `start_orchestration` call contains only the absolute `project_root`
+and the user's exact, unexpanded text in `task.user_request`; complexity safely
+defaults to C2 and Cortex constructs the pipeline. This is a breaking 4.0.0
+contract. The deprecated `task.objective` may be omitted; when supplied for
+compatibility, it must match the trimmed `user_request` exactly. Cortex rejects
+coordinator paraphrase or expansion before any ledger write. Optional compact
+overrides use `waves[].workers[]`, where only
 `phase` is required, `depends_on` selects exact prerequisite phases, and
 `context_files` carries task-relevant project or feature documentation.
 Omitting `depends_on` supplies all verified predecessor reports; an empty list
@@ -258,7 +262,15 @@ needs no worker reference; a parallel wave uses only the returned slots
 `worker: 1..N`. Any worker can persist a material user decision through
 `worker_question`, pause without completing its attempt, receive the answer on
 the same `question_ref`, and resume the same native worker. Open blocking
-questions reject both report publication and wave continuation. Workers then
+questions reject both report publication and wave continuation. The
+coordinator passes only the opaque `question_ref` to
+`manage_orchestration(intent="question")`; Cortex resolves the task, attempt,
+profile, and native-thread identity and opens MCP elicitation. Guessed identity
+fields and a prose fallback fail closed. The worker ends its current native
+turn so it is idle and resumable; after the answer, the coordinator resumes
+that exact worker through `followup_task`, and the worker polls the same ref.
+Repeating question management for an already answered ref returns the durable
+answer without reopening the UI. Workers then
 persist all eight report sections with `record_report`,
 return only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
 summary (or the exact report-tool error), and the coordinator reads each ref
@@ -267,12 +279,24 @@ persistence, `manage_orchestration` inspect exposes the ref in
 `available_reports`. Slots and report refs are validated atomically
 before lifecycle state is written.
 
+Cortex deterministically marks a short, underspecified product-surface creation
+request for intent clarification. Repository evidence may support a useful
+question but cannot establish the user's desired product outcome. Discovery
+may gather bounded evidence; before plan or another decision-bearing phase can
+report completion, the worker must persist the smallest material question with
+`worker_question`, wait for the user's answer, poll it, and resume the same
+attempt. A sufficiently detailed product request does not receive this
+automatic hold, but material ambiguity discovered later still requires the
+same durable question lifecycle.
+
 Every task-bound lifecycle response returns an opaque `task_ref`. Preserve it
 on every later `continue_orchestration`, `manage_orchestration`, and
 `read_worker_report` call. Different task contracts may run concurrently below
-one project root; an exact duplicate active start is idempotent and explicitly
-returns `replayed: true` with no dispatches, while changed
-task or wave content creates a distinct task. If a later call omits the ref
+one project root. The same exact `task.user_request` cannot create a second
+active task merely because coordinator metadata or proposed waves differ: the
+start replays the existing `task_ref` with no dispatches. A different user
+request creates a distinct task. Replayed continue calls likewise return no
+dispatches and never authorize another wave. If a later call omits the ref
 while several tasks are selectable, Cortex returns `needs_selection` with
 opaque refs and objectives instead of guessing.
 
@@ -422,7 +446,11 @@ reason.
 
 Each worker writes exactly the `cortex/report/v1` fields—`summary`,
 `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
-and `next_action`—through public `record_report`. The operation stores sanitized authoritative JSON, creates
+and `next_action`—through public `record_report`. The final `questions` list
+must always be empty. Material questions are resolved through
+`worker_question` before publication; genuinely non-blocking evidence gaps
+belong in `uncertainty`. Cortex rejects a report that uses `questions` as an
+escape hatch. The operation stores sanitized authoritative JSON, creates
 a one-use attempt receipt, updates task- and delegation-scoped indexes, and
 generates an escaped Markdown view. Evidence consumption creates an
 irreversible `reports/consumptions/` tombstone; reconciliation may repair
@@ -436,10 +464,11 @@ to the current relative slot. Cortex privately creates
 the durable report receipt, evidence, gate transitions, reconciliation, and
 handoff. The coordinator waits for every native worker in the current wave
 before calling `continue_orchestration`.
-When predecessor handoffs are embedded in a dispatch, the worker reads every
-one before project work, reconciles relevant findings and conflicts against
-current evidence, and adds the generated `Predecessor review:` entry naming
-every supplied report ref to report evidence. Public `record_report` rejects
+Predecessor handoffs are passed as compact report refs rather than embedded
+report bodies. Before project work, the successor reads every granted ref
+through `read_worker_report`, reconciles relevant findings and conflicts
+against current evidence, and adds the generated `Predecessor review:` entry
+naming every supplied report ref to report evidence. Public `record_report` rejects
 an incomplete acknowledgement. Cortex also fails closed instead of silently
 dropping predecessor reports when the safe count or context-size budget is
 exceeded; narrow the dependency set with `depends_on`.
@@ -458,7 +487,13 @@ not crash-atomic. Report bodies are task-bound and require an explicit
 per-attempt context grant. Hooks inject the report contract and internal-worker
 routing only for an active, initialized task; they remain best-effort telemetry,
 not proof that the host spawned an agent.
-Report intake is bounded to 64 KiB and 100 list items per field; a task keeps
+Report intake is bounded to 64 KiB and 100 list items per field. Ordinary JSON
+writes are bounded by `MAX_JSON_BYTES` (8 MiB) and fail before replacement with
+an actionable diagnostic; manifests use the separate `MAX_MANIFEST_BYTES` (64
+MiB) bound. Baseline manifest preflight runs before task-directory creation,
+and handoff/reconciliation snapshot serialization remains bounded, so oversized
+artifacts fail closed instead of surfacing only at close. Task and operation
+ledger state also has an 8 MiB file limit. A task keeps
 at most 256 reports / 1 MiB aggregate, and telemetry retains at most 1,000
 events / 512 KiB. Ledger paths reject symlink ancestry and regular-file
 replacement targets, so coordination data cannot be redirected through a
@@ -468,11 +503,14 @@ symlink.
 
 Questions are durable for every worker profile. A worker calls
 `worker_question(action="ask")`, returns only `QUESTION_RECORDED` with the
-`question_ref` and a concise summary, remains available, and does not record a
-report. The main agent surfaces that exact ref with
-`manage_orchestration(intent="question")`, collects the user's answer, then
-signals the same worker to call `worker_question(action="poll")` and resume the
-same attempt. Its private payload commands remain `ask`, `publish`,
+`question_ref` and a concise summary, ends its native turn in an idle/resumable
+state, and does not record a report. The main agent passes only that exact ref
+to `manage_orchestration(intent="question")`; Cortex resolves lifecycle
+identity and opens native MCP elicitation. Identity guesses and prose fallback
+are rejected. After the answer, the coordinator uses `followup_task` to resume
+the exact same worker, which calls `worker_question(action="poll")` with the
+same ref and continues the same attempt. Duplicate management calls do not
+reopen the UI. Its private payload commands remain `ask`, `publish`,
 `list`, `answer`, and `updates`; server-owned management transactions hide
 their lifecycle identifiers from the normal coordinator path.
 
@@ -482,7 +520,10 @@ material product intent, behavior, audience, design direction, security,
 irreversibility, or external commitments must be asked. Existing source proves
 the current system, not the user's desired outcome. Cortex fails closed if a
 worker tries to report or the coordinator tries to continue while a blocking
-question remains open.
+question remains open. It also rejects a non-empty final report `questions`
+list. When deterministic preflight marks a short product-surface creation
+request as underspecified, plan and other decision-bearing phases cannot report
+completion until at least one blocking question has been answered.
 
 ## Prune maintenance
 
@@ -520,14 +561,25 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 3.3.0 source candidate has 237 passing Python tests in 15.491
-seconds; quick validation for the changed skills, plugin and marketplace
-validation, Python compilation, and shell syntax also pass. Cachebuster
-`3.3.0+codex.20260814224159` is installed and content-verified; installer check
-and dry-run pass with `agents.default_subagent_model=gpt-5.6-luna`. Cold-boot
-smoke, all three deterministic Luna-high fixtures, the eight-worker/five-wave
-benchmark target, and the isolated fresh-plugin probe also pass for 3.3.0.
-The earlier 3.2.x candidates remain historical evidence
-for historical comparison only. The live Luna-high route, tracked release,
-commit, tag, push, catalog publication, and
-public release remain unverified.
+The current 4.0.4 source candidate has 251 passing Python tests. File-size
+hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
+diagnostics, the separate 64 MiB manifest bound, early baseline preflight,
+bounded handoff/reconciliation snapshots, and fail-closed actionable errors for
+oversized artifacts. A copy-based migration compacted a 291212-byte legacy
+registry to 9624 bytes, and the generated Planner prompt measured 13679 bytes.
+Installed `cortex@cortex` as `4.0.4+codex.20260815083316` from the local
+marketplace; installed content matches the manifest, runtime, orchestrator and
+cortex-control skills, and planner profile. Installer check passed, its dry-run
+preserved `default_tools_approval_mode=approve`, and the exact user config
+section/value was confirmed. Plugin/marketplace validation, compilation,
+shell syntax, cold boot, deterministic Luna fixtures, the isolated fresh-plugin
+probe, and the 8-worker/5-wave composite benchmark passed; the benchmark
+reported 22 versus 50 calls (56% reduction). Live-model testing was skipped
+because `--live` was not supplied. The tracked-release archive remains blocked
+until the 4.0.4 tree is committed; no commit was made.
+Historical 4.0.0 evidence includes
+241 passing tests in 15.770 seconds, installed and content-verified cachebuster
+`4.0.0+codex.20260814231427`, installer check/dry-run, cold boot, deterministic
+fixtures, the benchmark, the isolated fresh-plugin probe, and the installed
+intent-hold probe; those results do not attest 4.0.2. No commit, tag, push,
+catalog publication, or public release is claimed.

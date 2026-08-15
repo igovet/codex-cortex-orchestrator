@@ -62,7 +62,7 @@ def run(base: Path) -> dict[str, object]:
     project, ledger = fixture(base)
     start_request = {
         "task": {
-            "objective": "prove a fresh JSON-RPC process can complete Cortex v3 by relative waves",
+            "user_request": "prove a fresh JSON-RPC process can complete Cortex v3 by relative waves",
             "complexity": "standard",
             "requirements": ["implementation, verification, documentation, and close invariants"],
             "acceptance_criteria": ["complete every planned wave"],
@@ -139,8 +139,12 @@ def run(base: Path) -> dict[str, object]:
             if not current.get("ok"):
                 raise AssertionError(f"continue failed: {current}")
         replay = rpc.tool("continue_orchestration", last_payload)
-        if replay != current:
-            raise AssertionError("final continue retry did not replay after completion")
+        if not replay.get("ok") or not replay.get("replayed"):
+            raise AssertionError("final continue retry did not return a replay receipt")
+        if replay.get("dispatches"):
+            raise AssertionError("final continue retry repeated native dispatches")
+        if replay.get("task_ref") != current.get("task_ref") or replay.get("status") != current.get("status"):
+            raise AssertionError("final continue retry lost the completed task identity")
         if not parallel_wave_seen:
             raise AssertionError("the smoke plan did not return a parallel dispatch wave")
 

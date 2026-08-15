@@ -205,11 +205,14 @@ should use canonical phases from the returned snapshot rather than guessing.
 
 ## Relative one-call-per-wave workflow
 
-1. Form the task objective from what the user actually said. Preserve material
-   ambiguity: do not fabricate product intent, requirements, audience, design
-   direction, behavior, or acceptance merely to make the dispatch look
-   complete. Include success criteria, constraints, paths, approval boundaries,
-   and user language only when supplied or already established. The coordinator owns the initial plan: it
+1. Copy the exact user-authored task text into `task.user_request`; never
+   paraphrase, normalize, summarize, or expand it. Omit `task.objective` (if
+   supplied for compatibility, Cortex requires it to match `user_request`
+   exactly). Preserve material ambiguity: do not fabricate product intent,
+   requirements, audience, design direction, behavior, or acceptance merely to
+   make the dispatch look complete. Include success criteria, constraints,
+   paths, approval boundaries, and user language only when supplied or already
+   established. The coordinator owns the initial plan: it
    may supply compact waves or consciously accept Cortex's safe standard C2
    proposal. In either case, treat the returned `pipeline` snapshot as the
    authoritative current coordinator plan.
@@ -222,10 +225,17 @@ should use canonical phases from the returned snapshot rather than guessing.
 4. Wait idly for the complete wave. Do not inspect or modify the project while
    any worker is active. Any profile may first publish a material question with
    `worker_question(action="ask")`. The worker returns only its `question_ref`
-   and a concise summary, remains available, and does not publish a report.
-   Surface that exact ref with `manage_orchestration(intent="question")`, ask
-   the user, then signal the same native worker to poll the answer and resume
-   the same attempt. Do not dispatch a replacement or advance the wave. Once
+   and a concise summary, publishes no report, and finishes its current native
+   turn into an idle/resumable state; it must not busy-wait for the user.
+   Call `manage_orchestration(intent="question", payload={"question_ref":
+   "<exact ref>"})` exactly once. That call must open the host-native question
+   UI; never restate the question as commentary or a final message, and never
+   guess task, principal, thread, attempt, or profile identifiers. After the UI
+   records the answer, use `followup_task` on the exact same native worker and
+   instruct it to poll the same ref before resuming the same attempt. Do not
+   dispatch a replacement or advance the wave. If native elicitation is
+   unavailable, keep the durable question open and report the host limitation
+   without asking the question as prose. Once
    complete, each worker publishes its strict eight-section
    `cortex/report/v1` through the scoped public `record_report` tool, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
@@ -303,6 +313,10 @@ itself.
 
 Every persisted report contains exactly `summary`, `findings`, `questions`,
 `changed_files`, `tests`, `evidence`, `uncertainty`, and `next_action`.
+The final `questions` list is always empty: material questions use the durable
+`worker_question` lifecycle before report publication, while genuinely
+non-blocking evidence limitations belong in `uncertainty`. Cortex rejects a
+report that uses `questions` as an escape hatch.
 `record_report` returns a compact `report_ref`; `read_worker_report` is the
 coordinator's bounded read path. A successful native worker response contains
 only that ref and a short summary. Non-success returns only a normalized status

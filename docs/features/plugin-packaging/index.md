@@ -20,6 +20,14 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, 21 registered profile files with structured playbooks, 13 validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, and sandbox parity plus complete automatic/manual route metadata, gates, and selection/avoidance guidance. The ordered implementation contract must route each of the eight specialist writers exactly once before the `general` fallback, and the generated root-skill catalog must exactly match `profiles.json`. It rejects nested marketplace artifacts, symlinks, and plugin-local `.codex/` runtime state. The installer re-registers the local plugin with a remove/add cycle; when present, it captures and restores the user's Cortex MCP `default_tools_approval_mode` override across that cycle and atomically enforces `[agents] default_subagent_model = "gpt-5.6-luna"`. A different default is privately backed up before replacement; comments, unrelated keys, and mode are preserved. Its `--check` mode is read-only and detects installed-content drift, missing or non-Luna global routing configuration, or managed legacy artifacts, while `--dry-run` reports the planned changes without writing. The fresh probe uses a copy of the root checkout with temporary `HOME` and `CODEX_HOME`; it prints `SKIP` if the CLI is absent. The tracked-release archive validator is blocking in CI and rejects runtime state, secret-prone paths, missing release policies, private local home paths in public documents, and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the exact six-tool v3 public surface—the three coordinator lifecycle operations plus worker `worker_question`/`record_report` and coordinator `read_worker_report`—and aligned plugin/server versions. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
 
+The 4.0.x package carries the breaking start contract introduced in 4.0.0:
+`start_orchestration.task.user_request` is required and preserves the exact
+user-authored text. Deprecated `task.objective` is only an exact compatibility
+mirror. The runtime also requires final report `questions: []` and routes
+material ambiguity through durable `worker_question`; deterministic preflight
+holds short underspecified product-surface creation requests until the user
+answers a blocking question.
+
 The marketplace validator also enforces the machine-readable shared worker
 contract: one strict eight-field report, worker-only `worker_question` and `record_report`, the three
 coordinator lifecycle operations, coordinator-only `read_worker_report`,
@@ -35,5 +43,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). For the current 3.3.0 candidate, 237 tests pass together with changed-skill quick validation, plugin and marketplace validation, Python compilation, and shell syntax. Cachebuster `3.3.0+codex.20260814224159` is installed and content-verified; installer check/dry-run, cold boot, all three deterministic Luna-high fixtures, the composite benchmark target, and the isolated fresh-plugin probe pass. Live-model, tracked-release, and publication checks remain unverified.
+Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). Current 4.0.4 evidence is 251 passing tests and installed `cortex@cortex` cachebuster `4.0.4+codex.20260815083316` from the local marketplace. Installed content matches source for the manifest, runtime, orchestrator/cortex-control skills, and planner profile. Plugin/marketplace validation, installer check/dry-run, compilation, shell syntax, cold boot, deterministic fixtures, isolated probe, and composite benchmark passed; live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest the patch candidate.
 <!-- GENERATED:END -->

@@ -15,27 +15,55 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Current Cortex 3.3.0 source evidence:
+Current Cortex 4.0.4 source evidence:
 
-- The full Python suite passed 237 tests in 15.491 seconds.
-- Quick validation passed for the changed `orchestrator` and `cortex-control`
-  skills; plugin and marketplace validation also passed.
-- Python compilation and shell syntax passed.
-- Cachebuster `3.3.0+codex.20260814224159` was generated, installed from this
-  repository, and content-verified. Installer check and dry-run pass with
-  `agents.default_subagent_model=gpt-5.6-luna`.
-- Cold boot passed with seven continues, eight reports, and a parallel wave;
-  all three deterministic Luna-high fixtures passed.
-- The eight-worker/five-wave composite benchmark met its target with a 56%
-  public-call reduction, and the isolated fresh-plugin probe passed on the
-  installed cachebuster.
-- No live-model, tracked-release, or publication result is claimed.
+- The full Python suite passed 251 tests.
+- File-size hardening passed: ordinary JSON writes use the bounded
+  `MAX_JSON_BYTES=8 MiB` limit with fail-before-replace diagnostics; manifests
+  use `MAX_MANIFEST_BYTES=64 MiB`; baseline preflight runs before task-directory
+  creation; and handoff/reconciliation snapshot serialization remains bounded.
+  Oversized artifacts fail closed with an actionable error rather than
+  surfacing at close.
+- A migration exercised on a copy compacted a 291212-byte legacy registry to
+  9624 bytes.
+- The generated Planner prompt measured 13679 bytes.
+- Installed `cortex@cortex` as `4.0.4+codex.20260815083316` from the local
+  marketplace. Installed content matches the source for the manifest,
+  `scripts/cortex.py`, orchestrator/cortex-control skills, and planner profile.
+  `./scripts/sync-cortex.sh --check` passed; its dry-run preserved
+  `default_tools_approval_mode=approve`, and the exact user configuration
+  section/value was confirmed.
+- Plugin and marketplace validation, Python compilation, and shell syntax
+  checks passed. Cold-boot smoke passed with seven continue calls, eight
+  reports, and a parallel wave. Deterministic Luna fixtures passed; live mode
+  was skipped because `--live` was not supplied. The 8-worker/5-wave composite
+  benchmark passed with 22 public MCP calls versus 50 legacy calls (56%
+  reduction), and the isolated fresh-plugin probe passed on 4.0.4.
+- The tracked-release archive check remains blocked because the 4.0.4 tree is
+  not committed; the current `HEAD` still contains the previous manifest. No
+  release commit was created.
+- No live-model, commit, tag, push, catalog submission, or publication is
+  verified.
+
+Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds;
+changed-skill, plugin, and marketplace validation; Python compilation and shell
+syntax; installed and content-verified cachebuster
+`4.0.0+codex.20260814231427`; installer check/dry-run; cold boot; deterministic
+fixtures; the composite benchmark; isolated fresh-plugin probe; and the
+installed intent-hold probe. Live execution was skipped because `--live` was
+not supplied. These results do not attest 4.0.2.
+
+Historical 3.3.0 evidence includes installed and content-verified cachebuster
+`3.3.0+codex.20260814224159`, 237 tests, changed-skill/plugin/marketplace
+validation, Python compilation, shell syntax, installer check/dry-run, cold
+boot, deterministic fixtures, the composite benchmark, and the isolated
+fresh-plugin probe. These results do not attest 4.0.2.
 
 Historical 3.2.1 evidence includes installed cachebuster
 `3.2.1+codex.20260814203024`, content-verified installer check with the Luna
 default, 220 tests, marketplace validation, cold boot, deterministic fixtures,
 the composite benchmark, isolated fresh-plugin probe, compilation, shell
-syntax, and installer dry-run. These results do not attest 3.3.0.
+syntax, and installer dry-run. These results do not attest 4.0.2.
 
 `cortex-cold-boot-smoke.py` is the v3 cold-boot smoke. It creates a fresh
 temporary Git project, drives the stdio JSON-RPC server through the public
@@ -50,8 +78,9 @@ regressions cover changed-payload conflicts, validation before writes,
 future-wave replacement/rework protection, every transaction checkpoint,
 multi-root isolation, and expected `ok: false` results that do not enter the
 exception log.
-For the current 3.3.0 candidate it completed successfully with seven continue
-calls, eight reports, and a parallel wave.
+For the historical 4.0.0 candidate it completed successfully with seven
+continue calls, eight reports, and a parallel wave. It has not been reported
+for 4.0.2.
 
 Coordinator-isolation regressions assert that `SessionStart` reasserts the
 root lock and that every public v3 `next_action`, including validation
@@ -59,18 +88,22 @@ failures, tells the root to avoid project inspection, edits, builds, and tests,
 dispatch only workers, and remain idle while they run. The installable skill
 contracts are also checked for the same coordination-only boundary.
 
-The question regression drives `manage_orchestration(intent="question")`
-through stdio JSON-RPC with the modern `extensions["openai/form"]` host
-capability enabled and proves that the server emits `elicitation/create` in
-`openai/form` mode and returns the answered result. The legacy capability bit
-remains covered for compatibility.
-This verifies the MCP/UI protocol path; a host without that capability is
-reported as unsupported and is not counted as a successful UI interaction.
+The question regressions drive `manage_orchestration(intent="question")`
+through stdio JSON-RPC with only the opaque `question_ref`. Cortex resolves the
+task, attempt, profile, and native-thread identity internally, emits one
+`elicitation/create` request in `openai/form` mode, and returns the durable
+answer. A duplicate call does not reopen the UI. Guessed identity fields are
+rejected, and a host without native elicitation support leaves the question
+open with an explicit no-prose-fallback action. Prompt coverage requires the
+worker to end its current native turn in an idle/resumable state, the
+coordinator to resume that exact worker through `followup_task`, and the worker
+to poll the same ref before continuing the same attempt. The legacy capability
+bit remains covered for compatibility.
 The Luna-high evaluation fixture covers sequential, compact parallel, and
 blocked/resume or reassessment scenarios. Its live harness is release evidence
 only when the Codex runtime is available; `SKIP` records missing live evidence,
 not a pass.
-The current deterministic run passed `automatic_sequential`,
+The historical 4.0.0 deterministic run passed `automatic_sequential`,
 `compact_parallel`, and `blocked_resume`; live execution remains unattempted
 because `--live` was not supplied.
 
@@ -81,7 +114,7 @@ finished with one active task, public v3 tools only, strict reports, server-
 observed close evidence, and handoff. The Codex JSON event stream did not expose
 an independent effective-model field, so the exact launch configuration is
 evidence of the requested runtime route, not a separate host-model attestation.
-This is historical runtime evidence and was not rerun for the current 3.3.0
+This is historical runtime evidence and was not rerun for the current 4.0.2
 candidate.
 
 `cortex-composite-benchmark.py` is a call-count contract benchmark, not a
@@ -92,8 +125,8 @@ report write/read pair per worker. Native host spawns are intentionally
 excluded because they remain host calls rather than MCP façade calls. Run it
 when changing the public lifecycle; it is not correctness or performance
 evidence.
-The current run reported 50 legacy calls and 22 relative-v3 calls, meeting the
-target with a 0.56 call-count reduction.
+The historical 4.0.0 run reported 50 legacy calls and 22 relative-v3 calls,
+meeting the target with a 0.56 call-count reduction.
 
 Facade validation regressions cover malformed requests and completions,
 including missing/relative roots, malformed compact waves, invalid reports,
@@ -110,8 +143,9 @@ temporary directory, uses temporary `HOME` and `CODEX_HOME`, installs it with fr
 processes, and checks that `cortex` is exposed. It reports
 `SKIP` when the Codex CLI is unavailable; treat that as an environment
 limitation, not plugin-registration evidence.
-The 3.3.0 isolated probe passed and observed installed version
-`3.3.0+codex.20260814224159`.
+The historical 4.0.0 isolated probe passed and observed source version `4.0.0`.
+The repository cachebuster was subsequently installed and content-verified as
+`4.0.0+codex.20260814231427`.
 
 The lane regression creates a real temporary Git repository, materializes a
 declared branch/worktree, reconciles branch and dirty state, and retires the
@@ -147,20 +181,34 @@ coordinator lifecycle operations, worker `worker_question` and `record_report`, 
 `report_ref` rather than an inline report body, that the coordinator can read
 and advance with a persisted exact eight-field report, and that inspect returns
 `available_reports` when native acknowledgement is interrupted after
-persistence. They also prove that a blocking material question rejects report
-publication and continuation, resumes the same attempt after an answer, and
-that confirmed prune removes only stale task-scoped state. Prompt-contract regressions require the worker's compact
+persistence. They also prove the ref-only native question lifecycle described
+above and that confirmed prune removes only stale task-scoped state. The 4.0.x facade
+requires exact `task.user_request`, rejects coordinator-expanded
+`task.objective` before ledger writes, and preserves the exact request in every
+worker briefing. It deterministically holds short underspecified
+product-surface creation requests until a blocking question is answered, while
+detailed requests proceed without the automatic hold. Report regressions
+require `questions: []`; material questions use `worker_question`, and
+non-blocking evidence gaps use `uncertainty`. Prompt-contract regressions require the worker's compact
 `REPORT_RECORDED report_ref=<value>` final and report-tool error fallback.
-Pipeline regressions also require coordinator authority in the returned
+Idempotency coverage proves that the same exact `task.user_request` cannot
+create a second active task when coordinator metadata or proposed waves differ,
+and that replayed start and continue responses contain no dispatches. Successor
+prompt coverage proves predecessor reports are passed as refs rather than
+embedded bodies, then read through public `read_worker_report`. Pipeline
+regressions also require coordinator authority in the returned
 snapshot and an explicit reason for a future-wave replacement; planner and
 explorer evidence remains advisory.
 
-The current 231-test suite exercises opaque `task_ref` isolation for multiple and
-concurrently started same-root tasks, exact duplicate-start replay, and
+The current 251-test suite exercises opaque `task_ref` isolation for multiple and
+concurrently started same-root tasks, same-request active-task replay, and
 `needs_selection` when an ambiguous call omits the ref. They also exercise
 phase-level `depends_on`, mandatory `Predecessor review:` evidence, public
 report rejection for an incomplete acknowledgement, and fail-closed
-predecessor-context overflow. Repository-knowledge cases verify automatic
+ref-based predecessor access. Task and operation ledger reads enforce an
+8 MiB file bound; migration coverage compacted a 291212-byte legacy registry
+to 9624 bytes in a copy. The Planner prompt regression measured 13679 bytes
+and remains below its bounded contract. Repository-knowledge cases verify automatic
 index injection, compact-worker `context_files`, required `Knowledge reviewed:`
 evidence, and rejection of unsafe context paths. Worker-report coverage also
 requires safe project-relative `changed_files`; explanatory text belongs in
@@ -194,7 +242,7 @@ matrix, feature-page depth, independent completeness review, zero unexplained
 unmapped surfaces, and no-change refresh pass. They also reject shallow feature
 indexes missing Coverage matrix columns, Inventory totals, Unmapped surfaces,
 Exclusions, or Known unknowns. These assertions are included in the current
-231-test result.
+251-test result.
 
 The v7 report regressions cover strict shape and redaction, task/attempt scope,
 one-use evidence receipts, explicit context grants, idempotent submissions,
@@ -226,18 +274,15 @@ private configuration backups, explicit override preservation, dry-run output,
 replacement of a different default while preserving comments and mode, and
 read-only check failures when the setting is missing or not Luna.
 
-The 2026-08-14 fresh-CLI proof used parent task
-`01a000fb-12ef-7631-a022-8076b6b6a828`. The first Cortex delegation selected
-`expected_model=gpt-5.6-luna`, `model_resolution=configured_default`, and
-`reasoning_effort=high`, with no `model` field. The persisted parent rollout
-likewise records a native `spawn_agent` call containing `task_name=explorer`
-and `reasoning_effort=high` but no `model` key. Its child edge points to
-`01a000fb-cd55-76c1-8922-484c710f6d6e` with `thread_source=subagent`; that
-child's persisted `thread_settings_applied` snapshot records
-`model=gpt-5.6-luna` and `reasoning_effort=high`. This runtime metadata, rather
-than worker self-report, is the acceptance evidence. The worker returned to
-the parent and no user-owned visible task was created.
-This proof predates the current 3.3.0 candidate and is not a fresh-install or
+The 2026-08-14 fresh-CLI proof selected `expected_model=gpt-5.6-luna`,
+`model_resolution=configured_default`, and `reasoning_effort=high`, with no
+`model` field. The persisted rollout likewise records a native `spawn_agent`
+call containing `task_name=explorer` and `reasoning_effort=high` but no `model`
+key. Its child snapshot records `model=gpt-5.6-luna` and
+`reasoning_effort=high`. This runtime metadata, rather than worker self-report,
+is the acceptance evidence. The worker returned to the parent and no
+user-owned visible task was created.
+This proof predates the current 4.0.4 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
@@ -253,9 +298,9 @@ It requires a committed `HEAD`. Without one, the non-blocking command reports
 `SKIP` and `--require-tracked` fails intentionally; neither result validates a
 release archive. Create the initial commit only with authorization and rerun
 the blocking command against the committed tree before publication.
-The tracked-release command has not been rerun for 3.3.0. The historical 3.2.1
-run was blocked because committed `HEAD` did not contain that uncommitted
-package contract; this is not release or publication evidence.
+The tracked-release command has not been reported for 4.0.4. Historical
+candidate results do not validate the current breaking package contract; this
+is not release or publication evidence.
 
 <!-- GENERATED:START -->
 

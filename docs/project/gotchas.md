@@ -9,9 +9,10 @@
   primitives below are private compatibility internals. Together with
   worker-only `worker_question`/`record_report` and coordinator-only
   `read_worker_report`, the public surface is exactly six tools.
-- Every public call requires the exact absolute `project_root`. Start needs
-  only `task.objective`; complexity defaults to C2. Compact wave overrides use
-  `waves[].workers[]`, with only `phase` required.
+- Every public call requires the exact absolute `project_root`. Start requires
+  the user's exact, unexpanded `task.user_request`; deprecated `task.objective`
+  is only an exact compatibility mirror. Complexity defaults to C2. Compact
+  wave overrides use `waves[].workers[]`, with only `phase` required.
 - Continue carries the prior response's relative `step`. A single result omits
   `worker`; a parallel wave must return every unique integer worker slot once.
   Stale, duplicate, missing, foreign, or changed retries fail before task-state
@@ -51,6 +52,11 @@
 - Explicit `context_files` are not arbitrary host paths. Cortex rejects
   absolute paths, traversal, missing entries, symlinks, and anything that is
   not an existing project-relative regular file.
+- Caller-correctable `record_report` failures (identity, generated evidence
+  acknowledgements, safe `changed_files`, harvest-manifest shape, or report
+  payload) return structured `ok: false` diagnostics and do not enter the
+  private exception journal. Genuine ledger/server corruption remains an
+  exception and is logged for diagnosis.
 - Idempotency is server-owned. Callers do not send submission, task, wave,
   attempt, coordinator identity, or host metadata. Preserve the returned opaque
   `task_ref` on every later lifecycle and report-read call. Exact duplicate

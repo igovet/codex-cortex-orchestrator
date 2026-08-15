@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 3.3.0 task ledger, staged waves,
+The local MCP server implements the Cortex 4.0.4 task ledger, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly six public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -19,9 +19,13 @@ details; existing v7 tasks are inspectable and resumable through the v3 adapter.
 
 ## Behavior and status
 
-`start_orchestration` accepts an absolute `project_root` and compact task
-contract, defaults complexity to safe C2, builds the standard pipeline when
-waves are omitted, and prepares the first wave. Each
+`start_orchestration` accepts an absolute `project_root` and requires the
+user's exact, unexpanded text in `task.user_request`. This is the breaking
+4.0.0 intent boundary. Deprecated `task.objective` is optional compatibility
+input and, when present, must match the trimmed `user_request` exactly;
+paraphrase or coordinator expansion is rejected before ledger writes. Cortex
+defaults complexity to safe C2, builds the standard pipeline when waves are
+omitted, and prepares the first wave. Each
 `continue_orchestration` call supplies the relative active-wave `step`, the
 opaque `task_ref`, and persisted worker `report_ref` values. A single-worker
 wave needs no slot; a parallel wave
@@ -39,11 +43,13 @@ part of normal wave progression. Host `spawn_agent` and user-authorized
 calls.
 
 Cortex returns `task_ref` on every task-bound lifecycle response. The
-coordinator preserves it on every later lifecycle and report-read call. Different task and
-wave contracts can run concurrently below one project root; an exact duplicate
-active start replays idempotently with `replayed: true` and no dispatches,
-while changed content creates a distinct
-task. Omitting the ref when several tasks are selectable returns
+coordinator preserves it on every later lifecycle and report-read call.
+Different task contracts can run concurrently below one project root. The same exact
+`task.user_request` cannot create another active task when only coordinator
+metadata or proposed waves differ: it replays the existing task with
+`replayed: true` and no dispatches. A different user request creates a distinct
+task. Replayed continue calls also return no dispatches and cannot authorize a
+duplicate wave. Omitting the ref when several tasks are selectable returns
 `needs_selection` with bounded objective/ref candidates. The project registry
 is lock-serialized so concurrent process starts do not overwrite one another.
 
@@ -74,7 +80,8 @@ criteria. Explicit coordinator-supplied objective, ownership, acceptance, or
 verification values override the corresponding gate defaults; omitted values
 are filled from the validated briefing registry. Context files and explicitly
 granted predecessor reports are included in the assignment so workers can
-ground their work without inventing missing context.
+ground their work without inventing missing context. A gate-level mission or
+proposed criterion never expands the preserved user-authored intent boundary.
 
 The `planner` profile is read-only and follows a repository-grounded,
 decision-complete workflow: it resolves discoverable facts, separates
@@ -85,6 +92,16 @@ scope or behavior. It may not turn recognized intent ambiguity into an
 assumption. Its plan must leave the implementer no unmade design decisions
 after those questions are answered and must cite evidence for consequential
 choices.
+
+A deterministic preflight recognizes short underspecified product-surface
+creation requests. It marks the task as requiring intent clarification and
+places the exact user request and blocking reason in every worker briefing.
+Discovery may gather bounded evidence needed to ask well, but plan and all
+other decision-bearing phases cannot report completion until a blocking
+`worker_question` has been answered and the same attempt resumes. A detailed
+request bypasses this automatic hold; material ambiguity discovered during
+work still uses the same question lifecycle. Existing project artifacts prove
+current state, not the user's desired outcome.
 
 Automatic implementation routing examines only bounded explicit signals in
 the task objective, requirements, acceptance criteria, scope, allowed paths,
@@ -109,17 +126,25 @@ the coordinator can audit routing without rewriting the host request.
 
 Every worker calls only `worker_question` and `record_report`. A material
 question is persisted with action `ask`; the worker returns only
-`QUESTION_RECORDED question_ref=<value>` plus a concise summary and remains
-available. The coordinator surfaces that ref in the main chat, records the
-user answer, and signals the same native worker to poll and resume the same
-attempt. Open blocking questions reject both report publication and wave
+`QUESTION_RECORDED question_ref=<value>` plus a concise summary, ends the
+current native turn, and becomes idle/resumable. The coordinator passes only
+that `question_ref` to `manage_orchestration(intent="question")`; Cortex
+internally resolves task, attempt, profile, and native-thread identity and
+opens native MCP elicitation. Guessed identity fields and prose fallback fail
+closed. After the answer, the coordinator resumes the exact worker through
+`followup_task`; the worker polls the same ref and continues the same attempt.
+Duplicate calls return the durable answer without reopening the UI. Open
+blocking questions reject both report publication and wave
 continuation. This applies to every profile, not only Planner. Repository facts
 are investigated, low-impact reversible choices may be documented, and
 material intent/product/security/irreversible decisions must not be guessed.
 
 After questions are resolved, every worker uses `record_report` to persist exactly `summary`,
 `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
-and `next_action`. Its successful native final is only
+and `next_action`. Final `questions` must be `[]`: material decisions complete
+the durable question lifecycle first, while genuinely non-blocking evidence
+limitations belong in `uncertainty`. Public report intake rejects a non-empty
+questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
 tool failure returns only the exact error. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
@@ -138,13 +163,13 @@ lane objects, project source/docs, and plugin content are preserved. Repeating
 prune is idempotent; Cortex intentionally has no clear-all route.
 
 Predecessor handoffs are an enforced worker contract. Omitted `depends_on`
-supplies every verified predecessor report, an explicit phase list selects only
-those completed or earlier-wave dependencies, and `[]` declares intentional
-independence. The generated prompt requires reconciliation of every supplied
-handoff and an exact generated `Predecessor review:` evidence marker containing
-all report refs; public `record_report` rejects incomplete acknowledgement.
-More than eight reports or a predecessor payload beyond the safe context budget
-fails closed with guidance to narrow `depends_on`, never by silently dropping
+supplies every verified predecessor report ref, an explicit phase list selects
+only those completed or earlier-wave dependencies, and `[]` declares
+intentional independence. Report bodies are not embedded in successor prompts:
+the worker reads every granted ref through `read_worker_report`, reconciles the
+handoffs, and emits an exact generated `Predecessor review:` evidence marker
+containing all refs. Public `record_report` rejects incomplete acknowledgement.
+Ref-based handoffs remain bounded and fail closed rather than silently dropping
 older reports.
 
 Codebase Memory is conditional worker tooling rather than a ledger dependency.
@@ -184,7 +209,12 @@ Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
 so reconciliation can repair derived receipts, indexes, and Markdown but
 cannot replay consumed evidence. A report is capped at 64 KiB and 100 list
 items per field; an attempt at 32 reports; a task at 256 reports and 1 MiB
-total; and an attempt at 256 context grants. Every call includes an absolute
+total; and an attempt at 256 context grants. Task and operation ledger files
+have an 8 MiB upper bound. Ordinary JSON writes use `MAX_JSON_BYTES=8 MiB` and
+fail before replacement with actionable diagnostics. Baseline manifest reads
+use `MAX_MANIFEST_BYTES=64 MiB`; preflight runs before task-directory creation,
+and handoff/reconciliation snapshot serialization remains bounded, so oversized
+artifacts fail closed rather than surfacing at close. Every call includes an absolute
 `project_root`; the same server process may serve multiple roots. Mutating v3
 operations use server-owned request-digest receipts tied to the internal
 active wave, so identical retries replay and changed or stale payloads
@@ -239,5 +269,5 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 3.3.0 evidence includes 237 passing tests, quick validation for the changed `orchestrator` and `cortex-control` skills, plugin and marketplace validation, Python compilation, shell syntax, installed and content-verified cachebuster `3.3.0+codex.20260814224159`, installer check/dry-run with the Luna default, cold boot, three deterministic Luna-high fixtures, the composite benchmark target, and the isolated fresh-plugin probe. The live model route, tracked release, and publication remain unverified. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.0.4 evidence is 251 passing tests and installed `cortex@cortex` cachebuster `4.0.4+codex.20260815083316`, with installed content matching source for the manifest, runtime, skills, and planner profile. Installer check/dry-run preserved the user's `default_tools_approval_mode=approve`; plugin/marketplace validation, compilation, shell syntax, cold boot, deterministic fixtures, isolated probe, and composite benchmark passed. Live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.0.4. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->
