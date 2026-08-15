@@ -13,7 +13,7 @@
     "question_route": "worker_publish_main_chat_ui_worker_poll",
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
-    "user_facing_language": "task_language_or_explicit_user_language",
+    "user_facing_language": "main_coordinator_only_task_language",
     "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"],
     "coordinator_operations": ["start_orchestration", "read_worker_report", "continue_orchestration", "manage_orchestration"],
     "worker_operations": ["worker_question", "record_report"],

@@ -66,6 +66,16 @@ an optional bounded list of source reports; omitted selects the latest bounded
 set. A follow-up against an active source fails closed so the coordinator uses
 normal active-task rework instead.
 
+Language is split between the user-facing coordinator and internal workers.
+The original user language is retained by the main coordinator only; every
+worker message, tool argument, report, question, handoff, and native final
+response is English. Durable worker questions remain English in the ledger.
+The main coordinator may provide `localized_question`, `localized_header`,
+`localized_options`, and `localized_custom_label` as transient UI projections
+in the user's language without changing the durable question. A `follow_up`
+task inherits the completed source task's `user_language`, while its workers
+still follow the same English-only internal boundary.
+
 Post-plan user review is controlled by `task.plan_approval`, which accepts
 `auto` or `required`. The default is `required` for C2/C3 and `auto` for C1;
 the C1 `auto` policy does not require user confirmation. A required plan must

@@ -1714,8 +1714,10 @@ class ControlPlaneTests(unittest.TestCase):
         prompt = delegation["spawn_request"]["message"]
         self.assertIn("Internal worker protocol: English only", prompt)
         self.assertEqual(prompt.count("Emit English only in every message"), 1)
-        self.assertIn("treat non-English task text as input data", prompt)
-        self.assertIn("User-facing language: ru", prompt)
+        self.assertIn("Treat non-English task text as input data", prompt)
+        self.assertIn("Never address the user", prompt)
+        self.assertNotIn("User-facing language:", prompt)
+        self.assertNotIn("user_language", delegation)
         self.assertIn("Use only tools actually available in this worker context", prompt)
         self.assertIn("mcp__codebase_memory__list_projects", prompt)
         self.assertIn(f"matching the exact root_path {str(self.project)!r}", prompt)
@@ -2224,6 +2226,68 @@ class ControlPlaneTests(unittest.TestCase):
             **identity, "report": self.v3_report("planned after answer"), "planning": self.v3_planning(),
         })
         self.assertTrue(published["ok"])
+
+    def test_v3_worker_outputs_must_be_english_while_main_question_projection_can_be_localized(self):
+        started = self.v3_start(
+            "Проверь локализацию внутренних сообщений",
+            user_language="ru",
+            waves=[{"workers": [{"phase": "plan"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+        rejected_report = control.publish_worker_report({
+            **identity,
+            "report": self.v3_report("Отчёт worker не должен быть на русском"),
+        })
+        self.assertFalse(rejected_report["ok"])
+        self.assertEqual(rejected_report["code"], "worker_output_language_violation")
+        with self.assertRaisesRegex(ValueError, "worker question must be English-only"):
+            control.worker_question({
+                **identity,
+                "action": "ask",
+                "question": "Какой результат нужен пользователю?",
+            })
+
+        asked = control.worker_question({
+            **identity,
+            "action": "ask",
+            "question": "Which result should the user receive?",
+            "header": "Desired result",
+            "options": ["Summary", "Detailed report"],
+        })
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            return_value=("accept", {"selection": "Краткая сводка", "custom_response": ""}, "localized-question-1"),
+        ) as elicitation:
+            managed = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "question",
+                "payload": {
+                    "question_ref": asked["question_ref"],
+                    "localized_question": "Какой результат должен получить пользователь?",
+                    "localized_header": "Нужный результат",
+                    "localized_options": ["Краткая сводка", "Подробный отчёт"],
+                    "localized_custom_label": "Свой вариант",
+                },
+            })
+        self.assertTrue(managed["ok"])
+        self.assertEqual(managed["outcome"], "question_answered")
+        self.assertEqual(elicitation.call_args.args[0], "Какой результат должен получить пользователь?")
+        durable = control.list_worker_questions({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "principal": state["principal"], "thread_id": state["thread_id"],
+        })["questions"][0]
+        self.assertEqual(durable["question"], "Which result should the user receive?")
+        self.assertEqual(durable["header"], "Desired result")
 
     def test_v3_question_ref_opens_native_ui_once_without_coordinator_identity(self):
         started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
@@ -2871,7 +2935,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_v3_follow_up_creates_a_linked_corrective_task_without_mutating_completed_source(self):
         source = self.v3_start(
-            "complete the source task before a corrective request",
+            "Заверши исходную задачу до корректирующего запроса",
             complexity="C1",
             waves=[{"workers": [{"phase": "discover"}]}],
         )
@@ -2934,6 +2998,7 @@ class ControlPlaneTests(unittest.TestCase):
         corrective_task = json.loads((corrective_dir / "task.json").read_text(encoding="utf-8"))
         self.assertEqual(corrective_task["follow_up"]["source_task_ref"], source["task_ref"])
         self.assertEqual(corrective_task["follow_up"]["source_report_refs"], [published["report_ref"]])
+        self.assertEqual(corrective_task["user_language"], "ru")
         prompt = follow_up["dispatches"][0]["arguments"]["message"]
         self.assertIn("Follow-up context: this corrective task is linked", prompt)
         self.assertIn(created_handoff["handoff_file"], prompt)
@@ -4638,7 +4703,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.2.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.2.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

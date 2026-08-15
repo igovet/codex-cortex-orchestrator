@@ -237,8 +237,14 @@ Configured-default Luna routes carry explicit effort but omit native `model`;
 explicit Luna/Terra/Sol selections retain it. If Luna is unavailable to the
 host, Cortex may use a hidden Terra fallback while preserving the selected
 effort. Expected routes are metadata, not proof of the effective host model.
-Only host-observed runtime metadata may attest actual models. Workers emit
-English only; the main coordinator localizes user-facing content.
+Only host-observed runtime metadata may attest actual models. The original
+user language is held by the main coordinator only. Workers emit English in
+every message, tool argument, report, durable question, handoff, and native
+final response. Durable worker questions remain English; the coordinator may
+pass `localized_question`, `localized_header`, `localized_options`, and
+`localized_custom_label` as user-language UI projections without altering the
+durable record. A corrective `follow_up` inherits the completed source task's
+user language, but workers retain the same English-only protocol.
 
 Generated worker briefings carry a bounded Codebase Memory contract. When the
 `mcp__codebase_memory__*` tools are actually available, workers resolve the

@@ -355,8 +355,16 @@ Expected routing is not host attestation; claim the actual model only from host
 runtime metadata.
 
 Workers remain internal, English-only, bounded to ownership and allowed paths,
-and cannot subdelegate without explicit authorization. The main coordinator
-alone communicates with and localizes for the user.
+and cannot subdelegate without explicit authorization. Emit English in every
+worker message, tool argument, report, durable question, handoff, and native
+final response; treat non-English task text as input data. The original user
+language belongs to the main coordinator, which alone communicates with and
+localizes for the user. For durable worker questions, keep the ledger content
+English and use only the coordinator's `localized_question`,
+`localized_header`, `localized_options`, and `localized_custom_label` fields
+for transient user-language UI projections. A `follow_up` task inherits the
+completed source task's user language while preserving this English-only
+worker boundary.
 
 When Codebase Memory tools are present, generated worker briefings require an
 exact-root `list_projects` match and prefer indexed architecture, graph search,

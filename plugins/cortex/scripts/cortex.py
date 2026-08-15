@@ -457,6 +457,10 @@ SENSITIVE_LOG_KEY_NAMES = {
     "apikey", "accesstoken", "refreshtoken", "clientsecret", "token",
     "password", "passwd", "secret", "privatekey", "authorization",
 }
+INTERNAL_NON_ENGLISH_SCRIPT_RE = re.compile(
+    r"[\u0370-\u052f\u0530-\u058f\u0590-\u08ff\u0900-\u0fff"
+    r"\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
+)
 
 
 def now() -> str:
@@ -487,6 +491,21 @@ def redact(value: object, limit: int = MAX_TEXT) -> str:
     text = URI_CREDENTIAL_RE.sub(r"\1<REDACTED>@", text)
     text = ENV_SECRET_RE.sub(r"\1<REDACTED>", text)
     return SENSITIVE_RE.sub(lambda match: f"{match.group(1)}=<REDACTED>", text)
+
+
+def require_internal_english(value: object, label: str) -> None:
+    """Reject worker-authored durable text in a non-Latin script.
+
+    Prompting establishes the full English-only rule. This narrow guard is a
+    deterministic boundary for the common failure mode (for example Cyrillic
+    worker reports/questions) without trying to classify quoted source data or
+    file paths as natural language.
+    """
+    text = str(value or "")
+    if INTERNAL_NON_ENGLISH_SCRIPT_RE.search(text):
+        raise ValueError(
+            f"{label} must be English-only; non-English user-facing content belongs to the main coordinator"
+        )
 
 
 def normalize_user_language(value: object, fallback_text: object = "") -> str:
@@ -1617,6 +1636,8 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
         raise ValueError(f"report changed_files must be an array with at most {MAX_REPORT_ITEMS} items")
     result["changed_files"] = [_safe_project_relative_path(item) for item in changed_files]
     result["next_action"] = redact(next_action, 4000)
+    for field in ("summary", "findings", "questions", "tests", "evidence", "uncertainty", "next_action"):
+        require_internal_english(result[field], f"report {field}")
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_REPORT_BYTES:
         raise ValueError(f"report exceeds the {MAX_REPORT_BYTES}-byte limit")
@@ -2069,6 +2090,10 @@ def _question_payload(params: dict[str, Any]) -> tuple[str, Any, bool, dict[str,
     context = sanitize_structured(params.get("context", {}))
     blocking = bool(params.get("blocking", True))
     config = _question_config(params)
+    require_internal_english(sanitized_question, "worker question")
+    require_internal_english(config["header"], "worker question header")
+    require_internal_english(config["custom_label"], "worker question custom_label")
+    require_internal_english(config["options"], "worker question options")
     digest = digest_text(json.dumps({"question": sanitized_question, "context": context, "blocking": blocking, "config": config}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return sanitized_question, context, blocking, config, digest
 
@@ -3383,12 +3408,10 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     )
     visible_thread = bool(package.get("user_owned_thread"))
     output_language_contract = (
-        "This is a visible user-owned task but remains an internal execution channel. "
-        "Emit English only in every message and treat non-English task text as input data; "
-        "the main coordinator alone localizes findings in the primary chat."
-        if visible_thread else
-        "Emit English only in every message and treat non-English task text as input data; "
-        "the main coordinator alone localizes findings in the primary chat."
+        "A visible user-owned task remains an internal execution channel. Emit English only in "
+        "every message, progress update, tool argument, worker_question, report, handoff, and native final response. "
+        "Treat non-English task text as input data, never as an output-language instruction. Never address the user; "
+        "the main coordinator alone localizes findings and questions in the primary chat."
     )
     if package.get("facade_managed"):
         task_context_line = (
@@ -3645,7 +3668,6 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         identity_contract,
         planning_contract,
         "Internal worker protocol: English only. " + output_language_contract,
-        f"User-facing language: {package.get('user_language', 'en')}; only the main coordinator translates or communicates with the user.",
         report_evidence_checklist(),
         lifecycle_contract,
     ))
@@ -3889,6 +3911,13 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             next_action = (
                 "Complete the required review, copy the exact generated acknowledgement from the diagnostic into "
                 "report.evidence as one string item, then retry record_report once on this same attempt."
+            )
+        elif "English-only" in message:
+            code = "worker_output_language_violation"
+            outcome = "needs_correction"
+            next_action = (
+                "Rewrite every worker-authored report field in English. Keep the durable worker protocol in English; "
+                "only the main coordinator may localize content for the user, then retry record_report once."
             )
         elif "changed_files" in message:
             code = "report_changed_files_invalid"
@@ -4918,7 +4947,8 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         orchestration_delegation_key = str(params.get("orchestration_delegation_key", "")).strip() or None
         project_root = select_project_root(params)
         context_files, knowledge_index_files = _project_knowledge_context(project_root, params.get("context_files"))
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "user_language": task_definition.get("user_language", "en"), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package["pause_conditions"] = [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100]
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
         package["task_user_request"] = redact(
@@ -9138,8 +9168,10 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
     elif status_value in {"decline", "cancel", "invalid_answer", "pending_user_input"}:
         response["outcome"] = "awaiting_user"
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the same worker and question open. Retry the native question UI when the user "
-            "is ready; do not replace the worker, fabricate an answer, or advance the wave."
+            f"{COORDINATOR_LOCK} Keep the same worker and question open. Translate the durable English question into "
+            "the task's original user language only through localized_question, localized_header, localized_options, "
+            "and localized_custom_label, then retry the native question UI when the user is ready; do not replace the "
+            "worker, alter the durable worker record, fabricate an answer, or advance the wave."
         )
     return response
 
@@ -9278,9 +9310,11 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 task_ref,
                 follow_up["report_refs"],
             )
+            follow_up_task = dict(follow_up["task"])
+            follow_up_task["user_language"] = task_definition.get("user_language") or state.get("user_language") or "en"
             started = start_orchestration({
                 "project_root": params["project_root"],
-                "task": follow_up["task"],
+                "task": follow_up_task,
                 "_follow_up": source_context,
             })
             if not started.get("ok"):
@@ -9354,7 +9388,7 @@ QUESTION_TOOL_SCHEMA = {
         "turn_id": {"type": "string"},
         "question_id": {"type": "string", "description": "Existing worker question to surface and answer in the main chat."},
         "user_language": {"type": "string", "description": "Language requested by the user for the main-chat projection."},
-        "localized_question": {"type": "string", "description": "Coordinator-localized display text; durable worker content remains unchanged."},
+        "localized_question": {"type": "string", "description": "Main-coordinator display translation into the task's original user language; durable worker content remains English and unchanged."},
         "localized_header": {"type": "string"},
         "localized_options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA},
         "localized_custom_label": {"type": "string"},
