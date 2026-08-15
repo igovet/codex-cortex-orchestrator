@@ -15,3 +15,17 @@ Do not pass raw transcripts by default. Create a compact handoff containing only
 6. Open questions, blockers, and next action.
 
 Use short summaries for older logs and reports. Preserve exact error output only when the next agent needs it to reproduce or diagnose the issue. Never summarize secrets into the handoff. The parent thread should integrate the handoff; do not depend on private host databases or resume a failed subagent session.
+
+## Cortex recovery after context reset or compaction
+
+When the coordinator resumes after automatic/manual compaction or a host
+`clear` context reset,
+do not assume that the active skill version, transient protocol reminders, or
+the last visible lifecycle response survived. Preserve the opaque `task_ref`
+and call `manage_orchestration` with `intent="inspect"` exactly once for that
+task. Treat the returned `context_handoff`, current pipeline, report refs, and
+relative step as the authoritative recovery snapshot. Do not call
+`start_orchestration` again, replay completed dispatches, or reconstruct state
+from a raw transcript. After rehydration, continue the existing task and
+publish every exact `report_markdown_link` before the next lifecycle or report
+read call.

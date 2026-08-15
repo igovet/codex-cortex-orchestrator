@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 4.1.0 task ledger, staged waves,
+The local MCP server implements the Cortex 4.3.0 task ledger, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly six public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -14,7 +14,7 @@ details; existing v7 tasks are inspectable and resumable through the v3 adapter.
 ## Key files and dependencies
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) implements task, report, and lane tools.
-- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, ordered implementation routing, 13 gate briefings, and the `cortex/report/v1` field contract.
+- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, 13 gate briefings, and the `cortex/report/v1` field contract.
 - [test_cortex_control.py](../../../tests/test_cortex_control.py) covers report-bus scoping/reconciliation and lane lifecycle behavior.
 
 ## Behavior and status
@@ -42,6 +42,14 @@ part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
 
+Cortex keeps each new v3 task on a generated task-local authorization identity.
+The synchronous `PostToolUse` hook separately binds its returned `task_ref` to
+the documented hook `session_id`; environment identity is only a compatibility
+hint. `SessionStart` handles `resume`, `clear`, and `compact` and exposes model
+context through `hookSpecificOutput.additionalContext`. If several active
+tasks share one host session, Cortex removes the session lookup until one task
+remains, so recovery context cannot be injected for the wrong task.
+
 Cortex returns `task_ref` on every task-bound lifecycle response. The
 coordinator preserves it on every later lifecycle and report-read call.
 Different task contracts can run concurrently below one project root. The same exact
@@ -64,12 +72,19 @@ workers receive those paths as historical evidence and must revalidate current
 source rather than treating old reports as authority. `payload.report_refs` is
 an optional bounded list of source reports; omitted selects the latest bounded
 set. A follow-up against an active source fails closed so the coordinator uses
-normal active-task rework instead.
+normal active-task rework instead. Repeating the exact follow-up request is an
+idempotent replay of the existing corrective task. If the coordinator had
+deactivated between attempts, Cortex restores the server-owned activation for
+that linked replay, returns the same opaque `task_ref`, and emits no duplicate
+dispatch. The coordinator must not reopen the completed source or expose an
+internal `/cortex` activation diagnostic to the user.
 
 Language is split between the user-facing coordinator and internal workers.
 The original user language is retained by the main coordinator only; every
 worker message, tool argument, report, question, handoff, and native final
-response is English. Durable worker questions remain English in the ledger.
+response is English. Hidden `spawn_agent` dispatches use `fork_turns: "none"`
+so a localized coordinator transcript cannot override that boundary. Durable
+worker questions remain English in the ledger.
 The main coordinator may provide `localized_question`, `localized_header`,
 `localized_options`, and `localized_custom_label` as transient UI projections
 in the user's language without changing the durable question. A `follow_up`
@@ -211,13 +226,34 @@ questions list. Its successful native final is only
 tool failure returns only the exact error. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
 never an inline report body. That read also returns Cortex's derived absolute
-`report_markdown_path` for `reports/markdown/<report-ref>.md`; after reading
-each completed report, the coordinator publishes a compact clickable Markdown
-link using that exact returned path, in addition to the concise summary and
-report review. The path must never be guessed, substituted, or used to browse
+`report_markdown_path` and the exact `report_markdown_link` for
+`reports/markdown/<report-ref>.md`; after reading each completed report, the
+coordinator immediately publishes that link verbatim as a compact clickable
+Markdown link before any other lifecycle call or additional report read. This
+is mandatory coordinator output, in addition to the concise summary and report
+review. The path must never be guessed, substituted, or used to browse
 unrelated files. If the worker is interrupted after persistence but before its
 acknowledgement, `manage_orchestration` inspect returns the compact entry in
 `available_reports`, including the same path, for recovery.
+
+### Context-compaction recovery
+
+`manage_orchestration(intent="inspect")` returns a bounded
+`cortex/context-handoff/v1` snapshot for a resumed or compacted coordinator.
+It is rebuilt from the durable task definition, state, pipeline, evidence, and
+report index and carries the goal, acceptance criteria, verified report refs
+and exact links, decisions, changed files, decisive checks, blockers, and
+next action. Preserve the opaque `task_ref`, inspect once after compaction,
+and continue the existing relative step. Cortex explicitly forbids restarting
+the task or replaying completed dispatches during this recovery.
+
+Native worker identity is separate from the canonical role label. Every
+dispatch keeps `profile` and `display_name` canonical, while
+`spawn_agent.task_name` is unique to the task and attempt. `followup_task` is
+reserved for the exact confirmed native worker being resumed; a reused
+`host_agent_id` is rejected for another attempt. Lifecycle hooks resolve the
+native task key (and its host aliases) back to the canonical profile before
+emitting worker context.
 
 `manage_orchestration(intent="prune")` is project-scoped maintenance and must
 omit `task_ref`. With exact `confirmation: "PRUNE"`, it removes task-scoped
@@ -310,12 +346,18 @@ evictions in `telemetry_dropped`.
 Multi-agent v2 is required for explicit per-worker model selection. `explorer`
 always selects Luna with coordinator-selected effort or a risk-based default;
 Terra is only its host-unavailable fallback. The accepted effort vocabulary
-ends at `max`. `planner` and all remaining non-security profiles default to Luna
-at exactly `max`, while the coordinator may normally choose Terra from `medium`
-through `max`. Luna `max` is the strong normal default, not a reason for
-reflexive escalation. Security context, the security gate, and
-`security_auditor` always select Sol with effort floors C1 `medium`, C2 `high`,
-and C3 `xhigh`, capped at `max`. Non-security Sol requires matching
+ends at `max`. The model contract classifies ordinary profiles as efficient,
+adaptive, or deep: efficient work uses Luna, deep profiles and
+`terra_task_kinds` entries use Terra. C2/C3 planning and those entries
+(including uncertain
+diagnosis, long-context, and integration-conflict work), plus high/critical
+failure cost, also use Terra; other low/moderate-risk adaptive work stays on
+Luna. Efficient Luna uses
+C1/C2/C3 `high`/`high`/`xhigh`, bounded adaptive Luna uses
+`high`/`xhigh`/`max`, and Terra uses `high`/`high`/`xhigh`, subject to the risk
+floor. Automatic `max` is limited to bounded C3 Luna work. Security
+context, the security gate, and `security_auditor` always select Sol with the
+complexity floors above. Non-security Sol requires matching
 `user_requested_model` and `requested_model` from an explicit user choice; old
 `sol_escalation`, auditable-extreme, failed-Terra, and model/effort-remap
 authorization is rejected. Configured-default Luna omits native `model`, while

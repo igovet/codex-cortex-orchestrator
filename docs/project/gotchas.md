@@ -108,6 +108,13 @@
 - Dispatch routing metadata is not part of the native host call. Read `phase`,
   `profile`, `capability`, `sandbox`, and `selection_reason` from the dispatch,
   then pass only `call` and its unchanged `arguments` to the native tool.
+  Hidden `spawn_agent` arguments intentionally include `fork_turns: "none"`;
+  do not replace it with inherited coordinator context.
+- Keep `profile` and `display_name` as the exact canonical role name. The native
+  `spawn_agent.task_name` is a task/attempt-unique session key, and hooks map
+  that key (or its confirmed host alias) back to the canonical profile. Use
+  `followup_task` only for that exact resumed worker; `host_agent_id` reuse is
+  rejected across attempts.
 - Once Cortex is active, the main/root agent is coordination-only. It must not
   inspect, search, read, edit, patch, build, test, or run the target project,
   even when a worker is delayed, fails, or is unavailable. Dispatch only the
@@ -115,6 +122,21 @@
   rework, or a blocker instead of taking over their project work. `SessionStart`
   and every public v3 `next_action` repeat this rule so compaction or a resumed
   turn does not weaken it.
+- After context compaction, do not trust the visible transcript or assume the
+  loaded skill cache is current. Preserve the opaque `task_ref`, call
+  `manage_orchestration(intent="inspect")` once, and rehydrate from its
+  `context_handoff`. It is ledger-derived recovery state, not a replacement
+  for the orchestrator skill; never restart the task or replay completed work.
+- New v3 starts use a generated task-local authorization identity, then the
+  synchronous Cortex `PostToolUse` hook binds the returned `task_ref` to the
+  documented event `session_id`. Explicitly forwarded `CODEX_SESSION_ID` or
+  `CODEX_THREAD_ID` values are compatibility hints only. `SessionStart` handles
+  `resume`, `clear`, and `compact`; if multiple active tasks share the session,
+  its lookup is removed until one remains rather than guessing.
+- Plugin installation and reload are operator-owned. After installation or an
+  update, start a fresh Codex thread; an existing thread may retain retired
+  cachebusted hook paths and will not load updated skills, hooks, or MCP tools
+  automatically.
 - Codebase Memory is worker-only and conditional. When its tools are present,
   call `list_projects` first and use only the project whose root exactly matches
   the task root; prefer graph, architecture, and trace operations, then confirm
@@ -260,14 +282,19 @@ private adapter. They are not valid public v3 request envelopes.
   loaded it; otherwise Cortex uses explicit Luna when supported and hidden
   Terra when it is not. `luna_fallback` defaults to and accepts only `terra`.
 - If a task is rejected with `orchestration is inactive`, explicitly select a
-  non-help Cortex skill route. The skill supplies the server's canonical
-  `/cortex` activation token.
+  non-help Cortex skill route. Use the Skills picker or `$cortex:orchestrator`;
+  never ask the user to send a bare `/cortex` token as a recovery command.
 - In Desktop, use the Skills picker or `$cortex:orchestrator`; in CLI, lead
   with `$cortex:orchestrator` or use `/skills` and select it.
   `$cortex:orchestrator normal` is
   the supported normal-mode route. Bare `/cortex` and `/normal` (including
   their arguments) are textual shorthand, not native slash-command
   registrations; a host may reserve them.
+- A completed-source `follow_up` is idempotent. If its existing corrective
+  task is replayed after a coordinator deactivation, the server restores the
+  task-scoped activation and returns the existing task without dispatching a
+  duplicate. Continue with that opaque `task_ref`; do not reopen the source or
+  expose an internal activation diagnostic.
 - Incremental harvest requires a current source-backed coverage manifest with
   zero unexplained gaps; absent, shallow, stale, or contradicted baselines
   trigger a full feature census rather than a recent-change scan. Large
@@ -292,10 +319,16 @@ private adapter. They are not valid public v3 request envelopes.
   revive a consumed receipt.
 - Routing is binding: `explorer` always selects Luna with coordinator-selected
   effort or the risk default; Terra is only its host-unavailable fallback.
-  The accepted effort vocabulary ends at `max`. `planner` and every remaining
-  non-security profile default to Luna at exactly `max`, while the coordinator
-  may normally choose Terra from `medium` through `max`. Luna `max` is already a
-  powerful default and should not be escalated reflexively.
+  Security always selects Sol. The machine-validated ordinary policy classifies
+  profiles as efficient, adaptive, or deep: efficient work uses Luna, deep
+  profiles use Terra, and adaptive work uses Luna for low/moderate-risk
+  work without a `terra_task_kinds` trigger. C2/C3 planning, uncertain
+  diagnosis, long context, integration conflict, and high/critical failure cost
+  use Terra.
+  Efficient Luna uses `high`/`high`/`xhigh`, bounded adaptive Luna uses
+  `high`/`xhigh`/`max`, and Terra uses `high`/`high`/`xhigh` across C1/C2/C3.
+  Automatic `max` is limited to bounded C3 Luna work. Explicit Luna/Terra overrides
+  cannot lower the computed effort floor.
 - Host model confirmation is strict: an `advance` completion must include the
   actual `host_model`. Cortex verifies it against `expected_model`, even when
   a configured-default request intentionally omitted native `model`; explicit

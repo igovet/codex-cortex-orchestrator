@@ -13,12 +13,12 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates the root-only marketplace and plugin contract.
 - [sync-cortex.sh](../../../scripts/sync-cortex.sh) validates sources, registers the local marketplace, supports a read-only `--check`, and offers a no-write `--dry-run` preview.
 - [probe-fresh-cortex-plugin.py](../../../scripts/probe-fresh-cortex-plugin.py) tests fresh isolated CLI registration when the Codex CLI is available.
-- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical profile, routing, and generated-catalog contract validated against the bundled TOML files and orchestration skill.
+- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical profile, adaptive model/effort routing, implementation routing, and generated-catalog contract validated against the bundled TOML files and orchestration skill.
 - [feature-census.md](../../../plugins/cortex/skills/knowledge-harvest/references/feature-census.md) defines the bundled exhaustive inventory, coverage-matrix, feature-page, and harvest failure contract.
 
 ## Behavior and status
 
-The current source manifest and server declare plugin version `4.2.2`; the
+The current source manifest and server declare plugin version `4.3.0`; the
 recorded 4.0.4 verification evidence below does not attest this current
 source candidate.
 

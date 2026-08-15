@@ -8,6 +8,7 @@ import os
 import stat
 import tomllib
 from pathlib import Path
+from typing import NoReturn
 
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,7 @@ EXPECTED_PLUGIN = "cortex"
 EXPECTED_SKILLS = {"adaptive-pipeline", "content-safety", "context-compaction", "orchestrator", "cortex-control", "documentation-sync", "find-skills", "knowledge-harvest", "output-validation", "token-monitoring"}
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise SystemExit(f"marketplace validation failed: {message}")
 
 
@@ -110,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "4.2.2":
-        fail("plugin manifest must identify cortex at release version 4.2.2")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "4.3.0":
+        fail("plugin manifest must identify cortex at release version 4.3.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:
@@ -140,6 +141,66 @@ def main() -> int:
             fail(f"manual profile must be implementation-selected: {item.get('name')}")
         if not all(isinstance(item.get(field), str) and item[field].strip() for field in ("description", "select_when", "avoid_when")):
             fail(f"incomplete profile routing text: {item.get('name')}")
+    profile_names = {item["name"] for item in profile_contract["profiles"]}
+    model_routing = profile_contract.get("model_routing")
+    if not isinstance(model_routing, dict) or model_routing.get("schema") != "cortex/model-routing/v1":
+        fail("profile contract must define the Cortex model-routing policy")
+    if model_routing.get("configured_default_model") != "gpt-5.6-luna":
+        fail("model routing must keep Luna as the configured hidden-agent default")
+    if model_routing.get("max_policy") != "bounded_complex_work":
+        fail("model routing must reserve automatic max for bounded complex Luna work")
+    if model_routing.get("security", {}).get("model") != "gpt-5.6-sol":
+        fail("security model routing must select Sol")
+    if model_routing.get("explorer", {}).get("model") != "gpt-5.6-luna":
+        fail("explorer model routing must select Luna")
+    profile_classes = model_routing.get("profile_classes")
+    if not isinstance(profile_classes, dict) or set(profile_classes) != {"efficient", "adaptive", "deep"}:
+        fail("model routing must define efficient, adaptive, and deep profile classes")
+    if any(
+        not isinstance(members, list)
+        or not members
+        or not all(isinstance(name, str) for name in members)
+        for members in profile_classes.values()
+    ):
+        fail("model profile classes must contain non-empty profile-name lists")
+    classified_profiles = [name for members in profile_classes.values() for name in members]
+    if (
+        len(classified_profiles) != len(set(classified_profiles))
+        or set(classified_profiles) != profile_names - {"explorer", "security_auditor"}
+    ):
+        fail("model profile classes must cover every ordinary profile exactly once")
+    supported_efforts = {"low", "medium", "high", "xhigh"}
+    luna_bounded_effort = model_routing.get("luna_bounded_effort_by_complexity")
+    luna_efficient_effort = model_routing.get("luna_efficient_effort_by_complexity")
+    terra_effort = model_routing.get("terra_effort_by_complexity")
+    effort_floor_by_risk = model_routing.get("effort_floor_by_risk")
+    security_effort = model_routing.get("security", {}).get("effort_by_complexity")
+    explorer_effort = model_routing.get("explorer", {}).get("effort_by_risk")
+    if luna_bounded_effort != {"C1": "high", "C2": "xhigh", "C3": "max"}:
+        fail("bounded Luna routing must define high/xhigh/max complexity effort")
+    if not isinstance(luna_efficient_effort, dict) or set(luna_efficient_effort) != {"C1", "C2", "C3"}:
+        fail("efficient Luna routing must define every complexity effort floor")
+    if not isinstance(terra_effort, dict) or set(terra_effort) != {"C1", "C2", "C3"}:
+        fail("Terra routing must define every complexity effort floor")
+    if not isinstance(effort_floor_by_risk, dict) or set(effort_floor_by_risk) != {"low", "moderate", "high", "critical"}:
+        fail("model routing must define every risk effort floor")
+    if not isinstance(security_effort, dict) or set(security_effort) != {"C1", "C2", "C3"}:
+        fail("security routing must define every complexity effort floor")
+    if not isinstance(explorer_effort, dict) or set(explorer_effort) != {"low", "moderate", "high", "critical"}:
+        fail("explorer routing must define every risk effort default")
+    if any(
+        not set(mapping.values()).issubset(supported_efforts)
+        for mapping in (luna_efficient_effort, terra_effort, effort_floor_by_risk, security_effort, explorer_effort)
+    ):
+        fail("non-bounded automatic model-routing effort maps must not contain unsupported or max effort")
+    terra_task_kinds = model_routing.get("terra_task_kinds")
+    if (
+        not isinstance(terra_task_kinds, list)
+        or not terra_task_kinds
+        or not all(isinstance(kind, str) and kind and kind.replace("_", "").isalnum() for kind in terra_task_kinds)
+        or len(terra_task_kinds) != len(set(terra_task_kinds))
+    ):
+        fail("model routing must define unique Terra trigger task kinds")
     expected_gates = {
         "plan", "discover", "architecture", "database_architecture", "implementation",
         "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",

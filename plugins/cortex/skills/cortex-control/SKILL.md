@@ -51,7 +51,10 @@ signal, never permission for the root to perform the work directly.
    `sandbox`, and `selection_reason` against the latest worker evidence and
    the canonical roster in `cortex:orchestrator`. Arguments contain only
    native host parameters. Never add ledger IDs or copy an expected model into
-   a missing native `model` field.
+   a missing native `model` field. Hidden `spawn_agent` dispatches must retain
+   the returned `fork_turns: "none"`: the generated Cortex briefing is the
+   complete worker context, and inheriting the coordinator transcript can leak
+   localized user-language messages into the English-only worker channel.
 4. Workers do not call lifecycle operations. Any worker may call
    `worker_question(action="ask")` when repository evidence cannot resolve a
    material user decision. It returns a compact `question_ref`; the worker
@@ -78,11 +81,12 @@ signal, never permission for the root to perform the work directly.
 5. After all workers finish, read every ref with `read_worker_report`. Each
    result includes Cortex's derived absolute `report_markdown_path` for the
    persisted `reports/markdown/<report-ref>.md` artifact. After reading each
-   completed report, publish a compact clickable Markdown link in the main chat
-   using that exact returned path, for example
-   `[Report <phase> — <report_ref>](<path>)` when needed for spaces. The link
-   supplements the concise summary and report review. Never guess, substitute,
-   or use the path to browse unrelated files. Then evaluate
+   completed report, immediately publish the returned `report_markdown_link`
+   verbatim as a compact clickable Markdown link in the main chat, before any
+   other lifecycle call or additional report read. This is mandatory coordinator
+   output, not optional metadata. The link supplements the concise summary and
+   report review. Never guess, substitute, or use the path to browse unrelated
+   files. Then evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
    prior response, and all `report_ref` results. A single result needs no worker reference.
@@ -93,6 +97,18 @@ signal, never permission for the root to perform the work directly.
 6. Repeat one continue per completed wave. Finish only when `outcome` is
    `completed`; Cortex has then reconciled reports, evidence, documentation,
    close verification, the manifest, and handoff.
+
+### Recovery after context reset or compaction
+
+If the host compacts or clears the conversation, or resumes the task with a new context
+window, or the coordinator no longer has the exact Cortex protocol in active
+context, preserve the opaque `task_ref` and call
+`manage_orchestration(intent="inspect")` exactly once for that task. Use the
+returned `context_handoff`, current pipeline, report refs, and relative step
+as the authoritative recovery snapshot. Do not call `start_orchestration`
+again, replay completed dispatches, or reconstruct state from a raw
+transcript. After rehydration, continue the existing task and publish every
+exact `report_markdown_link` before the next lifecycle or report-read call.
 
 ### Required post-plan approval
 
@@ -214,18 +230,23 @@ weekly; do not use an unbounded clear operation.
 
 ## Dispatch and evidence policy
 
-Use the simplified model policy. `explorer` always selects Luna; the
-coordinator chooses its effort, with the risk-based default used when omitted,
-and Terra is permitted only as the hidden host-unavailable fallback.
-The complete effort vocabulary is `low`, `medium`, `high`, `xhigh`, and `max`;
-never request another value. `planner` defaults to Luna at exactly `max`, and
-the coordinator may normally select Terra from `medium` through `max`. Every
-remaining non-security profile has the same exact Luna `max` default and normal
-Terra `medium`-through-`max` override. Luna `max` is already a powerful default;
-do not escalate it reflexively. Security context, the security gate, and
-`security_auditor` always select Sol, with minimum effort `medium` for C1,
-`high` for C2, and `xhigh` for C3, capped at `max`. Non-security Sol is accepted
-only when the user explicitly selected it.
+Use the adaptive model policy defined in `profiles.json`. `explorer` always
+selects Luna; the coordinator chooses its effort, with the risk-based default
+used when omitted, and Terra is permitted only as the hidden host-unavailable
+fallback. Security context, the security gate, and `security_auditor` always
+select Sol, with minimum effort `medium` for C1, `high` for C2, and `xhigh` for
+C3. Ordinary profiles are divided into efficient, adaptive, and deep classes.
+Efficient work uses Luna. Deep profiles use Terra. Adaptive work stays on Luna
+for low/moderate-risk work when no `terra_task_kinds` trigger is present.
+C2/C3 planning, uncertain diagnosis, long-context or integration-conflict
+work, and high/critical failure cost use Terra. Efficient Luna uses C1/C2/C3
+`high`/`high`/`xhigh`; bounded adaptive Luna uses `high`/`xhigh`/`max`; Terra
+uses `high`/`high`/`xhigh`. Risk floors remain low/moderate `medium`, high
+`high`, critical `xhigh`. The complete vocabulary is `low`, `medium`, `high`,
+`xhigh`, and `max`; never request another value. Automatic `max` is limited to
+bounded C3 Luna work. A coordinator may explicitly override an
+ordinary route between Luna and Terra, but cannot lower its effort floor.
+Non-security Sol is accepted only when the user explicitly selected it.
 Set compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
 Cortex records matching `user_requested_model` and `requested_model`.
 Coordinator preference, an earlier Terra failure, and auditable-extreme labels

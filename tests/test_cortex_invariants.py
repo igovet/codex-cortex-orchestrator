@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -602,7 +603,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_numbered_task_hook_resolution(self):
         created = self.init(task_id="hooked")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "PostToolUse", "thread_id": "owner", "tool_name": "Agent"}
+        event = {"hook_event_name": "PostToolUse", "session_id": "owner", "tool_name": "Agent"}
         completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         self.assertEqual(completed.stdout.strip(), "{}")
         lifecycle = self.ledger / "tasks" / created["task_directory"] / "lifecycle-events.jsonl"
@@ -612,7 +613,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_session_hook_reasserts_root_coordinator_lock(self):
         self.init(task_id="coordinator-lock")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "SessionStart", "thread_id": "owner"}
+        event = {"hook_event_name": "SessionStart", "session_id": "owner"}
         completed = subprocess.run(
             [sys.executable, str(hook)],
             input=json.dumps(event),
@@ -621,10 +622,97 @@ class OrchestrationInvariantTests(unittest.TestCase):
             env=os.environ.copy(),
             check=True,
         )
-        context = json.loads(completed.stdout)["additionalContext"]
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("COORDINATOR LOCK", context)
         self.assertIn("must not inspect", context)
         self.assertIn("Remain idle while workers run", context)
+
+    def test_session_hook_accepts_legacy_thread_id_alias(self):
+        self.init(task_id="legacy-session-hook")
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        completed = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({"hook_event_name": "SessionStart", "thread_id": "owner"}),
+            text=True,
+            capture_output=True,
+            env=os.environ.copy(),
+            check=True,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertIn("COORDINATOR LOCK", payload["hookSpecificOutput"]["additionalContext"])
+
+    def test_compact_session_hook_reasserts_durable_recovery(self):
+        self.init(task_id="compact-recovery")
+        public_ref = control._v3_task_ref("compact-recovery")
+        (self.ledger / "v3-operations.json").write_text(
+            json.dumps({
+                "schema": "cortex/orchestration/v3",
+                "tasks": {"compact-recovery": {"start": {"task_ref": public_ref}}},
+            }),
+            encoding="utf-8",
+        )
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        event = {"hook_event_name": "SessionStart", "session_id": "owner", "source": "compact"}
+        completed = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            env=os.environ.copy(),
+            check=True,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("CONTEXT RECOVERY", context)
+        self.assertIn("manage_orchestration(intent='inspect'", context)
+        self.assertIn(f"task_ref={public_ref!r}", context)
+        self.assertIn("exactly once", context)
+        self.assertIn("report_markdown_link", context)
+        self.assertIn("Do not call start_orchestration again", context)
+
+    def test_read_worker_report_hook_reasserts_exact_main_chat_link(self):
+        self.init(task_id="report-publication")
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        link = "[qa report](</workspace/.codex/cortex/tasks/task-001/reports/qa.md>)"
+        event = {
+            "hook_event_name": "PostToolUse",
+            "session_id": "owner",
+            "cwd": str(self.project),
+            "tool_name": "mcp__cortex__read_worker_report",
+            "tool_input": {"project_root": str(self.project)},
+            "tool_response": {"structuredContent": {
+                "schema": "cortex/orchestration/v3",
+                "ok": True,
+                "report_markdown_link": link,
+            }},
+        }
+        completed = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            env=os.environ.copy(),
+            check=True,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("REPORT PUBLICATION REQUIRED", context)
+        self.assertIn(link, context)
+
+    def test_hook_manifest_covers_clear_and_cortex_post_tool_contracts(self):
+        manifest = json.loads(
+            (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("clear", manifest["hooks"]["SessionStart"][0]["matcher"])
+        matcher = manifest["hooks"]["PostToolUse"][0]["matcher"]
+        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__start_orchestration"))
+        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__manage_orchestration"))
+        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_report"))
 
     def test_lifecycle_hook_commands_fail_open_when_a_retired_cache_path_disappears(self):
         manifest = json.loads(
@@ -660,7 +748,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         victim.write_text("unchanged\n", encoding="utf-8")
         (task_dir / "lifecycle-events.jsonl").symlink_to(victim)
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "PostToolUse", "thread_id": "owner", "tool_name": "Agent"}
+        event = {"hook_event_name": "PostToolUse", "session_id": "owner", "tool_name": "Agent"}
         completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         self.assertEqual(completed.stdout.strip(), "{}")
         self.assertIn("warning: ValueError", completed.stderr)
@@ -668,13 +756,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_worker_hook_forces_main_chat_return_route(self):
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        inactive_event = {"hook_event_name": "SubagentStart", "thread_id": "worker", "agent_type": "explorer"}
+        inactive_event = {"hook_event_name": "SubagentStart", "session_id": "worker", "agent_type": "explorer"}
         inactive = subprocess.run([sys.executable, str(hook)], input=json.dumps(inactive_event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         self.assertEqual(inactive.stdout.strip(), "{}")
         self.init(task_id="worker-context")
-        active_event = {"hook_event_name": "SubagentStart", "thread_id": "owner", "agent_type": "explorer"}
+        active_event = {"hook_event_name": "SubagentStart", "session_id": "owner", "agent_type": "explorer"}
         completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(active_event), text=True, capture_output=True, env=os.environ.copy(), check=True)
-        context = json.loads(completed.stdout)["additionalContext"]
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SubagentStart")
+        context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("internal worker, never user-facing", context)
         self.assertIn("native parent channel", context)
         self.assertIn("public worker_question when needed", context)
@@ -684,10 +774,26 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("Never call Cortex lifecycle", context)
         self.assertNotIn("mcp__codebase_memory__", context)
 
+    def test_worker_hook_maps_unique_native_task_key_back_to_canonical_profile(self):
+        created = self.init(task_id="unique-worker-hook")
+        delegation = self.delegate(created["state"], "unique-worker-hook", "discover", "general")
+        native_task_name = delegation["spawn_request"]["task_name"]
+        self.assertNotEqual(native_task_name, "general")
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        event = {"hook_event_name": "SubagentStart", "session_id": "owner", "agent_type": native_task_name}
+        completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
+        payload = json.loads(completed.stdout)
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Canonical agent name: general", context)
+        task_dir = self.ledger / "tasks" / created["task_directory"]
+        lifecycle = json.loads((task_dir / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(lifecycle["agent_type"], "general")
+        self.assertEqual(lifecycle["display_name"], "general")
+
     def test_hook_hashes_thread_and_allowlists_telemetry_fields(self):
         created = self.init(task_id="hook-privacy")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        event = {"hook_event_name": "PostToolUse", "thread_id": "owner", "agent_type": "secret-agent", "tool_name": "bad tool\nsecret"}
+        event = {"hook_event_name": "PostToolUse", "session_id": "owner", "agent_type": "secret-agent", "tool_name": "bad tool\nsecret"}
         subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         task_dir = self.ledger / "tasks" / created["task_directory"]
         payload = json.loads((task_dir / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
@@ -857,6 +963,36 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertEqual(set(shared["codebase_memory_refresh_profiles"]), control.CODEBASE_MEMORY_REFRESH_PROFILES)
         self.assertEqual(contract["implementation_routing"]["fallback"], "general")
+        model_routing = contract["model_routing"]
+        self.assertEqual(model_routing["schema"], "cortex/model-routing/v1")
+        self.assertEqual(model_routing["configured_default_model"], "gpt-5.6-luna")
+        self.assertEqual(model_routing["security"]["model"], "gpt-5.6-sol")
+        self.assertEqual(model_routing["explorer"]["model"], "gpt-5.6-luna")
+        classified = {
+            name
+            for members in model_routing["profile_classes"].values()
+            for name in members
+        }
+        self.assertEqual(classified, set(profiles) - {"explorer", "security_auditor"})
+        self.assertEqual(
+            sum(len(members) for members in model_routing["profile_classes"].values()),
+            len(classified),
+        )
+        self.assertEqual(model_routing["max_policy"], "bounded_complex_work")
+        self.assertEqual(
+            model_routing["luna_bounded_effort_by_complexity"],
+            {"C1": "high", "C2": "xhigh", "C3": "max"},
+        )
+        self.assertEqual(
+            model_routing["luna_efficient_effort_by_complexity"],
+            {"C1": "high", "C2": "high", "C3": "xhigh"},
+        )
+        self.assertEqual(
+            model_routing["terra_effort_by_complexity"],
+            {"C1": "high", "C2": "high", "C3": "xhigh"},
+        )
+        self.assertIn("long_context", model_routing["terra_task_kinds"])
+        self.assertIn("integration_conflict", model_routing["terra_task_kinds"])
 
         skill = (repository / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
         generated = control.render_profile_catalog(markdown=True)

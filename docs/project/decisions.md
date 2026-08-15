@@ -207,12 +207,34 @@ providing Mandate-style recovery and collision control for C3 work.
 The Cortex control plane is inactive by default. In Desktop, select
 `cortex:orchestrator` through the Skills picker or mention
 `$cortex:orchestrator`; in CLI, lead with `$cortex:orchestrator` or use
-`/skills` and select it. Non-help,
-non-`normal` skill routes authorize the main/root agent to pass the server's
-canonical `/cortex` token. The `normal` skill argument deactivates the mode.
-Literal `/cortex` and `/normal` are textual shorthand, not registered native
-slash commands. Classification, task creation, delegation, gates, lanes, and
-claims cannot mutate state before activation.
+`/skills` and select it. Non-help, non-`normal` skill routes authorize the
+main/root agent to activate the server-side mode. The server's `/cortex` and
+`/normal` values are internal protocol tokens only; the host does not register
+bare native slash commands for them. Use `$cortex:orchestrator normal` to leave
+the route, and never present either bare token as a required user recovery
+step. Classification, task creation, delegation, gates, lanes, and claims
+cannot mutate state before activation.
+
+## Documented v3 lifecycle identity
+
+New v3 tasks keep their generated authorization identity immutable. A
+synchronous `PostToolUse` hook binds the returned opaque `task_ref` to the
+documented hook `session_id` in a separate private registry, so identities
+already embedded in a dispatch response remain valid. `SessionStart` uses that
+binding after `resume`, `clear`, or `compact`. Environment values are only a
+compatibility fallback, and model-visible context is emitted under
+`hookSpecificOutput.additionalContext`.
+
+Plugin installation and reload remain operator-owned. A fresh Codex thread is
+required after installation or update so the new hook, skill, and MCP paths are
+loaded.
+
+Native worker identity follows the same separation: `profile` and
+`display_name` remain canonical, while `spawn_agent.task_name` uniquely names
+the task/attempt session. Cortex rejects reuse of a `host_agent_id` already
+bound to another attempt. Only `followup_task` for the exact confirmed native
+worker may resume it; lifecycle hooks map the native task key back to the
+canonical profile for worker-context injection.
 
 ## Visible-thread checkout selection
 
@@ -248,16 +270,24 @@ gate, project-manifest, verification, and handoff contracts.
 `plugins/cortex/profiles.json` is the single machine-readable source for the 21
 supported profile names, sandbox modes, automatic gate routes, and the shared
 worker report contract. The removed `task_formatter` profile is not accepted by
-the server. Model selection remains a coordinator dispatch decision within a
-small policy envelope, and Cortex persists requested, selected, policy, and
-fallback fields. `explorer` always selects Luna, with coordinator-selected
-effort or a risk-based default; Terra is only its host-unavailable fallback.
-The accepted effort vocabulary ends at `max`. `planner` and all remaining
-non-security profiles default to Luna at exactly `max`, and the coordinator may
-normally choose Terra from `medium` through `max`. Luna `max` is the strong
-normal default rather than a reason for reflexive escalation. Security context,
-the security gate, and `security_auditor` always select Sol with complexity
-floors C1 `medium`, C2 `high`, and C3 `xhigh`, capped at `max`.
+the server. Model selection remains a coordinator dispatch decision within the
+machine-validated adaptive policy in the same contract, and Cortex persists
+requested, selected, policy, and fallback fields. `explorer` always selects
+Luna, with coordinator-selected effort or a risk-based default; Terra is only
+its host-unavailable fallback. Security context, the security gate, and
+`security_auditor` always select Sol with complexity floors C1 `medium`, C2
+`high`, and C3 `xhigh`. Ordinary profiles are classified as efficient,
+adaptive, or deep. Efficient work uses Luna; deep profiles and
+`terra_task_kinds` entries use Terra. C2/C3 planning and those entries
+(including uncertain
+diagnosis, long-context, and integration-conflict work), plus high/critical
+failure cost, also use Terra; other low/moderate-risk adaptive work stays on
+Luna. Efficient Luna uses
+C1/C2/C3 `high`/`high`/`xhigh`; bounded adaptive Luna uses
+`high`/`xhigh`/`max`; Terra uses `high`/`high`/`xhigh`, all subject to the risk
+floor. The accepted effort vocabulary ends at `max`; automatic `max` is
+limited to bounded C3 Luna work. Coordinator Luna/Terra overrides remain
+available but cannot lower the computed effort floor.
 Non-security Sol is valid only for an explicit user model request represented
 by matching `user_requested_model` and `requested_model`; old
 `sol_escalation`, auditable-extreme, failed-Terra, and model/effort-remap

@@ -1,8 +1,8 @@
 {
   "hooks": {
-    "SessionStart": [{"matcher": "startup|resume|compact", "hooks": [{"type": "command", "command": "if test -f \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; then python3 \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; else printf '{}\\n'; fi", "timeout": 5, "additionalContextLimit": 800}]}],
+    "SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [{"type": "command", "command": "if test -f \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; then python3 \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; else printf '{}\\n'; fi", "timeout": 5, "additionalContextLimit": 800}]}],
     "SubagentStart": [{"hooks": [{"type": "command", "command": "if test -f \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; then python3 \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; else printf '{}\\n'; fi", "timeout": 5}]}],
     "SubagentStop": [{"hooks": [{"type": "command", "command": "if test -f \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; then python3 \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; else printf '{}\\n'; fi", "timeout": 5}]}],
-    "PostToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": "if test -f \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; then python3 \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; else printf '{}\\n'; fi", "timeout": 5}]}]
+    "PostToolUse": [{"matcher": "^(Agent|mcp__cortex__(start_orchestration|manage_orchestration|read_worker_report))$", "hooks": [{"type": "command", "command": "if test -f \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; then python3 \"${PLUGIN_ROOT}/scripts/cortex_hook.py\"; else printf '{}\\n'; fi", "timeout": 5, "additionalContextLimit": 800}]}]
   }
 }

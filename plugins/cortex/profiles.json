@@ -194,6 +194,29 @@
       ]
     }
   },
+  "model_routing": {
+    "schema": "cortex/model-routing/v1",
+    "configured_default_model": "gpt-5.6-luna",
+    "security": {
+      "model": "gpt-5.6-sol",
+      "effort_by_complexity": {"C1":"medium","C2":"high","C3":"xhigh"}
+    },
+    "explorer": {
+      "model": "gpt-5.6-luna",
+      "effort_by_risk": {"low":"medium","moderate":"medium","high":"high","critical":"xhigh"}
+    },
+    "profile_classes": {
+      "efficient": ["build_verification","technical_writer"],
+      "adaptive": ["accessibility_engineer","backend_dev","data_engineer","debugger","devops_engineer","frontend_dev","fullstack_dev","general","mobile_dev","planner","qa_engineer","refactorer","ux_designer"],
+      "deep": ["architect","code_reviewer","database_architect","performance_engineer"]
+    },
+    "terra_task_kinds": ["architecture","code_review","concurrency","context_reconstruction","cross_layer_integration","database_architecture","debugging","diagnosis","integration_conflict","long_context","migration","performance","research","research_debugging","root_cause_analysis","runtime_investigation"],
+    "luna_bounded_effort_by_complexity": {"C1":"high","C2":"xhigh","C3":"max"},
+    "luna_efficient_effort_by_complexity": {"C1":"high","C2":"high","C3":"xhigh"},
+    "terra_effort_by_complexity": {"C1":"high","C2":"high","C3":"xhigh"},
+    "effort_floor_by_risk": {"low":"medium","moderate":"medium","high":"high","critical":"xhigh"},
+    "max_policy": "bounded_complex_work"
+  },
   "implementation_routing": {
     "fallback": "general",
     "rules": [

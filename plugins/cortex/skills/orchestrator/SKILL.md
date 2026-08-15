@@ -12,6 +12,14 @@ mention `$cortex:orchestrator`. In CLI use `$cortex:orchestrator` or `/skills`.
 Bare `/cortex` and `/normal` are textual shorthand, not registered native slash
 commands. Do not use the deprecated `/prompts` mechanism.
 
+Never present a bare `/cortex` or `/normal` token as a required next step or
+ask the user to send it as a recovery command. Those tokens are not native
+host commands. If activation is needed, use the Skills picker to select
+`cortex:orchestrator` or mention `$cortex:orchestrator`; to leave the route,
+use `$cortex:orchestrator normal`. A Cortex lifecycle response that says a
+task is complete is terminal: report the verified handoff and limitations
+without asking for another activation.
+
 | Exact argument | Route | Effect |
 | --- | --- | --- |
 | `empty` | `orchestrate` | Start normal relative orchestration. |
@@ -170,8 +178,15 @@ Routing is evidence-driven:
    Cortex's native arguments.
 
 Multiple workers with the same profile are separate bounded instances. Keep
-their ownership, paths, dependencies, and report refs distinct even though
-their display name is the same canonical profile.
+their ownership, paths, dependencies, report refs, and native task identities
+distinct even though their display name is the same canonical profile. Cortex
+sets `spawn_agent.task_name` to a task/attempt-unique key; only
+`profile`/`display_name` carries the stable role label. A new dispatch must use
+`spawn_agent`; `followup_task` is reserved for resuming that exact native
+worker after its durable question or other explicitly resumable pause. Cortex
+rejects reuse of a `host_agent_id` already bound to another attempt, and the
+lifecycle hooks map native task keys back to the canonical profile before
+injecting worker context.
 
 ## Repository knowledge consumption
 
@@ -221,7 +236,10 @@ should use canonical phases from the returned snapshot rather than guessing.
    `{waves: [{workers: [{phase, depends_on, context_files, ...}]}]}`; only phase is required.
 3. Invoke each returned `{worker, call, arguments}` exactly. Native arguments
    are already filtered. Do not add IDs or turn expected model metadata into a
-   native model override.
+   native model override. Hidden `spawn_agent` dispatches must retain the
+   returned `fork_turns: "none"`: the generated Cortex briefing is the
+   complete worker context, and inheriting the coordinator transcript can leak
+   localized user-language messages into the English-only worker channel.
 4. Wait idly for the complete wave. Do not inspect or modify the project while
    any worker is active. Any profile may first publish a material question with
    `worker_question(action="ask")`. The worker returns only its `question_ref`
@@ -243,9 +261,10 @@ should use canonical phases from the returned snapshot rather than guessing.
 5. Read every returned ref with `read_worker_report`. The result includes the
    derived absolute `report_markdown_path` for the persisted
    `reports/markdown/<report-ref>.md` artifact. After each completed report,
-   publish a compact clickable Markdown link in the main chat using that exact
-   returned path, for example `[Report <phase> — <report_ref>](<path>)` when
-   needed for spaces. This link supplements—not replaces—the concise summary
+   immediately publish the returned `report_markdown_link` verbatim as a
+   compact clickable Markdown link in the main chat, before any other lifecycle
+   call or additional report read. This is mandatory coordinator output, not
+   optional metadata. The link supplements—not replaces—the concise summary
    and full report review. Never guess, substitute, or use the path to browse
    unrelated files. Then decide whether the coordinator-owned pipeline still fits, then call
    `continue_orchestration` once with `project_root`, the returned opaque
@@ -255,6 +274,19 @@ should use canonical phases from the returned snapshot rather than guessing.
 6. Repeat until `outcome: completed`. If evidence changes future scope, send a
    compact `future_waves` replacement in the same continue call. Set
    `rework: true` only for intentional repetition of a completed phase.
+
+### Recovery after context reset or compaction
+
+When an automatic/manual compaction, a host `clear`, or a resumed context may have weakened
+the active orchestration instructions, preserve the opaque `task_ref` and
+call `manage_orchestration` with `intent="inspect"` exactly once. Treat the
+returned `context_handoff` as the authoritative compact state and protocol
+snapshot. It restores the goal, acceptance criteria, verified reports,
+decisions, changed files, decisive checks, blockers, pipeline, and next
+action from the durable ledger. Never call `start_orchestration` again,
+replay completed dispatches, or rely on a raw transcript. After rehydration,
+continue the existing relative step and publish every returned exact
+`report_markdown_link` before any other lifecycle or report-read call.
 
 ### Correcting a completed task
 
@@ -331,17 +363,34 @@ once and invoke only its still-awaiting recovery dispatches. Preparing native
 arguments, translating commentary, or recovering an acknowledgement is not a
 reason to restart.
 
+If a recovery operation reports that the coordinator was deactivated, do not
+copy its internal activation diagnostic into the user response. Keep the
+current task reference, use the Cortex skill route again when the user has
+explicitly selected it, and retry the lifecycle operation through
+`manage_orchestration`/`continue_orchestration`. For a linked `follow_up`, an
+idempotent replay may restore the server-owned activation and must be handled
+as the existing corrective task; do not create a duplicate or resume the
+completed source task.
+
 ## Model and dispatch contract
 
-`explorer` always selects Luna, using coordinator-selected effort or the
-risk-based default; Terra is reserved for a hidden host-unavailable fallback.
-The complete effort vocabulary is `low`, `medium`, `high`, `xhigh`, and `max`;
-never request another value. `planner` and every remaining non-security profile
-default to Luna at exactly `max`, while the coordinator may normally select
-Terra from `medium` through `max`. Luna `max` is already a powerful default and
-must not be escalated reflexively. Security context, the security gate, and
-`security_auditor` always select Sol, with effort floors C1 `medium`, C2 `high`,
-and C3 `xhigh`, capped at `max`.
+Apply the adaptive model policy defined in `profiles.json`. `explorer` always
+selects Luna, using coordinator-selected effort or the risk-based default;
+Terra is reserved for a hidden host-unavailable fallback. Security context,
+the security gate, and `security_auditor` always select Sol, with effort floors
+C1 `medium`, C2 `high`, and C3 `xhigh`. Ordinary profiles are divided into
+efficient, adaptive, and deep classes. Efficient work uses Luna; deep profiles
+use Terra, as do C2/C3 planning and `terra_task_kinds` entries (including
+uncertain diagnosis, long-context, and integration-conflict work), plus
+high/critical failure cost. Other low/moderate-risk adaptive work stays on
+Luna. Efficient Luna uses
+C1/C2/C3 `high`/`high`/`xhigh`; bounded adaptive Luna uses
+`high`/`xhigh`/`max`; Terra uses `high`/`high`/`xhigh`. Risk floors remain
+low/moderate `medium`, high `high`, critical `xhigh`. The complete effort
+vocabulary is `low`, `medium`, `high`, `xhigh`, and `max`; automatic `max` is
+limited to bounded C3 Luna work. A coordinator may
+explicitly override an ordinary route between Luna and Terra, but cannot lower
+its effort floor.
 
 Non-security Sol is valid only when the user explicitly chose it. Set the
 compact worker's `user_requested_model: sol`; omit `model` or also set it to

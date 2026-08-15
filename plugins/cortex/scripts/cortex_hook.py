@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
+    from cortex import bind_host_session_from_hook
+except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open.
+    bind_host_session_from_hook = None
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None
@@ -35,6 +40,9 @@ HOOK_NAMES = {"SessionStart", "SubagentStart", "SubagentStop", "PostToolUse"}
 TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 MAX_LIFECYCLE_EVENTS = 1000
 MAX_LIFECYCLE_BYTES = 256 * 1024
+MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
+CORTEX_START_TOOLS = {"mcp__cortex__start_orchestration", "mcp__cortex__manage_orchestration"}
+CORTEX_REPORT_TOOL = "mcp__cortex__read_worker_report"
 WORKER_CONTEXT = (
     "You are an internal worker, never user-facing. Stay within delegated ownership and allowed paths; "
     "All internal worker communication, progress updates, Cortex tool arguments, reports, questions, findings, handoffs, and native final responses must be in English. "
@@ -68,28 +76,140 @@ def reject_symlink_ancestry(path: Path, label: str) -> Path:
     return candidate
 
 
-def root() -> Path:
-    configured = os.environ.get("CORTEX_ROOT")
-    project_root = os.environ.get("CORTEX_PROJECT_ROOT")
-    path = Path(configured or (Path(project_root).expanduser() if project_root else Path.cwd()) / ".codex" / "cortex")
-    return reject_symlink_ancestry(path, "Cortex root")
+def project_directory(event: dict) -> Path:
+    """Resolve the documented tool project_root/cwd, with a test-only fallback."""
+    raw_tool_input = event.get("tool_input")
+    tool_input: dict = raw_tool_input if isinstance(raw_tool_input, dict) else {}
+    candidates = [tool_input.get("project_root"), event.get("cwd"), os.environ.get("CORTEX_PROJECT_ROOT")]
+    for value in candidates:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            continue
+        candidate = reject_symlink_ancestry(candidate, "project root")
+        if not candidate.is_dir():
+            continue
+        for parent in (candidate, *candidate.parents):
+            ledger = reject_symlink_ancestry(parent / ".codex" / "cortex", "Cortex root")
+            if ledger.is_dir():
+                return parent
+    raise ValueError("Cortex project root is unavailable")
+
+
+def root(event: dict) -> Path:
+    return reject_symlink_ancestry(project_directory(event) / ".codex" / "cortex", "Cortex root")
 
 
 def valid_task_id(value: object) -> str | None:
-    candidate = str(value or "")
+    candidate = str(value or "").strip().lower()
     return candidate if SAFE_ID_RE.fullmatch(candidate) else None
 
 
-def active_task(ledger: Path, thread_id: str) -> str | None:
+def session_identity(event: dict) -> str | None:
+    """Resolve the documented Codex session identity with legacy fallbacks."""
+    for key in ("session_id", "thread_id"):
+        candidate = valid_task_id(event.get(key))
+        if candidate:
+            return candidate
+    for key in ("CODEX_SESSION_ID", "CODEX_THREAD_ID"):
+        candidate = valid_task_id(os.environ.get(key))
+        if candidate:
+            return candidate
+    return None
+
+
+def active_task(ledger: Path, session_id: str | None) -> str | None:
     index_path = ledger / "active-tasks.json"
-    if thread_id and index_path.exists():
+    if session_id and index_path.exists():
         try:
-            found = valid_task_id(json.loads(index_path.read_text(encoding="utf-8")).get(thread_id))
+            found = valid_task_id(json.loads(index_path.read_text(encoding="utf-8")).get(session_id))
             if found:
                 return found
         except (OSError, json.JSONDecodeError):
             pass
     return None
+
+
+def task_ref(ledger: Path, task_id: str) -> str | None:
+    """Resolve the public opaque ref without guessing from a task id."""
+    path = reject_symlink_ancestry(ledger / "v3-operations.json", "v3 operation registry")
+    try:
+        if not path.exists() or not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        record = payload.get("tasks", {}).get(task_id) if isinstance(payload, dict) else None
+        candidate = record.get("start", {}).get("task_ref") if isinstance(record, dict) else None
+        candidate = str(candidate or "")
+        return candidate if SAFE_ID_RE.fullmatch(candidate) else None
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def is_context_recovery(event: dict) -> bool:
+    """Recognize host resume/clear/compact starts without trusting arbitrary text."""
+    for key in ("source", "reason", "startup_reason", "thread_start_reason", "trigger"):
+        value = str(event.get(key, "")).strip().lower()
+        if value in {"resume", "resumed", "clear", "cleared", "compact", "compaction"}:
+            return True
+    return False
+
+
+def structured_tool_result(event: dict) -> dict | None:
+    """Extract one bounded public Cortex result from an MCP call envelope."""
+    response = event.get("tool_response")
+    try:
+        encoded = json.dumps(response, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    if len(encoded.encode("utf-8")) > MAX_TOOL_RESPONSE_BYTES:
+        return None
+    queue: list[object] = [response]
+    visited = 0
+    while queue and visited < 64:
+        value = queue.pop(0)
+        visited += 1
+        if isinstance(value, dict):
+            if value.get("schema") == "cortex/orchestration/v3" and value.get("ok") is True:
+                return value
+            queue.extend(value.get(key) for key in ("structuredContent", "result") if key in value)
+            content = value.get("content")
+            if isinstance(content, list):
+                queue.extend(content[:8])
+            text = value.get("text")
+            if isinstance(text, str) and len(text.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES:
+                try:
+                    queue.append(json.loads(text))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        elif isinstance(value, list):
+            queue.extend(value[:8])
+    return None
+
+
+def bind_post_tool_session(event: dict, project: Path, session_id: str | None) -> None:
+    if bind_host_session_from_hook is None or not session_id:
+        return
+    if str(event.get("hook_event_name")) != "PostToolUse" or str(event.get("tool_name")) not in CORTEX_START_TOOLS:
+        return
+    result = structured_tool_result(event)
+    task_ref_value = result.get("task_ref") if isinstance(result, dict) else None
+    if valid_task_id(task_ref_value):
+        bind_host_session_from_hook(str(project), task_ref_value, session_id)
+
+
+def report_publication_context(event: dict) -> str | None:
+    if str(event.get("hook_event_name")) != "PostToolUse" or str(event.get("tool_name")) != CORTEX_REPORT_TOOL:
+        return None
+    result = structured_tool_result(event)
+    link = str(result.get("report_markdown_link") or "") if isinstance(result, dict) else ""
+    if not link or len(link) > 4096 or "\n" in link or not link.startswith("["):
+        return None
+    return (
+        "REPORT PUBLICATION REQUIRED: publish this exact report_markdown_link verbatim in the main chat now, before "
+        f"any other Cortex report read or lifecycle call: {link}"
+    )
 
 
 def task_directory(ledger: Path, task_id: str) -> Path:
@@ -120,12 +240,12 @@ def task_directory(ledger: Path, task_id: str) -> Path:
     return tasks / f"missing-{task_id}"
 
 
-def activation(ledger: Path, thread_id: str) -> dict | None:
-    if not thread_id:
+def activation(ledger: Path, session_id: str | None) -> dict | None:
+    if not session_id:
         return None
     path = ledger / "activations.json"
     try:
-        record = json.loads(path.read_text(encoding="utf-8")).get(thread_id)
+        record = json.loads(path.read_text(encoding="utf-8")).get(session_id)
         if isinstance(record, dict) and record.get("schema") == SCHEMA and record.get("coordinator") == "main" and record.get("mode") == "main-orchestrator":
             return record
         return None
@@ -133,10 +253,38 @@ def activation(ledger: Path, thread_id: str) -> dict | None:
         return None
 
 
-def canonical_agent_name(event: dict) -> str | None:
-    """Return the profile name supplied by Codex, without accepting free text."""
+def canonical_agent_name(event: dict, state: dict | None = None) -> str | None:
+    """Resolve a canonical profile from a host agent or native task key."""
     candidate = str(event.get("agent_type", "")).strip()
-    return candidate if candidate in PROFILES else None
+    if candidate in PROFILES:
+        return candidate
+    if not isinstance(state, dict) or not candidate:
+        return None
+    for attempt in state.get("attempts", []):
+        if not isinstance(attempt, dict):
+            continue
+        spawn_request = attempt.get("spawn_request") or {}
+        host_spawn = attempt.get("host_spawn") or {}
+        aliases = {
+            str(spawn_request.get("task_name") or "").strip(),
+            str(host_spawn.get("agent_id") or "").strip(),
+            str(host_spawn.get("task_name") or "").strip(),
+        }
+        if candidate not in aliases:
+            continue
+        profile = str(attempt.get("profile") or attempt.get("agent") or "").strip()
+        return profile if profile in PROFILES else None
+    return None
+
+
+def hook_context(event_name: str, context: str) -> dict:
+    """Return the documented model-visible hook output envelope."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": context,
+        }
+    }
 
 
 def append_lifecycle_event(task_dir: Path, event: dict) -> None:
@@ -213,16 +361,16 @@ def main() -> None:
         print("{}")
         return
     try:
-        ledger = root()
-        thread_id = str(event.get("thread_id", ""))
-        agent_name = canonical_agent_name(event)
-        active = activation(ledger, thread_id)
-        task_id = active_task(ledger, thread_id)
+        project = project_directory(event)
+        ledger = root(event)
+        session_id = session_identity(event)
+        bind_post_tool_session(event, project, session_id)
+        task_id = active_task(ledger, session_id)
     except Exception as exc:
         print(f"orchestration_hook warning: {type(exc).__name__}", file=sys.stderr)
         print("{}")
         return
-    if not active or not task_id or active.get("task_id") != task_id:
+    if not task_id:
         print("{}")
         return
     task_dir = task_directory(ledger, task_id)
@@ -235,17 +383,30 @@ def main() -> None:
         state = json.loads(state_file.read_text(encoding="utf-8"))
         if state.get("schema") != SCHEMA or state.get("task_id") != task_id:
             raise ValueError("unsupported or mismatched task state")
+        # The host-session index selects a task only when the binding is
+        # unambiguous.  Authorization still uses the task's unique v3
+        # principal, so multiple tasks in one host session cannot cross-read
+        # each other's activation state.
+        active = activation(ledger, str(state.get("principal") or ""))
+        if not active or active.get("task_id") != task_id:
+            print("{}")
+            return
+        agent_name = canonical_agent_name(event, state)
         safe = {
             "at": datetime.now(timezone.utc).isoformat(),
             "hook": str(event.get("hook_event_name")) if str(event.get("hook_event_name")) in HOOK_NAMES else "unknown",
             "agent_type": agent_name,
             "display_name": agent_name,
-            "thread_id_digest": hashlib.sha256(str(event.get("thread_id", "")).encode("utf-8")).hexdigest() if event.get("thread_id") else None,
+            "thread_id_digest": hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest() if session_id else None,
             "tool_name": str(event.get("tool_name")) if TOOL_NAME_RE.fullmatch(str(event.get("tool_name", ""))) else None,
         }
         append_lifecycle_event(task_dir, safe)
+        publication_context = report_publication_context(event)
+        if publication_context:
+            print(json.dumps(hook_context("PostToolUse", publication_context), ensure_ascii=False))
+            return
         if safe["hook"] in {"SessionStart", "SubagentStart"} and agent_name:
-            print(json.dumps({"additionalContext": f"Canonical agent name: {agent_name}. Use exactly this value as the subagent display name and thread label. {WORKER_CONTEXT}"}, ensure_ascii=False))
+            print(json.dumps(hook_context(safe["hook"], f"Canonical agent name: {agent_name}. Use exactly this value as the subagent display name and thread label. {WORKER_CONTEXT}"), ensure_ascii=False))
             return
         if safe["hook"] == "SessionStart":
             current_gates = state.get("current_gates") or [state.get("current_gate", "unknown")]
@@ -255,7 +416,23 @@ def main() -> None:
                 "Use only Cortex lifecycle calls, exact returned worker dispatches, waiting, report evaluation, user communication, and safe recovery. "
                 "Remain idle while workers run; worker delay or failure is never permission for direct coordinator work."
             )
-            print(json.dumps({"additionalContext": context}, ensure_ascii=False))
+            if is_context_recovery(event):
+                public_ref = task_ref(ledger, task_id)
+                if public_ref:
+                    context += (
+                        f" CONTEXT RECOVERY: the host resumed this task after a context reset or compaction; preserve opaque task_ref={public_ref!r}. "
+                        f"Call manage_orchestration(intent='inspect', task_ref={public_ref!r}) exactly once before any other lifecycle, dispatch, or report-read call. "
+                        "Treat the returned context_handoff, current pipeline, report refs, and relative step as authoritative. "
+                        "Do not call start_orchestration again, replay completed dispatches, or reconstruct state from the transcript. "
+                        "Publish every returned report_markdown_link verbatim in the main chat before the next lifecycle call."
+                    )
+                else:
+                    context += (
+                        " CONTEXT RECOVERY: the host resumed this task after a context reset or compaction. Preserve the opaque task_ref from the durable task context "
+                        "and call manage_orchestration(intent='inspect') exactly once before any other lifecycle, dispatch, or report-read call. "
+                        "Treat context_handoff and the current ledger as authoritative; do not restart, replay completed dispatches, or use the raw transcript."
+                    )
+            print(json.dumps(hook_context(safe["hook"], context), ensure_ascii=False))
             return
     except Exception as exc:
         # Hooks are telemetry-only; never inject untrusted exception text into model context.

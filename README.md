@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**4.1.0**. The public MCP surface has exactly six tools: three coordinator
+**4.3.0**. The public MCP surface has exactly six tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question` and `record_report`, and coordinator
@@ -151,7 +151,9 @@ retired cachebusted plugin directory. Cortex hook commands now detect that
 missing script and return the empty JSON object `{}` successfully, without the
 Python missing-file error; the stale thread simply receives no hook context or
 telemetry from that call. A new thread is still required to pick up the updated
-skills, hooks, and MCP tools. Test an isolated fresh
+skills, hooks, and MCP tools. Plugin installation and reload are operator-owned
+actions; a task or lifecycle hook never installs or reloads the plugin for you.
+Test an isolated fresh
 registration with:
 
 ```bash
@@ -163,12 +165,22 @@ repository root.
 It is explicitly registered by the installer; no personal marketplace is used
 for the new installation.
 
+For v3, the synchronous `PostToolUse` hook binds a newly returned `task_ref` to
+the documented hook `session_id`, using the tool's explicit `project_root` and
+the event `cwd`. The task authorization identity remains separate. Explicitly
+forwarded `CODEX_SESSION_ID` or `CODEX_THREAD_ID` values are compatibility hints
+only; standalone MCP falls back to a generated task-local identity until the
+hook runs. `SessionStart` recovers the binding for `resume`, `clear`, and
+`compact`, while `read_worker_report` PostToolUse context repeats the exact
+main-chat report link requirement. Model-visible context uses
+`hookSpecificOutput.additionalContext`.
+
 ## Release boundary
 
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 4.1.0
+and secret-prone paths before validating the package again. The Cortex 4.3.0
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` cannot attest the
 mutable candidate. Commit only with explicit authorization, then rerun the
@@ -208,10 +220,11 @@ Alternatively, enter `/skills`, select `cortex:orchestrator`, then provide the t
 or one of the same arguments: `help`, `harvest`, `harvest-refresh`, or
 `normal`.
 
-Cortex does not provide native bare `/cortex` or `/normal` commands. `/cortex`,
-`/cortex help`, `/cortex harvest`, `/cortex harvest-refresh`, and `/normal`
-are textual shorthand only when a host passes them through; a host may reserve
-or reject them. Do not use the deprecated `/prompts` mechanism. Selecting the
+Cortex does not provide native bare `/cortex` or `/normal` commands. Those
+values are server-side compatibility tokens only when a host explicitly passes
+textual shorthand through; a host may reserve or reject them. Never present a
+bare token as a required recovery step. Use the Cortex skill route instead. Do
+not use the deprecated `/prompts` mechanism. Selecting the
 Cortex skill for any non-help, non-`normal` route explicitly activates it;
 `$cortex:orchestrator normal` exits an active session. Ordinary requests and mere
 mentions remain normal workflow and do not create a ledger. Help is read-only
@@ -274,10 +287,27 @@ answer without reopening the UI. Workers then
 persist all eight report sections with `record_report`,
 return only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
 summary (or the exact report-tool error), and the coordinator reads each ref
-with `read_worker_report`. If a native acknowledgement is interrupted after
-persistence, `manage_orchestration` inspect exposes the ref in
-`available_reports`. Slots and report refs are validated atomically
+with `read_worker_report`. That read returns both the derived
+`report_markdown_path` and exact `report_markdown_link`; the coordinator must
+publish the link verbatim in the main chat immediately before any other
+lifecycle call or additional report read. If a native acknowledgement is
+interrupted after persistence, `manage_orchestration` inspect exposes the ref
+and link in `available_reports`. Slots and report refs are validated atomically
 before lifecycle state is written.
+
+If the host compacts or resumes a conversation, call
+`manage_orchestration(intent="inspect")` once with the preserved opaque
+`task_ref`. The response includes a bounded `context_handoff` rebuilt from the
+ledger: goal, acceptance criteria, verified reports and links, decisions,
+changed files, checks, blockers, pipeline, and the recovery protocol. Treat
+it as authoritative current state; do not restart the task, replay completed
+dispatches, or infer state from a raw transcript.
+
+The lifecycle `SessionStart` hook repeats this recovery route automatically
+for host `resume` and `compact` events, including the registry-backed opaque
+`task_ref`. This keeps the first post-compaction turn pointed at one durable
+inspect instead of relying on the model's free-form summary to preserve the
+orchestration protocol.
 
 Cortex deterministically marks a short, underspecified product-surface creation
 request for intent clarification. Repository evidence may support a useful
@@ -330,14 +360,6 @@ failures are appended as redacted JSONL under
 summary, chat/thread session id, JSON-RPC request id, and any task/attempt or
 other call ids that were present; the log directory is `0700` and the file is
 `0600`.
-
-Textual shorthand examples (only if the host accepts them; not native slash
-commands):
-
-```text
-/cortex Составь план и проведи задачу через Cortex.
-/normal
-```
 
 An ordinary complex request, a request mentioning orchestration, or using
 subagents does **not** activate a durable ledger. After activation, the main
@@ -415,12 +437,38 @@ the native request override and always records reasoning effort. `explorer`
 always selects Luna; its effort is chosen by the coordinator or defaults from
 risk, and Terra is reserved for a hidden host-unavailable fallback. The only
 valid efforts are `low`, `medium`, `high`, `xhigh`, and `max`; `max` is the hard
-upper bound. `planner` and all remaining non-security profiles default to Luna
-at exactly `max`, while the coordinator may normally select Terra from `medium`
-through `max`. Luna `max` is already a powerful default and should not be
-escalated reflexively. Security
-context, the security gate, and `security_auditor` always select Sol, with
-effort floors C1 `medium`, C2 `high`, and C3 `xhigh`, capped at `max`.
+upper bound. The adaptive policy in `plugins/cortex/profiles.json` classifies
+ordinary profiles as efficient, adaptive, or deep. Efficient work uses Luna;
+deep profiles, C2/C3 planning, and `terra_task_kinds` entries such as complex
+planning, uncertain diagnosis, long-context or integration-conflict work, and
+high/critical failure cost use Terra. Other low/moderate-risk adaptive work
+stays on Luna. Efficient Luna uses
+C1/C2/C3 `high`/`high`/`xhigh`; bounded adaptive Luna uses
+`high`/`xhigh`/`max`; Terra uses `high`/`high`/`xhigh`. Risk floors remain
+low/moderate `medium`, high `high`, critical `xhigh`. Automatic `max` is
+limited to bounded C3 Luna work. Security context, the
+security gate, and `security_auditor` always select Sol with the same
+complexity floors. A coordinator may explicitly override an ordinary route
+between Luna and Terra without lowering its effort floor.
+
+The root coordinator is a separate operator choice from worker dispatch
+routing. Select the model and effort together:
+
+- Luna `high` for short C1 tasks with one or two waves and little ambiguity.
+- Luna `xhigh` as the recommended normal mode for multi-wave orchestration,
+  report reconciliation, and compaction recovery.
+- Luna `max` for complex but well-specified C3 orchestration with clear
+  acceptance criteria and bounded decisions.
+- Terra `high` when reports conflict, strategy is unclear, or the cost of a
+  wrong routing/completion decision is high.
+- Terra `xhigh` for high-risk C3 orchestration and unresolved, consequential
+  decisions.
+
+Luna `high/xhigh/max` is the effort ladder for the root coordinator; Terra is
+an adaptive model-tier escalation, not a substitute for the 256K Codex context
+limit. Compaction recovery uses the durable Cortex handoff with fresh goal,
+criteria, reports, decisions, blockers, and next-action data. This does not
+change the root coordinator's coordination-only boundary.
 
 Non-security Sol is accepted only when the user explicitly selected it. Pass
 compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
@@ -436,8 +484,16 @@ and Cortex never claims an actual worker model from expected routing alone.
 
 Each v3 dispatch is `{worker, phase, profile, capability, sandbox,
 selection_reason, call, arguments}`. `arguments` contains only the real native
-`spawn_agent` or `create_thread` parameters; routing and expected-model
-metadata is never copied into native `model`. The main Codex agent invokes all
+`spawn_agent` or `create_thread` parameters; hidden `spawn_agent` arguments
+retain `fork_turns: "none"` so localized parent history is not inherited.
+`profile` and `display_name` remain the exact canonical role name, while
+`spawn_agent.task_name` is a task/attempt-unique native session key. Reusing a
+profile must therefore create a fresh native worker; only an explicit
+`followup_task` for the same confirmed host child may resume it. Routing and
+expected-model metadata is never copied into native `model`. Cortex rejects
+reuse of a `host_agent_id` already bound to another attempt. Lifecycle hooks
+map the unique native task key back to the canonical profile before injecting
+worker context. The main Codex agent invokes all
 independent requests in a wave, waits for them, and submits their reports in
 one relative continue call. A malformed report, duplicate/foreign slot, or
 incomplete wave is rejected before partial acceptance. Native spawn failures

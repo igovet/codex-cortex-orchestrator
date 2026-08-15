@@ -6,6 +6,37 @@ same base version.
 
 ## [Unreleased]
 
+- Bind v3 lifecycle recovery through the documented synchronous Cortex
+  `PostToolUse.session_id` and tool `project_root`, keeping task authorization
+  immutable and treating session environment variables as compatibility hints.
+  Cover `SessionStart.source=clear`, inject exact report-link publication
+  context after `read_worker_report`, and add compact server-wide MCP
+  instructions for post-compaction invariants.
+
+- Add a ledger-derived `cortex/context-handoff/v1` recovery snapshot to
+  `manage_orchestration(intent="inspect")`, with explicit post-compaction
+  rehydration guidance and bounded goal, evidence, decisions, checks,
+  blockers, pipeline, and report-link state.
+
+- Make the `SessionStart` hook reassert the recovery route after `resume` or
+  `compact`, resolving the registry-backed opaque `task_ref` and requiring one
+  inspect before dispatch, report reads, or lifecycle continuation.
+
+- Keep host-session lifecycle lookup fail-closed when multiple active v3 tasks
+  share one session; rebuild the lookup only after exactly one task remains.
+
+- Isolate hidden worker dispatches from the coordinator transcript by forcing
+  `fork_turns: "none"`, so localized parent messages cannot override the
+  English-only worker protocol. `read_worker_report` now returns the exact
+  `report_markdown_link` plus an immediate main-chat publication requirement;
+  plan review and inspection responses expose the same link for recovery.
+
+- Fix linked completed-task `follow_up` replays after coordinator deactivation:
+  restore the server-owned activation for the idempotent existing corrective
+  task, suppress duplicate dispatches, and keep `/cortex`/`/normal` internal
+  tokens out of user-facing recovery instructions. Add regression coverage for
+  source immutability, activation restoration, and replay receipts.
+
 - Keep caller-correctable public `record_report` failures out of the private
   MCP exception journal. Worker briefings now repeat the exact generated
   predecessor/knowledge evidence markers next to the report protocol, and
@@ -13,14 +44,17 @@ same base version.
   payload corrections return structured `ok: false` diagnostics while genuine
   ledger/server failures remain exceptions.
 
-- Simplify model routing around a strong Luna default: explorer is always Luna
-  except hidden host fallback, planner and ordinary profiles default to Luna
-  at exactly `max`, normal Terra selection ranges from `medium` through `max`,
-  and security always uses Sol with complexity-based effort floors capped at
-  `max`. Reject any effort outside `low`, `medium`, `high`, `xhigh`, and `max`.
-  Non-security Sol now requires matching explicit user-model provenance;
-  remove `sol_escalation`, failed-Terra/auditable-extreme authorization, and
-  model/effort remaps.
+- Replace the blanket Luna/`max` default with a machine-validated adaptive
+  policy in `profiles.json`. Explorer remains Luna and Security remains Sol;
+  ordinary profiles are classified as efficient, adaptive, or deep, with
+  deterministic Luna/Terra selection from profile, task kind, complexity, and
+  risk. Efficient Luna uses `high`/`high`/`xhigh`; bounded low/moderate-risk
+  adaptive work uses Luna `high`/`xhigh`/`max`, while C2/C3 planning,
+  `terra_task_kinds`, deep profiles, and high/critical failure cost use Terra
+  `high`/`high`/`xhigh`. Automatic `max` is limited to bounded C3 Luna work.
+  Preserve bounded Luna/Terra coordinator overrides, hidden
+  Luna-to-Terra host fallback, and explicit-user provenance for non-security
+  Sol; retired escalation/remapping fields remain rejected.
 - Make the coordinator the explicit pipeline authority: Cortex validates and
   persists its plan, planner/explorer reports remain advisory, and only the
   coordinator may replace future waves with a stated evidence-based reason.

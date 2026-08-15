@@ -147,6 +147,135 @@ class ControlPlaneTests(unittest.TestCase):
             arguments["waves"] = waves
         return control.start_orchestration(arguments)
 
+    def test_v3_start_binds_codex_session_for_documented_compact_hook(self):
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "bind the host session for recovery",
+                waves=[{"workers": [{"phase": "discover"}]}],
+            )
+            self.assertTrue(started["ok"])
+            task_dir = next((self.ledger / "tasks").iterdir())
+            state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["thread_id"], state["principal"])
+            bound = subprocess.run(
+                [sys.executable, str(hook)],
+                input=json.dumps({
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "host-session-42",
+                    "cwd": str(self.project),
+                    "tool_name": "mcp__cortex__start_orchestration",
+                    "tool_input": {"project_root": str(self.project)},
+                    "tool_response": {"structuredContent": started},
+                }),
+                text=True,
+                capture_output=True,
+                env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+                check=True,
+            )
+            self.assertEqual(bound.stdout.strip(), "{}")
+            self.assertEqual(json.loads((self.ledger / "active-tasks.json").read_text(encoding="utf-8"))["host-session-42"], state["task_id"])
+            bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+            self.assertEqual(bindings["tasks"][state["task_id"]], "host-session-42")
+            subprocess.run(
+                [sys.executable, str(hook)],
+                input=json.dumps({
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "different-host-session",
+                    "cwd": str(self.project),
+                    "tool_name": "mcp__cortex__start_orchestration",
+                    "tool_input": {"project_root": str(self.project)},
+                    "tool_response": {"structuredContent": started},
+                }),
+                text=True,
+                capture_output=True,
+                env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+                check=True,
+            )
+            bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+            self.assertEqual(bindings["tasks"][state["task_id"]], "host-session-42")
+            self.assertNotIn("different-host-session", json.loads((self.ledger / "active-tasks.json").read_text(encoding="utf-8")))
+            completed = subprocess.run(
+                [sys.executable, str(hook)],
+                input=json.dumps({
+                    "hook_event_name": "SessionStart",
+                    "session_id": "host-session-42",
+                    "cwd": str(self.project),
+                    "source": "clear",
+                }),
+                text=True,
+                capture_output=True,
+                env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+                check=True,
+            )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        context = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("CONTEXT RECOVERY", context)
+        self.assertIn(started["task_ref"], context)
+        self.assertIn("manage_orchestration(intent='inspect'", context)
+
+    def test_v3_shared_host_session_hook_binding_fails_closed_until_unambiguous(self):
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            starts = [
+                self.v3_start(
+                    f"shared host task {index}",
+                    waves=[{"workers": [{"phase": "discover"}]}],
+                )
+                for index in range(1, 4)
+            ]
+            self.assertTrue(all(item["ok"] for item in starts))
+            for started in starts:
+                subprocess.run(
+                    [sys.executable, str(hook)],
+                    input=json.dumps({
+                        "hook_event_name": "PostToolUse",
+                        "session_id": "shared-host",
+                        "cwd": str(self.project),
+                        "tool_name": "mcp__cortex__start_orchestration",
+                        "tool_input": {"project_root": str(self.project)},
+                        "tool_response": {"structuredContent": started},
+                    }),
+                    text=True,
+                    capture_output=True,
+                    env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+                    check=True,
+                )
+            active_path = self.ledger / "active-tasks.json"
+            active = json.loads(active_path.read_text(encoding="utf-8")) if active_path.exists() else {}
+            self.assertNotIn("shared-host", active)
+            completed = subprocess.run(
+                [sys.executable, str(hook)],
+                input=json.dumps({"hook_event_name": "SessionStart", "session_id": "shared-host", "cwd": str(self.project), "source": "compact"}),
+                text=True,
+                capture_output=True,
+                env={**os.environ, "CORTEX_ROOT": "", "CORTEX_PROJECT_ROOT": str(self.project)},
+                check=True,
+            )
+            self.assertEqual(completed.stdout.strip(), "{}")
+
+            index = json.loads((self.ledger / "task-index.json").read_text(encoding="utf-8"))
+            bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+            task_ids = sorted(task_id for task_id, session in bindings["tasks"].items() if session == "shared-host")
+            self.assertEqual(len(task_ids), 3)
+            for task_id in task_ids[:2]:
+                state_path = self.ledger / "tasks" / index[task_id]["directory"] / "current.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["status"] = "completed"
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                control.remove_active_mapping(self.ledger, task_id, str(state.get("thread_id") or ""))
+            active = json.loads(active_path.read_text(encoding="utf-8"))
+            self.assertEqual(active.get("shared-host"), task_ids[2])
+
     def test_orchestration_is_inactive_until_main_chat_command(self):
         with self.assertRaisesRegex(ValueError, "inactive"):
             control.init_task({"task_id": "inactive", "objective": "nope", "complexity": "C1", "principal": "thread-a"})
@@ -158,7 +287,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(control.activation_status({"principal": "thread-a"})["active"])
 
     def test_activation_requires_exact_command_and_rejects_agent_profile(self):
-        with self.assertRaisesRegex(ValueError, "exact standalone /cortex text trigger"):
+        with self.assertRaisesRegex(ValueError, "Cortex skill route"):
             control.activate_orchestration({"user_command": "please orchestrate", "principal": "thread-a", "thread_id": "thread-a"})
         with self.assertRaisesRegex(ValueError, "does not accept an agent profile"):
             control.activate_orchestration({"agent": "general", "user_command": "/cortex", "principal": "thread-a", "thread_id": "thread-a"})
@@ -170,7 +299,8 @@ class ControlPlaneTests(unittest.TestCase):
         result = control.activate_orchestration({"principal": "thread-a", "thread_id": "thread-a"})
         self.assertFalse(result["active"])
         self.assertTrue(result["recoverable"])
-        self.assertIn("user_command", result["next_action"])
+        self.assertIn("cortex:orchestrator", result["next_action"])
+        self.assertNotIn("/cortex", result["next_action"])
 
     def test_default_ledger_is_project_local(self):
         with self.assertRaisesRegex(ValueError, "project_root is required"):
@@ -221,7 +351,7 @@ class ControlPlaneTests(unittest.TestCase):
         second_classification = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
         with self.assertRaisesRegex(ValueError, "inactive"):
             control.init_task({"task_id": "second-task", "objective": "second", "complexity": "C1", "classification_id": second_classification["classification_id"], "principal": "thread-a"})
-        with self.assertRaisesRegex(ValueError, "exact /normal"):
+        with self.assertRaisesRegex(ValueError, "Cortex skill route"):
             control.deactivate_orchestration({"user_command": "normal", "principal": "thread-a"})
         control.deactivate_orchestration({"user_command": "/normal", "principal": "thread-a"})
         self.assertFalse(control.activation_status({"principal": "thread-a"})["active"])
@@ -447,6 +577,11 @@ class ControlPlaneTests(unittest.TestCase):
                 "agent": "security_auditor", "task_kind": "security", "risk": "low",
                 "complexity": "C1", "requested_model": "gpt-5.6-terra",
             })
+        with self.assertRaisesRegex(ValueError, "security work always uses"):
+            control.resolve_dispatch_route({
+                "agent": "security_auditor", "task_kind": "security", "risk": "low",
+                "complexity": "C1", "user_requested_model": "gpt-5.6-terra",
+            })
 
     def test_security_profile_normalizes_contradictory_lightweight_kind_to_sol(self):
         route = control.resolve_dispatch_route({"agent": "security_auditor", "task_kind": "reading", "risk": "low", "complexity": "C1"})
@@ -529,6 +664,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(request["expected_model"], "gpt-5.6-luna")
         self.assertEqual(request["model_resolution"], "configured_default")
         self.assertEqual(request["reasoning_effort"], "medium")
+        self.assertEqual(request["fork_turns"], "none")
         confirmed = control.confirm_host_spawn({
             "task_id": "configured-default-luna", "principal": "thread-a",
             "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
@@ -612,12 +748,13 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(fallback["expected_model"], "gpt-5.6-terra")
         self.assertEqual(fallback["model_resolution"], "explicit_override")
 
-    def test_planner_and_ordinary_worker_model_effort_matrix(self):
+    def test_explicit_luna_and_terra_overrides_keep_adaptive_effort_floor(self):
         for agent in ("planner", "general", "code_reviewer"):
             for requested_model, requested_effort, expected_effort in (
-                ("gpt-5.6-luna", "high", "max"),
+                ("gpt-5.6-luna", "low", "xhigh"),
+                ("gpt-5.6-luna", "high", "xhigh"),
                 ("gpt-5.6-luna", "max", "max"),
-                ("gpt-5.6-terra", "low", "medium"),
+                ("gpt-5.6-terra", "low", "high"),
                 ("gpt-5.6-terra", "high", "high"),
                 ("gpt-5.6-terra", "max", "max"),
             ):
@@ -660,18 +797,24 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(route["selected_model"], "gpt-5.6-luna")
         self.assertEqual(route["selected_reasoning_effort"], "high")
 
-    def test_ordinary_profiles_default_to_luna_max_regardless_of_task_kind(self):
-        for task_kind in ("analysis", "diagnosis", "research", "runtime_investigation", "root_cause_analysis", "code_review"):
+    def test_terra_task_kinds_route_uncertain_work_independently_of_risk(self):
+        for task_kind in ("diagnosis", "research", "runtime_investigation", "root_cause_analysis", "code_review", "long_context", "integration_conflict"):
             with self.subTest(task_kind=task_kind):
                 route = control.resolve_dispatch_route({
                     "agent": "general",
                     "task_kind": task_kind,
-                    "risk": "high",
-                    "complexity": "C3",
+                    "risk": "low",
+                    "complexity": "C1",
                 })
-                self.assertEqual(route["policy_model"], "gpt-5.6-luna")
-                self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                self.assertEqual(route["selected_reasoning_effort"], "max")
+                self.assertEqual(route["policy_model"], "gpt-5.6-terra")
+                self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+                self.assertEqual(route["selected_reasoning_effort"], "high")
+                self.assertEqual(route["policy_reason"], "terra_task_kind")
+        bounded_analysis = control.resolve_dispatch_route({
+            "agent": "general", "task_kind": "analysis", "risk": "low", "complexity": "C1",
+        })
+        self.assertEqual(bounded_analysis["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(bounded_analysis["selected_reasoning_effort"], "high")
 
     def test_record_gate_returns_revision_correction_instead_of_stale_revision_error(self):
         state = self.init(task_id="gate-revision", complexity="C1")["state"]
@@ -686,12 +829,53 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(result["state"])
         self.assertEqual(result["revision_correction"], {"requested": state["revision"] + 7, "used": state["revision"]})
 
-    def test_planner_defaults_to_luna_max(self):
+    def test_planner_defaults_follow_complexity(self):
+        simple = control.resolve_dispatch_route({
+            "agent": "planner", "task_kind": "planning", "risk": "low", "complexity": "C1",
+        })
+        self.assertEqual(simple["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(simple["selected_reasoning_effort"], "high")
         route = control.resolve_dispatch_route({
             "agent": "planner", "task_kind": "reading", "risk": "low", "complexity": "C2",
         })
-        self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-        self.assertEqual(route["selected_reasoning_effort"], "max")
+        self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+        self.assertEqual(route["selected_reasoning_effort"], "high")
+
+    def test_every_ordinary_profile_follows_its_canonical_model_class(self):
+        for agent in control.MODEL_PROFILE_CLASSES["efficient"]:
+            with self.subTest(profile_class="efficient", agent=agent):
+                route = control.resolve_dispatch_route({
+                    "agent": agent, "task_kind": "documentation", "risk": "moderate", "complexity": "C3",
+                })
+                self.assertEqual(route["selected_model"], "gpt-5.6-luna")
+                self.assertEqual(route["selected_reasoning_effort"], "xhigh")
+                self.assertEqual(route["policy_reason"], "efficient_profile")
+        for agent in control.MODEL_PROFILE_CLASSES["deep"]:
+            with self.subTest(profile_class="deep", agent=agent):
+                route = control.resolve_dispatch_route({
+                    "agent": agent, "task_kind": "analysis", "risk": "low", "complexity": "C1",
+                })
+                self.assertEqual(route["selected_model"], "gpt-5.6-terra")
+                self.assertEqual(route["selected_reasoning_effort"], "high")
+                self.assertEqual(route["policy_reason"], "deep_profile")
+        for agent in control.MODEL_PROFILE_CLASSES["adaptive"]:
+            with self.subTest(profile_class="adaptive", agent=agent, complexity="C1"):
+                simple = control.resolve_dispatch_route({
+                    "agent": agent, "task_kind": "implementation", "risk": "low", "complexity": "C1",
+                })
+                self.assertEqual(simple["selected_model"], "gpt-5.6-luna")
+                self.assertEqual(simple["selected_reasoning_effort"], "high")
+                self.assertEqual(simple["policy_reason"], "bounded_adaptive_work")
+            with self.subTest(profile_class="adaptive", agent=agent, complexity="C2"):
+                consequential = control.resolve_dispatch_route({
+                    "agent": agent, "task_kind": "implementation", "risk": "moderate", "complexity": "C2",
+                })
+                expected_model = "gpt-5.6-terra" if agent == "planner" else "gpt-5.6-luna"
+                expected_effort = "high" if agent == "planner" else "xhigh"
+                expected_reason = "complex_planning" if agent == "planner" else "bounded_adaptive_work"
+                self.assertEqual(consequential["selected_model"], expected_model)
+                self.assertEqual(consequential["selected_reasoning_effort"], expected_effort)
+                self.assertEqual(consequential["policy_reason"], expected_reason)
 
     def test_lightweight_categories_route_to_luna_with_multi_agent_v2(self):
         for agent, task_kind in (("explorer", "reading"), ("explorer", "discover"), ("explorer", "read_discovery"), ("explorer", "read_only_audit"), ("explorer", "comparative_audit"), ("explorer", "comparative-audit"), ("general", "data_gathering"), ("general", "crud_edit"), ("general", "small_fix")):
@@ -700,14 +884,19 @@ class ControlPlaneTests(unittest.TestCase):
                     route = control.resolve_dispatch_route({"agent": agent, "task_kind": task_kind, "risk": "low", "complexity": "C1", "requested_reasoning_effort": effort})
                     self.assertEqual(route["policy_model"], "gpt-5.6-luna")
                     self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                    expected_effort = effort if agent == "explorer" else "max"
-                    self.assertEqual(route["selected_reasoning_effort"], expected_effort)
-        for task_kind in ("implementation", "tests", "debugging", "architecture", "migration"):
+                    self.assertEqual(route["selected_reasoning_effort"], effort)
+        for task_kind, expected_model in (
+            ("implementation", "gpt-5.6-luna"),
+            ("tests", "gpt-5.6-luna"),
+            ("debugging", "gpt-5.6-terra"),
+            ("architecture", "gpt-5.6-terra"),
+            ("migration", "gpt-5.6-terra"),
+        ):
             with self.subTest(non_lightweight=task_kind):
                 route = control.resolve_dispatch_route({"agent": "general", "task_kind": task_kind, "risk": "low", "complexity": "C1"})
-                self.assertEqual(route["policy_model"], "gpt-5.6-luna")
-                self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                self.assertEqual(route["selected_reasoning_effort"], "max")
+                self.assertEqual(route["policy_model"], expected_model)
+                self.assertEqual(route["selected_model"], expected_model)
+                self.assertEqual(route["selected_reasoning_effort"], "high")
 
     def test_terra_style_task_kind_is_canonicalized_at_the_mcp_boundary(self):
         for supplied, expected, model in (("Code Review", "code_review", "gpt-5.6-luna"), ("READ-ONLY", "read_only", "gpt-5.6-luna"), ("data   gathering", "data_gathering", "gpt-5.6-luna")):
@@ -908,14 +1097,28 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegated["spawn_request"]["host_tool"], "spawn_agent")
         self.assertEqual(delegated["spawn_request"]["model"], "gpt-5.6-luna")
 
-    def test_all_ordinary_non_security_complexities_default_to_luna_max(self):
+    def test_adaptive_profile_matrix_uses_bounded_luna_and_high_cost_terra(self):
         for complexity in ("C1", "C2", "C3"):
             for risk in ("low", "moderate", "high", "critical"):
                 with self.subTest(complexity=complexity, risk=risk):
                     route = control.resolve_dispatch_route({"agent": "general", "task_kind": "implementation", "risk": risk, "complexity": complexity})
-                    self.assertEqual(route["policy_model"], "gpt-5.6-luna")
-                    self.assertEqual(route["selected_model"], "gpt-5.6-luna")
-                    self.assertEqual(route["selected_reasoning_effort"], "max")
+                    expected_model = "gpt-5.6-luna" if risk in {"low", "moderate"} else "gpt-5.6-terra"
+                    effort_map = (
+                        control.LUNA_BOUNDED_EFFORT_BY_COMPLEXITY
+                        if expected_model == "gpt-5.6-luna"
+                        else control.TERRA_EFFORT_BY_COMPLEXITY
+                    )
+                    expected_effort = control.higher_effort(
+                        effort_map[complexity],
+                        control.MODEL_EFFORT_FLOOR_BY_RISK[risk],
+                    )
+                    self.assertEqual(route["policy_model"], expected_model)
+                    self.assertEqual(route["selected_model"], expected_model)
+                    self.assertEqual(route["selected_reasoning_effort"], expected_effort)
+                    self.assertEqual(
+                        route["selected_reasoning_effort"] == "max",
+                        expected_model == "gpt-5.6-luna" and complexity == "C3",
+                    )
 
     def test_non_security_sol_requires_explicit_user_model_request(self):
         with self.assertRaisesRegex(ValueError, "requires user_requested_model"):
@@ -935,7 +1138,7 @@ class ControlPlaneTests(unittest.TestCase):
             "user_requested_model": "gpt-5.6-sol",
             "requested_reasoning_effort": "xhigh",
         })
-        self.assertEqual(route["policy_model"], "gpt-5.6-luna")
+        self.assertEqual(route["policy_model"], "gpt-5.6-terra")
         self.assertEqual(route["selected_model"], "gpt-5.6-sol")
         self.assertEqual(route["selected_reasoning_effort"], "xhigh")
         self.assertEqual(route["model_choice_reason"], "explicit_user_request")
@@ -1233,6 +1436,14 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(old_attempt["status"], "superseded")
 
         replacement = self.delegate(superseded["state"], "invalidated-attempt", "plan", "planner")
+        self.assertNotEqual(
+            old_attempt["spawn_request"]["task_name"],
+            replacement["spawn_request"]["task_name"],
+        )
+        self.assertNotEqual(
+            old_attempt["host_spawn"]["agent_id"],
+            replacement["host_spawn"]["agent_id"],
+        )
         report = self.report("invalidated-attempt", replacement["attempt_id"])
         evidence = control.record_evidence({
             "task_id": "invalidated-attempt",
@@ -1298,18 +1509,19 @@ class ControlPlaneTests(unittest.TestCase):
             "host_tool": "spawn_agent",
             "profile": "general",
             "display_name": "general",
-            "task_name": "general",
             "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
         }
         package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
+        self.assertRegex(delegation["spawn_request"]["task_name"], r"^general__spawn-contract__discover-01$")
+        self.assertNotEqual(delegation["spawn_request"]["task_name"], delegation["spawn_request"]["display_name"])
         self.assertEqual({key: package["spawn_request"][key] for key in expected}, expected)
         self.assertEqual({key: delegation["state"]["attempts"][-1]["spawn_request"][key] for key in expected}, expected)
         self.assertIn("internal Cortex worker with profile `general`", delegation["spawn_request"]["message"])
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
 
-    def test_host_spawn_confirmation_requires_the_exact_profile_task_name(self):
+    def test_host_spawn_confirmation_requires_the_exact_native_task_name(self):
         state = self.init(task_id="host-name-contract")["state"]
         observed = control.status({"task_id": "host-name-contract", "principal": "thread-a"})
         delegated = control.record_delegation({
@@ -1319,20 +1531,50 @@ class ControlPlaneTests(unittest.TestCase):
             "ownership": "Read-only discovery", "allowed_paths": ["."],
             "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
         })
-        self.assertEqual(delegated["spawn_request"]["task_name"], "explorer")
+        expected_task_name = delegated["spawn_request"]["task_name"]
+        self.assertEqual(expected_task_name, "explorer__host-name-contract__discover-01")
         self.assertIn("Use attempt_id='discover-01' exactly", delegated["spawn_request"]["message"])
         self.assertIn("stable lowercase submission_id", delegated["spawn_request"]["message"])
         self.assertIn("exactly these eight keys", delegated["spawn_request"]["message"])
         self.assertIn("byte-identical retry", delegated["spawn_request"]["message"])
         self.assertIn("Do not activate or initialize Cortex", delegated["spawn_request"]["message"])
-        corrected = control.confirm_host_spawn({
+        confirmed = control.confirm_host_spawn({
                 "task_id": "host-name-contract", "principal": "thread-a",
                 "expected_revision": delegated["state"]["revision"],
                 "attempt_id": delegated["attempt_id"], "host_agent_id": "desktop-child-123",
-                "host_task_name": "cortex_discover_01", "host_model": delegated["spawn_request"]["model"],
+                "host_task_name": expected_task_name, "host_model": delegated["spawn_request"]["model"],
             })
-        self.assertEqual(corrected["task_name_correction"], {"requested": "cortex_discover_01", "used": "explorer"})
-        self.assertEqual(corrected["host_spawn"]["task_name"], "explorer")
+        self.assertTrue(confirmed["confirmed"])
+        self.assertIsNone(confirmed["task_name_correction"])
+        self.assertEqual(confirmed["host_spawn"]["task_name"], expected_task_name)
+
+    def test_host_spawn_confirmation_rejects_reused_native_child_id(self):
+        self.init(task_id="host-id-reuse")
+        result = control.prepare_delegations({
+            "task_id": "host-id-reuse", "principal": "thread-a", "delegations": [
+                {"gate": "discover", "agent": "explorer", "task_kind": "discovery", "risk": "low", "parallel": True, "objective": "one", "ownership": "one", "allowed_paths": ["."], "acceptance_criteria": ["one"], "verification": ["one"]},
+                {"gate": "discover", "agent": "explorer", "task_kind": "discovery", "risk": "low", "parallel": True, "objective": "two", "ownership": "two", "allowed_paths": ["."], "acceptance_criteria": ["two"], "verification": ["two"]},
+            ],
+        })
+        first, second = result["spawn_requests"]
+        first_attempt_id, second_attempt_id = result["attempts"]
+        first_confirmed = control.confirm_host_spawn({
+            "task_id": "host-id-reuse", "principal": "thread-a", "expected_revision": result["state"]["revision"],
+            "attempt_id": first_attempt_id, "host_tool": "spawn_agent", "host_agent_id": "same-native-child",
+            "host_task_name": first["task_name"], "host_model": first.get("model") or first["expected_model"],
+            "host_reasoning_effort": first["reasoning_effort"],
+        })
+        self.assertTrue(first_confirmed["confirmed"])
+        reused = control.confirm_host_spawn({
+            "task_id": "host-id-reuse", "principal": "thread-a", "expected_revision": first_confirmed["state"]["revision"],
+            "attempt_id": second_attempt_id, "host_tool": "spawn_agent", "host_agent_id": "same-native-child",
+            "host_task_name": second["task_name"], "host_model": second.get("model") or second["expected_model"],
+            "host_reasoning_effort": second["reasoning_effort"],
+        })
+        self.assertFalse(reused["confirmed"])
+        self.assertTrue(reused["recoverable"])
+        self.assertEqual(reused["reason"], "host_agent_id_reused")
+        self.assertEqual(reused["state"]["attempts"][1]["status"], control.AWAITING_HOST_SPAWN)
 
     def test_host_spawn_confirmation_without_host_fields_is_recoverable(self):
         state = self.init(task_id="host-fields")["state"]
@@ -1413,7 +1655,7 @@ class ControlPlaneTests(unittest.TestCase):
         confirmed = control.confirm_host_spawn({
             "task_id": "worker-report-alias", "principal": "thread-a",
             "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
-            "host_agent_id": "planner", "host_task_name": "planner", "host_model": delegated["spawn_request"]["model"],
+            "host_agent_id": "planner", "host_task_name": delegated["spawn_request"]["task_name"], "host_model": delegated["spawn_request"]["model"],
         })
         report = control.record_report({
             "task_id": "worker-report-alias", "principal": "planner", "attempt_id": delegated["attempt_id"],
@@ -1716,6 +1958,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(prompt.count("Emit English only in every message"), 1)
         self.assertIn("Treat non-English task text as input data", prompt)
         self.assertIn("Never address the user", prompt)
+        self.assertIn("Do not repeat, translate, or mirror the user's language", prompt)
         self.assertNotIn("User-facing language:", prompt)
         self.assertNotIn("user_language", delegation)
         self.assertIn("Use only tools actually available in this worker context", prompt)
@@ -1740,7 +1983,7 @@ class ControlPlaneTests(unittest.TestCase):
         attempt_id = prepared["delegation"]["attempt_id"]
         completed = control.complete_attempt({
             "task_id": "composites", "principal": "thread-a", "attempt_id": attempt_id,
-            "host_agent_id": "host-composite", "host_task_name": "explorer", "host_model": "gpt-5.6-luna",
+            "host_agent_id": "host-composite", "host_task_name": prepared["delegation"]["spawn_request"]["task_name"], "host_model": "gpt-5.6-luna",
             "host_reasoning_effort": "low", "status": "passed", "report": {
                 "summary": "discovery complete", "findings": [], "questions": [], "changed_files": [],
                 "tests": [], "evidence": ["source paths"], "uncertainty": [], "next_action": "advance",
@@ -1870,7 +2113,7 @@ class ControlPlaneTests(unittest.TestCase):
         attempt_id = prepared["delegation"]["attempt_id"]
         bad = control.complete_attempt({
             "task_id": "attempt-recovery", "principal": "thread-a", "attempt_id": attempt_id,
-            "host_agent_id": "host-attempt-recovery", "host_task_name": "planner",
+            "host_agent_id": "host-attempt-recovery", "host_task_name": prepared["delegation"]["spawn_request"]["task_name"],
             "host_model": prepared["delegation"]["spawn_request"]["model"],
             "host_reasoning_effort": prepared["delegation"]["spawn_request"]["reasoning_effort"],
             "status": "passed", "report": {"summary": "missing required report fields"},
@@ -1880,7 +2123,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(bad["state"]["attempts"][0]["status"], "running")
         good = control.complete_attempt({
             "task_id": "attempt-recovery", "principal": "thread-a", "attempt_id": attempt_id,
-            "host_agent_id": "host-attempt-recovery", "host_task_name": "planner",
+            "host_agent_id": "host-attempt-recovery", "host_task_name": prepared["delegation"]["spawn_request"]["task_name"],
             "host_model": prepared["delegation"]["spawn_request"]["model"],
             "host_reasoning_effort": prepared["delegation"]["spawn_request"]["reasoning_effort"],
             "status": "passed", "submission_id": "corrected-report", "report": {
@@ -1913,7 +2156,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(result["recorded"])
         self.assertEqual(len(result["spawn_requests"]), 2)
         self.assertEqual(len(set(result["attempts"])), 2)
-        self.assertTrue(all(item["task_name"] == "explorer" for item in result["spawn_requests"]))
+        task_names = [item["task_name"] for item in result["spawn_requests"]]
+        self.assertEqual(len(set(task_names)), 2)
+        self.assertTrue(all(item.startswith("explorer__composite-success__discover-") for item in task_names))
+        self.assertTrue(all(item["profile"] == "explorer" for item in result["spawn_requests"]))
 
     def test_parallel_gate_wave_accepts_multiple_independent_gates(self):
         self.activate()
@@ -2010,7 +2256,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("COORDINATOR LOCK", started["next_action"])
         self.assertIn("remain idle", started["next_action"])
         self.assertIn("All project operations belong to workers", started["next_action"])
-        self.assertNotIn("model", started["dispatches"][0]["arguments"])
+        self.assertEqual(started["dispatches"][0]["arguments"]["model"], "gpt-5.6-terra")
+        self.assertEqual(started["dispatches"][0]["arguments"]["reasoning_effort"], "high")
         self.assertNotIn("task_id", started)
         self.assertNotIn("wave_id", started)
         tasks = list((self.ledger / "tasks").iterdir())
@@ -2837,6 +3084,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"workers": [{"phase": "implementation"}]},
         ])
         self.assertEqual(started["pipeline"]["authority"], "coordinator")
+        self.assertEqual(started["dispatches"][0]["arguments"]["fork_turns"], "none")
         task_dir = next((self.ledger / "tasks").iterdir())
         state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
         attempt = state["attempts"][0]
@@ -2862,6 +3110,11 @@ class ControlPlaneTests(unittest.TestCase):
         report_markdown = Path(read["report_markdown_path"])
         self.assertEqual(report_markdown, task_dir / "reports/markdown/report-0001.md")
         self.assertTrue(report_markdown.is_file())
+        self.assertEqual(
+            read["report_markdown_link"],
+            f"[Report discover — report-0001](<{report_markdown}>)",
+        )
+        self.assertIn("Publish report_markdown_link verbatim", read["next_action"])
         advanced = control.continue_orchestration({
             "project_root": str(self.project),
             "step": started["step"],
@@ -2908,6 +3161,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(
             Path(held["plan_review"]["report_markdown_path"]),
             task_dir / "reports/markdown/report-0001.md",
+        )
+        self.assertEqual(
+            held["plan_review"]["report_markdown_link"],
+            f"[Report plan — report-0001](<{task_dir / 'reports/markdown/report-0001.md'}>)",
         )
         self.assertIn("manage_orchestration", held["next_action"])
         state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
@@ -3003,6 +3260,14 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Follow-up context: this corrective task is linked", prompt)
         self.assertIn(created_handoff["handoff_file"], prompt)
 
+        deactivated = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": follow_up["task_ref"], "intent": "deactivate",
+        })
+        self.assertTrue(deactivated["ok"])
+        corrective_state = json.loads((corrective_dir / "current.json").read_text(encoding="utf-8"))
+        corrective_principal = corrective_state["principal"]
+        self.assertFalse(control.activation_status({"project_root": str(self.project), "principal": corrective_principal})["active"])
+
         replay = control.manage_orchestration({
             "project_root": str(self.project), "intent": "follow_up",
             "payload": {
@@ -3014,6 +3279,12 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(replay["ok"])
         self.assertEqual(replay["task_ref"], follow_up["task_ref"])
         self.assertEqual(replay["dispatches"], [])
+        self.assertTrue(replay["replayed"])
+        self.assertIn("idempotent replay", replay["next_action"])
+        self.assertNotIn("/cortex", replay["next_action"])
+        self.assertTrue(control.activation_status({"project_root": str(self.project), "principal": corrective_principal})["active"])
+        self.assertEqual((source_dir / "task.json").read_text(encoding="utf-8"), source_task_before)
+        self.assertEqual((source_dir / "current.json").read_text(encoding="utf-8"), source_state_before)
 
     def test_v3_follow_up_rejects_an_active_source_task(self):
         source = self.v3_start("active source task", waves=[{"workers": [{"phase": "discover"}]}])
@@ -3540,8 +3811,17 @@ class ControlPlaneTests(unittest.TestCase):
                 "profile": "explorer",
                 "summary": "persisted before native acknowledgement interruption",
                 "report_markdown_path": str(task_dir / "reports/markdown/report-0001.md"),
+                "report_markdown_link": f"[Report discover — report-0001](<{task_dir / 'reports/markdown/report-0001.md'}>)",
             }],
         )
+        self.assertEqual(inspected["context_handoff"]["schema"], "cortex/context-handoff/v1")
+        self.assertEqual(inspected["context_handoff"]["task_ref"], started["task_ref"])
+        self.assertEqual(inspected["context_handoff"]["goal"], "recover persisted report")
+        self.assertEqual(inspected["context_handoff"]["reports"][0]["report_ref"], published["report_ref"])
+        self.assertIn("fork_turns=none", inspected["context_handoff"]["protocol"]["hidden_dispatch"])
+        self.assertIn("report_markdown_link", inspected["context_handoff"]["protocol"]["report_publication"])
+        self.assertIn("context_handoff", inspected["next_action"])
+        self.assertIn("manage_orchestration", inspected["context_handoff"]["next_action"])
         advanced = control.continue_orchestration({
             "project_root": str(self.project),
             "step": inspected["step"],
@@ -3969,6 +4249,11 @@ class ControlPlaneTests(unittest.TestCase):
         )
         responses = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(responses[0]["result"]["capabilities"]["resources"], {"subscribe": False, "listChanged": False})
+        instructions = responses[0]["result"]["instructions"]
+        self.assertLessEqual(len(instructions), 512)
+        self.assertIn("publishes every read_worker_report report_markdown_link", instructions)
+        self.assertIn("Internal workers emit English only", instructions)
+        self.assertIn("After resume, clear, or compaction", instructions)
         self.assertEqual(responses[1]["result"], {"resources": []})
         self.assertEqual(responses[2]["result"], {"resourceTemplates": []})
 
@@ -4059,7 +4344,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(package["requested_model"], "gpt-5.6-terra")
         self.assertEqual(package["selected_model"], "gpt-5.6-terra")
         self.assertIsNone(package["fallback_reason"])
-        self.assertEqual(package["selected_reasoning_effort"], "medium")
+        self.assertEqual(package["selected_reasoning_effort"], "high")
         self.assertEqual(package["model_choice_reason"], "coordinator_selected_terra")
         report = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
         replay = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
@@ -4703,7 +4988,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.2.2")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.3.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

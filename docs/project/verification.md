@@ -83,10 +83,50 @@ continue calls, eight reports, and a parallel wave. It has not been reported
 for 4.0.2.
 
 Coordinator-isolation regressions assert that `SessionStart` reasserts the
-root lock and that every public v3 `next_action`, including validation
-failures, tells the root to avoid project inspection, edits, builds, and tests,
-dispatch only workers, and remain idle while they run. The installable skill
-contracts are also checked for the same coordination-only boundary.
+root lock, that compact/resume starts reassert the durable inspect recovery
+route, and that every public v3 `next_action`, including validation failures,
+tells the root to avoid project inspection, edits, builds, and tests, dispatch
+only workers, and remain idle while they run. The installable skill contracts
+are also checked for the same coordination-only boundary.
+
+The 2026-08-15 working-tree audit ran `python3 -m unittest discover -s tests
+-v`: 265 tests passed. It also passed the focused v3 host-binding and
+ambiguous-session hook regressions, Python compilation for both runtime
+scripts, marketplace validation, `bash -n scripts/sync-cortex.sh`, and
+`git diff --check`. The isolated cold-boot JSON-RPC smoke also passed with
+seven continue calls, eight reports, a parallel wave, and post-plan approval.
+The regression cases cover v3 binding from documented `PostToolUse.session_id`
+without session environment variables, explicit compatibility fallbacks,
+documented `SessionStart.session_id` plus legacy `thread_id`, `clear` and
+`compact` recovery, exact report-link reinjection, the
+`hookSpecificOutput.additionalContext` envelope, and fail-closed recovery when
+multiple active tasks share a session. No plugin installation or reload was
+performed; those remain operator-owned, and a fresh thread is required to load
+an updated plugin. `cortex_hook.py` is clean under the available `pyright`
+command; the broader `cortex.py` module still reports 64 optional/type
+diagnostics in older, unrelated sections, so this audit did not claim a clean
+whole-module pyright gate. Adaptive-routing coverage exercises every ordinary
+profile class, efficient Luna `high`/`high`/`xhigh`, bounded adaptive Luna
+`high`/`xhigh`/`max`, C1/C2/C3 and risk floors, `terra_task_kinds` upgrades,
+explicit Luna/Terra overrides, bounded C3 Luna `max`, Security/Sol, Explorer/Luna, and
+hidden Luna-to-Terra host fallback. `sync-cortex.sh --check` intentionally
+reported the then-installed 4.2.5 cache as outdated against the 4.3.0 source
+candidate; the operator-owned installation was performed in the follow-up
+verification below.
+
+The same audit covers native worker identity: canonical `profile`/
+`display_name`, task/attempt-unique `spawn_agent.task_name`, rejection of reused
+`host_agent_id`, exact-worker-only `followup_task`, and hook recovery from the
+native task key back to the canonical profile.
+
+On 2026-08-16 the native-worker identity fix was revalidated with 267 passing
+tests, Python compilation, marketplace validation, shell syntax validation, and
+`git diff --check`. The plugin cachebuster was refreshed to
+`4.3.0+codex.20260815211743` and installed from the local `cortex` marketplace;
+`scripts/probe-fresh-cortex-plugin.py` passed against an isolated HOME/CODEX_HOME.
+A focused live stdio-MCP smoke against that installed server started two
+parallel `explorer` workers and verified distinct task/attempt-native
+`spawn_agent.task_name` values, canonical profiles, and `fork_turns=none`.
 
 The question regressions drive `manage_orchestration(intent="question")`
 through stdio JSON-RPC with only the opaque `question_ref`. Cortex resolves the
@@ -152,11 +192,14 @@ declared branch/worktree, reconciles branch and dirty state, and retires the
 clean worktree without force removal.
 
 Activation regression coverage proves that mutations fail before explicit
-skill-route activation. It also verifies that the skill normalizes activation
-to the MCP server's canonical internal `/cortex` token and deactivation to its
-canonical `/normal` token; neither is a promised host slash command. Activation
-becomes bound to the initialized task and active-thread mapping. Completing a
-task cleans that mapping, not the activating principal's session. The v7 suite
+skill-route activation. It also verifies that the server receives its internal
+activation/deactivation tokens only through the Cortex skill route; neither
+bare `/cortex` nor `/normal` is a promised host slash command or a user-facing
+recovery instruction. A linked completed-task follow-up replay after
+deactivation restores the server-owned activation, returns the same opaque
+corrective `task_ref`, and emits no duplicate dispatch or slash-command hint.
+Activation becomes bound to the initialized task and active-thread mapping.
+Completing a task cleans that mapping, not the activating principal's session. The v7 suite
 also covers principal-bound classification and recoverable stale status/revision hints,
 manifest reconciliation, global resource claims, numbered task/hook resolution,
 and lane lifecycle safety.
@@ -251,10 +294,10 @@ Host-spawn binding regressions also prove that a model-routed attempt cannot
 become `running` without the host's actual `host_model`, and that an expected
 model mismatch (for example, configured-default Luna but Terra started) is terminalized
 as `host_model_mismatch` instead of being accepted as a successful dispatch.
-Routing regressions cover the simplified policy: explorer-only Luna selection,
-exact Luna `max` defaults for planner and ordinary profiles, normal Terra
-selection from `medium` through `max`, security Sol complexity floors, a hard
-`max` ceiling for every route, and
+Routing regressions cover the adaptive policy: explorer-only Luna selection,
+efficient/adaptive/deep profile classes, complexity/risk model thresholds,
+uncertainty/context/failure-cost Terra triggers, bounded C3 Luna `max`, bounded Luna/Terra overrides,
+security Sol complexity floors, a hard `max` ceiling for every route, and
 matching `user_requested_model` provenance for non-security Sol. They also
 prove configured-default Luna with no native `model`, explicit Luna when the
 host advertises it, and hidden Terra fallback with preserved effort when Luna

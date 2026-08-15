@@ -35,12 +35,22 @@ LEGACY_QUESTION_SCHEMA = "cortex/question/v1"
 QUESTION_SCHEMAS = {QUESTION_SCHEMA, LEGACY_QUESTION_SCHEMA}
 ACTIVATION_COMMAND = "/cortex"
 NORMAL_COMMAND = "/normal"
+SKILL_ROUTE_HINT = "select `cortex:orchestrator` in the Skills picker or mention `$cortex:orchestrator` in the main chat"
 PROFILE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "profiles.json"
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
+CODEX_SESSION_ENV_KEYS = ("CODEX_SESSION_ID", "CODEX_THREAD_ID")
+HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
 PLUGIN_ROOT = PROFILE_CONTRACT_PATH.parent
 PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 MCP_OPENAI_FORM = False
 _STATE_LOCK_LOCAL = threading.local()
+MCP_SERVER_INSTRUCTIONS = (
+    "Cortex is opt-in: use it only after explicit cortex:orchestrator skill activation. During an active Cortex task, "
+    "root coordinates only, preserves task_ref, and follows returned dispatches and lifecycle steps. Root publishes "
+    "every read_worker_report report_markdown_link verbatim in the main chat before another lifecycle "
+    "call. Internal workers emit English only. After resume, clear, or compaction, inspect the active task once and "
+    "continue from context_handoff; never restart it or request a bare slash command."
+)
 
 try:
     SERVER_VERSION = str(json.loads(PLUGIN_MANIFEST_PATH.read_text(encoding="utf-8"))["version"])
@@ -391,8 +401,98 @@ SUPPORTED_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
 REQUESTABLE_MODELS = SUPPORTED_MODELS
 SUPPORTED_EFFORT_SEQUENCE = ("low", "medium", "high", "xhigh", "max")
 SUPPORTED_EFFORTS = set(SUPPORTED_EFFORT_SEQUENCE)
-CONFIGURED_DEFAULT_MODEL = "gpt-5.6-luna"
 MODEL_RESOLUTIONS = {"configured_default", "explicit_override", "visible_thread"}
+MODEL_ROUTING = PROFILE_CONTRACT.get("model_routing")
+if not isinstance(MODEL_ROUTING, dict) or MODEL_ROUTING.get("schema") != "cortex/model-routing/v1":
+    raise RuntimeError("bundled Cortex model routing contract is invalid")
+CONFIGURED_DEFAULT_MODEL = str(MODEL_ROUTING.get("configured_default_model", ""))
+if CONFIGURED_DEFAULT_MODEL != "gpt-5.6-luna":
+    raise RuntimeError("bundled Cortex model routing must use Luna as the configured default")
+
+
+def _validated_effort_map(
+    value: Any,
+    keys: set[str],
+    label: str,
+    *,
+    allow_max: bool = False,
+) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise RuntimeError(f"bundled Cortex {label} keys are invalid")
+    normalized = {str(key): str(effort) for key, effort in value.items()}
+    allowed_efforts = SUPPORTED_EFFORTS if allow_max else SUPPORTED_EFFORTS - {"max"}
+    if not set(normalized.values()).issubset(allowed_efforts):
+        raise RuntimeError(f"bundled Cortex {label} efforts are invalid")
+    return normalized
+
+
+_security_routing = MODEL_ROUTING.get("security")
+_explorer_routing = MODEL_ROUTING.get("explorer")
+if not isinstance(_security_routing, dict) or _security_routing.get("model") != "gpt-5.6-sol":
+    raise RuntimeError("bundled Cortex security model routing is invalid")
+if not isinstance(_explorer_routing, dict) or _explorer_routing.get("model") != CONFIGURED_DEFAULT_MODEL:
+    raise RuntimeError("bundled Cortex explorer model routing is invalid")
+SECURITY_MODEL = str(_security_routing["model"])
+EXPLORER_MODEL = str(_explorer_routing["model"])
+SECURITY_EFFORT_BY_COMPLEXITY = _validated_effort_map(
+    _security_routing.get("effort_by_complexity"), {"C1", "C2", "C3"}, "security effort map"
+)
+EXPLORER_EFFORT_BY_RISK = _validated_effort_map(
+    _explorer_routing.get("effort_by_risk"), {"low", "moderate", "high", "critical"}, "explorer effort map"
+)
+LUNA_BOUNDED_EFFORT_BY_COMPLEXITY = _validated_effort_map(
+    MODEL_ROUTING.get("luna_bounded_effort_by_complexity"),
+    {"C1", "C2", "C3"},
+    "bounded Luna effort map",
+    allow_max=True,
+)
+if LUNA_BOUNDED_EFFORT_BY_COMPLEXITY != {"C1": "high", "C2": "xhigh", "C3": "max"}:
+    raise RuntimeError("bundled Cortex bounded Luna effort map must be high/xhigh/max")
+LUNA_EFFICIENT_EFFORT_BY_COMPLEXITY = _validated_effort_map(
+    MODEL_ROUTING.get("luna_efficient_effort_by_complexity"),
+    {"C1", "C2", "C3"},
+    "efficient Luna effort map",
+)
+TERRA_EFFORT_BY_COMPLEXITY = _validated_effort_map(
+    MODEL_ROUTING.get("terra_effort_by_complexity"),
+    {"C1", "C2", "C3"},
+    "Terra effort map",
+)
+MODEL_EFFORT_FLOOR_BY_RISK = _validated_effort_map(
+    MODEL_ROUTING.get("effort_floor_by_risk"), {"low", "moderate", "high", "critical"}, "model effort risk map"
+)
+if MODEL_ROUTING.get("max_policy") != "bounded_complex_work":
+    raise RuntimeError("bundled Cortex max effort policy must be bounded_complex_work")
+
+_profile_classes = MODEL_ROUTING.get("profile_classes")
+if not isinstance(_profile_classes, dict) or set(_profile_classes) != {"efficient", "adaptive", "deep"}:
+    raise RuntimeError("bundled Cortex model profile classes are invalid")
+MODEL_PROFILE_CLASSES: dict[str, set[str]] = {}
+_classified_profiles: set[str] = set()
+for _class_name, _class_profiles in _profile_classes.items():
+    if (
+        not isinstance(_class_profiles, list)
+        or not _class_profiles
+        or not all(isinstance(name, str) and name in AGENTS for name in _class_profiles)
+    ):
+        raise RuntimeError(f"bundled Cortex model profile class is invalid: {_class_name}")
+    _class_set = set(_class_profiles)
+    if len(_class_set) != len(_class_profiles) or _classified_profiles.intersection(_class_set):
+        raise RuntimeError("bundled Cortex model profile classes overlap or contain duplicates")
+    MODEL_PROFILE_CLASSES[str(_class_name)] = _class_set
+    _classified_profiles.update(_class_set)
+if _classified_profiles != AGENTS - {"explorer", "security_auditor"}:
+    raise RuntimeError("bundled Cortex model profile classes must cover every ordinary profile exactly once")
+
+_terra_task_kinds = MODEL_ROUTING.get("terra_task_kinds")
+if (
+    not isinstance(_terra_task_kinds, list)
+    or not _terra_task_kinds
+    or len(set(_terra_task_kinds)) != len(_terra_task_kinds)
+    or not all(isinstance(kind, str) and SAFE_ID_RE.fullmatch(kind) for kind in _terra_task_kinds)
+):
+    raise RuntimeError("bundled Cortex Terra task kinds are invalid")
+TERRA_TASK_KINDS = set(_terra_task_kinds)
 LIGHTWEIGHT_TASK_KINDS = {
     "read_only", "read-only", "reading", "discover", "discovery",
     "read_discovery", "read-discovery", "audit", "comparison",
@@ -400,10 +500,9 @@ LIGHTWEIGHT_TASK_KINDS = {
     "data_gathering", "data-gathering", "crud", "crud_edit", "crud-edit",
     "small_fix", "small-fix",
 }
-# Analysis intent must not be inferred only from low risk.  A high-risk
-# investigation is still a Luna investigation; the reasoning floor changes,
-# but the worker model does not fall back to Terra.  Keep this list bounded and
-# explicit because task_kind is model-supplied input at the MCP boundary.
+# Analysis intent controls durable read-only metadata independently of model
+# selection. Keep this list bounded and explicit because task_kind is
+# model-supplied input at the MCP boundary.
 ANALYSIS_TASK_KINDS = {
     "analysis", "analyze", "investigation", "investigate", "diagnosis",
     "diagnostic", "research", "fact_gathering", "fact_finding",
@@ -415,14 +514,7 @@ ANALYSIS_TASK_KIND_PREFIXES = (
     "fact_gather", "fact_find", "source_analysis", "code_analysis",
     "runtime_investigat", "root_cause",
 )
-ANALYSIS_REASONING_FLOORS = {
-    "low": "medium",
-    "moderate": "medium",
-    "high": "high",
-    "critical": "xhigh",
-}
 REASONING_EFFORT_ORDER = {name: index for index, name in enumerate(SUPPORTED_EFFORT_SEQUENCE)}
-SECURITY_EFFORT_BY_COMPLEXITY = {"C1": "medium", "C2": "high", "C3": "xhigh"}
 TERMINAL_ATTEMPT_STATUSES = {"passed", "failed", "blocked", "cancelled", "superseded"}
 AWAITING_HOST_SPAWN = "awaiting_host_spawn"
 CAPABILITY_SOURCE = "host_spawn_agent_contract_2026-08-13"
@@ -474,6 +566,29 @@ def safe_id(value: str) -> str:
     if not candidate or not SAFE_ID_RE.fullmatch(candidate):
         raise ValueError("identifier must contain only lowercase letters, numbers, hyphens, or underscores")
     return candidate
+
+
+def native_worker_task_name(profile: str, task_id: str, attempt_id: str) -> str:
+    """Return a fresh native task key while preserving the canonical profile.
+
+    ``profile``/``display_name`` is the stable role label.  The native
+    ``spawn_agent.task_name`` is instead a session identity, so reusing only
+    the role (for example, ``explorer``) can make a host attach a new dispatch
+    to an old child thread.  Include the task and attempt in the readable
+    form, and retain a deterministic digest when the host-facing value would
+    exceed the bounded identifier length.
+    """
+    profile_id = safe_id(profile)
+    task_id = safe_id(task_id)
+    attempt_id = safe_id(attempt_id)
+    readable = f"{profile_id}__{task_id}__{attempt_id}"
+    if len(readable) <= 80:
+        return readable
+    digest = hashlib.sha256(readable.encode("utf-8")).hexdigest()[:24]
+    attempt_fragment = attempt_id[:24].rstrip("-_") or "attempt"
+    profile_fragment = profile_id[:24].rstrip("-_") or "worker"
+    candidate = f"{profile_fragment}__{attempt_fragment}__{digest}"
+    return candidate[:80].rstrip("-_")
 
 
 def normalize_routing_id(value: Any, field: str = "routing id") -> str:
@@ -532,6 +647,22 @@ def normalize_user_language(value: object, fallback_text: object = "") -> str:
 
 def digest_text(value: object) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _codex_host_session_id() -> str | None:
+    """Return a compatible session hint explicitly forwarded to the MCP process.
+
+    Public v3 arguments intentionally do not accept caller-supplied durable
+    identity.  Some hosts or operator configurations forward a session/thread
+    environment value; the documented PostToolUse hook session_id is the
+    primary lifecycle binding.  An absent or malformed value keeps the
+    standalone-MCP fallback behavior until that hook runs.
+    """
+    for name in CODEX_SESSION_ENV_KEYS:
+        candidate = str(os.environ.get(name, "")).strip().lower()
+        if SAFE_ID_RE.fullmatch(candidate):
+            return candidate
+    return None
 
 
 def _reject_symlink_ancestry(path: Path, label: str, allow_missing_leaf: bool = False) -> Path:
@@ -719,8 +850,32 @@ def remove_active_mapping(root: Path, task_id: str, thread_id: str) -> None:
             index = json.loads(index_path.read_text(encoding="utf-8"))
             changed = False
             for key, value in list(index.items()):
-                if value == task_id and (not thread_id or key == thread_id):
+                if value == task_id:
                     del index[key]
+                    changed = True
+            if thread_id:
+                remaining = _active_task_ids_for_thread(root, thread_id, exclude_task_id=task_id)
+                if len(remaining) == 1:
+                    if index.get(thread_id) != remaining[0]:
+                        index[thread_id] = remaining[0]
+                        changed = True
+                elif thread_id in index:
+                    # Keep the lifecycle hook fail-closed while more than one
+                    # active task still shares this host session.
+                    index.pop(thread_id, None)
+                    changed = True
+            bindings = _host_session_bindings(root)
+            bound_session = str(bindings["tasks"].pop(task_id, "") or "")
+            if bound_session:
+                bindings["updated_at"] = now()
+                write_json(_host_session_bindings_path(root), bindings)
+                remaining = _active_host_session_task_ids(root, bindings, bound_session)
+                if len(remaining) == 1:
+                    if index.get(bound_session) != remaining[0]:
+                        index[bound_session] = remaining[0]
+                        changed = True
+                elif bound_session in index:
+                    index.pop(bound_session, None)
                     changed = True
             if changed:
                 if index:
@@ -808,7 +963,11 @@ def ledger_root(params: dict[str, Any] | None = None) -> Path:
 
 
 def activation_key(params: dict[str, Any]) -> str:
-    key = str(params.get("thread_id") or params.get("principal") or "").strip()
+    principal = str(params.get("principal") or "").strip()
+    # v3 owns a server-generated principal for each task.  Keep activation
+    # records keyed by that unique identity even when the host session binding
+    # is shared by more than one task in the same Codex thread.
+    key = principal if principal.startswith("v3-task-") else str(params.get("thread_id") or principal).strip()
     if not key:
         raise ValueError("explicit orchestration activation requires thread_id or principal")
     return redact(key, 256)
@@ -839,7 +998,7 @@ def require_activation(params: dict[str, Any], task_id: str | None = None) -> di
     root = ledger_root(params)
     record = activation_record(root, params, task_id)
     if not record:
-        raise ValueError("orchestration is inactive; send exact standalone /cortex text in the main chat first")
+        raise ValueError(f"orchestration is inactive; {SKILL_ROUTE_HINT} first")
     return record
 
 
@@ -855,12 +1014,12 @@ def activate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     if not activation_token:
         return {
             "active": False,
-            "next_action": f"retry activate_orchestration with user_command={ACTIVATION_COMMAND!r}",
+            "next_action": f"{SKILL_ROUTE_HINT}, then retry the Cortex activation route",
             "recoverable": True,
             "ledger_root": str(ledger_root(params)),
         }
     if activation_token != ACTIVATION_COMMAND:
-        raise ValueError("explicit orchestration activation requires the exact standalone /cortex text trigger")
+        raise ValueError(f"explicit orchestration activation is owned by the Cortex skill route; {SKILL_ROUTE_HINT}")
     principal = str(params.get("principal", "")).strip()
     thread_id = str(params.get("thread_id", "")).strip()
     if not principal or not thread_id:
@@ -896,7 +1055,7 @@ def activate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
 
 def deactivate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     if str(params.get("user_command", "")).strip() != NORMAL_COMMAND:
-        raise ValueError("explicit normal-mode transition requires the exact /normal command")
+        raise ValueError("explicit normal-mode transition is owned by the Cortex skill route; use `$cortex:orchestrator normal`")
     root = ledger_root(params)
     key = activation_key(params)
     with state_lock(root):
@@ -1126,6 +1285,123 @@ def read_task_index(root: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _active_task_ids_for_thread(
+    root: Path,
+    thread_id: str,
+    *,
+    exclude_task_id: str | None = None,
+) -> list[str]:
+    """Find every non-terminal task bound to a host thread.
+
+    ``active-tasks.json`` is intentionally only an unambiguous lookup index;
+    when a second task shares a host session the entry is removed.  Scanning
+    the durable task index here prevents a later task from silently restoring
+    an ambiguous binding just because that lookup entry is absent.
+    """
+    normalized_thread = str(thread_id or "").strip()
+    if not normalized_thread:
+        return []
+    active: list[str] = []
+    for raw_task_id, entry in read_task_index(root).items():
+        try:
+            task_id = safe_id(str(raw_task_id))
+        except ValueError:
+            continue
+        if exclude_task_id and task_id == exclude_task_id:
+            continue
+        directory = entry.get("directory") if isinstance(entry, dict) else None
+        if not isinstance(directory, str) or Path(directory).name != directory or directory in {"", ".", ".."}:
+            continue
+        try:
+            task_dir = _contained_path(root / "tasks", root / "tasks" / directory, "indexed task directory")
+            _reject_symlink_ancestry(task_dir, "indexed task directory")
+            state_path = _reject_symlink_ancestry(task_dir / "current.json", "indexed task state")
+            if not state_path.exists():
+                continue
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            continue
+        if (
+            isinstance(state, dict)
+            and state.get("schema") == SCHEMA
+            and state.get("task_id") == task_id
+            and str(state.get("thread_id") or "").strip() == normalized_thread
+            and state.get("status") in {"active", "blocked"}
+        ):
+            active.append(task_id)
+    return sorted(set(active))
+
+
+def _host_session_bindings_path(root: Path) -> Path:
+    return root / "host-sessions.json"
+
+
+def _host_session_bindings(root: Path) -> dict[str, Any]:
+    path = _host_session_bindings_path(root)
+    if not path.exists():
+        return {"schema": HOST_SESSION_SCHEMA, "tasks": {}, "updated_at": now()}
+    payload = _read_private_json(path, "host session bindings")
+    if payload.get("schema") != HOST_SESSION_SCHEMA or not isinstance(payload.get("tasks"), dict):
+        raise ValueError("host session binding registry is invalid")
+    return payload
+
+
+def _active_host_session_task_ids(root: Path, bindings: dict[str, Any], session_id: str) -> list[str]:
+    active: list[str] = []
+    for raw_task_id, bound_session in bindings.get("tasks", {}).items():
+        if bound_session != session_id:
+            continue
+        try:
+            task_id = safe_id(str(raw_task_id))
+            loaded = _v3_task_state(root, task_id)
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            continue
+        if loaded is not None and loaded[1].get("status") in {"active", "blocked"}:
+            active.append(task_id)
+    return sorted(set(active))
+
+
+def bind_host_session_from_hook(project_root_value: object, task_ref_value: object, session_id_value: object) -> dict[str, Any]:
+    """Bind documented hook identity without changing task authorization."""
+    project = select_project_root({"project_root": str(project_root_value or "")})
+    task_ref_value = safe_id(str(task_ref_value or ""))
+    session_id = safe_id(str(session_id_value or ""))
+    root = ledger_root({"project_root": str(project)})
+    with state_lock(root):
+        registry = _v3_registry(root)
+        matches = [
+            str(task_id)
+            for task_id, record in registry.get("tasks", {}).items()
+            if isinstance(record, dict)
+            and isinstance(record.get("start"), dict)
+            and record["start"].get("task_ref") == task_ref_value
+        ]
+        if len(matches) != 1:
+            return {"bound": False, "reason": "task_ref_unavailable"}
+        task_id = safe_id(matches[0])
+        loaded = _v3_task_state(root, task_id)
+        if loaded is None or loaded[1].get("status") not in {"active", "blocked"}:
+            return {"bound": False, "reason": "task_inactive"}
+        bindings = _host_session_bindings(root)
+        previous = str(bindings["tasks"].get(task_id) or "")
+        if previous and previous != session_id:
+            return {"bound": False, "reason": "session_conflict"}
+        bindings["tasks"][task_id] = session_id
+        bindings["updated_at"] = now()
+        write_json(_host_session_bindings_path(root), bindings)
+        index_path = root / "active-tasks.json"
+        index = _read_private_json(index_path, "active task index") if index_path.exists() else {}
+        if not isinstance(index, dict):
+            raise ValueError("active task index is invalid")
+        active = _active_host_session_task_ids(root, bindings, session_id)
+        if len(active) == 1:
+            index[session_id] = active[0]
+        else:
+            index.pop(session_id, None)
+        write_json(index_path, index)
+        return {"bound": True, "task_id": task_id, "ambiguous": len(active) != 1}
+
+
 def task_paths(task_id: str, params: dict[str, Any]) -> tuple[Path, Path, Path]:
     root = ledger_root(params)
     normalized = safe_id(task_id)
@@ -1347,6 +1623,17 @@ def is_analysis_task_kind(task_kind: str) -> bool:
     )
 
 
+def model_profile_class(profile_name: str) -> str:
+    for class_name, profiles in MODEL_PROFILE_CLASSES.items():
+        if profile_name in profiles:
+            return class_name
+    raise RuntimeError(f"Cortex model routing has no class for profile {profile_name}")
+
+
+def higher_effort(*efforts: str) -> str:
+    return max(efforts, key=REASONING_EFFORT_ORDER.__getitem__)
+
+
 def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     select_project_root(params)
     profile_name = canonical_profile(params.get("agent") or params.get("profile") or "")
@@ -1379,9 +1666,9 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         or task_kind.startswith("data_gather")
         or task_kind.startswith("audit")
     )
-    # Task kind affects sandbox/read-only metadata only. Model selection is a
-    # deliberately small profile matrix so similarly named work cannot
-    # silently change models.
+    # Task kind supplies a bounded uncertainty/context/failure-cost signal.
+    # Profile class and risk remain authoritative, so a vague lightweight
+    # label cannot downgrade a deep specialist or high-consequence task.
     analysis_dispatch = lightweight_dispatch or is_analysis_task_kind(task_kind)
     # Read-only is a property of the dispatched work, not only of the worker
     # profile.  Documentation/verification profiles may be allowed to touch
@@ -1389,13 +1676,23 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     # durable attempt record regardless of which profile owns its gate.
     read_only = read_only or analysis_dispatch
     if security_context:
-        policy_model, policy_reason = "gpt-5.6-sol", "security_profile_or_gate"
+        policy_model, policy_reason = SECURITY_MODEL, "security_profile_or_gate"
     elif profile_name == "explorer":
-        policy_model, policy_reason = CONFIGURED_DEFAULT_MODEL, "explorer_always_luna"
-    elif profile_name == "planner":
-        policy_model, policy_reason = CONFIGURED_DEFAULT_MODEL, "planner_strong_luna_default"
+        policy_model, policy_reason = EXPLORER_MODEL, "explorer_always_luna"
     else:
-        policy_model, policy_reason = CONFIGURED_DEFAULT_MODEL, "strong_luna_default"
+        profile_class = model_profile_class(profile_name)
+        if profile_class == "deep":
+            policy_model, policy_reason = "gpt-5.6-terra", "deep_profile"
+        elif profile_name == "planner" and complexity in {"C2", "C3"}:
+            policy_model, policy_reason = "gpt-5.6-terra", "complex_planning"
+        elif task_kind in TERRA_TASK_KINDS:
+            policy_model, policy_reason = "gpt-5.6-terra", "terra_task_kind"
+        elif risk in {"high", "critical"}:
+            policy_model, policy_reason = "gpt-5.6-terra", "high_failure_cost"
+        elif profile_class == "efficient":
+            policy_model, policy_reason = CONFIGURED_DEFAULT_MODEL, "efficient_profile"
+        else:
+            policy_model, policy_reason = CONFIGURED_DEFAULT_MODEL, "bounded_adaptive_work"
     raw_requested_model = str(params.get("requested_model") or "").strip()
     raw_user_requested_model = str(params.get("user_requested_model") or "").strip()
     configured_default_model = str(
@@ -1417,9 +1714,9 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         selected_model = CONFIGURED_DEFAULT_MODEL
         model_choice_reason = "explorer_policy"
     elif security_context:
-        if raw_requested_model and requested_model != "gpt-5.6-sol":
+        if requested_model != SECURITY_MODEL:
             raise ValueError("security work always uses gpt-5.6-sol")
-        selected_model = "gpt-5.6-sol"
+        selected_model = SECURITY_MODEL
         model_choice_reason = "security_policy"
     elif requested_model == "gpt-5.6-sol":
         if raw_user_requested_model != "gpt-5.6-sol":
@@ -1430,19 +1727,30 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         selected_model = requested_model
         if raw_user_requested_model:
             model_choice_reason = "explicit_user_request"
-        elif selected_model == "gpt-5.6-terra":
-            model_choice_reason = "coordinator_selected_terra"
         elif raw_requested_model:
-            model_choice_reason = "coordinator_selected_luna"
+            model_choice_reason = (
+                "coordinator_selected_terra"
+                if selected_model == "gpt-5.6-terra"
+                else "coordinator_selected_luna"
+            )
         else:
-            model_choice_reason = "strong_luna_default"
+            model_choice_reason = policy_reason
 
     if profile_name == "explorer":
-        default_effort = ANALYSIS_REASONING_FLOORS[risk]
+        default_effort = EXPLORER_EFFORT_BY_RISK[risk]
     elif security_context:
         default_effort = SECURITY_EFFORT_BY_COMPLEXITY[complexity]
     else:
-        default_effort = "max"
+        if selected_model != "gpt-5.6-luna":
+            model_effort = TERRA_EFFORT_BY_COMPLEXITY[complexity]
+        elif model_profile_class(profile_name) == "efficient":
+            model_effort = LUNA_EFFICIENT_EFFORT_BY_COMPLEXITY[complexity]
+        else:
+            model_effort = LUNA_BOUNDED_EFFORT_BY_COMPLEXITY[complexity]
+        default_effort = higher_effort(
+            model_effort,
+            MODEL_EFFORT_FLOOR_BY_RISK[risk],
+        )
     requested_effort = str(params.get("requested_reasoning_effort") or "").strip().lower() or default_effort
     selected_effort = "low" if requested_effort == "none" else requested_effort
     if selected_effort not in SUPPORTED_EFFORTS:
@@ -1451,7 +1759,7 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     if security_context:
         minimum_effort = SECURITY_EFFORT_BY_COMPLEXITY[complexity]
     elif profile_name != "explorer":
-        minimum_effort = "max" if selected_model == CONFIGURED_DEFAULT_MODEL else "medium"
+        minimum_effort = default_effort
     if minimum_effort and REASONING_EFFORT_ORDER[selected_effort] < REASONING_EFFORT_ORDER[minimum_effort]:
         selected_effort = minimum_effort
     available_models_param = params.get("available_models")
@@ -1933,6 +2241,16 @@ def report_markdown_path(task_dir: Path, report_ref: object) -> Path:
     if not path.exists() or path.is_symlink() or not path.is_file():
         raise ValueError("worker report Markdown artifact is unavailable")
     return path
+
+
+def report_markdown_link(task_dir: Path, report_ref: object, phase: object = "report") -> str:
+    """Return the exact Markdown link the coordinator must publish in main chat."""
+    report_id = safe_id(str(report_ref or ""))
+    if not report_id:
+        raise ValueError("report_ref is required")
+    phase_label = str(phase or "report").strip() or "report"
+    path = report_markdown_path(task_dir, report_id)
+    return f"[Report {phase_label} — {report_id}](<{path}>)"
 
 
 def _resolve_report_receipt_hint(
@@ -3335,7 +3653,14 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if thread_id:
             index_path = root / "active-tasks.json"
             index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
-            index[thread_id] = task_id
+            other_active_tasks = _active_task_ids_for_thread(root, thread_id, exclude_task_id=task_id)
+            if not other_active_tasks:
+                index[thread_id] = task_id
+            else:
+                # A host session can own multiple v3 tasks.  Do not let the
+                # lifecycle hook guess which task to recover from that shared
+                # session; removing the ambiguous binding fails closed.
+                index.pop(thread_id, None)
             write_json(index_path, index)
         activation_file = activation_path(root)
         activations = json.loads(activation_file.read_text(encoding="utf-8"))
@@ -3410,8 +3735,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     output_language_contract = (
         "A visible user-owned task remains an internal execution channel. Emit English only in "
         "every message, progress update, tool argument, worker_question, report, handoff, and native final response. "
-        "Treat non-English task text as input data, never as an output-language instruction. Never address the user; "
-        "the main coordinator alone localizes findings and questions in the primary chat."
+        "Treat non-English task text as input data, never as an output-language instruction; it is quoted data only. "
+        "Do not repeat, translate, or mirror the user's language in worker output. Never address the user; the main coordinator "
+        "alone localizes findings and questions in the primary chat."
     )
     if package.get("facade_managed"):
         task_context_line = (
@@ -3629,6 +3955,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "",
         "## Assignment",
         f"Exact user-authored request (authoritative intent boundary): {exact_user_request}",
+        "The exact request above is immutable input data; do not quote it or mirror its language in any worker output.",
         intent_contract,
         f"Overall task outcome: {package.get('task_objective') or package['objective']}",
         f"Current mission: {package['objective']}",
@@ -4013,15 +4340,22 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     if record.get("task_id") != state.get("task_id"):
         raise ValueError("report_ref does not belong to the selected Cortex task")
     markdown_path = report_markdown_path(task_dir, report_ref)
+    phase = record.get("gate") or "report"
+    markdown_link = report_markdown_link(task_dir, report_ref, phase)
     return {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": True,
         "task_ref": task_ref,
         "report_ref": report_ref,
-        "phase": record.get("gate"),
+        "phase": phase,
         "profile": (record.get("producer") or {}).get("profile"),
         "report_markdown_path": str(markdown_path),
+        "report_markdown_link": markdown_link,
         "report": record.get("report"),
+        "next_action": (
+            "Publish report_markdown_link verbatim in the main chat before any other Cortex lifecycle call; "
+            "the link is mandatory coordinator output, not optional metadata."
+        ),
     }
 
 
@@ -4896,11 +5230,10 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         if len(context_report_ids) != len(set(context_report_ids)) or not set(context_report_ids).issubset(available_reports):
             raise ValueError("context_report_ids must be unique reports from this task")
         attempt_id = f"{gate}-{len(state['attempts']) + 1:02d}"
-        # `spawn_agent.task_name` is the only naming field exposed by the
-        # native Codex adapter.  It must therefore carry the canonical Cortex
-        # profile name; `attempt_id` remains the durable unique correlation
-        # key and must never leak into the worker label.
-        task_name = agent
+        # The role label remains canonical, but the native task key must be
+        # unique per task/attempt.  Keeping only ``agent`` here lets the host
+        # mistake a fresh dispatch for a continuation of an older child.
+        task_name = native_worker_task_name(agent, state["task_id"], attempt_id)
         host_tool = "create_thread" if dispatch_mode == "visible_thread" else "spawn_agent"
         visible_thread = dispatch_mode == "visible_thread"
         spawn_request = {
@@ -4921,6 +5254,12 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "model_resolution": route.get("model_resolution", "policy"),
             "reasoning_effort": route["selected_reasoning_effort"],
         }
+        if host_tool == "spawn_agent":
+            # Hidden workers receive a complete Cortex briefing below.  Do
+            # not inherit the coordinator's conversation, where the user's
+            # language and localized status messages can override the
+            # English-only worker protocol or leak unrelated context.
+            spawn_request["fork_turns"] = "none"
         if route.get("model_resolution") != "configured_default":
             spawn_request["model"] = route["selected_model"]
         if visible_thread:
@@ -4963,7 +5302,9 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             # create_thread calls this field `prompt`; retaining `message`
             # keeps the package readable by existing coordinator adapters.
             spawn_request["prompt"] = spawn_request["message"]
-            spawn_request["title"] = task_name
+            # Visible thread labels remain the exact canonical profile name;
+            # ``task_name`` is the private native session key.
+            spawn_request["title"] = agent
         package_path = task_dir / "delegations" / f"{attempt_id}.json"
         write_json(package_path, package)
         if observed is not None and status_path is not None:
@@ -5111,6 +5452,29 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
                 "state": state,
             }
         expected_task_name = str((attempt.get("spawn_request") or {}).get("task_name", ""))
+        for existing in state.get("attempts", []):
+            if existing.get("attempt_id") == attempt_id:
+                continue
+            existing_spawn = existing.get("host_spawn") or {}
+            if (
+                existing_spawn.get("tool") == host_tool
+                and existing_spawn.get("agent_id") == host_agent_id
+            ):
+                return {
+                    "confirmed": False,
+                    "attempt_id": attempt_id,
+                    "reason": "host_agent_id_reused",
+                    "detail": (
+                        f"host_agent_id {host_agent_id!r} is already bound to "
+                        f"attempt {existing.get('attempt_id')!r}"
+                    ),
+                    "next_action": (
+                        "retry confirm_host_spawn with the new native child id and "
+                        "the exact task_name returned for this attempt"
+                    ),
+                    "recoverable": True,
+                    "state": state,
+                }
         task_name_correction = (
             {"requested": host_task_name, "used": expected_task_name}
             if host_task_name != expected_task_name else None
@@ -6556,6 +6920,152 @@ def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _context_handoff(
+    task_dir: Path,
+    state: dict[str, Any],
+    task: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a bounded, ledger-backed recovery handoff after context compaction.
+
+    The host may compact or replay the conversation without preserving the
+    exact skill version or the coordinator's transient protocol state.  This
+    handoff is deliberately derived from the task ledger and report index, so
+    the coordinator can rehydrate from durable evidence instead of trusting a
+    raw transcript or starting a duplicate task.
+    """
+    report_index = _report_index(report_bus_paths(task_dir), state["task_id"])
+    report_items = [
+        item for item in report_index.get("reports", [])
+        if isinstance(item, dict)
+    ][-MAX_CONTEXT_REPORTS:]
+    report_handoffs: list[dict[str, Any]] = []
+    changed_files: list[str] = []
+    verified_facts: list[dict[str, Any]] = []
+    for item in report_items:
+        report_ref = safe_id(str(item.get("report_id") or ""))
+        phase = redact(item.get("gate", "report"), 128) or "report"
+        summary = redact(item.get("summary", ""), 2400)
+        raw_files = item.get("changed_files")
+        files: list[Any] = raw_files if isinstance(raw_files, list) else []
+        compact_files = [redact(value, 500) for value in files[:32]]
+        for value in compact_files:
+            if value and value not in changed_files:
+                changed_files.append(value)
+        report_handoffs.append({
+            "report_ref": report_ref,
+            "phase": phase,
+            "profile": redact((item.get("producer") or {}).get("profile", ""), 128),
+            "summary": summary,
+            "report_markdown_path": str(report_markdown_path(task_dir, report_ref)),
+            "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
+            "changed_files": compact_files,
+        })
+        verified_facts.append({
+            "source": report_ref,
+            "phase": phase,
+            "fact": summary,
+            "changed_files": compact_files,
+        })
+
+    decisions: list[dict[str, Any]] = []
+    for collection_name in ("pipeline_changes", "adaptive_events"):
+        collection = state.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        for value in collection[-8:]:
+            if isinstance(value, dict):
+                decisions.append(sanitize_structured({
+                    "source": collection_name,
+                    "at": value.get("at"),
+                    "reason": redact(value.get("reason", ""), 1200),
+                    "signals": [redact(item, 800) for item in (value.get("signals") or [])[:8]],
+                    "from": value.get("from"),
+                    "to": value.get("to") or value.get("pipeline"),
+                    "operations": value.get("operations") or [],
+                }))
+    approval = _plan_approval(state)
+    if approval.get("policy") == "required" or approval.get("plan_report_ref"):
+        decisions.append({
+            "source": "plan_approval",
+            "status": redact(approval.get("status", ""), 64),
+            "plan_report_ref": redact(approval.get("plan_report_ref", ""), 128) or None,
+            "feedback": redact(approval.get("feedback", ""), 1200) or None,
+        })
+
+    commands: list[dict[str, Any]] = []
+    for evidence in state.get("evidence", [])[-8:]:
+        if not isinstance(evidence, dict):
+            continue
+        command = redact(evidence.get("command", ""), 1000)
+        argv = [redact(value, 300) for value in (evidence.get("argv") or [])[:32]]
+        if not command and not argv:
+            continue
+        commands.append({
+            "gate": redact(evidence.get("gate", ""), 64),
+            "command": command or None,
+            "argv": argv,
+            "cwd": redact(evidence.get("cwd", ""), 500) or None,
+            "exit_code": evidence.get("exit_code"),
+            "verified_execution": bool(evidence.get("verified_execution")),
+            "stdout": redact(evidence.get("stdout", ""), 1200),
+            "stderr": redact(evidence.get("stderr", ""), 1200),
+        })
+
+    open_questions = [
+        {
+            "question_ref": redact(item.get("question_id", ""), 128),
+            "attempt_id": redact(item.get("attempt_id", ""), 128),
+            "header": redact(item.get("header", ""), 300),
+            "question": redact(item.get("question", ""), 1600),
+        }
+        for item in _open_blocking_questions(task_dir, state)
+        if isinstance(item, dict)
+    ][:8]
+    blockers: list[str] = []
+    if state.get("status") == "blocked":
+        blockers.append(redact(state.get("blocked_reason", "The task is blocked."), 2000))
+    blockers.extend(
+        redact(item.get("reason", ""), 1200)
+        for item in state.get("recovery_events", [])[-8:]
+        if isinstance(item, dict) and item.get("reason")
+    )
+
+    task_ref = _v3_task_ref(state["task_id"])
+    next_action = (
+        f"Call manage_orchestration(intent=inspect, task_ref={task_ref}) once after context compaction; "
+        "treat the returned context_handoff and current ledger as authoritative. Do not call "
+        "start_orchestration again, do not replay completed dispatches, and do not use a raw transcript. "
+        "After rehydration, follow the returned relative step and publish every exact report_markdown_link "
+        "before the next lifecycle or report-read call."
+    )
+    return {
+        "schema": "cortex/context-handoff/v1",
+        "task_ref": task_ref,
+        "task_id": redact(state.get("task_id", ""), 128),
+        "generated_at": now(),
+        "goal": redact(task.get("user_request") or task.get("objective", ""), 4000),
+        "acceptance_criteria": [redact(item, 1000) for item in (task.get("acceptance_criteria") or [])[:32]],
+        "verified_facts": verified_facts[-MAX_CONTEXT_REPORTS:],
+        "decisions": decisions[-16:],
+        "changed_files": changed_files[:64],
+        "commands": commands,
+        "open_questions": open_questions,
+        "blockers": [item for item in blockers if item][:16],
+        "state": _orchestrate_summary(state),
+        "pipeline": _orchestrate_pipeline_snapshot(state, plan),
+        "reports": report_handoffs,
+        "protocol": {
+            "coordinator": "The main/root agent is the sole user-facing coordinator; project operations belong to workers.",
+            "worker_language": "Worker-authored commentary, tool arguments, reports, questions, and native final output are English-only.",
+            "hidden_dispatch": "Hidden spawn_agent requests retain fork_turns=none so the coordinator transcript is not inherited.",
+            "report_publication": "Read each report_ref, then publish the returned report_markdown_link verbatim in the main chat before any other lifecycle call or report read.",
+            "instruction_source": "cortex:orchestrator and cortex-control skills; this handoff restores state and invariants, not a replacement skill source.",
+        },
+        "next_action": next_action,
+    }
+
+
 def _orchestrate_pipeline_snapshot(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     """Expose the coordinator-owned canonical plan without durable attempt ids."""
     completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
@@ -7196,6 +7706,7 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any
     return {
         "report_ref": report_ref,
         "report_markdown_path": str(report_markdown_path(task_dir, report_ref)),
+        "report_markdown_link": report_markdown_link(task_dir, report_ref, planner_attempt.get("gate", "plan")),
         "summary": redact(report["summary"], 2400),
         "findings": [redact(item, 1000) for item in report.get("findings", [])][:12],
         "uncertainty": [redact(item, 1000) for item in report.get("uncertainty", [])][:12],
@@ -7786,6 +8297,7 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
     task_id = safe_id(str(params.get("task_id", "")))
     _, task_dir, state = load_state(task_id, params)
     authorize(state, params)
+    task = _read_private_json(task_dir / "task.json", "task definition")
     plan = _load_or_create_orchestrate_plan(params, task_dir, state, persist=False)
     current_wave = _wave_for_gates(plan, active_gates(state))
     spawn_requests = [
@@ -7803,10 +8315,12 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
             "profile": (item.get("producer") or {}).get("profile"),
             "summary": item.get("summary"),
             "report_markdown_path": str(report_markdown_path(task_dir, item.get("report_id"))),
+            "report_markdown_link": report_markdown_link(task_dir, item.get("report_id"), item.get("gate", "report")),
         }
         for item in report_index.get("reports", [])
         if isinstance(item, dict)
     ][-MAX_CONTEXT_REPORTS:]
+    context_handoff = _context_handoff(task_dir, state, task, plan)
     return _orchestrate_response(
         "inspect",
         state,
@@ -7815,6 +8329,7 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
         result={
             "plan": [{"wave_id": wave["wave_id"], "gates": wave["gates"], "status": wave.get("status", "pending")} for wave in plan.get("waves", [])],
             "available_reports": available_reports,
+            "context_handoff": context_handoff,
             **(
                 {"plan_review": dict(_plan_approval(state).get("review") or {})}
                 if _plan_approval_is_pending(state) else {}
@@ -8182,6 +8697,12 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("active task index is invalid")
         active = {key: value for key, value in active.items() if value not in stale_ids}
 
+        host_bindings = _host_session_bindings(root)
+        host_bindings["tasks"] = {
+            key: value for key, value in host_bindings["tasks"].items() if key not in stale_ids
+        }
+        host_bindings["updated_at"] = now()
+
         activations_file = activation_path(root)
         activations = _read_private_json(activations_file, "activation registry") if activations_file.exists() else {}
         if not isinstance(activations, dict):
@@ -8251,6 +8772,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
             task_index.pop(task_id, None)
         _write_or_remove_json(task_index_path(root), task_index)
         _write_or_remove_json(active_path, active)
+        write_json(_host_session_bindings_path(root), host_bindings)
         _write_or_remove_json(activations_file, activations)
         _write_or_remove_json(claims_path, claims)
         _write_v3_registry(root, registry)
@@ -8577,6 +9099,7 @@ def _v3_native_arguments(request: dict[str, Any]) -> dict[str, Any]:
             "task_name": request.get("task_name"),
             "message": request.get("message"),
             "reasoning_effort": request.get("reasoning_effort"),
+            "fork_turns": request.get("fork_turns") or "none",
         }
     if request.get("model"):
         arguments["model"] = request["model"]
@@ -8651,12 +9174,14 @@ def _v3_response(
             "Do not repeat a completed lifecycle call while preparing the native dispatch. "
             "Each successful worker must publish "
             "through record_report and return only a report_ref plus a short summary. Read every report_ref with "
-            "read_worker_report, decide whether the coordinator-owned pipeline still fits, then call "
+            "read_worker_report; immediately publish each returned report_markdown_link verbatim in the main chat "
+            "before any other Cortex lifecycle call. Decide whether the coordinator-owned pipeline still fits, then call "
             f"continue_orchestration with task_ref={task_ref}, the report_ref values, and this step."
         )
     elif outcome == "awaiting_plan_approval":
         next_action = (
-            f"{COORDINATOR_LOCK} Read plan_review.report_ref, present a concise plan summary in the main chat, and "
+            f"{COORDINATOR_LOCK} Read plan_review.report_ref, publish plan_review.report_markdown_link verbatim in "
+            "the main chat, present a concise plan summary there, and "
             "wait for explicit user approval. Do not dispatch the next wave. Call manage_orchestration with "
             "intent=plan_approval and payload.decision=approve, or decision=revise with the user's feedback."
         )
@@ -8668,6 +9193,12 @@ def _v3_response(
         next_action = (
             f"{COORDINATOR_LOCK} Wait idly for the active worker results, then call continue_orchestration "
             f"with task_ref={task_ref} and this step."
+        )
+    if old.get("operation") == "inspect" and isinstance(old.get("result"), dict) and isinstance(old["result"].get("context_handoff"), dict):
+        next_action = (
+            f"{COORDINATOR_LOCK} Rehydrate from result.context_handoff before continuing. "
+            "It is the durable post-compaction state and protocol snapshot; do not restart the task or replay "
+            "completed dispatches. Then " + next_action
         )
     response = {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -8690,6 +9221,8 @@ def _v3_response(
         }
     if include_result and "result" in old:
         response["result"] = old["result"]
+        if isinstance(old["result"], dict) and isinstance(old["result"].get("context_handoff"), dict):
+            response["context_handoff"] = old["result"]["context_handoff"]
     if outcome == "awaiting_plan_approval":
         review = (old.get("result") or {}).get("plan_review") if isinstance(old.get("result"), dict) else None
         if isinstance(review, dict):
@@ -8711,7 +9244,10 @@ def _v3_compact_continue_replay(response: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple[str, str, str, str, bool]:
+def _v3_start_reservation(
+    params: dict[str, Any],
+    task: dict[str, Any],
+) -> tuple[str, str, str, str, str, bool]:
     root = ledger_root(params)
     # The exact user-authored request is the active-task identity boundary.
     # Coordinator-derived language metadata, waves, routing, or verification
@@ -8732,6 +9268,7 @@ def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple
                     task_id,
                     str(prior["task_ref"]),
                     str(prior["principal"]),
+                    str(prior.get("thread_id") or prior["principal"]),
                     str(prior["submission_id"]),
                     True,
                 )
@@ -8739,18 +9276,20 @@ def _v3_start_reservation(params: dict[str, Any], task: dict[str, Any]) -> tuple
         task_id = safe_id(f"{objective_slug}-{secrets.token_hex(4)}")
         task_ref = _v3_task_ref(task_id)
         principal = safe_id("v3-" + task_ref)
+        thread_id = _codex_host_session_id() or principal
         submission_id = safe_id("v3-start-" + secrets.token_hex(8))
         reservation = {
             "task_id": task_id,
             "task_ref": task_ref,
             "principal": principal,
+            "thread_id": thread_id,
             "submission_id": submission_id,
             "created_at": now(),
         }
         registry["starts"][start_digest] = reservation
         registry["tasks"].setdefault(task_id, {})["start"] = {"digest": start_digest, **reservation}
         _write_v3_registry(root, registry)
-        return task_id, task_ref, principal, submission_id, False
+        return task_id, task_ref, principal, thread_id, submission_id, False
 
 
 def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
@@ -8806,8 +9345,27 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             _v3_compact_waves(params["waves"], task, project_root=selected_project_root)
             if params.get("waves") is not None else _v3_auto_waves(task)
         )
-        task_id, task_ref, principal, submission_id, replayed = _v3_start_reservation(params, task)
+        task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
         if replayed:
+            # A linked corrective task may be replayed after the coordinator
+            # intentionally deactivated its prior session while recovering a
+            # stale worker attempt.  The follow_up management operation is an
+            # explicit Cortex route, so restore the server-owned activation
+            # for this idempotent replay instead of leaking an internal
+            # activation hint into the user-facing response.
+            if isinstance(params.get("_follow_up"), dict):
+                replay_params = {
+                    "project_root": params["project_root"],
+                    "principal": principal,
+                    "thread_id": thread_id,
+                }
+                if not activation_record(ledger_root(params), replay_params, task_id):
+                    activated = activate_orchestration({
+                        **replay_params,
+                        "user_command": ACTIVATION_COMMAND,
+                    })
+                    if not activated.get("active"):
+                        raise ValueError("linked corrective-task replay could not restore its Cortex activation")
             loaded = _v3_task_state(ledger_root(params), task_id)
             if loaded is None:
                 old = {
@@ -8820,7 +9378,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 old = _orchestrate_inspect({
                     "project_root": params["project_root"],
                     "principal": principal,
-                    "thread_id": principal,
+                    "thread_id": thread_id,
                     "task_id": task_id,
                 })
             return _v3_response(old, task_ref, start_replayed=True)
@@ -8829,7 +9387,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "submission_id": submission_id,
             "project_root": params["project_root"],
             "principal": principal,
-            "thread_id": principal,
+            "thread_id": thread_id,
             "task": {**task, "task_id": task_id},
             "waves": waves,
             "host_capabilities": _v3_host_capabilities(),
@@ -9325,11 +9883,19 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "source_report_markdown_paths": source_context["source_report_markdown_paths"],
                 "new_task_ref": started["task_ref"],
             }
-            started["next_action"] = (
-                f"{COORDINATOR_LOCK} A new corrective task was created for completed source task_ref={task_ref}. "
-                "Do not modify or reopen the source task. Execute only the returned dispatches for the new task, "
-                "then follow its normal plan approval, verification, and close flow."
-            )
+            if started.get("replayed"):
+                started["next_action"] = (
+                    f"{COORDINATOR_LOCK} The linked corrective task_ref={started['task_ref']} already exists; this is an idempotent replay. "
+                    "Do not create or dispatch it again. Do not modify or reopen the source task. "
+                    "If the original dispatch response was lost, inspect the corrective task once and invoke only its still-awaiting dispatches, "
+                    "then follow its normal plan approval, verification, and close flow."
+                )
+            else:
+                started["next_action"] = (
+                    f"{COORDINATOR_LOCK} A new corrective task was created for completed source task_ref={task_ref}. "
+                    "Do not modify or reopen the source task. Execute only the returned dispatches for the new task, "
+                    "then follow its normal plan approval, verification, and close flow."
+                )
             return started
         common = {
             "project_root": params["project_root"],
@@ -9902,6 +10468,7 @@ def main() -> None:
                     # receive a valid result instead of an avoidable protocol error.
                     "capabilities": {"tools": {}, "resources": {"subscribe": False, "listChanged": False}},
                     "serverInfo": {"name": "cortex", "version": SERVER_VERSION},
+                    "instructions": MCP_SERVER_INSTRUCTIONS,
                 }
             elif method == "notifications/initialized":
                 continue
