@@ -6,6 +6,16 @@ same base version.
 
 ## [Unreleased]
 
+- Narrow baseline manifests to meaningful project state: honor `.gitignore`
+  rules with ordered negations and freeze the effective rules per task, exclude
+  high-confidence dependency/cache/runtime directories across languages, and
+  require an ignore rule or build marker before excluding ambiguous output
+  directory names such as `build`, `dist`, `target`, `bin`, or `obj`.
+
+- Keep native worker session keys task/attempt-unique while compacting long
+  request-derived task IDs to a deterministic fingerprint, so local skill paths
+  and prompt text do not leak into host-visible worker names.
+
 - Bind v3 lifecycle recovery through the documented synchronous Cortex
   `PostToolUse.session_id` and tool `project_root`, keeping task authorization
   immutable and treating session environment variables as compatibility hints.

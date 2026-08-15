@@ -11,7 +11,7 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `4.0.4` (an installed build may carry a `+codex.<build>` suffix).
+  `4.4.0` (an installed build may carry a `+codex.<build>` suffix).
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
@@ -37,20 +37,18 @@ pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
 tracked-release archive validation.
 
-Current 4.0.4 source evidence is 251 passing tests. File-size hardening covers
+Current 4.4.0 source evidence is 270 passing tests. File-size hardening covers
 the 8 MiB ordinary-JSON bound with fail-before-replace diagnostics, the
 separate 64 MiB manifest bound, early baseline preflight, bounded
 handoff/reconciliation snapshots, and actionable fail-closed errors for
 oversized artifacts. A copy-based registry migration and the Planner prompt
-measurements are recorded in `docs/project/verification.md`. Installed/content-
-Installed `cortex@cortex` as `4.0.4+codex.20260815083316` from the local
-marketplace; installed content matches the source for the manifest, runtime,
-orchestrator/cortex-control skills, and planner profile. Installer check passed,
-its dry-run preserved `default_tools_approval_mode=approve`, and the exact user
-configuration section/value was confirmed. Plugin/marketplace validation,
-compilation, shell syntax, cold boot, deterministic fixtures, isolated
-fresh-plugin probe, and the 8-worker/5-wave benchmark passed. Live-model and
-tracked-release validation remain unverified.
+measurements are recorded in `docs/project/verification.md`. The local plugin
+registration reports `4.4.0+codex.20260815215311`; after the last source edit,
+`./scripts/sync-cortex.sh --check` correctly reports same-version content drift.
+No plugin reinstall command was run in this turn. Source marketplace
+validation, compilation, shell syntax, focused manifest tests, and the full
+270-test suite passed. Live-model and tracked-release validation remain
+unverified.
 Historical 4.0.0 installation and validation evidence does not attest this
 patch.
 Commit, tag, push, catalog submission, approval, and publication remain
@@ -58,7 +56,7 @@ unverified.
 
 ## External release gates
 
-- Create the Cortex 4.0.4 release commit only with explicit authorization.
+- Create the Cortex 4.4.0 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

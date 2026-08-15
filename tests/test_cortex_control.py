@@ -1521,6 +1521,20 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("internal Cortex worker with profile `general`", delegation["spawn_request"]["message"])
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
 
+    def test_native_worker_task_name_compacts_long_request_derived_task_ids(self):
+        long_task_id = "cortex-orchestrator-home-igovet-codex-plugins-ca-bd8a9ad4"
+        task_name = control.native_worker_task_name("planner", long_task_id, "plan-01")
+        self.assertRegex(task_name, r"^planner__task-[0-9a-f]{12}__plan-01$")
+        self.assertNotIn("home", task_name)
+        self.assertNotIn("codex", task_name)
+        self.assertLessEqual(len(task_name), 80)
+        self.assertNotEqual(
+            task_name,
+            control.native_worker_task_name(
+                "planner", "cortex-orchestrator-home-igovet-codex-plugins-ca-7f3e2a19", "plan-01"
+            ),
+        )
+
     def test_host_spawn_confirmation_requires_the_exact_native_task_name(self):
         state = self.init(task_id="host-name-contract")["state"]
         observed = control.status({"task_id": "host-name-contract", "principal": "thread-a"})
@@ -4988,7 +5002,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.3.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.4.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

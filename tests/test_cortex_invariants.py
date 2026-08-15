@@ -834,7 +834,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertFalse((repository / "agents" / "orchestrator.toml").exists())
         targets = [repository / "AGENTS.md"]
         targets.extend(path for path in (repository / "plugins/cortex").rglob("*") if path.is_file() and "__pycache__" not in path.parts)
-        forbidden = ("@" + "orchestrator", "conductor" + "_only", "cortex/" + "v" + str(5), "4." + "4.0")
+        forbidden = ("@" + "orchestrator", "conductor" + "_only", "cortex/" + "v" + str(5), "4." + "5.0")
         for path in targets:
             content = path.read_text(encoding="utf-8", errors="ignore")
             for marker in forbidden:
@@ -1008,6 +1008,53 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(ledger, self.project / ".codex" / "cortex")
         self.assertNotIn(".codex/cortex/generated.txt", manifest["entries"])
         self.assertIn(".codex/cortex", manifest["policy"]["effective_ignored_roots"])
+
+    def test_manifest_honors_gitignore_and_language_agnostic_generated_directories(self):
+        (self.project / ".gitignore").write_text(
+            "ignored-dir/\n*.secret\n!keep.secret\ndist/\n*.generated/\n",
+            encoding="utf-8",
+        )
+        (self.project / "ignored-dir").mkdir()
+        (self.project / "ignored-dir" / "artifact.bin").write_text("generated", encoding="utf-8")
+        (self.project / "dist").mkdir()
+        (self.project / "dist" / "bundle.js").write_text("generated", encoding="utf-8")
+        (self.project / "artifact.generated").mkdir()
+        (self.project / "artifact.generated" / "payload.bin").write_text("generated", encoding="utf-8")
+        (self.project / "node_modules").mkdir()
+        (self.project / "node_modules" / "package.js").write_text("dependency", encoding="utf-8")
+        (self.project / ".venv-test").mkdir()
+        (self.project / ".venv-test" / "python").write_text("runtime", encoding="utf-8")
+        (self.project / "target").mkdir()
+        (self.project / "target" / ".rustc_info.json").write_text("build", encoding="utf-8")
+        (self.project / "a.secret").write_text("ignored", encoding="utf-8")
+        (self.project / "keep.secret").write_text("explicitly kept", encoding="utf-8")
+        (self.project / "src").mkdir()
+        (self.project / "src" / "build").mkdir()
+        (self.project / "src" / "build" / "source.txt").write_text("source", encoding="utf-8")
+        (self.project / "src" / "target").mkdir()
+        (self.project / "src" / "target" / "source.txt").write_text("source", encoding="utf-8")
+
+        manifest = control.capture_project_manifest(self.project)
+
+        self.assertIn(".gitignore", manifest["entries"])
+        self.assertIn("keep.secret", manifest["entries"])
+        self.assertIn("src/build/source.txt", manifest["entries"])
+        self.assertIn("src/target/source.txt", manifest["entries"])
+        for path in ("a.secret", "ignored-dir/artifact.bin", "dist/bundle.js", "artifact.generated/payload.bin", "node_modules/package.js", ".venv-test/python", "target/.rustc_info.json"):
+            self.assertNotIn(path, manifest["entries"])
+        self.assertEqual(manifest["policy"]["gitignore_files"], [".gitignore"])
+        self.assertIn("ignored-dir", manifest["policy"]["detected_ignored_roots"])
+        self.assertIn(".venv-test", manifest["policy"]["detected_ignored_roots"])
+
+        frozen = control.capture_project_manifest(self.project, policy=manifest["policy"])
+        self.assertEqual(manifest["digest"], frozen["digest"])
+
+    def test_manifest_keeps_non_environment_venv_named_source_directory(self):
+        source = self.project / "venv"
+        source.mkdir()
+        (source / "domain.py").write_text("source", encoding="utf-8")
+        manifest = control.capture_project_manifest(self.project)
+        self.assertIn("venv/domain.py", manifest["entries"])
 
     def test_server_and_manifest_versions_match(self):
         manifest = json.loads((Path(__file__).parents[1] / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8"))

@@ -111,10 +111,12 @@
   Hidden `spawn_agent` arguments intentionally include `fork_turns: "none"`;
   do not replace it with inherited coordinator context.
 - Keep `profile` and `display_name` as the exact canonical role name. The native
-  `spawn_agent.task_name` is a task/attempt-unique session key, and hooks map
-  that key (or its confirmed host alias) back to the canonical profile. Use
-  `followup_task` only for that exact resumed worker; `host_agent_id` reuse is
-  rejected across attempts.
+  `spawn_agent.task_name` is a task/attempt-unique session key. Long
+  request-derived task IDs are compacted to a short deterministic fingerprint,
+  so skill paths and prompt text do not leak into the host-visible worker name.
+  Hooks map that key (or its confirmed host alias) back to the canonical
+  profile. Use `followup_task` only for that exact resumed worker;
+  `host_agent_id` reuse is rejected across attempts.
 - Once Cortex is active, the main/root agent is coordination-only. It must not
   inspect, search, read, edit, patch, build, test, or run the target project,
   even when a worker is delayed, fails, or is unavailable. Dispatch only the
@@ -245,6 +247,15 @@ private adapter. They are not valid public v3 request envelopes.
   account for all changed project-relative files under the manifest policy;
   `reconcile_project_files` is useful to find omitted additions, deletions,
   modifications, or renames before handoff.
+- Baseline manifests honor the project's `.gitignore` rules, including ordered
+  negations, and persist the effective rules in the baseline policy. The same
+  frozen policy is reused during reconciliation, so changing `.gitignore`
+  during an active task does not silently redefine its scope. Cortex also
+  excludes high-confidence dependency/cache/runtime directories such as
+  `node_modules`, `.pnpm-store`, `.venv*`, and language-specific caches. Generic
+  `build`, `dist`, `target`, `bin`, and `obj` directories require an applicable
+  ignore rule or recognizable generated-output marker; do not assume every
+  directory with one of those names is ignored.
 - Retry-budget exhaustion, a stale attempt, an invalid receipt, or an unknown
   verification id is a repair signal, not permission to dispatch another
   worker. Finalize old attempts, use the exact active receipt/catalog id, and

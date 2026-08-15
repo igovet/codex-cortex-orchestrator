@@ -178,6 +178,16 @@ at reconciliation or handoff. A final handoff must name every detected changed
 file, including additions, deletions, modifications, and recognized renames.
 This makes touched-file reporting checkable without relying on a worker's
 summary.
+The manifest scope is policy-driven: Cortex honors each applicable project
+`.gitignore`, including ordered negations, and freezes the discovered rules in
+the baseline policy for the lifetime of the task. It also excludes
+high-confidence dependency, cache, test-output, and runtime directories across
+languages. Ambiguous output names (`build`, `dist`, `target`, `bin`, and `obj`)
+are excluded only when an ignore rule or recognizable build marker confirms
+that they are generated output; a source directory with one of those names is
+not hidden by name alone. This balances complete changed-file accounting with
+the practical need to avoid inventorying virtual environments and package
+caches.
 
 The ledger stores `principal` and `thread_id` for authorization and a
 delegation attempt for auditability, but it deliberately labels the link as

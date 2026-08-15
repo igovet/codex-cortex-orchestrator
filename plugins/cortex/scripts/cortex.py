@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import difflib
+import fnmatch
 import html
 import hashlib
 import json
@@ -533,12 +534,29 @@ DOCUMENTATION_EVIDENCE_KINDS = {
 }
 TRACKER_POLICY = {
     "schema": "cortex/file-manifest/v1",
-    "scope": "all non-directory entries below project_root",
+    "scope": "all non-directory entries below project_root after policy exclusions",
     "ignored_roots": [".git", ".codex/cortex"],
-    "ignored_directory_names": ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules"],
+    # These are language-agnostic dependency, cache, test-output, and runtime
+    # directories.  They are deliberately limited to names that conventionally
+    # contain generated material rather than project source.
+    "ignored_directory_names": [
+        "__pycache__", ".build", ".cache", ".direnv", ".eggs", ".gradle",
+        ".hypothesis", ".mypy_cache", ".next", ".nox", ".parcel-cache",
+        ".pnpm-store", ".pytest_cache", ".ruff_cache", ".serverless",
+        ".svelte-kit", ".terraform", ".tox", ".turbo", ".venv", "CMakeFiles",
+        "DerivedData", "Pods", "_build", "coverage", "dist-newstyle", "htmlcov",
+        "node_modules", "pip-wheel-metadata", "test-results",
+    ],
+    "ignored_relative_roots": [".yarn/cache", ".yarn/unplugged", "Carthage/Build"],
+    # Generic output names require either an explicit .gitignore rule or a
+    # recognizable build marker; source directories named build/dist/target
+    # are therefore not hidden merely because of their name.
+    "build_output_directory_names": ["build", "dist", "out", "target", "bin", "obj"],
+    "virtual_environment_prefixes": [".venv"],
     "ignored_file_suffixes": [".pyc", ".pyo"],
     "symlinks": "record link target and never follow",
     "special_files": "record type and metadata without reading content",
+    "gitignore": "honor directory and file patterns from .gitignore, including negation",
 }
 VERIFICATION_COMMANDS = {
     "benign_success": {"argv": ["/usr/bin/true"], "cwd": "."},
@@ -575,13 +593,18 @@ def native_worker_task_name(profile: str, task_id: str, attempt_id: str) -> str:
     ``spawn_agent.task_name`` is instead a session identity, so reusing only
     the role (for example, ``explorer``) can make a host attach a new dispatch
     to an old child thread.  Include the task and attempt in the readable
-    form, and retain a deterministic digest when the host-facing value would
-    exceed the bounded identifier length.
+    form. Long request-derived task IDs are represented by a short deterministic
+    fingerprint so local skill paths or other prompt text never become a
+    host-visible worker name. Retain a final deterministic digest when the
+    complete key would still exceed the bounded identifier length.
     """
     profile_id = safe_id(profile)
     task_id = safe_id(task_id)
     attempt_id = safe_id(attempt_id)
-    readable = f"{profile_id}__{task_id}__{attempt_id}"
+    task_fragment = task_id
+    if len(task_id) > 32:
+        task_fragment = f"task-{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:12]}"
+    readable = f"{profile_id}__{task_fragment}__{attempt_id}"
     if len(readable) <= 80:
         return readable
     digest = hashlib.sha256(readable.encode("utf-8")).hexdigest()[:24]
@@ -735,25 +758,193 @@ def _manifest_file(path: Path, info: os.stat_result) -> dict[str, Any]:
         os.close(descriptor)
 
 
-def capture_project_manifest(root: Path | None = None) -> dict[str, Any]:
-    """Capture every non-ignored project entry without following symlinks."""
+def _load_manifest_gitignore_rules(directory: Path, relative: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Load relevant .gitignore rules without following symlinks.
+
+    This is intentionally a small, deterministic matcher rather than a claim to
+    implement every Git ignore edge case. It preserves directory-only markers,
+    applies ordinary globs to both matching files and directories, and applies
+    negations in source order.
+    """
+    path = directory / ".gitignore"
+    if path.is_symlink() or not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    rules: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith((r"\#", r"\!")):
+            line = line[1:]
+        negated = line.startswith("!")
+        if negated:
+            line = line[1:]
+        if not line:
+            continue
+        anchored = line.startswith("/")
+        if anchored:
+            line = line[1:]
+        directory_rule = line.endswith("/")
+        line = line.rstrip("/")
+        if not line:
+            continue
+        rules.append({
+            "base": list(relative),
+            "pattern": line,
+            "anchored": anchored,
+            "directory_only": directory_rule,
+            "negated": negated,
+            "source": Path(*relative, ".gitignore").as_posix(),
+        })
+    return rules
+
+
+def _manifest_gitignore_matches(parts: tuple[str, ...], rule: dict[str, Any], is_dir: bool) -> bool:
+    if bool(rule.get("directory_only")) and not is_dir:
+        return False
+    base = tuple(str(item) for item in rule.get("base", []))
+    if len(parts) <= len(base) or parts[: len(base)] != base:
+        return False
+    relative = Path(*parts[len(base) :]).as_posix()
+    pattern = str(rule.get("pattern", ""))
+    if not pattern:
+        return False
+    if pattern.startswith("**/"):
+        pattern = pattern[3:]
+    if "/" not in pattern:
+        if bool(rule.get("anchored")):
+            return fnmatch.fnmatchcase(relative, pattern)
+        return fnmatch.fnmatchcase(parts[-1], pattern)
+    return fnmatch.fnmatchcase(relative, pattern)
+
+
+def _manifest_gitignored(parts: tuple[str, ...], rules: list[dict[str, Any]], is_dir: bool) -> tuple[bool, str | None]:
+    ignored = False
+    source: str | None = None
+    for rule in rules:
+        if not _manifest_gitignore_matches(parts, rule, is_dir):
+            continue
+        ignored = not bool(rule.get("negated"))
+        source = str(rule.get("source") or "") or None
+    return ignored, source
+
+
+def _manifest_virtual_environment(path: Path, name: str, prefixes: tuple[str, ...]) -> bool:
+    if any(name.startswith(prefix) for prefix in prefixes):
+        return True
+    if name.lower() not in {"venv", "env"}:
+        return False
+    markers = (
+        "pyvenv.cfg",
+        "bin/activate",
+        "bin/python",
+        "Scripts/activate",
+        "Scripts/python.exe",
+    )
+    return any((path / marker).is_file() and not (path / marker).is_symlink() for marker in markers)
+
+
+def _manifest_build_output(path: Path, name: str, build_names: set[str]) -> bool:
+    if name.startswith("cmake-build-") or name.startswith("bazel-"):
+        return True
+    if name not in build_names:
+        return False
+    markers = {
+        "build": ("CMakeFiles", ".ninja_deps", "intermediates", "classes", "reports"),
+        "dist": ("*.whl", "*.tar.gz"),
+        "out": ("Debug", "Release", "generated"),
+        "target": (".rustc_info.json", "debug", "release", "classes", "test-classes", "maven-status"),
+        "bin": ("Debug", "Release"),
+        "obj": ("Debug", "Release"),
+    }.get(name, ())
+    for marker in markers:
+        if "*" in marker:
+            if any(match.exists() and not match.is_symlink() for match in path.glob(marker)):
+                return True
+        elif (path / marker).exists() and not (path / marker).is_symlink():
+            return True
+    return False
+
+
+def _manifest_auto_ignore_reason(
+    path: Path,
+    parts: tuple[str, ...],
+    policy: dict[str, Any],
+) -> str | None:
+    name = parts[-1]
+    ignored_names = {str(item) for item in policy.get("ignored_directory_names", [])}
+    if name in ignored_names:
+        return f"conventional generated directory: {name}"
+    relative = Path(*parts).as_posix()
+    for root in policy.get("ignored_relative_roots", []):
+        root_text = Path(str(root)).as_posix().strip("/")
+        if relative == root_text or relative.startswith(root_text + "/"):
+            return f"conventional generated root: {root_text}"
+    prefixes = tuple(str(item) for item in policy.get("virtual_environment_prefixes", []))
+    if _manifest_virtual_environment(path, name, prefixes):
+        return f"virtual environment directory: {name}"
+    build_names = {str(item) for item in policy.get("build_output_directory_names", [])}
+    if _manifest_build_output(path, name, build_names):
+        return f"recognized build output directory: {name}"
+    return None
+
+
+def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Capture every non-ignored project entry without following symlinks.
+
+    A new baseline discovers project-owned `.gitignore` rules and records the
+    resulting policy.  Reconciliation may pass that recorded policy back so an
+    existing task remains stable even if `.gitignore` or generated directories
+    change while the task is running.
+    """
     if root is None:
         raise ValueError("project root is required for manifest capture")
     base = root
     base = _reject_symlink_ancestry(base, "project root")
     entries: dict[str, dict[str, Any]] = {}
-    ignored_roots = {tuple(Path(value).parts) for value in TRACKER_POLICY["ignored_roots"]}
-    ignored_dirs = set(TRACKER_POLICY["ignored_directory_names"])
-    ignored_suffixes = tuple(TRACKER_POLICY["ignored_file_suffixes"])
+    active_policy = dict(TRACKER_POLICY if policy is None else policy)
+    ignored_roots = {tuple(Path(value).parts) for value in active_policy.get("ignored_roots", [])}
+    ignored_suffixes = tuple(str(value) for value in active_policy.get("ignored_file_suffixes", []))
+    discovered_rules: list[dict[str, Any]] = []
+    discovered_gitignore_files: set[str] = set()
+    detected_roots: dict[str, str] = {}
+    frozen_rules = list(active_policy.get("gitignore_rules", [])) if policy is not None else []
+    if policy is not None:
+        discovered_gitignore_files.update(str(item) for item in active_policy.get("gitignore_files", []))
 
-    def ignored(parts: tuple[str, ...], is_dir: bool) -> bool:
+    def ignored(parts: tuple[str, ...], path: Path, is_dir: bool, rules: list[dict[str, Any]]) -> tuple[bool, str | None]:
         if any(parts[: len(prefix)] == prefix for prefix in ignored_roots):
-            return True
-        if is_dir and parts and parts[-1] in ignored_dirs:
-            return True
-        return bool(not is_dir and parts and parts[-1].endswith(ignored_suffixes))
+            return True, "ledger or VCS root"
+        gitignored, source = _manifest_gitignored(parts, rules, is_dir)
+        if gitignored:
+            return True, f".gitignore:{source or 'rule'}"
+        # An explicit negation is the project owner's opt-in to keep a path;
+        # it takes precedence over the conventional fallback exclusions below.
+        if source:
+            return False, None
+        if is_dir:
+            reason = _manifest_auto_ignore_reason(path, parts, active_policy)
+            if reason:
+                return True, reason
+        if not is_dir and parts and parts[-1].endswith(ignored_suffixes):
+            return True, f"ignored file suffix: {parts[-1]}"
+        return False, None
 
-    def walk(directory: Path, relative: tuple[str, ...] = ()) -> None:
+    def walk(directory: Path, relative: tuple[str, ...] = (), inherited_rules: list[dict[str, Any]] | None = None) -> None:
+        rules = list(inherited_rules or [])
+        if policy is None:
+            local_gitignore = _load_manifest_gitignore_rules(directory, relative)
+            if local_gitignore:
+                rules.extend(local_gitignore)
+                source = Path(*relative, ".gitignore").as_posix()
+                discovered_gitignore_files.add(source)
+                discovered_rules.extend(local_gitignore)
+        elif not relative:
+            rules.extend(frozen_rules)
         with os.scandir(directory) as iterator:
             children = sorted(iterator, key=lambda item: item.name)
         for child in children:
@@ -761,22 +952,37 @@ def capture_project_manifest(root: Path | None = None) -> dict[str, Any]:
             info = child.stat(follow_symlinks=False)
             mode = info.st_mode
             is_directory = stat.S_ISDIR(mode)
-            if ignored(parts, is_directory):
+            path = Path(child.path)
+            skip, reason = ignored(parts, path, is_directory, rules)
+            if skip:
+                if is_directory and reason and reason != "ledger or VCS root":
+                    detected_roots[Path(*parts).as_posix()] = reason
                 continue
             rel = Path(*parts).as_posix()
-            path = Path(child.path)
             if stat.S_ISLNK(mode):
                 entries[rel] = {"kind": "symlink", "target": os.readlink(path), "mode": stat.S_IMODE(mode)}
             elif is_directory:
-                walk(path, parts)
+                walk(path, parts, rules)
             elif stat.S_ISREG(mode):
                 entries[rel] = _manifest_file(path, info)
             else:
                 entries[rel] = {"kind": "special", "file_type": stat.S_IFMT(mode), "mode": stat.S_IMODE(mode), "size": info.st_size}
     walk(base)
     encoded = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    policy = {**TRACKER_POLICY, "effective_ignored_roots": sorted(Path(*parts).as_posix() for parts in ignored_roots)}
-    return {"schema": TRACKER_POLICY["schema"], "project_root": str(base), "policy": policy, "entries": entries, "entry_count": len(entries), "digest": digest_text(encoded), "captured_at": now()}
+    if policy is None:
+        active_policy["gitignore_rules"] = discovered_rules
+    active_policy["effective_ignored_roots"] = sorted(Path(*parts).as_posix() for parts in ignored_roots)
+    active_policy["gitignore_files"] = sorted(discovered_gitignore_files)
+    active_policy["detected_ignored_roots"] = dict(sorted(detected_roots.items()))
+    return {
+        "schema": TRACKER_POLICY["schema"],
+        "project_root": str(base),
+        "policy": active_policy,
+        "entries": entries,
+        "entry_count": len(entries),
+        "digest": digest_text(encoded),
+        "captured_at": now(),
+    }
 
 
 def compare_manifests(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -810,7 +1016,7 @@ def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: li
         "baseline manifest",
         max_bytes=MAX_MANIFEST_BYTES,
     )
-    current = capture_project_manifest(Path(baseline["project_root"]))
+    current = capture_project_manifest(Path(baseline["project_root"]), policy=baseline.get("policy"))
     comparison = compare_manifests(baseline, current)
     supplied = {Path(str(item)).as_posix().removeprefix("./") for item in reported_paths}
     missing = sorted(set(comparison["changed_paths"]) - supplied)
@@ -6154,7 +6360,15 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             manifest = state.get("final_manifest_receipt")
             if not manifest or not manifest.get("complete"):
                 raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
-            current_manifest = capture_project_manifest(Path(json.loads((task_dir / "task.json").read_text(encoding="utf-8"))["project_root"]))
+            baseline_manifest = _read_private_json(
+                task_dir / "baseline-manifest.json",
+                "baseline manifest",
+                max_bytes=MAX_MANIFEST_BYTES,
+            )
+            current_manifest = capture_project_manifest(
+                Path(json.loads((task_dir / "task.json").read_text(encoding="utf-8"))["project_root"]),
+                policy=baseline_manifest.get("policy"),
+            )
             if current_manifest["digest"] != manifest.get("current_digest"):
                 raise ValueError("project files changed after the final handoff; create a new complete handoff")
         state["gates"][gate] = {"outcome": outcome, "at": now(), "summary": redact(params.get("summary", ""), 2000), "skip_reason": redact(params.get("skip_reason", ""), 2000), "evidence_ids": [item["evidence_id"] for item in gate_evidence]}
@@ -7846,7 +8060,7 @@ def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any],
         "baseline manifest",
         max_bytes=MAX_MANIFEST_BYTES,
     )
-    current = capture_project_manifest(Path(baseline["project_root"]))
+    current = capture_project_manifest(Path(baseline["project_root"]), policy=baseline.get("policy"))
     comparison = compare_manifests(baseline, current)
     completed = [
         f"{gate}: {state.get('gates', {}).get(gate, {}).get('summary') or state.get('gates', {}).get(gate, {}).get('outcome', 'completed')}"

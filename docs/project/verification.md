@@ -15,33 +15,30 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Recorded Cortex 4.0.4 source evidence:
+Recorded Cortex 4.4.0 source evidence:
 
-- The full Python suite passed 251 tests.
+- The full Python suite passed 270 tests.
 - File-size hardening passed: ordinary JSON writes use the bounded
   `MAX_JSON_BYTES=8 MiB` limit with fail-before-replace diagnostics; manifests
   use `MAX_MANIFEST_BYTES=64 MiB`; baseline preflight runs before task-directory
   creation; and handoff/reconciliation snapshot serialization remains bounded.
   Oversized artifacts fail closed with an actionable error rather than
   surfacing at close.
+- Manifest-scope coverage verifies that baselines honor project `.gitignore`
+  rules, including ordered negations, freeze the discovered rules for the
+  lifetime of an active task, and automatically exclude high-confidence
+  dependency/cache/runtime directories. Conditional handling keeps ambiguous
+  `build`/`dist`/`target`/`bin`/`obj` source directories visible unless an
+  ignore rule or recognizable build marker identifies generated output.
 - A migration exercised on a copy compacted a 291212-byte legacy registry to
   9624 bytes.
 - The generated Planner prompt measured 13679 bytes.
-- Installed `cortex@cortex` as `4.0.4+codex.20260815083316` from the local
-  marketplace. Installed content matches the source for the manifest,
-  `scripts/cortex.py`, orchestrator/cortex-control skills, and planner profile.
-  `./scripts/sync-cortex.sh --check` passed; its dry-run preserved
-  `default_tools_approval_mode=approve`, and the exact user configuration
-  section/value was confirmed.
-- Plugin and marketplace validation, Python compilation, and shell syntax
-  checks passed. Cold-boot smoke passed with seven continue calls, eight
-  reports, and a parallel wave. Deterministic Luna fixtures passed; live mode
-  was skipped because `--live` was not supplied. The 8-worker/5-wave composite
-  benchmark passed with 22 public MCP calls versus 50 legacy calls (56%
-  reduction), and the isolated fresh-plugin probe passed on 4.0.4.
-- The tracked-release archive check remains blocked because the 4.0.4 tree is
-  not committed; the current `HEAD` still contains the previous manifest. No
-  release commit was created.
+- The local plugin registration reports `4.4.0+codex.20260815215311`; after the
+  last source edit, `./scripts/sync-cortex.sh --check` correctly reports
+  same-version content drift. No plugin reinstall command was run in this turn.
+- Source marketplace validation, Python compilation, shell syntax checks,
+  focused manifest regressions, and the full 270-test suite passed. Live-model
+  and tracked-release evidence remain unverified.
 - No live-model, commit, tag, push, catalog submission, or publication is
   verified.
 
@@ -119,14 +116,17 @@ The same audit covers native worker identity: canonical `profile`/
 `host_agent_id`, exact-worker-only `followup_task`, and hook recovery from the
 native task key back to the canonical profile.
 
-On 2026-08-16 the native-worker identity fix was revalidated with 267 passing
+On 2026-08-16 the native-worker identity fix was revalidated with 268 passing
 tests, Python compilation, marketplace validation, shell syntax validation, and
 `git diff --check`. The plugin cachebuster was refreshed to
-`4.3.0+codex.20260815211743` and installed from the local `cortex` marketplace;
+`4.3.0+codex.20260815213447` and installed from the local `cortex` marketplace;
 `scripts/probe-fresh-cortex-plugin.py` passed against an isolated HOME/CODEX_HOME.
 A focused live stdio-MCP smoke against that installed server started two
 parallel `explorer` workers and verified distinct task/attempt-native
-`spawn_agent.task_name` values, canonical profiles, and `fork_turns=none`.
+`spawn_agent.task_name` values, canonical profiles, and `fork_turns=none`. A
+second installed-runtime smoke used a request containing a local skill path
+and verified that the planner key was compact (`planner__task-<fingerprint>__plan-01`)
+without exposing `home`, `codex`, or `plugins` path fragments.
 
 The question regressions drive `manage_orchestration(intent="question")`
 through stdio JSON-RPC with only the opaque `question_ref`. Cortex resolves the
@@ -243,7 +243,7 @@ regressions also require coordinator authority in the returned
 snapshot and an explicit reason for a future-wave replacement; planner and
 explorer evidence remains advisory.
 
-The current 251-test suite exercises opaque `task_ref` isolation for multiple and
+The current 270-test suite exercises opaque `task_ref` isolation for multiple and
 concurrently started same-root tasks, same-request active-task replay, and
 `needs_selection` when an ambiguous call omits the ref. They also exercise
 phase-level `depends_on`, mandatory `Predecessor review:` evidence, public
@@ -325,7 +325,7 @@ key. Its child snapshot records `model=gpt-5.6-luna` and
 `reasoning_effort=high`. This runtime metadata, rather than worker self-report,
 is the acceptance evidence. The worker returned to the parent and no
 user-owned visible task was created.
-This proof predates the current 4.0.4 candidate and is not a fresh-install or
+This proof predates the current 4.4.0 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
@@ -341,7 +341,7 @@ It requires a committed `HEAD`. Without one, the non-blocking command reports
 `SKIP` and `--require-tracked` fails intentionally; neither result validates a
 release archive. Create the initial commit only with authorization and rerun
 the blocking command against the committed tree before publication.
-The tracked-release command has not been reported for 4.0.4. Historical
+The tracked-release command has not been reported for 4.4.0. Historical
 candidate results do not validate the current breaking package contract; this
 is not release or publication evidence.
 

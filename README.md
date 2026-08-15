@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**4.3.0**. The public MCP surface has exactly six tools: three coordinator
+**4.4.0**. The public MCP surface has exactly six tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question` and `record_report`, and coordinator
@@ -180,7 +180,7 @@ main-chat report link requirement. Model-visible context uses
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 4.3.0
+and secret-prone paths before validating the package again. The Cortex 4.4.0
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` cannot attest the
 mutable candidate. Commit only with explicit authorization, then rerun the
@@ -487,8 +487,10 @@ selection_reason, call, arguments}`. `arguments` contains only the real native
 `spawn_agent` or `create_thread` parameters; hidden `spawn_agent` arguments
 retain `fork_turns: "none"` so localized parent history is not inherited.
 `profile` and `display_name` remain the exact canonical role name, while
-`spawn_agent.task_name` is a task/attempt-unique native session key. Reusing a
-profile must therefore create a fresh native worker; only an explicit
+`spawn_agent.task_name` is a task/attempt-unique native session key. Long
+request-derived task IDs are compacted to a short deterministic fingerprint,
+so local skill paths are not exposed in the host-visible worker name. Reusing
+a profile must therefore create a fresh native worker; only an explicit
 `followup_task` for the same confirmed host child may resume it. Routing and
 expected-model metadata is never copied into native `model`. Cortex rejects
 reuse of a `host_agent_id` already bound to another attempt. Lifecycle hooks
@@ -555,6 +557,20 @@ events / 512 KiB. Ledger paths reject symlink ancestry and regular-file
 replacement targets, so coordination data cannot be redirected through a
 symlink.
 
+Baseline manifests are deliberately narrower than “every byte below the
+project root”. Each new baseline honors project `.gitignore` rules, including
+ordered negations, and records the discovered files and frozen effective rules
+in its manifest policy. Later reconciliation reuses those frozen rules, so a
+task cannot silently change scope because a worker edits `.gitignore` midway.
+Cortex also excludes high-confidence dependency, cache, test-output, and
+runtime directories (for example `node_modules`, `.pnpm-store`, `.venv*`, and
+language-specific cache directories). Generic names such as `build`, `dist`,
+`target`, `bin`, and `obj` are excluded only when an applicable `.gitignore`
+rule or recognizable build-output marker justifies it; source directories with
+those names remain tracked otherwise. Symlinks are recorded without following
+them. This keeps final changed-file reconciliation useful without hashing
+virtual environments and package caches.
+
 ## Questions in the main chat
 
 Questions are durable for every worker profile. A worker calls
@@ -617,22 +633,18 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 4.0.4 source candidate has 251 passing Python tests. File-size
+The current 4.4.0 source candidate has 270 passing Python tests. File-size
 hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
 diagnostics, the separate 64 MiB manifest bound, early baseline preflight,
 bounded handoff/reconciliation snapshots, and fail-closed actionable errors for
 oversized artifacts. A copy-based migration compacted a 291212-byte legacy
 registry to 9624 bytes, and the generated Planner prompt measured 13679 bytes.
-Installed `cortex@cortex` as `4.0.4+codex.20260815083316` from the local
-marketplace; installed content matches the manifest, runtime, orchestrator and
-cortex-control skills, and planner profile. Installer check passed, its dry-run
-preserved `default_tools_approval_mode=approve`, and the exact user config
-section/value was confirmed. Plugin/marketplace validation, compilation,
-shell syntax, cold boot, deterministic Luna fixtures, the isolated fresh-plugin
-probe, and the 8-worker/5-wave composite benchmark passed; the benchmark
-reported 22 versus 50 calls (56% reduction). Live-model testing was skipped
-because `--live` was not supplied. The tracked-release archive remains blocked
-until the 4.0.4 tree is committed; no commit was made.
+The local plugin registration reports `4.4.0+codex.20260815215311`; after the
+last source edit, `./scripts/sync-cortex.sh --check` correctly reports
+same-version content drift. No plugin reinstall command was run in this turn.
+Source marketplace validation, compilation, shell syntax, focused manifest
+tests, and the full 270-test suite passed. Live-model and tracked-release
+evidence remain unverified until the tree is committed.
 Historical 4.0.0 evidence includes
 241 passing tests in 15.770 seconds, installed and content-verified cachebuster
 `4.0.0+codex.20260814231427`, installer check/dry-run, cold boot, deterministic

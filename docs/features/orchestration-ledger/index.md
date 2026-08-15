@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 4.3.0 task ledger, staged waves,
+The local MCP server implements the Cortex 4.4.0 task ledger, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly six public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -249,7 +249,9 @@ the task or replaying completed dispatches during this recovery.
 
 Native worker identity is separate from the canonical role label. Every
 dispatch keeps `profile` and `display_name` canonical, while
-`spawn_agent.task_name` is unique to the task and attempt. `followup_task` is
+`spawn_agent.task_name` is unique to the task and attempt; long request-derived
+task IDs are represented by a short deterministic fingerprint rather than
+being copied into the host-visible name. `followup_task` is
 reserved for the exact confirmed native worker being resumed; a reused
 `host_agent_id` is rejected for another attempt. Lifecycle hooks resolve the
 native task key (and its host aliases) back to the canonical profile before
@@ -306,6 +308,17 @@ review with zero unexplained unmapped surfaces. Refresh rebuilds the inventory
 and also requires a no-change second documentation plan. Documentation,
 review, and close reject a shallow feature index without Coverage matrix
 columns, Inventory totals, Unmapped surfaces, Exclusions, or Known unknowns.
+
+Baseline manifests honor project `.gitignore` files, applying rules in order
+and including negations, and store the discovered rules in the baseline policy.
+Reconciliation reuses that frozen policy for task stability. In addition,
+language-agnostic high-confidence dependency, cache, test-output, and runtime
+directories are excluded automatically. Names that can be either source or
+generated output (`build`, `dist`, `target`, `bin`, and `obj`) are excluded
+only with an applicable ignore rule or recognizable build marker. Symlinks are
+recorded but never followed. Thus the receipt remains an independent local
+changed-file check without treating virtual environments or package stores as
+source changes.
 
 Reports are sanitized, task- and attempt-bound, and use one-use receipts.
 Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
@@ -378,5 +391,5 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.0.4 evidence is 251 passing tests and installed `cortex@cortex` cachebuster `4.0.4+codex.20260815083316`, with installed content matching source for the manifest, runtime, skills, and planner profile. Installer check/dry-run preserved the user's `default_tools_approval_mode=approve`; plugin/marketplace validation, compilation, shell syntax, cold boot, deterministic fixtures, isolated probe, and composite benchmark passed. Live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.0.4. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.4.0 source evidence is 270 passing tests, including manifest-policy regressions. The local plugin registration reports `4.4.0+codex.20260815215311`; after the last source edit, `./scripts/sync-cortex.sh --check` correctly reports same-version content drift, and no plugin reinstall command was run in this turn. Live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.4.0. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->
