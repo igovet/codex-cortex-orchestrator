@@ -1172,9 +1172,9 @@ class ControlPlaneTests(unittest.TestCase):
         result = self.init()
         state = result["state"]
         delegation = self.delegate(state, "demo", "discover", "explorer")
-        self.assertEqual(delegation["state"]["attempts"][-1]["display_name"], "explorer")
+        self.assertEqual(delegation["state"]["attempts"][-1]["display_name"], "Explorer Delegation 01")
         delegation_file = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
-        self.assertEqual(delegation_file["display_name"], "explorer")
+        self.assertEqual(delegation_file["display_name"], "Explorer Delegation 01")
         self.assertEqual(delegation_file["profile"], "explorer")
         self.assertEqual(delegation_file["selected_model"], "gpt-5.6-luna")
         self.assertEqual(delegation_file["selected_reasoning_effort"], "medium")
@@ -1509,7 +1509,7 @@ class ControlPlaneTests(unittest.TestCase):
         expected = {
             "host_tool": "spawn_agent",
             "profile": "general",
-            "display_name": "general",
+            "display_name": "General Delegation 01",
             "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
         }
@@ -1517,7 +1517,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
         self.assertRegex(
             delegation["spawn_request"]["task_name"],
-            r"^general__spawn_contract__discover_01__[0-9a-f]{12}$",
+            r"^general_delegation_01_[0-9a-f]{8}$",
         )
         self.assertNotEqual(delegation["spawn_request"]["task_name"], delegation["spawn_request"]["display_name"])
         self.assertEqual({key: package["spawn_request"][key] for key in expected}, expected)
@@ -1528,7 +1528,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_native_worker_task_name_compacts_long_request_derived_task_ids(self):
         long_task_id = "cortex-orchestrator-local-plugin-cache-ca-bd8a9ad4"
         task_name = control.native_worker_task_name("planner", long_task_id, "plan-01")
-        self.assertRegex(task_name, r"^planner__task_[0-9a-f]{12}__plan_01__[0-9a-f]{12}$")
+        self.assertRegex(task_name, r"^planner_worker_01_[0-9a-f]{8}$")
         self.assertNotIn("plugin", task_name)
         self.assertNotIn("cache", task_name)
         self.assertNotIn("-", task_name)
@@ -1568,7 +1568,7 @@ class ControlPlaneTests(unittest.TestCase):
             "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
         })
         expected_task_name = delegated["spawn_request"]["task_name"]
-        self.assertRegex(expected_task_name, r"^explorer__host_name_contract__discover_01__[0-9a-f]{12}$")
+        self.assertRegex(expected_task_name, r"^explorer_inspect_01_[0-9a-f]{8}$")
         self.assertIn("Use attempt_id='discover-01' exactly", delegated["spawn_request"]["message"])
         self.assertIn("stable lowercase submission_id", delegated["spawn_request"]["message"])
         self.assertIn("exactly these eight keys", delegated["spawn_request"]["message"])
@@ -2194,7 +2194,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(len(set(result["attempts"])), 2)
         task_names = [item["task_name"] for item in result["spawn_requests"]]
         self.assertEqual(len(set(task_names)), 2)
-        self.assertTrue(all(item.startswith("explorer__composite_success__discover_") for item in task_names))
+        self.assertTrue(all(item.startswith("explorer_") for item in task_names))
         self.assertTrue(all(re.fullmatch(r"[a-z0-9_]{1,80}", item) for item in task_names))
         self.assertTrue(all(item["profile"] == "explorer" for item in result["spawn_requests"]))
 
@@ -2283,7 +2283,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started["step"], 1)
         self.assertEqual(len(started["dispatches"]), 1)
         self.assertEqual(set(started["dispatches"][0]), {
-            "worker", "phase", "profile", "capability", "sandbox",
+            "worker", "phase", "profile", "display_name", "capability", "sandbox",
             "selection_reason", "call", "arguments",
         })
         self.assertEqual(started["dispatches"][0]["phase"], "plan")
@@ -2403,6 +2403,13 @@ class ControlPlaneTests(unittest.TestCase):
                 for dispatch in started["dispatches"]:
                     self.assertEqual(dispatch["call"], "spawn_agent")
                     self.assertRegex(dispatch["arguments"]["task_name"], r"^[a-z0-9_]{1,80}$")
+
+    def test_v3_harvest_never_requires_post_plan_user_approval(self):
+        started = self.v3_start("$cortex:orchestrator harvest", complexity="C3")
+        self.assertTrue(started["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        self.assertEqual(task["plan_approval"], "auto")
 
     def test_v3_profile_schema_exposes_exact_roster_and_rejects_wrong_gate_owner(self):
         self.assertEqual(set(control.V3_WORKER_SCHEMA["properties"]["profile"]["enum"]), control.AGENTS)
@@ -3521,6 +3528,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(read["ok"])
         self.assertEqual(read["report"]["summary"], "large-state report remains readable")
 
+    def test_v3_report_read_returns_recoverable_result_for_missing_identity_or_record(self):
+        missing_root = control.read_worker_report({"report_ref": "report-0001"})
+        self.assertFalse(missing_root["ok"])
+        self.assertEqual(missing_root["code"], "report_unavailable")
+        started = self.v3_start("missing report", waves=[{"workers": [{"phase": "discover"}]}])
+        missing_record = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "report_ref": "report-9999",
+        })
+        self.assertFalse(missing_record["ok"])
+        self.assertEqual(missing_record["code"], "report_unavailable")
+
     def test_large_baseline_manifest_is_readable_during_handoff_and_reconciliation(self):
         started = self.v3_start("large baseline handoff", waves=[{"workers": [{"phase": "discover"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -3774,9 +3792,20 @@ class ControlPlaneTests(unittest.TestCase):
             "## Coverage matrix\n\n"
             "| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |\n"
             "| --- | --- | --- | --- | --- | --- | --- |\n"
-            "| Trading | engine | command | service.py | trading/index.md | test.py | documented |\n\n"
+            "| [Trading](trading/index.md) | engine | command | service.py | [trading](trading/index.md) | test.py | documented |\n\n"
             "## Unmapped surfaces\n\nNone.\n\n## Exclusions\n\nNone.\n\n"
             "## Known unknowns\n\nNone.\n",
+            encoding="utf-8",
+        )
+        trading_page = feature_docs / "trading/index.md"
+        trading_page.parent.mkdir()
+        trading_page.write_text(
+            "# Trading\n\n## Runtime owner\n\nThe runtime owns trading.\n\n"
+            "## Behavior and workflow\n\nThe workflow handles an order scenario.\n\n"
+            "## State and data\n\nState is persisted as order data.\n\n"
+            "## Interfaces\n\nThe API route is the entry point.\n\n"
+            "## Failure and recovery\n\nAn error triggers recovery.\n\n"
+            "## Verification\n\nTests verify the behavior.\n",
             encoding="utf-8",
         )
         accepted = control.publish_worker_report({
@@ -4605,6 +4634,14 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(recovered["report"]["report_id"], "report-0001")
                 self.assertEqual(control.reconcile_report_bus({"task_id": task_id, "principal": "thread-a"})["report_count"], 1)
 
+    def test_report_allocation_skips_orphaned_markdown_artifacts(self):
+        state = self.init(task_id="orphan-markdown", complexity="C2")["state"]
+        delegation = self.delegate(state, "orphan-markdown", "plan", "planner")
+        task_dir = self.ledger / "tasks/0001-orphan-markdown"
+        (task_dir / "reports/markdown/report-0001.md").write_text("orphan\n", encoding="utf-8")
+        recorded = self.report("orphan-markdown", delegation["attempt_id"])
+        self.assertEqual(recorded["report"]["report_id"], "report-0002")
+
     def test_report_quotas_and_terminal_attempt_are_rejected(self):
         state = self.init(task_id="quotas", complexity="C2")["state"]
         delegation = self.delegate(state, "quotas", "plan", "planner")
@@ -5065,7 +5102,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.4.2")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.4.3")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

@@ -33,14 +33,12 @@ Recorded Cortex 4.4.2 source-candidate evidence:
 - A migration exercised on a copy compacted a 291212-byte legacy registry to
   9624 bytes.
 - The generated Planner prompt measured 13679 bytes.
-- The source candidate is 4.4.2, while the local plugin registration still
-  reports the previously installed `4.4.1+codex.20260815221329`; after the
-  source bump, `./scripts/sync-cortex.sh --check` is expected to report an
-  out-of-date installed cache. No plugin reinstall command was run in this
-  turn.
-- Source marketplace validation, Python compilation, shell syntax checks,
-  focused manifest regressions, and the full 274-test suite passed. Live-model
-  and tracked-release evidence remain unverified.
+- The source candidate is 4.4.3 and the local plugin registration is installed
+  and content-verified as `4.4.3+codex.20260815231023`; installation preserved
+  the user MCP approval override.
+- Marketplace validation, Python compilation, shell syntax checks, the isolated
+  fresh-plugin probe, and the full 277-test suite passed. Live-model and
+  tracked-release evidence remain unverified.
 - Desktop wrapper regressions verify that the exact local
   `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` host metadata is
   canonicalized before task persistence, labels, identity, and worker prompts;
@@ -332,7 +330,7 @@ key. Its child snapshot records `model=gpt-5.6-luna` and
 `reasoning_effort=high`. This runtime metadata, rather than worker self-report,
 is the acceptance evidence. The worker returned to the parent and no
 user-owned visible task was created.
-This proof predates the current 4.4.2 candidate and is not a fresh-install or
+This proof predates the current 4.4.3 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
@@ -348,8 +346,8 @@ It requires a committed `HEAD`. Without one, the non-blocking command reports
 `SKIP` and `--require-tracked` fails intentionally; neither result validates a
 release archive. Create the initial commit only with authorization and rerun
 the blocking command against the committed tree before publication.
-The tracked-release command has not been reported for 4.4.2. Historical
-candidate results do not validate the current breaking package contract; this
+The tracked-release command has not been reported for the historical 4.4.2
+candidate. Historical candidate results do not validate the current breaking package contract; this
 is not release or publication evidence.
 
 <!-- GENERATED:START -->

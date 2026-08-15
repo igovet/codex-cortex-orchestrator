@@ -115,13 +115,14 @@
   then pass only `call` and its unchanged `arguments` to the native tool.
   Hidden `spawn_agent` arguments intentionally include `fork_turns: "none"`;
   do not replace it with inherited coordinator context.
-- Keep `profile` and `display_name` as the exact canonical role name. The native
-  `spawn_agent.task_name` is a task/attempt-unique session key that must match
-  the host's strict `[a-z0-9_]{1,80}` contract. Long request-derived task IDs
-  are compacted to a short deterministic fingerprint; hyphens are normalized
-  only in this host-facing field and a deterministic identity fingerprint
-  preserves uniqueness. Durable Cortex IDs may still contain hyphens, and
-  skill paths or prompt text must never leak into the host-visible name.
+- Keep `profile` as the exact canonical role name, and use the human-readable
+  `display_name` format `Profile Module NN` (for example, `Explorer Auth 02`).
+  The native `spawn_agent.task_name` is the lower-underscore equivalent with a
+  uniqueness digest and is a task/attempt-unique session key that must match
+  the host's strict `[a-z0-9_]{1,80}` contract. Its deterministic digest
+  preserves uniqueness without copying durable IDs, skill paths, or prompt
+  text into the host-visible name. Durable Cortex IDs may still contain
+  hyphens.
   Hooks map that key (or its confirmed host alias) back to the canonical
   profile. Use `followup_task` only for that exact resumed worker;
   `host_agent_id` reuse is rejected across attempts.

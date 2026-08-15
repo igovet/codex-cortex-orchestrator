@@ -139,6 +139,10 @@ validate the feature index structurally; a shallow link list without Coverage
 matrix columns, Inventory totals, Unmapped surfaces, Exclusions, or Known
 unknowns cannot satisfy the coverage-manifest contract.
 
+Harvest routes retain the internal planning phase but force `plan_approval` to
+`auto`; they never introduce a post-plan user approval hold. User tasks keep
+the normal C1/C2/C3 approval policy.
+
 ## Atomic records, repairable projections, best-effort telemetry
 
 Task state, evidence, gate outcomes, handoffs, and authoritative report JSON
@@ -167,6 +171,12 @@ decision, an explicit reassessment decision, server-observed successful command
 evidence at close, a complete project-manifest receipt, and an attempt-tied
 single-use worker-report receipt for delegated evidence. C1 remains lightweight
 and may use direct evidence for local work.
+
+The C2/C3 close worker report is independently checked before gate evidence is
+accepted: it must contain an executed test or verification result, observed
+evidence, no unresolved completion markers, and a textual mapping from every
+task-level acceptance and verification criterion to that evidence. A summary
+that merely asserts completion cannot close the task.
 
 Reworking a gate invalidates that gate and every downstream gate, including
 their prior evidence, so a later pass cannot accidentally reuse stale proof.
@@ -239,12 +249,14 @@ Plugin installation and reload remain operator-owned. A fresh Codex thread is
 required after installation or update so the new hook, skill, and MCP paths are
 loaded.
 
-Native worker identity follows the same separation: `profile` and
-`display_name` remain canonical, while `spawn_agent.task_name` uniquely names
-the task/attempt session and satisfies the host's `[a-z0-9_]{1,80}` name
-contract. Hyphens are normalized only for this native field and a deterministic
-identity fingerprint prevents collisions; durable Cortex IDs retain their
-hyphen-compatible format. Cortex rejects reuse of a `host_agent_id` already
+Native worker identity follows the same separation: `profile` remains
+canonical, while `display_name` is the human-readable `Profile Module NN` form
+(for example, `Explorer Auth 02`). `spawn_agent.task_name` is its
+lower-underscore equivalent with a deterministic uniqueness digest; it uniquely
+names the task/attempt session and satisfies the host's `[a-z0-9_]{1,80}` name
+contract. Hyphens are normalized only for this native field and the digest
+prevents collisions; durable Cortex IDs retain their hyphen-compatible format.
+Cortex rejects reuse of a `host_agent_id` already
 bound to another attempt. Only `followup_task` for the exact confirmed native
 worker may resume it; lifecycle hooks map the native task key back to the
 canonical profile for worker-context injection.

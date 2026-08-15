@@ -620,41 +620,71 @@ def v3_task_slug(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "-", without_route.lower()).strip("-")[:48] or "task"
 
 
-def native_worker_task_name(profile: str, task_id: str, attempt_id: str) -> str:
-    """Return a fresh native task key while preserving the canonical profile.
+def worker_module_label(objective: object, allowed_paths: object, gate: object) -> str:
+    """Return a concise, non-sensitive module label for host-visible workers."""
+    ignored = {
+        "app", "apps", "api", "docs", "features", "package", "packages", "plugin", "plugins",
+        "script", "scripts", "service", "services", "src", "test", "tests", "the", "and", "for",
+        "with", "from", "into", "this", "that", "work", "task", "cortex", "orchestrator",
+        "harvest", "refresh", "review", "implement", "implementation", "documentation",
+    }
+    candidates: list[str] = []
+    if isinstance(allowed_paths, list):
+        for raw_path in allowed_paths:
+            path = str(raw_path or "").strip().replace("\\", "/")
+            if path and path != ".":
+                candidates.extend(re.findall(r"[A-Za-z][A-Za-z0-9]*", path))
+    if not candidates:
+        candidates = re.findall(r"[A-Za-z][A-Za-z0-9]*", str(objective or ""))
+    selected: list[str] = []
+    for candidate in candidates:
+        normalized = candidate.lower()
+        if normalized in ignored or len(normalized) < 3 or normalized in {item.lower() for item in selected}:
+            continue
+        selected.append(normalized.title())
+        if len(selected) == 2:
+            break
+    if selected:
+        return " ".join(selected)
+    fallback = re.sub(r"[^A-Za-z0-9]+", " ", str(gate or "worker")).strip().title()
+    return fallback or "Worker"
 
-    ``profile``/``display_name`` is the stable role label.  The native
-    ``spawn_agent.task_name`` is instead a session identity, so reusing only
-    the role (for example, ``explorer``) can make a host attach a new dispatch
-    to an old child thread.  Include the task and attempt in the readable
-    form. Long request-derived task IDs are represented by a short deterministic
-    fingerprint so local skill paths or other prompt text never become a
-    host-visible worker name. The native host accepts only ``[a-z0-9_]``,
-    unlike Cortex durable IDs which also permit hyphens. A fingerprint of the
-    original canonical components keeps the host key collision-resistant after
-    that native-only normalization. Retain a final deterministic digest when
-    the complete key would still exceed the bounded identifier length.
+
+def worker_display_name(profile: str, module: str, attempt_id: str) -> str:
+    """Return the human-readable worker label shown alongside a host task key."""
+    sequence = re.search(r"(\d{1,4})$", str(attempt_id or ""))
+    ordinal = sequence.group(1).zfill(2) if sequence else hashlib.sha256(str(attempt_id).encode("utf-8")).hexdigest()[:6]
+    role = " ".join(part.title() for part in safe_id(profile).split("-"))
+    compact_module = " ".join(re.findall(r"[A-Za-z0-9]+", str(module)))[:48] or "Worker"
+    return f"{role} {compact_module} {ordinal}"
+
+
+def native_worker_task_name(profile: str, task_id: str, attempt_id: str, module: str = "Worker") -> str:
+    """Return a unique host task key whose readable portion identifies the work.
+
+    Codex restricts ``spawn_agent.task_name`` to lowercase letters, digits,
+    and underscores. The companion ``display_name`` retains the human form
+    (for example ``Explorer Auth 02``); this key deliberately mirrors it as
+    ``explorer_auth_02_<digest>`` without exposing request text or local paths.
     """
     profile_id = safe_id(profile)
     task_id = safe_id(task_id)
     attempt_id = safe_id(attempt_id)
-    task_fragment = task_id
-    if len(task_id) > 32:
-        task_fragment = f"task_{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:12]}"
     native_profile = profile_id.replace("-", "_")
-    native_task = task_fragment.replace("-", "_")
-    native_attempt = attempt_id.replace("-", "_")
+    native_module = "_".join(re.findall(r"[a-z0-9]+", str(module).lower()))[:24].strip("_") or "worker"
+    sequence = re.search(r"(\d{1,4})$", attempt_id)
+    native_attempt = sequence.group(1).zfill(2) if sequence else attempt_id.replace("-", "_")[:12]
     identity_digest = hashlib.sha256(
-        "\0".join((profile_id, task_id, attempt_id)).encode("utf-8")
-    ).hexdigest()[:12]
-    readable = f"{native_profile}__{native_task}__{native_attempt}__{identity_digest}"
+        "\0".join((profile_id, task_id, attempt_id, native_module)).encode("utf-8")
+    ).hexdigest()[:8]
+    readable = f"{native_profile}_{native_module}_{native_attempt}_{identity_digest}"
     if len(readable) <= 80:
         candidate = readable
     else:
-        digest = hashlib.sha256(readable.encode("utf-8")).hexdigest()[:24]
-        attempt_fragment = native_attempt[:24].rstrip("_") or "attempt"
+        digest = hashlib.sha256(readable.encode("utf-8")).hexdigest()[:16]
+        attempt_fragment = native_attempt[:12].rstrip("_") or "attempt"
         profile_fragment = native_profile[:24].rstrip("_") or "worker"
-        candidate = f"{profile_fragment}__{attempt_fragment}__{digest}"
+        candidate = f"{profile_fragment}_{attempt_fragment}_{digest}"
     candidate = candidate[:80].rstrip("_")
     if not NATIVE_AGENT_NAME_RE.fullmatch(candidate):
         raise RuntimeError("native worker task name violated the host agent-name contract")
@@ -2961,7 +2991,7 @@ def _is_knowledge_harvest_task(task: dict[str, Any]) -> bool:
 
 
 def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any], gate: str) -> None:
-    """Prevent documentation/review/close from accepting a shallow feature list."""
+    """Require harvest documentation to cover real, behavior-complete feature pages."""
     if gate not in {"documentation", "review", "close"} or not _is_knowledge_harvest_task(task):
         return
     path = _contained_path(
@@ -2973,7 +3003,8 @@ def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any]
         raise ValueError("harvest coverage manifest is missing: docs/features/index.md")
     if path.stat().st_size > 512 * 1024:
         raise ValueError("harvest coverage manifest exceeds the 512 KiB validation limit")
-    text = path.read_text(encoding="utf-8").lower()
+    raw_text = path.read_text(encoding="utf-8")
+    text = raw_text.lower()
     required = {
         "coverage matrix": ("coverage matrix",),
         "matrix columns": (
@@ -2989,6 +3020,82 @@ def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any]
     if missing:
         raise ValueError(
             "harvest coverage manifest is shallow or incomplete; missing: " + ", ".join(missing)
+        )
+    documentation_links: set[Path] = set()
+    for raw_link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", raw_text):
+        target = raw_link.strip().strip("<>").split("#", 1)[0].strip()
+        if not target or "://" in target or target.startswith("/"):
+            continue
+        candidate = (path.parent / target).resolve()
+        try:
+            candidate.relative_to((project_root / "docs/features").resolve())
+        except ValueError:
+            continue
+        documentation_links.add(candidate)
+    if not documentation_links:
+        raise ValueError("harvest coverage manifest has no feature documentation links")
+    missing_pages = sorted(
+        item.relative_to(project_root).as_posix()
+        for item in documentation_links
+        if not item.is_file() or item.is_symlink()
+    )
+    if missing_pages:
+        raise ValueError("harvest coverage manifest references missing feature pages: " + ", ".join(missing_pages))
+    incomplete_rows = [
+        line.strip() for line in text.splitlines()
+        if line.lstrip().startswith("|") and re.search(r"\|\s*(?:partial|unknown|planned|unmapped)\b", line)
+    ]
+    if incomplete_rows:
+        raise ValueError("harvest coverage manifest still has incomplete feature rows; finish every feature before reporting")
+    required_page_topics = {
+        "runtime": ("runtime", "owner"),
+        "behavior": ("behavior", "workflow", "scenario", "logic"),
+        "state/data": ("state", "data", "persistence"),
+        "interfaces": ("interface", "entry point", "route", "api"),
+        "failure/recovery": ("failure", "recovery", "error"),
+        "verification": ("verification", "test"),
+    }
+    shallow_pages: list[str] = []
+    for page in sorted(documentation_links):
+        content = page.read_text(encoding="utf-8").lower()
+        absent = [topic for topic, markers in required_page_topics.items() if not any(marker in content for marker in markers)]
+        if absent:
+            shallow_pages.append(f"{page.relative_to(project_root).as_posix()} ({', '.join(absent)})")
+    if shallow_pages:
+        raise ValueError("harvest feature pages lack required behavior coverage: " + "; ".join(shallow_pages))
+
+
+def _validate_close_report(task_dir: Path, state: dict[str, Any], attempt: dict[str, Any], report: dict[str, Any]) -> None:
+    """Reject a C2/C3 close report that cannot substantiate task completion."""
+    if attempt.get("gate") != "close" or not state.get("require_handoff"):
+        return
+    if not report.get("tests"):
+        raise ValueError("C2/C3 close report requires at least one executed verification command or test result")
+    if not report.get("evidence"):
+        raise ValueError("C2/C3 close report requires observed evidence, not only a completion assertion")
+    task = _read_private_json(task_dir / "task.json", "task definition")
+    combined = "\n".join(
+        str(item) for field in ("summary", "findings", "tests", "evidence", "next_action")
+        for item in (report.get(field) if isinstance(report.get(field), list) else [report.get(field)])
+    ).lower()
+    weak_markers = ("not run", "not tested", "unverified", "todo", "tbd", "blocked")
+    present_weak_markers = [marker for marker in weak_markers if marker in combined]
+    if present_weak_markers:
+        raise ValueError("C2/C3 close report contains unresolved completion markers: " + ", ".join(present_weak_markers))
+    criteria = [
+        str(item) for field in ("acceptance_criteria", "verification")
+        for item in task.get(field, []) if isinstance(item, str) and item.strip()
+    ]
+    uncovered: list[str] = []
+    stop_words = {"after", "before", "every", "from", "have", "must", "should", "that", "the", "then", "this", "with"}
+    for criterion in criteria:
+        tokens = [token for token in re.findall(r"[a-z0-9_/-]{5,}", criterion.lower()) if token not in stop_words]
+        if tokens and not any(token in combined for token in tokens):
+            uncovered.append(criterion)
+    if uncovered:
+        raise ValueError(
+            "C2/C3 close report does not map task acceptance or verification criteria to observed evidence: "
+            + "; ".join(uncovered[:8])
         )
 
 
@@ -4338,6 +4445,8 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
                 "resume this same worker after the coordinator records the user answer"
             )
         report = sanitize_report_payload(params.get("report"))
+        if params.get("_require_close_validation"):
+            _validate_close_report(task_dir, state, attempt, report)
         raw_planning = params.get("planning")
         planning = None
         if raw_planning is not None:
@@ -4368,6 +4477,12 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
         submission_key = f"{attempt_id}:{submission_id}"
         authoritative: list[dict[str, Any]] = []
         authoritative_numbers: list[int] = []
+        occupied_numbers: list[int] = []
+        for namespace in (paths["records"], paths["markdown"], paths["receipts"]):
+            for artifact_path in namespace.iterdir():
+                match = re.fullmatch(r"(?:report-)?(\d+)\.(?:json|md)", artifact_path.name)
+                if match:
+                    occupied_numbers.append(int(match.group(1)))
         for record_path in sorted(paths["records"].glob("report-*.json")):
             if record_path.is_symlink() or not (match := re.fullmatch(r"report-(\d+)\.json", record_path.name)):
                 raise ValueError("report record namespace contains an unsafe entry")
@@ -4399,7 +4514,7 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("report count quota exhausted")
         if aggregate_bytes + report_bytes > MAX_REPORT_AGGREGATE_BYTES:
             raise ValueError("report aggregate byte quota exhausted")
-        report_id = f"report-{max(authoritative_numbers, default=0) + 1:04d}"
+        report_id = f"report-{max(occupied_numbers, default=0) + 1:04d}"
         record = {
             "schema": REPORT_SCHEMA, "report_id": report_id, "task_id": state["task_id"],
             "gate": attempt["gate"], "attempt_id": attempt_id, "submission_id": submission_id,
@@ -4459,6 +4574,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "_require_knowledge_review": True,
             "_require_harvest_manifest": True,
             "_require_plan_artifact": True,
+            "_require_close_validation": True,
         })
     except ValueError as exc:
         message = str(exc)
@@ -4507,7 +4623,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "findings or evidence, then retry record_report once on this same attempt."
             )
         elif any(fragment in message for fragment in (
-            "task 'None' does not exist", "does not belong to this task", "owned by a different principal",
+            "does not exist", "does not belong to this task", "owned by a different principal",
             "profile must be an exact Cortex worker profile", "attempt_id", "task_id",
             "invalidated or terminal attempt",
         )):
@@ -4531,7 +4647,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "report uncertainty must", "report exceeds the", "report count quota exhausted",
             "report aggregate byte quota exhausted", "idempotent report submission_id",
             "project_root is required", "project_root must be an absolute path", "CORTEX_ROOT is not supported",
-            "planning ", "planner reports require",
+            "planning ", "planner reports require", "C2/C3 close report",
         )):
             code = "report_validation_failed"
             outcome = "needs_correction"
@@ -4578,38 +4694,48 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
 
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Read one active-task report by compact ref for a coordinator or successor worker."""
-    resolved = _v3_resolve_task(params)
-    if isinstance(resolved, dict):
-        return resolved
-    task_dir, state, _, task_ref = resolved
-    report_ref = safe_id(str(params.get("report_ref") or ""))
-    if not report_ref:
-        raise ValueError("report_ref is required")
-    paths = report_bus_paths(task_dir)
-    record = _read_private_json(
-        _contained_path(paths["records"], paths["records"] / f"{report_ref}.json", "worker report"),
-        "worker report",
-    )
-    if record.get("task_id") != state.get("task_id"):
-        raise ValueError("report_ref does not belong to the selected Cortex task")
-    markdown_path = report_markdown_path(task_dir, report_ref)
-    phase = record.get("gate") or "report"
-    markdown_link = report_markdown_link(task_dir, report_ref, phase)
-    return {
-        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-        "ok": True,
-        "task_ref": task_ref,
-        "report_ref": report_ref,
-        "phase": phase,
-        "profile": (record.get("producer") or {}).get("profile"),
-        "report_markdown_path": str(markdown_path),
-        "report_markdown_link": markdown_link,
-        "report": record.get("report"),
-        "next_action": (
-            "Publish report_markdown_link verbatim in the main chat before any other Cortex lifecycle call; "
-            "the link is mandatory coordinator output, not optional metadata."
-        ),
-    }
+    try:
+        resolved = _v3_resolve_task(params)
+        if isinstance(resolved, dict):
+            return resolved
+        task_dir, state, _, task_ref = resolved
+        report_ref = safe_id(str(params.get("report_ref") or ""))
+        if not report_ref:
+            raise ValueError("report_ref is required")
+        paths = report_bus_paths(task_dir)
+        record_path = _contained_path(paths["records"], paths["records"] / f"{report_ref}.json", "worker report")
+        if not record_path.is_file() or record_path.is_symlink():
+            raise ValueError("report_ref is unavailable for the selected Cortex task; inspect available_reports and use only a persisted ref")
+        record = _read_private_json(record_path, "worker report")
+        if record.get("task_id") != state.get("task_id"):
+            raise ValueError("report_ref does not belong to the selected Cortex task")
+        markdown_path = report_markdown_path(task_dir, report_ref)
+        phase = record.get("gate") or "report"
+        markdown_link = report_markdown_link(task_dir, report_ref, phase)
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "task_ref": task_ref,
+            "report_ref": report_ref,
+            "phase": phase,
+            "profile": (record.get("producer") or {}).get("profile"),
+            "report_markdown_path": str(markdown_path),
+            "report_markdown_link": markdown_link,
+            "report": record.get("report"),
+            "next_action": (
+                "Publish report_markdown_link verbatim in the main chat before any other Cortex lifecycle call; "
+                "the link is mandatory coordinator output, not optional metadata."
+            ),
+        }
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "needs_correction",
+            "code": "report_unavailable",
+            "diagnostics": [{"code": "report_unavailable", "message": redact(str(exc), 1000)}],
+            "next_action": "Supply the exact project_root and persisted report_ref from the active task; do not guess report or task identifiers.",
+        }
 
 
 def _grant_reports_locked(task_dir: Path, state: dict[str, Any], attempt_id: str, report_ids: list[Any], reason: object) -> dict[str, Any]:
@@ -5486,14 +5612,16 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         # The role label remains canonical, but the native task key must be
         # unique per task/attempt.  Keeping only ``agent`` here lets the host
         # mistake a fresh dispatch for a continuation of an older child.
-        task_name = native_worker_task_name(agent, state["task_id"], attempt_id)
+        module = worker_module_label(objective, required_lists["allowed_paths"], gate)
+        display_name = worker_display_name(agent, module, attempt_id)
+        task_name = native_worker_task_name(agent, state["task_id"], attempt_id, module)
         host_tool = "create_thread" if dispatch_mode == "visible_thread" else "spawn_agent"
         visible_thread = dispatch_mode == "visible_thread"
         spawn_request = {
             "host_tool": host_tool,
             "phase": gate,
             "profile": agent,
-            "display_name": agent,
+            "display_name": display_name,
             "task_name": task_name,
             "capability": PROFILES[agent]["description"],
             "sandbox": PROFILES[agent]["sandbox"],
@@ -5539,7 +5667,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         orchestration_delegation_key = str(params.get("orchestration_delegation_key", "")).strip() or None
         project_root = select_project_root(params)
         context_files, knowledge_index_files = _project_knowledge_context(project_root, params.get("context_files"))
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "report_index": "reports/index.json", "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         package["pause_conditions"] = [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100]
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
@@ -5555,16 +5683,14 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             # create_thread calls this field `prompt`; retaining `message`
             # keeps the package readable by existing coordinator adapters.
             spawn_request["prompt"] = spawn_request["message"]
-            # Visible thread labels remain the exact canonical profile name;
-            # ``task_name`` is the private native session key.
-            spawn_request["title"] = agent
+            spawn_request["title"] = display_name
         package_path = task_dir / "delegations" / f"{attempt_id}.json"
         write_json(package_path, package)
         if observed is not None and status_path is not None:
             observed["consumed_at"] = now()
             observed["attempt_id"] = attempt_id
             write_json(status_path, observed)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": agent, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "ownership": package["ownership"], "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "ownership": package["ownership"], "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
         delegation_index_path, delegation_index = _delegation_report_index(report_paths, state["task_id"], attempt_id)
         delegation_index["context_report_ids"] = context_report_ids
         delegation_index["updated_at"] = now()
@@ -9404,6 +9530,7 @@ def _v3_response(
             "worker": index,
             "phase": request.get("phase"),
             "profile": request.get("profile"),
+            "display_name": request.get("display_name"),
             "capability": request.get("capability"),
             "sandbox": request.get("sandbox"),
             "selection_reason": request.get("selection_reason"),
@@ -9594,9 +9721,10 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("internal follow_up context must be an object")
             task["follow_up"] = sanitize_structured(params["_follow_up"])
         task["complexity"] = _v3_complexity(raw_task.get("complexity"))
-        task["plan_approval"] = _v3_plan_approval(
-            raw_task.get("plan_approval"),
-            task["complexity"],
+        task["plan_approval"] = (
+            "auto"
+            if _is_knowledge_harvest_task(task)
+            else _v3_plan_approval(raw_task.get("plan_approval"), task["complexity"])
         )
         language_alias = task.pop("language", None)
         task["user_language"] = normalize_user_language(

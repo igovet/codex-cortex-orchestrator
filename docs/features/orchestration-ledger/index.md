@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 4.4.2 task ledger, staged waves,
+The local MCP server implements the Cortex 4.4.3 task ledger, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly six public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -99,9 +99,11 @@ task inherits the completed source task's `user_language`, while its workers
 still follow the same English-only internal boundary.
 
 Post-plan user review is controlled by `task.plan_approval`, which accepts
-`auto` or `required`. The default is `required` for C2/C3 and `auto` for C1;
-the C1 `auto` policy does not require user confirmation. A required plan must
-be the only phase in its wave. After that plan succeeds, Cortex returns
+`auto` or `required`. The default is `required` for C2/C3 user tasks and `auto`
+for C1; knowledge routes (`harvest` and `harvest-refresh`) force `auto`. Those
+routes still run their internal `plan` phase, but never pause for post-plan user
+approval. For ordinary tasks, a required plan must be the only phase in its
+wave. After that plan succeeds, Cortex returns
 `outcome: awaiting_plan_approval`, dispatches no successor, and includes a
 bounded `plan_review` containing `report_ref`, `summary`, `findings`,
 `uncertainty`, `next_action`, `remaining_phases`, and the derived absolute
@@ -243,6 +245,12 @@ unrelated files. If the worker is interrupted after persistence but before its
 acknowledgement, `manage_orchestration` inspect returns the compact entry in
 `available_reports`, including the same path, for recovery.
 
+For C2/C3 close attempts, Cortex additionally requires at least one executed
+test or verification result and observed evidence. Completion markers such as
+“not run” or “unverified” fail closed, and the report must map every task-level
+acceptance and verification criterion to the observed evidence; a bare
+completion assertion is insufficient.
+
 ### Context-compaction recovery
 
 `manage_orchestration(intent="inspect")` returns a bounded
@@ -255,12 +263,14 @@ and continue the existing relative step. Cortex explicitly forbids restarting
 the task or replaying completed dispatches during this recovery.
 
 Native worker identity is separate from the canonical role label. Every
-dispatch keeps `profile` and `display_name` canonical, while
-`spawn_agent.task_name` is unique to the task and attempt and must satisfy the
-host's strict `[a-z0-9_]{1,80}` name contract. Long request-derived task IDs
-are represented by a short deterministic fingerprint; host-only hyphen
-normalization plus a deterministic identity fingerprint preserves uniqueness
-without copying durable IDs into the host-visible name. `followup_task` is
+dispatch keeps `profile` canonical and sets a human-readable `display_name` in
+the form `Profile Module NN` (for example, `Explorer Auth 02`), where the
+module is derived concisely from the assignment and `NN` is the attempt ordinal.
+`spawn_agent.task_name` is the lower-underscore equivalent with a uniqueness
+digest (for example, `explorer_auth_02_<digest>`), remains unique to the task
+and attempt, and must satisfy the host's strict `[a-z0-9_]{1,80}` name contract.
+The deterministic digest preserves uniqueness without copying durable IDs,
+request text, or skill paths into the host-visible name. `followup_task` is
 reserved for the exact confirmed native worker being resumed; a reused
 `host_agent_id` is rejected for another attempt. Lifecycle hooks resolve the
 native task key (and its host aliases) back to the canonical profile before
@@ -400,5 +410,5 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.4.2 source evidence is 274 passing tests, including manifest-policy regressions, native host-name coverage, and Desktop skill-wrapper path removal. The local plugin registration still reports the previously installed `4.4.1+codex.20260815221329`; after the source bump, `./scripts/sync-cortex.sh --check` is expected to report an out-of-date installed cache, and no plugin reinstall command was run in this turn. Live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.4.2. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.4.3 evidence is 277 passing tests, marketplace validation, Python compilation, shell syntax, an isolated fresh-plugin probe, and installed-content verification at `4.4.3+codex.20260815231023`; the installer preserved the user MCP approval override. The recorded 4.4.2 source evidence of 274 passing tests is retained as historical baseline. Live-model, tracked-release, and publication evidence remain unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.4.3. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->
