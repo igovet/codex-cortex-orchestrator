@@ -104,7 +104,17 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     return scenarios
 
 
-def live_prompt(scenario: str, project: Path) -> str:
+def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None) -> str:
+    if scenario == "follow_up_partial":
+        return (
+            "Use only Cortex v3 public tools for this isolated partial smoke test. "
+            f"The exact project_root is {project}. The completed source task_ref is {source_task_ref!r}. "
+            "Call manage_orchestration exactly once with intent=follow_up, that task_ref, and payload.user_request exactly "
+            "'Correct the fixture result because the completed task produced the wrong behavior.' with complexity C1. "
+            "Do not call start_orchestration, continue_orchestration, or any private Cortex tool. Do not execute the returned "
+            "worker dispatch: this test must stop after Cortex has created the linked corrective task. You may inspect that new task "
+            "once with manage_orchestration to confirm it is awaiting its first worker."
+        )
     common = (
         "Use the Cortex v3 MCP public tools to complete this isolated task. "
         "You are the parent orchestrator. Preserve the task text exactly in start_orchestration task.user_request, "
@@ -142,13 +152,29 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
         project.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=project, check=True)
         (project / "README.md").write_text("# Luna high Cortex fixture\n", encoding="utf-8")
+        source_task_ref = None
+        source_snapshot: tuple[str, str] | None = None
+        if scenario == "follow_up_partial":
+            source = cortex.start_orchestration({
+                "project_root": str(project),
+                "task": {"user_request": "Complete a deterministic source fixture before follow-up testing.", "complexity": "C1"},
+            })
+            completed_source = finish(project, source)
+            if completed_source.get("outcome") != "completed":
+                raise AssertionError(completed_source)
+            source_task_ref = str(source["task_ref"])
+            source_dir = next((project / ".codex/cortex/tasks").iterdir())
+            source_snapshot = (
+                (source_dir / "task.json").read_text(encoding="utf-8"),
+                (source_dir / "current.json").read_text(encoding="utf-8"),
+            )
         command = [
             codex, "exec", "--json", "--ephemeral", "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox", "-C", str(project),
             "-m", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"',
             "-c", f'mcp_servers.cortex.command="{sys.executable}"',
             "-c", f'mcp_servers.cortex.args=["{SERVER}"]',
-            live_prompt(scenario, project),
+            live_prompt(scenario, project, source_task_ref),
         ]
         completed = subprocess.run(command, cwd=project, text=True, capture_output=True, timeout=1800, check=False)
         events = []
@@ -182,8 +208,14 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
                     "result_tail": result_text[-1200:],
                 })
         task_dirs = list((project / ".codex/cortex/tasks").glob("*"))
-        state = json.loads((task_dirs[0] / "current.json").read_text(encoding="utf-8")) if len(task_dirs) == 1 else {}
-        report_records = list((task_dirs[0] / "reports/records").glob("*.json")) if len(task_dirs) == 1 else []
+        task_dir = task_dirs[0] if len(task_dirs) == 1 else None
+        if scenario == "follow_up_partial":
+            task_dir = next(
+                (path for path in task_dirs if isinstance(json.loads((path / "task.json").read_text(encoding="utf-8")).get("follow_up"), dict)),
+                None,
+            )
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8")) if task_dir else {}
+        report_records = list((task_dir / "reports/records").glob("*.json")) if task_dir else []
         report_keys = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
         strict_reports = bool(report_records) and all(
             set(json.loads(path.read_text(encoding="utf-8")).get("report", {})) == report_keys
@@ -200,7 +232,7 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
         )
-        planning_root = task_dirs[0] / "planning" if len(task_dirs) == 1 else None
+        planning_root = task_dir / "planning" if task_dir else None
         planning_manifest = (
             json.loads((planning_root / "manifest.json").read_text(encoding="utf-8"))
             if planning_root and (planning_root / "manifest.json").is_file() else {}
@@ -230,10 +262,29 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
                 and len(package_artifacts) >= 2
                 and all(
                     isinstance(package, dict)
-                    and (task_dirs[0] / str(package.get("artifact_path") or "")).is_file()
+                    and (task_dir / str(package.get("artifact_path") or "")).is_file()
                     for package in package_artifacts
                 )
             )
+        if scenario == "follow_up_partial":
+            source_dir = next((path for path in task_dirs if path != task_dir), None)
+            corrective_task = json.loads((task_dir / "task.json").read_text(encoding="utf-8")) if task_dir else {}
+            source_unchanged = bool(source_dir and source_snapshot and (
+                (source_dir / "task.json").read_text(encoding="utf-8"),
+                (source_dir / "current.json").read_text(encoding="utf-8"),
+            ) == source_snapshot)
+            checks = {
+                "process_ok": completed.returncode == 0,
+                "used_follow_up": "manage_orchestration" in tool_names,
+                "avoided_start_and_continue": "start_orchestration" not in tool_names and "continue_orchestration" not in tool_names,
+                "avoided_private_tools": "orchestrate" not in tool_names,
+                "created_one_linked_corrective_task": len(task_dirs) == 2 and task_dir is not None,
+                "source_unchanged": source_unchanged,
+                "corrective_task_active": state.get("status") == "active",
+                "follow_up_link": corrective_task.get("follow_up", {}).get("source_task_ref") == source_task_ref,
+                "first_corrective_dispatch_prepared": bool(state.get("attempts")) and state["attempts"][0].get("gate") in {"plan", "discover"},
+                "no_failed_public_calls": not failed_public_calls,
+            }
         passed = all(checks.values())
         results.append({
             "scenario": scenario, "status": "PASS" if passed else "FAIL",
@@ -257,7 +308,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="run the three real gpt-5.6-luna high parent scenarios")
     parser.add_argument(
-        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown"),
+        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown", "follow_up_partial"),
         help="run one live scenario for diagnosis; the default release run still requires all three",
     )
     args = parser.parse_args()

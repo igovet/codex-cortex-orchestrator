@@ -2869,6 +2869,96 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(approved["outcome"], "ready_to_spawn")
         self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
 
+    def test_v3_follow_up_creates_a_linked_corrective_task_without_mutating_completed_source(self):
+        source = self.v3_start(
+            "complete the source task before a corrective request",
+            complexity="C1",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        source_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((source_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        published = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self.v3_report("source evidence for a later corrective task"),
+        })
+        self.assertTrue(published["ok"])
+        completed = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": source["task_ref"], "step": source["step"],
+            "results": [{"report_ref": published["report_ref"]}],
+        })
+        while completed.get("outcome") != "completed":
+            dispatches = completed.get("dispatches") or []
+            self.assertTrue(dispatches)
+            results = [{"report": self.v3_report(f"complete corrective source phase {completed['step']} worker {slot}")}
+                       for slot in range(1, len(dispatches) + 1)]
+            if len(results) > 1:
+                for slot, result in enumerate(results, 1):
+                    result["worker"] = slot
+            completed = control.continue_orchestration({
+                "project_root": str(self.project), "task_ref": source["task_ref"], "step": completed["step"],
+                "results": results,
+            })
+        self.assertEqual(completed["outcome"], "completed")
+        state = json.loads((source_dir / "current.json").read_text(encoding="utf-8"))
+        created_handoff = control.handoff({
+            "project_root": str(self.project), "task_id": state["task_id"], "principal": state["principal"],
+            "expected_revision": state["revision"], "completed": ["Source task closed."],
+            "files": [], "next_action": "Use this source only as corrective-task context.",
+        })
+        source_task_before = (source_dir / "task.json").read_text(encoding="utf-8")
+        source_state_before = (source_dir / "current.json").read_text(encoding="utf-8")
+
+        follow_up = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": source["task_ref"], "intent": "follow_up",
+            "payload": {
+                "user_request": "Correct the behavior that was wrong in the completed source task.",
+                "complexity": "C1", "report_refs": [published["report_ref"]],
+            },
+        })
+        self.assertTrue(follow_up["ok"])
+        self.assertEqual(follow_up["outcome"], "ready_to_spawn")
+        self.assertNotEqual(follow_up["task_ref"], source["task_ref"])
+        self.assertEqual(follow_up["follow_up"]["source_task_ref"], source["task_ref"])
+        self.assertEqual(
+            follow_up["follow_up"]["source_handoff_path"],
+            created_handoff["handoff_file"],
+        )
+        self.assertTrue(Path(follow_up["follow_up"]["source_report_markdown_paths"][0]).is_file())
+        self.assertEqual((source_dir / "task.json").read_text(encoding="utf-8"), source_task_before)
+        self.assertEqual((source_dir / "current.json").read_text(encoding="utf-8"), source_state_before)
+
+        task_dirs = sorted((self.ledger / "tasks").iterdir())
+        corrective_dir = next(path for path in task_dirs if path != source_dir)
+        corrective_task = json.loads((corrective_dir / "task.json").read_text(encoding="utf-8"))
+        self.assertEqual(corrective_task["follow_up"]["source_task_ref"], source["task_ref"])
+        self.assertEqual(corrective_task["follow_up"]["source_report_refs"], [published["report_ref"]])
+        prompt = follow_up["dispatches"][0]["arguments"]["message"]
+        self.assertIn("Follow-up context: this corrective task is linked", prompt)
+        self.assertIn(created_handoff["handoff_file"], prompt)
+
+        replay = control.manage_orchestration({
+            "project_root": str(self.project), "intent": "follow_up",
+            "payload": {
+                "task_ref": source["task_ref"],
+                "user_request": "Correct the behavior that was wrong in the completed source task.",
+                "complexity": "C1", "report_refs": [published["report_ref"]],
+            },
+        })
+        self.assertTrue(replay["ok"])
+        self.assertEqual(replay["task_ref"], follow_up["task_ref"])
+        self.assertEqual(replay["dispatches"], [])
+
+    def test_v3_follow_up_rejects_an_active_source_task(self):
+        source = self.v3_start("active source task", waves=[{"workers": [{"phase": "discover"}]}])
+        rejected = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": source["task_ref"], "intent": "follow_up",
+            "payload": {"user_request": "Correct an active task instead of reopening it."},
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("requires a completed source task", rejected["diagnostics"][0]["message"])
+
     def test_planner_materializes_task_local_work_packages_and_exposes_them_for_review(self):
         started = self.v3_start(
             "produce a durable work breakdown",
@@ -4548,7 +4638,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.1.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.2.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

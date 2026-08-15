@@ -256,6 +256,21 @@ should use canonical phases from the returned snapshot rather than guessing.
    compact `future_waves` replacement in the same continue call. Set
    `rework: true` only for intentional repetition of a completed phase.
 
+### Correcting a completed task
+
+Never silently reopen or alter a task that has reached `outcome: completed`.
+When the user asks to correct its result, preserve the user's new wording and
+call `manage_orchestration` with the completed source `task_ref`,
+`intent="follow_up"`, and `payload.user_request` set to that exact corrective
+request. The payload may select a bounded `report_refs` list and normal task
+fields such as `complexity`, `scope`, or `verification`. Cortex creates a new,
+linked corrective task and returns its own `task_ref` and first dispatches.
+The original task remains immutable; the new Planner receives derived source
+handoff and report Markdown paths as historical evidence. Do not execute the
+source task again, or treat the link as proof that its old findings still match
+the repository. For an active task that has not completed, use normal
+evidence-based `rework` instead; `follow_up` rejects it.
+
 ### Required post-plan approval
 
 The v3 task field `task.plan_approval` accepts `auto` or `required`. It

@@ -128,6 +128,20 @@ approved or revised plans. `plan_review` exposes compact
 ownership/dependency-aware scheduling within the canonical phase/wave safety
 model, not as an unconstrained auto-executor.
 
+### Correcting a completed task
+
+Completed source tasks are immutable: do not reopen or mutate them. For an
+exact corrective request, call
+`manage_orchestration(intent="follow_up")` with the completed source
+`task_ref` and `payload.user_request` preserving the user's wording. Cortex
+creates a linked corrective task with its own `task_ref`, pipeline, and
+dispatches. Its workers receive source-derived handoff and report Markdown
+paths as historical context only; they must revalidate consequential claims
+against current source and tests. `payload.report_refs` is optional and
+bounded to at most 32 source refs; when omitted, Cortex selects a bounded
+recent set. If the source task is active, use evidence-based `rework` instead;
+`follow_up` rejects active sources.
+
 `read_worker_report` returns the derived absolute `report_markdown_path` for
 the persisted `reports/markdown/<report-ref>.md` artifact. After reading each
 completed report, publish a compact clickable Markdown link in the main chat

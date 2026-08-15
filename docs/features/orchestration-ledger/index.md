@@ -37,7 +37,7 @@ recorded as `unchanged` instead of failing after gate writes, and relative
 future steps remain monotonic. Human-readable language aliases such as
 `English` normalize before ledger creation. `manage_orchestration` is reserved for
 inspect/resume/deactivate, lanes, resources, durable questions, and confirmed
-project-scoped prune; it is not
+project-scoped prune, and completed-task `follow_up`; it is not
 part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
@@ -52,6 +52,19 @@ task. Replayed continue calls also return no dispatches and cannot authorize a
 duplicate wave. Omitting the ref when several tasks are selectable returns
 `needs_selection` with bounded objective/ref candidates. The project registry
 is lock-serialized so concurrent process starts do not overwrite one another.
+
+A user request to correct a task that is already `completed` uses
+`manage_orchestration(intent="follow_up")` with the exact completed source
+`task_ref` and `payload.user_request` containing the user's exact corrective
+request. Cortex never reopens or mutates the source task. It creates a new
+corrective task with its own `task_ref`, waves, approval policy, verification,
+and close. The new task stores a `cortex/follow-up/v1` relation to the source,
+including source-derived handoff and selected report Markdown paths; its
+workers receive those paths as historical evidence and must revalidate current
+source rather than treating old reports as authority. `payload.report_refs` is
+an optional bounded list of source reports; omitted selects the latest bounded
+set. A follow-up against an active source fails closed so the coordinator uses
+normal active-task rework instead.
 
 Post-plan user review is controlled by `task.plan_approval`, which accepts
 `auto` or `required`. The default is `required` for C2/C3 and `auto` for C1;
@@ -275,8 +288,8 @@ professional sections and that every gate briefing has non-generic acceptance
 and verification lists. Runtime validation also checks complete routing
 metadata, TOML identity/description/sandbox parity, and unique implementation
 specialist rules. Recovery and nested
-operations are `inspect`, `resume`, `deactivate`, `lane`, `resource`, and
-`question`.
+operations are `inspect`, `resume`, `deactivate`, `lane`, `resource`,
+`question`, and `follow_up`.
 
 Ledger, report-bus, and journal paths reject symlink ancestry and require
 regular-file targets, so journal or report-bus links cannot redirect state
