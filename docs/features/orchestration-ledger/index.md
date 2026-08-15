@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 4.0.4 task ledger, staged waves,
+The local MCP server implements the Cortex 4.1.0 task ledger, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly six public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -52,6 +52,45 @@ task. Replayed continue calls also return no dispatches and cannot authorize a
 duplicate wave. Omitting the ref when several tasks are selectable returns
 `needs_selection` with bounded objective/ref candidates. The project registry
 is lock-serialized so concurrent process starts do not overwrite one another.
+
+Post-plan user review is controlled by `task.plan_approval`, which accepts
+`auto` or `required`. The default is `required` for C2/C3 and `auto` for C1;
+the C1 `auto` policy does not require user confirmation. A required plan must
+be the only phase in its wave. After that plan succeeds, Cortex returns
+`outcome: awaiting_plan_approval`, dispatches no successor, and includes a
+bounded `plan_review` containing `report_ref`, `summary`, `findings`,
+`uncertainty`, `next_action`, `remaining_phases`, and the derived absolute
+`report_markdown_path`. The coordinator reads
+the referenced planner report, gives the user a concise main-chat summary,
+and waits for an explicit decision. It resumes with
+`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`;
+approval dispatches the next wave. A revision uses
+`payload={"decision":"revise", "feedback":"..."}` with non-empty feedback
+and reruns the Planner before another approval hold. This is distinct from
+the worker-question lifecycle: material questions are still resolved through
+`worker_question` while planning, and do not become a second approval flow.
+
+The Planner may also include a separate public `planning` object in its
+`record_report` call. The strict `cortex/report/v1` report remains unchanged
+at eight fields; `planning` must contain exactly `overview` and
+`work_packages`. Each package has `id`, `title`, `objective`, optional
+`allowed_paths` and `depends_on`, and at least one `microtasks` entry. Each
+microtask has `id`, `title`, and `objective`, with optional `profile`,
+`allowed_paths`, `depends_on`, `acceptance_criteria`, and `verification`.
+Package and per-package microtask dependencies are validated as acyclic DAGs,
+with bounded limits of 32 packages, 32 microtasks per package, and 128 total
+microtasks.
+
+The read-only Planner only proposes this durable planning catalog. Cortex
+materializes the validated artifacts under
+`.codex/cortex/tasks/<task>/planning/`: `manifest.json`, `overview.md`, and
+immutable revisions at `revisions/plan-<report-ref>/packages/<id>.json`.
+`manifest.json` is the current pointer and source of truth; revisions preserve
+prior approved or revised plans. When a required approval hold is reached,
+`plan_review.planning_artifacts` exposes compact manifest and package metadata
+for user review. The catalog supports ownership- and dependency-aware
+scheduling; it does not create an unconstrained auto-executor outside the
+canonical phase/wave safety model.
 
 The coordinator builds or consciously accepts the initial pipeline and follows
 the returned snapshot by default. Planner and explorer findings are advisory;
@@ -148,9 +187,14 @@ questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
 tool failure returns only the exact error. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
-never an inline report body. If the worker is interrupted after persistence but
-before its acknowledgement, `manage_orchestration` inspect returns the compact
-entry in `available_reports` for recovery.
+never an inline report body. That read also returns Cortex's derived absolute
+`report_markdown_path` for `reports/markdown/<report-ref>.md`; after reading
+each completed report, the coordinator publishes a compact clickable Markdown
+link using that exact returned path, in addition to the concise summary and
+report review. The path must never be guessed, substituted, or used to browse
+unrelated files. If the worker is interrupted after persistence but before its
+acknowledgement, `manage_orchestration` inspect returns the compact entry in
+`available_reports`, including the same path, for recovery.
 
 `manage_orchestration(intent="prune")` is project-scoped maintenance and must
 omit `task_ref`. With exact `confirmation: "PRUNE"`, it removes task-scoped

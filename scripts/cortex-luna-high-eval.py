@@ -27,6 +27,15 @@ def report(label: str) -> dict[str, object]:
 
 def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
     while current.get("outcome") != "completed":
+        if current.get("outcome") == "awaiting_plan_approval":
+            current = cortex.manage_orchestration({
+                "project_root": str(project),
+                "intent": "plan_approval",
+                "payload": {"decision": "approve"},
+            })
+            if not current.get("ok"):
+                raise AssertionError(current)
+            continue
         dispatches = current.get("dispatches") or []
         parallel = len(dispatches) > 1
         results = []
@@ -109,6 +118,17 @@ def live_prompt(scenario: str, project: Path) -> str:
         return common + "Use the automatic pipeline for objective: inspect README.md and append a concise verified note to result.md."
     if scenario == "compact_parallel":
         return common + "Use an explicit compact first wave with parallel discovery and architecture workers, then complete objective: create result.md summarizing the fixture."
+    if scenario == "planner_work_breakdown":
+        return common + (
+            "Exercise the Planner work-breakdown contract end to end. Start a C2 task with plan_approval required and "
+            "a plan wave followed by the necessary implementation, documentation, review, and close waves. The Planner "
+            "must call record_report with the normal strict report plus a separate planning object containing an overview "
+            "and at least two dependency-linked work_packages, each with non-empty microtasks, ownership profiles, paths, "
+            "acceptance criteria, and verification. Read the Planner report and inspect the plan_review returned by Cortex. "
+            "For this automated acceptance exercise, the user has explicitly pre-authorized approving that reviewed plan: "
+            "call manage_orchestration intent=plan_approval with decision=approve, then complete the task by creating "
+            "result.md. Do not bypass the approval gate or edit .codex/cortex directly."
+        )
     return common + "Exercise a blocked/resume or future-wave reassessment path safely, then create result.md and complete the task."
 
 
@@ -117,7 +137,7 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
     if not codex:
         return [{"status": "SKIP", "reason": "codex runtime unavailable; no live evidence"}]
     results: list[dict[str, object]] = []
-    for scenario in scenarios or ("automatic_sequential", "compact_parallel", "blocked_resume"):
+    for scenario in scenarios or ("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown"):
         project = base / f"live-{scenario}"
         project.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=project, check=True)
@@ -180,6 +200,11 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
         )
+        planning_root = task_dirs[0] / "planning" if len(task_dirs) == 1 else None
+        planning_manifest = (
+            json.loads((planning_root / "manifest.json").read_text(encoding="utf-8"))
+            if planning_root and (planning_root / "manifest.json").is_file() else {}
+        )
         checks = {
             "process_ok": completed.returncode == 0,
             "used_start": "start_orchestration" in tool_names,
@@ -197,6 +222,18 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             checks["parallel_wave_exercised"] = parallel_exercised
         if scenario == "blocked_resume":
             checks["resume_or_reassessment_exercised"] = adaptive_exercised
+        if scenario == "planner_work_breakdown":
+            package_artifacts = planning_manifest.get("work_packages") if isinstance(planning_manifest, dict) else []
+            checks["plan_approval_exercised"] = state.get("plan_approval", {}).get("status") == "approved"
+            checks["planning_manifest"] = (
+                planning_manifest.get("schema") == "cortex/planning/v1"
+                and len(package_artifacts) >= 2
+                and all(
+                    isinstance(package, dict)
+                    and (task_dirs[0] / str(package.get("artifact_path") or "")).is_file()
+                    for package in package_artifacts
+                )
+            )
         passed = all(checks.values())
         results.append({
             "scenario": scenario, "status": "PASS" if passed else "FAIL",
@@ -220,7 +257,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="run the three real gpt-5.6-luna high parent scenarios")
     parser.add_argument(
-        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume"),
+        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown"),
         help="run one live scenario for diagnosis; the default release run still requires all three",
     )
     args = parser.parse_args()

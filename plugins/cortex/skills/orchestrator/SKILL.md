@@ -240,8 +240,14 @@ should use canonical phases from the returned snapshot rather than guessing.
    `cortex/report/v1` through the scoped public `record_report` tool, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
-5. Read every returned ref with `read_worker_report`. Evaluate the full report,
-   decide whether the coordinator-owned pipeline still fits, then call
+5. Read every returned ref with `read_worker_report`. The result includes the
+   derived absolute `report_markdown_path` for the persisted
+   `reports/markdown/<report-ref>.md` artifact. After each completed report,
+   publish a compact clickable Markdown link in the main chat using that exact
+   returned path, for example `[Report <phase> — <report_ref>](<path>)` when
+   needed for spaces. This link supplements—not replaces—the concise summary
+   and full report review. Never guess, substitute, or use the path to browse
+   unrelated files. Then decide whether the coordinator-owned pipeline still fits, then call
    `continue_orchestration` once with `project_root`, the returned opaque
    `task_ref`, relative `step`, and results containing `report_ref`. Omit worker for one result;
    repeat the returned integer worker slot for parallel results. Inline report
@@ -249,6 +255,43 @@ should use canonical phases from the returned snapshot rather than guessing.
 6. Repeat until `outcome: completed`. If evidence changes future scope, send a
    compact `future_waves` replacement in the same continue call. Set
    `rework: true` only for intentional repetition of a completed phase.
+
+### Required post-plan approval
+
+The v3 task field `task.plan_approval` accepts `auto` or `required`. It
+defaults to `required` for C2/C3 and `auto` for C1; `auto` does not make user
+confirmation mandatory. When policy is `required`, the plan phase must be in
+its own wave. After a successful plan wave, Cortex returns
+`outcome: awaiting_plan_approval`, sends no successor dispatch, and provides
+`plan_review` with the planner `report_ref`, derived absolute
+`report_markdown_path`, `summary`, `findings`,
+`uncertainty`, `next_action`, and `remaining_phases`. Read the referenced
+report, present a concise plan summary in the main chat, and wait for the
+user's explicit decision. To continue, call
+`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`;
+this dispatches the next wave. To request changes, call
+`manage_orchestration(intent="plan_approval", payload={"decision":"revise", "feedback":"..."})`
+with non-empty feedback; Cortex reruns the Planner and presents a new review.
+Do not turn this into a second worker-question flow: material questions remain
+distinct and are resolved through `worker_question` during planning.
+
+The Planner's same-call public `record_report` may include a separate
+`planning` object with exactly `overview` and `work_packages`; the strict
+eight-field `cortex/report/v1` report is unchanged. Each package requires
+`id`, `title`, `objective`, and non-empty `microtasks`, with optional
+`allowed_paths` and `depends_on`. Each microtask requires `id`, `title`, and
+`objective`, with optional `profile`, `allowed_paths`, `depends_on`,
+`acceptance_criteria`, and `verification`. Use explicit ownership and
+dependencies; Cortex validates package and per-package microtask DAGs and
+enforces limits of 32 packages, 32 microtasks per package, and 128 total.
+Remain read-only: Cortex—not the Planner—materializes
+`.codex/cortex/tasks/<task>/planning/manifest.json`, `overview.md`, and
+immutable `revisions/plan-<report-ref>/packages/<id>.json` artifacts. The
+manifest is the current pointer/source of truth and revisions preserve prior
+approved or revised plans. `plan_review.planning_artifacts` is the compact
+approval-review projection. This durable catalog supports
+ownership/dependency-aware scheduling; it does not authorize an unconstrained
+auto-executor beyond the canonical phase/wave safety model.
 
 Normal flow uses no caller-generated submission/task/wave/attempt IDs, no
 coordinator identity, and no echoed host tool/model/effort. A relative `step`
@@ -318,13 +361,19 @@ The final `questions` list is always empty: material questions use the durable
 non-blocking evidence limitations belong in `uncertainty`. Cortex rejects a
 report that uses `questions` as an escape hatch.
 `record_report` returns a compact `report_ref`; `read_worker_report` is the
-coordinator's bounded read path. A successful native worker response contains
+coordinator's bounded read path and returns the derived absolute
+`report_markdown_path` for the persisted Markdown artifact. After reading each
+completed report, publish a compact clickable Markdown link in the main chat
+using that exact returned path, in addition to the concise summary and report
+review. Never guess or substitute the path, or use it to browse unrelated
+files. A successful native worker response contains
 only that ref and a short summary. Non-success returns only a normalized status
 and reason. Cortex validates all parallel slots and report refs before gate
 state writes and preserves quotas, redaction, one-use receipts,
 documentation/close, rework invalidation, and manifest-backed handoff. If a
 native worker is interrupted after persisting but before returning its ack,
-use `manage_orchestration` inspect to recover `available_reports`; do not ask
+use `manage_orchestration` inspect to recover `available_reports`, which also
+includes the derived report path; do not ask
 the worker to regenerate a large inline report.
 
 When a dispatch contains predecessor handoffs, the worker must review every

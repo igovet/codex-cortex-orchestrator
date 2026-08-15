@@ -117,6 +117,27 @@ class ControlPlaneTests(unittest.TestCase):
             "next_action": "advance",
         }
 
+    @staticmethod
+    def v3_planning():
+        return {
+            "overview": "Split the approved outcome into independently verifiable work packages.",
+            "work_packages": [{
+                "id": "core",
+                "title": "Core delivery",
+                "objective": "Implement the bounded core change.",
+                "allowed_paths": ["src"],
+                "microtasks": [{
+                    "id": "core_change",
+                    "title": "Implement the core change",
+                    "objective": "Make the requested behavior work.",
+                    "profile": "backend_dev",
+                    "allowed_paths": ["src"],
+                    "acceptance_criteria": ["Requested behavior is implemented."],
+                    "verification": ["Run focused tests."],
+                }],
+            }],
+        }
+
     def v3_start(self, objective="v3 task", waves=None, **task_overrides):
         arguments = {
             "project_root": str(self.project),
@@ -1993,6 +2014,7 @@ class ControlPlaneTests(unittest.TestCase):
         tasks = list((self.ledger / "tasks").iterdir())
         definition = json.loads((tasks[0] / "task.json").read_text(encoding="utf-8"))
         self.assertEqual(definition["complexity"], "C2")
+        self.assertEqual(definition["plan_approval"], "required")
 
     def test_v3_automatic_prompt_uses_gate_briefing_and_task_context(self):
         started = self.v3_start(
@@ -2198,7 +2220,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(polled["answer_text"], "Lead generation")
         after = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
         self.assertEqual(after["attempts"][0]["attempt_id"], attempt["attempt_id"])
-        published = control.publish_worker_report({**identity, "report": self.v3_report("planned after answer")})
+        published = control.publish_worker_report({
+            **identity, "report": self.v3_report("planned after answer"), "planning": self.v3_planning(),
+        })
         self.assertTrue(published["ok"])
 
     def test_v3_question_ref_opens_native_ui_once_without_coordinator_identity(self):
@@ -2376,7 +2400,9 @@ class ControlPlaneTests(unittest.TestCase):
         })
         polled = control.worker_question({**identity, "action": "poll", "question_ref": asked["question_ref"]})
         self.assertEqual(polled["outcome"], "question_answered")
-        accepted = control.publish_worker_report({**identity, "report": self.v3_report("intent answered")})
+        accepted = control.publish_worker_report({
+            **identity, "report": self.v3_report("intent answered"), "planning": self.v3_planning(),
+        })
         self.assertTrue(accepted["ok"])
 
     def test_v3_desktop_skill_link_cannot_hide_an_underspecified_user_request(self):
@@ -2769,6 +2795,9 @@ class ControlPlaneTests(unittest.TestCase):
             "report_ref": published["report_ref"],
         })
         self.assertEqual(read["report"], report)
+        report_markdown = Path(read["report_markdown_path"])
+        self.assertEqual(report_markdown, task_dir / "reports/markdown/report-0001.md")
+        self.assertTrue(report_markdown.is_file())
         advanced = control.continue_orchestration({
             "project_root": str(self.project),
             "step": started["step"],
@@ -2790,6 +2819,180 @@ class ControlPlaneTests(unittest.TestCase):
         state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
         completed = next(item for item in state["attempts"] if item["gate"] == "discover")
         self.assertEqual(completed["report_ids"], [published["report_ref"]])
+
+    def test_v3_plan_approval_holds_successor_wave_until_user_approves(self):
+        started = self.v3_start(
+            "review the plan before implementation",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"report": self.v3_report("planner proposed an ordered implementation plan")}],
+        })
+        self.assertTrue(held["ok"])
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        self.assertEqual(held["dispatches"], [])
+        self.assertEqual(held["plan_review"]["summary"], "planner proposed an ordered implementation plan")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        self.assertEqual(
+            Path(held["plan_review"]["report_markdown_path"]),
+            task_dir / "reports/markdown/report-0001.md",
+        )
+        self.assertIn("manage_orchestration", held["next_action"])
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["plan_approval"]["status"], "awaiting_user")
+        self.assertEqual([item["gate"] for item in state["attempts"]], ["plan"])
+
+        blocked = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": held["step"],
+            "results": [{"report": self.v3_report("must not bypass the plan review")}],
+        })
+        self.assertFalse(blocked["ok"])
+        self.assertIn("awaiting explicit user approval", blocked["diagnostics"][0]["message"])
+
+        approved = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "plan_approval",
+            "payload": {"decision": "approve"},
+        })
+        self.assertTrue(approved["ok"])
+        self.assertEqual(approved["outcome"], "ready_to_spawn")
+        self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
+
+    def test_planner_materializes_task_local_work_packages_and_exposes_them_for_review(self):
+        started = self.v3_start(
+            "produce a durable work breakdown",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self.v3_report("planner produced a package graph")
+        planning = {
+            "overview": "Deliver the API and UI as separately owned packages after the API dependency is ready.",
+            "work_packages": [
+                {
+                    "id": "api", "title": "API", "objective": "Add the service contract.",
+                    "allowed_paths": ["src/api"],
+                    "microtasks": [{
+                        "id": "contract", "title": "Define contract", "objective": "Create the public contract.",
+                        "profile": "backend_dev", "allowed_paths": ["src/api"],
+                        "acceptance_criteria": ["Contract is documented."], "verification": ["Run API tests."],
+                    }],
+                },
+                {
+                    "id": "ui", "title": "UI", "objective": "Consume the service contract.",
+                    "depends_on": ["api"], "allowed_paths": ["src/ui"],
+                    "microtasks": [{
+                        "id": "screen", "title": "Build screen", "objective": "Render the new UI.",
+                        "profile": "frontend_dev", "allowed_paths": ["src/ui"],
+                        "acceptance_criteria": ["Screen renders the contract data."], "verification": ["Run UI tests."],
+                    }],
+                },
+            ],
+        }
+        published = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": report, "planning": planning,
+        })
+        self.assertTrue(published["ok"])
+        manifest = json.loads((task_dir / "planning/manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema"], control.PLANNING_SCHEMA)
+        self.assertEqual(manifest["source_report_ref"], published["report_ref"])
+        self.assertEqual([package["id"] for package in manifest["work_packages"]], ["api", "ui"])
+        self.assertTrue((task_dir / "planning/overview.md").is_file())
+        self.assertTrue((task_dir / "planning/revisions/plan-report-0001/packages/api.json").is_file())
+        self.assertTrue((task_dir / "planning/revisions/plan-report-0001/packages/ui.json").is_file())
+
+        held = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": published["report_ref"]}],
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        artifacts = held["plan_review"]["planning_artifacts"]
+        self.assertEqual(artifacts["manifest_path"], "planning/manifest.json")
+        self.assertEqual([package["id"] for package in artifacts["work_packages"]], ["api", "ui"])
+
+    def test_planner_work_packages_reject_cycles_and_missing_artifact(self):
+        started = self.v3_start("validate work breakdown artifacts", waves=[{"workers": [{"phase": "plan"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        cyclic = self.v3_planning()
+        cyclic["work_packages"][0]["depends_on"] = ["core"]
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self.v3_report("invalid plan"), "planning": cyclic,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "report_validation_failed")
+        self.assertIn("cannot depend on itself", rejected["diagnostics"][0]["message"])
+
+        missing = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self.v3_report("missing plan artifact"),
+        })
+        self.assertFalse(missing["ok"])
+        self.assertIn("planner reports require", missing["diagnostics"][0]["message"])
+        self.assertTrue(started["ok"])
+
+    def test_v3_plan_approval_revision_restarts_planner_with_user_feedback(self):
+        started = self.v3_start(
+            "revise the plan before implementation",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"report": self.v3_report("first plan")}],
+        })
+        revised = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "plan_approval",
+            "payload": {"decision": "revise", "feedback": "Keep the public API unchanged and add rollback coverage."},
+        })
+        self.assertTrue(revised["ok"])
+        self.assertEqual(revised["outcome"], "ready_to_spawn")
+        self.assertEqual(revised["dispatches"][0]["phase"], "plan")
+        self.assertIn("Keep the public API unchanged", revised["dispatches"][0]["arguments"]["message"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["plan_approval"]["status"], "pending_plan")
+        self.assertEqual(len([item for item in state["attempts"] if item["gate"] == "plan"]), 2)
+
+        held_again = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": revised["step"],
+            "results": [{"report": self.v3_report("revised plan")}],
+        })
+        self.assertTrue(held_again["ok"])
+        self.assertEqual(held_again["outcome"], "awaiting_plan_approval")
 
     def test_v3_report_read_accepts_bounded_large_task_state_without_embedding_reports(self):
         started = self.v3_start("large harvest state", waves=[{"workers": [{"phase": "discover"}]}])
@@ -3030,6 +3233,7 @@ class ControlPlaneTests(unittest.TestCase):
             "attempt_id": attempt["attempt_id"],
             "profile": attempt["profile"],
             "report": report,
+            "planning": self.v3_planning(),
         })
         self.assertTrue(accepted["ok"])
 
@@ -3101,7 +3305,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
     def test_v3_depends_on_selects_exact_predecessor_phases(self):
-        started = self.v3_start("semantic handoff dependencies", waves=[
+        started = self.v3_start("semantic handoff dependencies", plan_approval="auto", waves=[
             {"workers": [{"phase": "plan"}]},
             {"workers": [{"phase": "discover", "depends_on": ["plan"]}]},
             {"workers": [{"phase": "architecture", "depends_on": ["plan"]}]},
@@ -3129,7 +3333,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_v3_reference_handoffs_scale_without_dropping_old_reports(self):
         with mock.patch.object(control, "MAX_CONTEXT_REPORTS", 1):
-            started = self.v3_start("bounded handoff overflow", waves=[
+            started = self.v3_start("bounded handoff overflow", plan_approval="auto", waves=[
                 {"workers": [{"phase": "plan"}]},
                 {"workers": [{"phase": "discover"}]},
                 {"workers": [{"phase": "architecture"}]},
@@ -3180,6 +3384,7 @@ class ControlPlaneTests(unittest.TestCase):
                 "phase": "discover",
                 "profile": "explorer",
                 "summary": "persisted before native acknowledgement interruption",
+                "report_markdown_path": str(task_dir / "reports/markdown/report-0001.md"),
             }],
         )
         advanced = control.continue_orchestration({
@@ -4343,7 +4548,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.0.4")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.1.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

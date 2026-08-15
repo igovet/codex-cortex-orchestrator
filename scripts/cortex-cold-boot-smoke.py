@@ -58,6 +58,27 @@ def report(worker: int, step: int, predecessor_reports: list[str]) -> dict[str, 
     }
 
 
+def planning(worker: int, step: int) -> dict[str, object]:
+    return {
+        "overview": f"Cold-boot planner breakdown for relative step {step}.",
+        "work_packages": [{
+            "id": "smoke_core",
+            "title": "Cold-boot core",
+            "objective": "Exercise the durable Planner work-breakdown protocol.",
+            "allowed_paths": ["."],
+            "microtasks": [{
+                "id": "smoke_validate",
+                "title": "Validate the smoke path",
+                "objective": f"Record the bounded work item owned by simulated worker {worker}.",
+                "profile": "backend_dev",
+                "allowed_paths": ["."],
+                "acceptance_criteria": ["The work breakdown is persisted."],
+                "verification": ["Run the cold-boot smoke workflow."],
+            }],
+        }],
+    }
+
+
 def run(base: Path) -> dict[str, object]:
     project, ledger = fixture(base)
     start_request = {
@@ -100,8 +121,21 @@ def run(base: Path) -> dict[str, object]:
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
         parallel_wave_seen = False
+        plan_approval_seen = False
         last_payload = None
         while current["outcome"] != "completed":
+            if current.get("outcome") == "awaiting_plan_approval":
+                if not current.get("plan_review", {}).get("report_ref"):
+                    raise AssertionError(f"plan approval omitted its planner report reference: {current}")
+                plan_approval_seen = True
+                current = rpc.tool("manage_orchestration", {
+                    "intent": "plan_approval",
+                    "task_ref": task_ref,
+                    "payload": {"decision": "approve"},
+                })
+                if not current.get("ok"):
+                    raise AssertionError(f"plan approval failed: {current}")
+                continue
             dispatches = current.get("dispatches", [])
             if not dispatches:
                 raise AssertionError(f"active relative step {current.get('step')} has no dispatches")
@@ -115,12 +149,15 @@ def run(base: Path) -> dict[str, object]:
             ][-len(dispatches):]
             results = []
             for index, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
-                published = rpc.tool("record_report", {
+                publication = {
                     "task_id": state["task_id"],
                     "attempt_id": attempt["attempt_id"],
                     "profile": dispatch["profile"],
                     "report": report(index, int(current["step"]), list(attempt.get("context_report_ids") or [])),
-                })
+                }
+                if dispatch.get("phase") == "plan":
+                    publication["planning"] = planning(index, int(current["step"]))
+                published = rpc.tool("record_report", publication)
                 if not published.get("ok"):
                     raise AssertionError(f"record_report failed: {published}")
                 read = rpc.tool("read_worker_report", {"task_ref": task_ref, "report_ref": published["report_ref"]})
@@ -145,8 +182,10 @@ def run(base: Path) -> dict[str, object]:
             raise AssertionError("final continue retry repeated native dispatches")
         if replay.get("task_ref") != current.get("task_ref") or replay.get("status") != current.get("status"):
             raise AssertionError("final continue retry lost the completed task identity")
-        if not parallel_wave_seen:
-            raise AssertionError("the smoke plan did not return a parallel dispatch wave")
+    if not parallel_wave_seen:
+        raise AssertionError("the smoke plan did not return a parallel dispatch wave")
+    if not plan_approval_seen:
+        raise AssertionError("the C2 smoke plan did not pause for post-plan approval")
 
     task_path = ledger / "tasks" / task_directory
     state = json.loads((task_path / "current.json").read_text(encoding="utf-8"))
@@ -159,10 +198,13 @@ def run(base: Path) -> dict[str, object]:
         raise AssertionError("every passed worker report must be consumed by evidence")
     if not state.get("handoff_created") or not all(item.get("status") == "committed" for item in operations):
         raise AssertionError("handoff or durable transaction commit is missing")
+    if not (task_path / "planning/manifest.json").is_file():
+        raise AssertionError("Planner work-breakdown manifest is missing")
     return {
         "status": "PASS", "fixture": str(base), "task_directory": str(task_path),
         "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
         "report_count": len(receipts), "parallel_wave_seen": parallel_wave_seen,
+        "plan_approval_seen": plan_approval_seen,
     }
 
 

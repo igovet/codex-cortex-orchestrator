@@ -75,7 +75,14 @@ signal, never permission for the root to perform the work directly.
    A final report always has `questions: []`: material decisions must complete
    the durable question lifecycle first, and non-blocking evidence gaps belong
    in `uncertainty`.
-5. After all workers finish, read every ref with `read_worker_report`, evaluate
+5. After all workers finish, read every ref with `read_worker_report`. Each
+   result includes Cortex's derived absolute `report_markdown_path` for the
+   persisted `reports/markdown/<report-ref>.md` artifact. After reading each
+   completed report, publish a compact clickable Markdown link in the main chat
+   using that exact returned path, for example
+   `[Report <phase> — <report_ref>](<path>)` when needed for spaces. The link
+   supplements the concise summary and report review. Never guess, substitute,
+   or use the path to browse unrelated files. Then evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
    prior response, and all `report_ref` results. A single result needs no worker reference.
@@ -86,6 +93,48 @@ signal, never permission for the root to perform the work directly.
 6. Repeat one continue per completed wave. Finish only when `outcome` is
    `completed`; Cortex has then reconciled reports, evidence, documentation,
    close verification, the manifest, and handoff.
+
+### Required post-plan approval
+
+`task.plan_approval` accepts `auto` or `required`; Cortex defaults to
+`required` for C2/C3 and `auto` for C1. The C1 auto policy does not require
+user confirmation. A required plan must be its own wave. Once that plan
+completes, the lifecycle result is `awaiting_plan_approval` with no successor
+dispatch and a bounded `plan_review` containing `report_ref`, `summary`,
+`findings`, `uncertainty`, `next_action`, and `remaining_phases`. The
+coordinator reads the report, summarizes the plan in the main chat, and waits
+for explicit user approval. Resume with
+`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`.
+For requested changes, use
+`manage_orchestration(intent="plan_approval", payload={"decision":"revise", "feedback":"..."})`;
+feedback is required and the Planner runs again before approval. This gate is
+separate from `worker_question`: material questions are resolved through that
+lifecycle during planning rather than through a duplicate approval question.
+
+The Planner may attach a separate `planning` object to its public
+`record_report`. It contains exactly `overview` and `work_packages`; the
+strict eight-field `cortex/report/v1` contract remains unchanged. Each package
+has `id`, `title`, `objective`, optional `allowed_paths`/`depends_on`, and
+non-empty microtasks. Each microtask has `id`, `title`, `objective`, and
+optional `profile`, `allowed_paths`, `depends_on`, `acceptance_criteria`, and
+`verification`. Cortex validates package and per-package microtask dependency
+DAGs and enforces 32 packages, 32 microtasks per package, and 128 total
+microtasks. The Planner remains read-only; Cortex materializes
+`.codex/cortex/tasks/<task>/planning/manifest.json`, `overview.md`, and
+immutable `revisions/plan-<report-ref>/packages/<id>.json` artifacts. The
+manifest is the current pointer/source of truth and revisions preserve past
+approved or revised plans. `plan_review` exposes compact
+`planning_artifacts` for approval. Treat this as a durable catalog for
+ownership/dependency-aware scheduling within the canonical phase/wave safety
+model, not as an unconstrained auto-executor.
+
+`read_worker_report` returns the derived absolute `report_markdown_path` for
+the persisted `reports/markdown/<report-ref>.md` artifact. After reading each
+completed report, publish a compact clickable Markdown link in the main chat
+using that exact returned path, in addition to the concise summary and report
+review. Never guess, substitute, or use the path to browse unrelated files.
+Inspect `available_reports` and required-plan `plan_review` expose the same
+derived path for recovery and approval review.
 
 Normal requests never carry caller-generated submission, task, wave, attempt,
 principal, thread, host-tool, host-model, or host-effort fields. Internal IDs
