@@ -90,6 +90,15 @@ PY
   legacy_marketplace="${home_root}/.agents/plugins/marketplace.json"
 }
 
+validate_global_config_path() {
+  local config_path="${codex_home}/config.toml"
+  [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
+  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
+    echo "error: refusing to inspect non-regular Codex config: ${config_path}" >&2
+    return 1
+  }
+}
+
 validate_cleanup_target() {
   local root="$1" relative="$2" target="$3"
   python3 - "${root}" "${relative}" "${target}" <<'PY'
@@ -230,8 +239,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "4.2.1":
-    raise SystemExit("plugin/server version must match the 4.2.1 release manifest")
+if module.SERVER_VERSION != version or base_version != "4.2.2":
+    raise SystemExit("plugin/server version must match the 4.2.2 release manifest")
 PY
 }
 
@@ -308,11 +317,8 @@ PY
 capture_cortex_mcp_approval_override() {
   local config_path="${codex_home}/config.toml"
   cortex_mcp_approval_override=""
+  validate_global_config_path || return 1
   [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
-  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
-    echo "error: refusing to inspect non-regular Codex config: ${config_path}" >&2
-    return 1
-  }
   cortex_mcp_approval_override="$({
     python3 - "${config_path}" <<'PY'
 import sys
@@ -345,11 +351,8 @@ capture_global_subagent_model() {
   local config_path="${codex_home}/config.toml"
   global_subagent_model=""
   global_subagent_model_state="missing"
+  validate_global_config_path || return 1
   [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
-  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
-    echo "error: refusing to inspect non-regular Codex config: ${config_path}" >&2
-    return 1
-  }
   global_subagent_model_state="$(python3 - "${config_path}" <<'PY'
 import sys
 import tomllib
@@ -658,6 +661,7 @@ install_or_check() {
 }
 
 validate_roots
+validate_global_config_path
 validate_sources
 status=0
 remove_legacy_profile || status=1

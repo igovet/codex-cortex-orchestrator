@@ -15,7 +15,7 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Current Cortex 4.0.4 source evidence:
+Recorded Cortex 4.0.4 source evidence:
 
 - The full Python suite passed 251 tests.
 - File-size hardening passed: ordinary JSON writes use the bounded
@@ -317,5 +317,10 @@ is not release or publication evidence.
 - `bash -n scripts/sync-cortex.sh` — shell syntax check; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
 - `./scripts/sync-cortex.sh --check` — read-only installed-content/legacy-artifact check; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
 - `./scripts/sync-cortex.sh --dry-run` — no-write report of the planned installation and managed legacy cleanup; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
+
+The installer performs the configured global Codex config-path safety preflight
+before any Codex CLI requirement: an existing config must be a regular,
+non-symlink file, otherwise the operation fails closed. This ordering also
+protects hosts where the Codex CLI is unavailable.
 
 <!-- GENERATED:END -->

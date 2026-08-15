@@ -28,4 +28,5 @@
 - Mutating v3 calls use server-owned request-digest receipts for idempotent replay. An identical retry replays; a changed continuation payload, stale step, duplicate slot, or missing slot is rejected before partial writes, while a changed start contract creates a separate task. Public schemas do not require submission, task, wave, attempt, or host metadata. Profiles and aliases are preloaded/validated when the MCP server starts.
 - Refreshable documentation facts are bounded by `<!-- GENERATED:START -->` and `<!-- GENERATED:END -->`; text outside those markers is preserved by knowledge-refresh work.
 - Repository validation and smoke scripts use `python3`; shell scripts use Bash with strict mode. See [validate-cortex-marketplace.py](../../scripts/validate-cortex-marketplace.py) and [sync-cortex.sh](../../scripts/sync-cortex.sh).
+- `sync-cortex.sh` validates the configured global Codex config path as an existing regular non-symlink before requiring the Codex CLI; unsafe `~/.codex/config.toml` paths therefore fail closed even on hosts without the CLI.
 <!-- GENERATED:END -->
