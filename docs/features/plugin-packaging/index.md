@@ -18,7 +18,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server declare plugin version `4.4.0`; the
+The current source manifest and server declare plugin version `4.4.2`; the
 recorded installed-runtime evidence below does not attest this current
 source candidate.
 
@@ -47,5 +47,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). The current source and local plugin registration report `4.4.0+codex.20260815215311`; after the last source edit, `./scripts/sync-cortex.sh --check` correctly reports same-version content drift, and no plugin reinstall command was run in this turn. The current source evidence includes 270 passing tests plus manifest-policy regressions; live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest the current source candidate.
+Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). The source candidate is 4.4.2, while the local plugin registration still reports the previously installed `4.4.1+codex.20260815221329`; after the source bump, `./scripts/sync-cortex.sh --check` is expected to report an out-of-date installed cache, and no plugin reinstall command was run in this turn. The current source evidence includes 274 passing tests plus manifest-policy regressions; live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest the current source candidate.
 <!-- GENERATED:END -->

@@ -3,7 +3,7 @@
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**4.4.0**. The public MCP surface has exactly six tools: three coordinator
+**4.4.2**. The public MCP surface has exactly six tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question` and `record_report`, and coordinator
@@ -180,7 +180,7 @@ main-chat report link requirement. Model-visible context uses
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 4.4.0
+and secret-prone paths before validating the package again. The Cortex 4.4.2
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` cannot attest the
 mutable candidate. Commit only with explicit authorization, then rerun the
@@ -258,7 +258,13 @@ closed before task state is created.
 The public normal flow has a narrow lifecycle plus scoped report transport. A
 minimal `start_orchestration` call contains only the absolute `project_root`
 and the user's exact, unexpanded text in `task.user_request`; complexity safely
-defaults to C2 and Cortex constructs the pipeline. This is a breaking 4.0.0
+defaults to C2 and Cortex constructs the pipeline. Desktop's sole host-metadata
+exception is its injected `[$cortex:orchestrator](absolute-local-plugin-path/skills/orchestrator/SKILL.md)`
+wrapper: Cortex canonicalizes that exact wrapper to `$cortex:orchestrator`
+before task identity, labels, persistence, and worker prompts, while preserving
+the route and every following user-authored word. Arbitrary Markdown links and
+user paths are unchanged, so local plugin-cache paths and cache-version changes
+never enter durable task state. This is a breaking 4.0.0
 contract. The deprecated `task.objective` may be omitted; when supplied for
 compatibility, it must match the trimmed `user_request` exactly. Cortex rejects
 coordinator paraphrase or expansion before any ledger write. Optional compact
@@ -487,10 +493,14 @@ selection_reason, call, arguments}`. `arguments` contains only the real native
 `spawn_agent` or `create_thread` parameters; hidden `spawn_agent` arguments
 retain `fork_turns: "none"` so localized parent history is not inherited.
 `profile` and `display_name` remain the exact canonical role name, while
-`spawn_agent.task_name` is a task/attempt-unique native session key. Long
-request-derived task IDs are compacted to a short deterministic fingerprint,
-so local skill paths are not exposed in the host-visible worker name. Reusing
-a profile must therefore create a fresh native worker; only an explicit
+`spawn_agent.task_name` is a task/attempt-unique native session key and must
+match the host's strict `[a-z0-9_]{1,80}` agent-name contract. Long
+request-derived task IDs are compacted to a short deterministic fingerprint;
+hyphens are normalized only in this host-facing field, with a deterministic
+identity fingerprint preserving uniqueness. Local skill paths are not exposed
+in the host-visible worker name. Cortex durable task, attempt, and ledger IDs
+may still contain hyphens. Reusing a profile must therefore create a fresh
+native worker; only an explicit
 `followup_task` for the same confirmed host child may resume it. Routing and
 expected-model metadata is never copied into native `model`. Cortex rejects
 reuse of a `host_agent_id` already bound to another attempt. Lifecycle hooks
@@ -633,17 +643,18 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 4.4.0 source candidate has 270 passing Python tests. File-size
+The current 4.4.2 source candidate has 274 passing Python tests. File-size
 hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
 diagnostics, the separate 64 MiB manifest bound, early baseline preflight,
 bounded handoff/reconciliation snapshots, and fail-closed actionable errors for
 oversized artifacts. A copy-based migration compacted a 291212-byte legacy
 registry to 9624 bytes, and the generated Planner prompt measured 13679 bytes.
-The local plugin registration reports `4.4.0+codex.20260815215311`; after the
-last source edit, `./scripts/sync-cortex.sh --check` correctly reports
-same-version content drift. No plugin reinstall command was run in this turn.
+The local plugin registration still reports the previously installed
+`4.4.1+codex.20260815221329`; after the source bump to 4.4.2,
+`./scripts/sync-cortex.sh --check` is expected to report an out-of-date
+installed cache. No plugin reinstall command was run for this source fix.
 Source marketplace validation, compilation, shell syntax, focused manifest
-tests, and the full 270-test suite passed. Live-model and tracked-release
+tests, and the full 274-test suite passed. Live-model and tracked-release
 evidence remain unverified until the tree is committed.
 Historical 4.0.0 evidence includes
 241 passing tests in 15.770 seconds, installed and content-verified cachebuster

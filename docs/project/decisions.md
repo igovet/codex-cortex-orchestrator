@@ -241,7 +241,10 @@ loaded.
 
 Native worker identity follows the same separation: `profile` and
 `display_name` remain canonical, while `spawn_agent.task_name` uniquely names
-the task/attempt session. Cortex rejects reuse of a `host_agent_id` already
+the task/attempt session and satisfies the host's `[a-z0-9_]{1,80}` name
+contract. Hyphens are normalized only for this native field and a deterministic
+identity fingerprint prevents collisions; durable Cortex IDs retain their
+hyphen-compatible format. Cortex rejects reuse of a `host_agent_id` already
 bound to another attempt. Only `followup_task` for the exact confirmed native
 worker may resume it; lifecycle hooks map the native task key back to the
 canonical profile for worker-context injection.

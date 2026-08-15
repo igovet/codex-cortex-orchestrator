@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 4.4.0 task ledger, staged waves,
+The local MCP server implements the Cortex 4.4.2 task ledger, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly six public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker-only
@@ -20,7 +20,14 @@ details; existing v7 tasks are inspectable and resumable through the v3 adapter.
 ## Behavior and status
 
 `start_orchestration` accepts an absolute `project_root` and requires the
-user's exact, unexpanded text in `task.user_request`. This is the breaking
+user's exact, unexpanded text in `task.user_request`. Desktop's sole
+host-metadata exception is its injected
+`[$cortex:orchestrator](absolute-local-plugin-path/skills/orchestrator/SKILL.md)`
+wrapper, which Cortex canonicalizes to `$cortex:orchestrator` before task
+identity, labels, persistence, and worker prompts. The route and every
+following user-authored word are preserved; arbitrary Markdown links and user
+paths remain unchanged. This prevents local plugin-cache paths and
+cache-version changes from entering durable task state. This is the breaking
 4.0.0 intent boundary. Deprecated `task.objective` is optional compatibility
 input and, when present, must match the trimmed `user_request` exactly;
 paraphrase or coordinator expansion is rejected before ledger writes. Cortex
@@ -249,9 +256,11 @@ the task or replaying completed dispatches during this recovery.
 
 Native worker identity is separate from the canonical role label. Every
 dispatch keeps `profile` and `display_name` canonical, while
-`spawn_agent.task_name` is unique to the task and attempt; long request-derived
-task IDs are represented by a short deterministic fingerprint rather than
-being copied into the host-visible name. `followup_task` is
+`spawn_agent.task_name` is unique to the task and attempt and must satisfy the
+host's strict `[a-z0-9_]{1,80}` name contract. Long request-derived task IDs
+are represented by a short deterministic fingerprint; host-only hyphen
+normalization plus a deterministic identity fingerprint preserves uniqueness
+without copying durable IDs into the host-visible name. `followup_task` is
 reserved for the exact confirmed native worker being resumed; a reused
 `host_agent_id` is rejected for another attempt. Lifecycle hooks resolve the
 native task key (and its host aliases) back to the canonical profile before
@@ -391,5 +400,5 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.4.0 source evidence is 270 passing tests, including manifest-policy regressions. The local plugin registration reports `4.4.0+codex.20260815215311`; after the last source edit, `./scripts/sync-cortex.sh --check` correctly reports same-version content drift, and no plugin reinstall command was run in this turn. Live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.4.0. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.4.2 source evidence is 274 passing tests, including manifest-policy regressions, native host-name coverage, and Desktop skill-wrapper path removal. The local plugin registration still reports the previously installed `4.4.1+codex.20260815221329`; after the source bump, `./scripts/sync-cortex.sh --check` is expected to report an out-of-date installed cache, and no plugin reinstall command was run in this turn. Live-model, tracked-release, and publication evidence remains unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.4.2. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

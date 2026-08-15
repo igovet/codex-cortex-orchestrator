@@ -39,6 +39,20 @@ NORMAL_COMMAND = "/normal"
 SKILL_ROUTE_HINT = "select `cortex:orchestrator` in the Skills picker or mention `$cortex:orchestrator` in the main chat"
 PROFILE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "profiles.json"
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
+# Native ``spawn_agent.task_name`` is stricter than Cortex durable IDs: the
+# host accepts only lowercase letters, digits, and underscores. Keep this
+# contract separate because task, report, and ledger IDs intentionally retain
+# hyphens for compatibility and readability.
+NATIVE_AGENT_NAME_RE = re.compile(r"^[a-z0-9_]{1,80}$")
+# Desktop inserts this local Markdown link when a user selects the Cortex
+# Orchestrator skill. It is host transport metadata, not user task content;
+# retaining its absolute plugin-cache path in task labels or durable ledgers
+# leaks a machine-local path and makes the label depend on the cache version.
+DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE = re.compile(
+    r"\[\$cortex:orchestrator\]\((?:file://)?(?:[A-Za-z]:)?[\\/][^)\r\n]*?"
+    r"[\\/]skills[\\/]orchestrator[\\/]SKILL\.md\)",
+    re.IGNORECASE,
+)
 CODEX_SESSION_ENV_KEYS = ("CODEX_SESSION_ID", "CODEX_THREAD_ID")
 HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
 PLUGIN_ROOT = PROFILE_CONTRACT_PATH.parent
@@ -586,6 +600,26 @@ def safe_id(value: str) -> str:
     return candidate
 
 
+def canonicalize_desktop_cortex_request(value: object) -> str:
+    """Remove only Desktop's local Cortex skill-link wrapper from task text.
+
+    The replacement keeps the selected ``$cortex:orchestrator`` route and all
+    following user-authored words, while ensuring an absolute plugin path is
+    never persisted to the Cortex task ledger or incorporated into a task ID.
+    Arbitrary Markdown links and user-provided paths are intentionally left
+    untouched.
+    """
+    raw = str(value or "").strip()
+    return DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.sub("$cortex:orchestrator", raw)
+
+
+def v3_task_slug(value: object) -> str:
+    """Build a concise durable-ID label without Desktop skill transport data."""
+    canonical = canonicalize_desktop_cortex_request(value)
+    without_route = re.sub(r"^\$cortex:orchestrator(?:\s+|$)", "", canonical, flags=re.IGNORECASE).strip()
+    return re.sub(r"[^a-z0-9]+", "-", without_route.lower()).strip("-")[:48] or "task"
+
+
 def native_worker_task_name(profile: str, task_id: str, attempt_id: str) -> str:
     """Return a fresh native task key while preserving the canonical profile.
 
@@ -595,23 +629,36 @@ def native_worker_task_name(profile: str, task_id: str, attempt_id: str) -> str:
     to an old child thread.  Include the task and attempt in the readable
     form. Long request-derived task IDs are represented by a short deterministic
     fingerprint so local skill paths or other prompt text never become a
-    host-visible worker name. Retain a final deterministic digest when the
-    complete key would still exceed the bounded identifier length.
+    host-visible worker name. The native host accepts only ``[a-z0-9_]``,
+    unlike Cortex durable IDs which also permit hyphens. A fingerprint of the
+    original canonical components keeps the host key collision-resistant after
+    that native-only normalization. Retain a final deterministic digest when
+    the complete key would still exceed the bounded identifier length.
     """
     profile_id = safe_id(profile)
     task_id = safe_id(task_id)
     attempt_id = safe_id(attempt_id)
     task_fragment = task_id
     if len(task_id) > 32:
-        task_fragment = f"task-{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:12]}"
-    readable = f"{profile_id}__{task_fragment}__{attempt_id}"
+        task_fragment = f"task_{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:12]}"
+    native_profile = profile_id.replace("-", "_")
+    native_task = task_fragment.replace("-", "_")
+    native_attempt = attempt_id.replace("-", "_")
+    identity_digest = hashlib.sha256(
+        "\0".join((profile_id, task_id, attempt_id)).encode("utf-8")
+    ).hexdigest()[:12]
+    readable = f"{native_profile}__{native_task}__{native_attempt}__{identity_digest}"
     if len(readable) <= 80:
-        return readable
-    digest = hashlib.sha256(readable.encode("utf-8")).hexdigest()[:24]
-    attempt_fragment = attempt_id[:24].rstrip("-_") or "attempt"
-    profile_fragment = profile_id[:24].rstrip("-_") or "worker"
-    candidate = f"{profile_fragment}__{attempt_fragment}__{digest}"
-    return candidate[:80].rstrip("-_")
+        candidate = readable
+    else:
+        digest = hashlib.sha256(readable.encode("utf-8")).hexdigest()[:24]
+        attempt_fragment = native_attempt[:24].rstrip("_") or "attempt"
+        profile_fragment = native_profile[:24].rstrip("_") or "worker"
+        candidate = f"{profile_fragment}__{attempt_fragment}__{digest}"
+    candidate = candidate[:80].rstrip("_")
+    if not NATIVE_AGENT_NAME_RE.fullmatch(candidate):
+        raise RuntimeError("native worker task name violated the host agent-name contract")
+    return candidate
 
 
 def normalize_routing_id(value: Any, field: str = "routing id") -> str:
@@ -9463,9 +9510,10 @@ def _v3_start_reservation(
     task: dict[str, Any],
 ) -> tuple[str, str, str, str, str, bool]:
     root = ledger_root(params)
-    # The exact user-authored request is the active-task identity boundary.
-    # Coordinator-derived language metadata, waves, routing, or verification
-    # refinements must not turn a retry into a second active task.
+    # The canonical user-authored request is the active-task identity boundary.
+    # Its only normalization removes Desktop's injected local Cortex skill-link
+    # wrapper; coordinator-derived language metadata, waves, routing, or
+    # verification refinements must not turn a retry into a second active task.
     start_digest = _orchestrate_request_digest({"user_request": task.get("user_request")})
     with state_lock(root):
         registry = _v3_registry(root)
@@ -9486,7 +9534,7 @@ def _v3_start_reservation(
                     str(prior["submission_id"]),
                     True,
                 )
-        objective_slug = re.sub(r"[^a-z0-9]+", "-", str(task["objective"]).lower()).strip("-")[:48] or "task"
+        objective_slug = v3_task_slug(task["objective"])
         task_id = safe_id(f"{objective_slug}-{secrets.token_hex(4)}")
         task_ref = _v3_task_ref(task_id)
         principal = safe_id("v3-" + task_ref)
@@ -9523,12 +9571,12 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         unknown_task = sorted(set(raw_task) - allowed_task)
         if unknown_task:
             raise ValueError("unsupported task fields: " + ", ".join(unknown_task))
-        user_request = str(raw_task.get("user_request") or "").strip()
+        user_request = canonicalize_desktop_cortex_request(raw_task.get("user_request"))
         if not user_request:
             raise ValueError(
                 "task.user_request is required and must preserve the exact user-authored task without coordinator expansion"
             )
-        supplied_objective = str(raw_task.get("objective") or "").strip()
+        supplied_objective = canonicalize_desktop_cortex_request(raw_task.get("objective"))
         if supplied_objective and supplied_objective != user_request:
             raise ValueError(
                 "task.objective must exactly match task.user_request when supplied; do not paraphrase, normalize, "
@@ -9980,7 +10028,7 @@ def _v3_follow_up_payload(value: object) -> dict[str, Any]:
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ValueError("unsupported follow_up payload fields: " + ", ".join(unknown))
-    user_request = str(value.get("user_request") or "").strip()
+    user_request = canonicalize_desktop_cortex_request(value.get("user_request"))
     if not user_request:
         raise ValueError("follow_up payload.user_request must preserve the exact corrective user request")
     report_refs = value.get("report_refs", [])

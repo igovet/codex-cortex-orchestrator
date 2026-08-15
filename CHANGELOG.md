@@ -14,7 +14,19 @@ same base version.
 
 - Keep native worker session keys task/attempt-unique while compacting long
   request-derived task IDs to a deterministic fingerprint, so local skill paths
-  and prompt text do not leak into host-visible worker names.
+  and prompt text do not leak into host-visible worker names. Native
+  `spawn_agent.task_name` values also satisfy the host's strict
+  `[a-z0-9_]{1,80}` contract: hyphens are normalized only in this
+  host-facing field and a deterministic identity fingerprint prevents
+  collisions. Cortex durable task, attempt, and ledger IDs retain their
+  hyphen-compatible format.
+
+- Canonicalize only Desktop's injected absolute
+  `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` host wrapper to
+  `$cortex:orchestrator` before task identity, labels, persistence, and worker
+  prompts. Preserve the route and following user-authored text verbatim, leave
+  arbitrary Markdown links and user paths unchanged, and prevent local plugin
+  cache paths or cache-version changes from entering durable task state.
 
 - Bind v3 lifecycle recovery through the documented synchronous Cortex
   `PostToolUse.session_id` and tool `project_root`, keeping task authorization

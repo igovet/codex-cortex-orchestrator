@@ -2,6 +2,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1514,7 +1515,10 @@ class ControlPlaneTests(unittest.TestCase):
         }
         package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
-        self.assertRegex(delegation["spawn_request"]["task_name"], r"^general__spawn-contract__discover-01$")
+        self.assertRegex(
+            delegation["spawn_request"]["task_name"],
+            r"^general__spawn_contract__discover_01__[0-9a-f]{12}$",
+        )
         self.assertNotEqual(delegation["spawn_request"]["task_name"], delegation["spawn_request"]["display_name"])
         self.assertEqual({key: package["spawn_request"][key] for key in expected}, expected)
         self.assertEqual({key: delegation["state"]["attempts"][-1]["spawn_request"][key] for key in expected}, expected)
@@ -1522,18 +1526,36 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
 
     def test_native_worker_task_name_compacts_long_request_derived_task_ids(self):
-        long_task_id = "cortex-orchestrator-home-igovet-codex-plugins-ca-bd8a9ad4"
+        long_task_id = "cortex-orchestrator-local-plugin-cache-ca-bd8a9ad4"
         task_name = control.native_worker_task_name("planner", long_task_id, "plan-01")
-        self.assertRegex(task_name, r"^planner__task-[0-9a-f]{12}__plan-01$")
-        self.assertNotIn("home", task_name)
-        self.assertNotIn("codex", task_name)
+        self.assertRegex(task_name, r"^planner__task_[0-9a-f]{12}__plan_01__[0-9a-f]{12}$")
+        self.assertNotIn("plugin", task_name)
+        self.assertNotIn("cache", task_name)
+        self.assertNotIn("-", task_name)
         self.assertLessEqual(len(task_name), 80)
         self.assertNotEqual(
             task_name,
             control.native_worker_task_name(
-                "planner", "cortex-orchestrator-home-igovet-codex-plugins-ca-7f3e2a19", "plan-01"
+                "planner", "cortex-orchestrator-local-plugin-cache-7f3e2a19", "plan-01"
             ),
         )
+
+    def test_native_worker_task_names_obey_host_contract_for_every_profile(self):
+        names = {
+            control.native_worker_task_name(profile, "harvest-refresh", "plan-01")
+            for profile in control.PROFILES
+        }
+        self.assertEqual(len(names), len(control.PROFILES))
+        for task_name in names:
+            self.assertRegex(task_name, r"^[a-z0-9_]{1,80}$")
+            self.assertNotIn("-", task_name)
+
+    def test_native_worker_task_name_remains_unique_after_hyphen_normalization(self):
+        dashed = control.native_worker_task_name("planner", "harvest-refresh", "plan-01")
+        underscored = control.native_worker_task_name("planner", "harvest_refresh", "plan_01")
+        self.assertNotEqual(dashed, underscored)
+        self.assertRegex(dashed, r"^[a-z0-9_]{1,80}$")
+        self.assertRegex(underscored, r"^[a-z0-9_]{1,80}$")
 
     def test_host_spawn_confirmation_requires_the_exact_native_task_name(self):
         state = self.init(task_id="host-name-contract")["state"]
@@ -1546,7 +1568,7 @@ class ControlPlaneTests(unittest.TestCase):
             "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
         })
         expected_task_name = delegated["spawn_request"]["task_name"]
-        self.assertEqual(expected_task_name, "explorer__host-name-contract__discover-01")
+        self.assertRegex(expected_task_name, r"^explorer__host_name_contract__discover_01__[0-9a-f]{12}$")
         self.assertIn("Use attempt_id='discover-01' exactly", delegated["spawn_request"]["message"])
         self.assertIn("stable lowercase submission_id", delegated["spawn_request"]["message"])
         self.assertIn("exactly these eight keys", delegated["spawn_request"]["message"])
@@ -2172,7 +2194,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(len(set(result["attempts"])), 2)
         task_names = [item["task_name"] for item in result["spawn_requests"]]
         self.assertEqual(len(set(task_names)), 2)
-        self.assertTrue(all(item.startswith("explorer__composite-success__discover-") for item in task_names))
+        self.assertTrue(all(item.startswith("explorer__composite_success__discover_") for item in task_names))
+        self.assertTrue(all(re.fullmatch(r"[a-z0-9_]{1,80}", item) for item in task_names))
         self.assertTrue(all(item["profile"] == "explorer" for item in result["spawn_requests"]))
 
     def test_parallel_gate_wave_accepts_multiple_independent_gates(self):
@@ -2375,6 +2398,11 @@ class ControlPlaneTests(unittest.TestCase):
                     [spec["gate"] for wave in waves for spec in wave["delegations"]],
                     expected,
                 )
+                started = self.v3_start(objective)
+                self.assertTrue(started["ok"])
+                for dispatch in started["dispatches"]:
+                    self.assertEqual(dispatch["call"], "spawn_agent")
+                    self.assertRegex(dispatch["arguments"]["task_name"], r"^[a-z0-9_]{1,80}$")
 
     def test_v3_profile_schema_exposes_exact_roster_and_rejects_wrong_gate_owner(self):
         self.assertEqual(set(control.V3_WORKER_SCHEMA["properties"]["profile"]["enum"]), control.AGENTS)
@@ -2730,18 +2758,53 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(accepted["ok"])
 
-    def test_v3_desktop_skill_link_cannot_hide_an_underspecified_user_request(self):
+    def test_v3_desktop_skill_link_is_canonicalized_before_task_persistence_and_labeling(self):
         request = (
-            "[$cortex:orchestrator](/home/igovet/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"
+            "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"
             "orchestrator/SKILL.md) создай лендинг"
         )
         started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
         task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
-        self.assertEqual(task["user_request"], request)
+        self.assertEqual(task["user_request"], "$cortex:orchestrator создай лендинг")
+        self.assertEqual(task["objective"], "$cortex:orchestrator создай лендинг")
+        self.assertRegex(task_dir.name, r"^0001-task-[0-9a-f]{8}$")
+        self.assertNotIn("home", task_dir.name)
+        self.assertNotIn("plugins", task_dir.name)
+        self.assertNotIn("SKILL.md", (task_dir / "task.json").read_text(encoding="utf-8"))
+        self.assertNotIn("plugins/cache", started["dispatches"][0]["arguments"]["message"])
         self.assertTrue(task["intent_clarification_required"])
         self.assertIn("Cortex intent preflight: BLOCKING", started["dispatches"][0]["arguments"]["message"])
+
+    def test_v3_desktop_skill_link_cache_version_does_not_split_task_identity(self):
+        first = self.v3_start(
+            "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"
+            "orchestrator/SKILL.md) harvest",
+            waves=[{"workers": [{"phase": "plan"}]}],
+        )
+        replay = self.v3_start(
+            "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.4.1/skills/"
+            "orchestrator/SKILL.md) harvest",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(replay["ok"])
+        self.assertEqual(replay["task_ref"], first["task_ref"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["dispatches"], [])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        self.assertRegex(task_dir.name, r"^0001-harvest-[0-9a-f]{8}$")
+        self.assertNotIn("plugins", task_dir.name)
+
+    def test_follow_up_canonicalizes_desktop_skill_link_before_persistence(self):
+        payload = control._v3_follow_up_payload({
+            "user_request": (
+                "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.4.1/skills/"
+                "orchestrator/SKILL.md) correct the report"
+            ),
+        })
+        self.assertEqual(payload["task"]["user_request"], "$cortex:orchestrator correct the report")
 
     def test_v3_detailed_product_surface_request_does_not_force_a_preflight_question(self):
         request = (
@@ -5002,7 +5065,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.4.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "4.4.2")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

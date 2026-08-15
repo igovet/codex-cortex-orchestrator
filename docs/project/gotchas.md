@@ -10,8 +10,13 @@
   worker-only `worker_question`/`record_report` and coordinator-only
   `read_worker_report`, the public surface is exactly six tools.
 - Every public call requires the exact absolute `project_root`. Start requires
-  the user's exact, unexpanded `task.user_request`; deprecated `task.objective`
-  is only an exact compatibility mirror. Complexity defaults to C2. Compact
+  the user's exact, unexpanded `task.user_request`; the sole host-metadata
+  exception is Desktop's injected absolute local
+  `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` wrapper, which is
+  canonicalized to `$cortex:orchestrator` before task identity, labels,
+  persistence, and worker prompts. The route and following user text are
+  preserved; arbitrary links and user paths are not normalized. Deprecated
+  `task.objective` is only an exact compatibility mirror. Complexity defaults to C2. Compact
   wave overrides use `waves[].workers[]`, with only `phase` required.
 - Continue carries the prior response's relative `step`. A single result omits
   `worker`; a parallel wave must return every unique integer worker slot once.
@@ -111,9 +116,12 @@
   Hidden `spawn_agent` arguments intentionally include `fork_turns: "none"`;
   do not replace it with inherited coordinator context.
 - Keep `profile` and `display_name` as the exact canonical role name. The native
-  `spawn_agent.task_name` is a task/attempt-unique session key. Long
-  request-derived task IDs are compacted to a short deterministic fingerprint,
-  so skill paths and prompt text do not leak into the host-visible worker name.
+  `spawn_agent.task_name` is a task/attempt-unique session key that must match
+  the host's strict `[a-z0-9_]{1,80}` contract. Long request-derived task IDs
+  are compacted to a short deterministic fingerprint; hyphens are normalized
+  only in this host-facing field and a deterministic identity fingerprint
+  preserves uniqueness. Durable Cortex IDs may still contain hyphens, and
+  skill paths or prompt text must never leak into the host-visible name.
   Hooks map that key (or its confirmed host alias) back to the canonical
   profile. Use `followup_task` only for that exact resumed worker;
   `host_agent_id` reuse is rejected across attempts.

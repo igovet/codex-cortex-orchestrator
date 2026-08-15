@@ -221,7 +221,14 @@ should use canonical phases from the returned snapshot rather than guessing.
 ## Relative one-call-per-wave workflow
 
 1. Copy the exact user-authored task text into `task.user_request`; never
-   paraphrase, normalize, summarize, or expand it. Omit `task.objective` (if
+   paraphrase, normalize, summarize, or expand it. The sole host-metadata
+   exception is Desktop's injected
+   `[$cortex:orchestrator](absolute-local-plugin-path/skills/orchestrator/SKILL.md)`
+   wrapper: remove that exact wrapper to `$cortex:orchestrator` before task
+   identity, labels, persistence, and worker prompts. Preserve the selected
+   route and every following user-authored word; arbitrary Markdown links and
+   user paths remain unchanged. This prevents a local plugin-cache path or
+   cache-version change from entering durable task state. Omit `task.objective` (if
    supplied for compatibility, Cortex requires it to match `user_request`
    exactly). Preserve material ambiguity: do not fabricate product intent,
    requirements, audience, design direction, behavior, or acceptance merely to
