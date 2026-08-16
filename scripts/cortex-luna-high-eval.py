@@ -17,19 +17,60 @@ sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 import cortex  # noqa: E402
 
 
-def report(label: str) -> dict[str, object]:
+def report(label: str, project: Path, changed_files: list[str] | None = None) -> dict[str, object]:
     return {
-        "summary": label, "findings": [], "questions": [], "changed_files": [],
-        "tests": ["luna-high fixture"], "evidence": [label], "uncertainty": [],
+        "summary": label, "findings": [], "questions": [], "changed_files": changed_files or [],
+        "tests": [{
+            "command": "python3 -c 'print(\"luna-high fixture\")'",
+            "cwd": str(project),
+            "exit_code": 0,
+            "evidence": "The deterministic fixture command printed luna-high fixture and exited zero.",
+        }],
+        "evidence": [label], "uncertainty": [],
         "next_action": "advance",
     }
 
 
+def task(user_request: str, complexity: str | None = None) -> dict[str, object]:
+    value: dict[str, object] = {
+        "user_request": user_request,
+        "acceptance_criteria": ["The requested fixture lifecycle completes with a verified handoff."],
+        "verification": ["Run and record the deterministic fixture check through the close gate."],
+    }
+    if complexity is not None:
+        value["complexity"] = complexity
+    return value
+
+
+def planning(label: str) -> dict[str, object]:
+    return {
+        "overview": f"Deterministic work breakdown for {label}.",
+        "work_packages": [{
+            "id": "fixture_core",
+            "title": "Complete fixture lifecycle",
+            "objective": "Exercise the current durable report and close contract.",
+            "allowed_paths": ["."],
+            "microtasks": [{
+                "id": "fixture_verify",
+                "title": "Verify fixture lifecycle",
+                "objective": "Record a complete, reproducible fixture result.",
+                "profile": "backend_dev",
+                "allowed_paths": ["."],
+                "acceptance_criteria": ["The fixture result is recorded."],
+                "verification": ["Run the deterministic fixture command."],
+            }],
+        }],
+    }
+
+
 def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
+    if not current.get("ok"):
+        raise AssertionError(current)
     while current.get("outcome") != "completed":
         if current.get("outcome") == "awaiting_plan_approval":
             current = cortex.manage_orchestration({
                 "project_root": str(project),
+                "task_ref": current["task_ref"],
                 "intent": "plan_approval",
                 "payload": {"decision": "approve"},
             })
@@ -38,9 +79,54 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
             continue
         dispatches = current.get("dispatches") or []
         parallel = len(dispatches) > 1
+        ledger = cortex.ledger_root({"project_root": str(project)})
+        registry = cortex._operation_registry(ledger)
+        task_id = next(
+            candidate for candidate, record in registry["tasks"].items()
+            if record.get("start", {}).get("task_ref") == current["task_ref"]
+        )
+        task_dir, state, _ = cortex._v3_task_state(ledger, task_id)
+        task_definition = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        active_attempts = [
+            item for item in state["attempts"]
+            if item.get("status") not in cortex.TERMINAL_ATTEMPT_STATUSES
+            and item.get("gate") in cortex.active_gates(state)
+        ][-len(dispatches):]
         results = []
-        for worker in range(1, len(dispatches) + 1):
-            value: dict[str, object] = {"report": report(f"step {current['step']} worker {worker}")}
+        for worker, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
+            label = f"step {current['step']} worker {worker}"
+            changed_files: list[str] = []
+            if attempt.get("gate") == "implementation":
+                (project / "result.md").write_text("Verified Luna-high fixture result.\n", encoding="utf-8")
+                changed_files = ["result.md"]
+            worker_report = report(label, project, changed_files)
+            evidence = worker_report["evidence"]
+            predecessor_reports = list(attempt.get("context_report_ids") or [])
+            if predecessor_reports:
+                evidence.append("Predecessor review: " + ", ".join(predecessor_reports))
+            for index, _criterion in enumerate(attempt.get("acceptance_criteria") or [], 1):
+                evidence.append(f"Gate acceptance {index}: PASS - Deterministic fixture lifecycle produced the required recorded result.")
+            for index, _criterion in enumerate(attempt.get("verification") or [], 1):
+                evidence.append(f"Gate verification {index}: PASS - Exact deterministic fixture command completed with exit code zero.")
+            if attempt.get("gate") == "close":
+                for index, _criterion in enumerate(task_definition.get("acceptance_criteria") or [], 1):
+                    evidence.append(f"Task acceptance {index}: PASS - Completed fixture lifecycle produced a durable verified handoff.")
+                for index, _criterion in enumerate(task_definition.get("verification") or [], 1):
+                    evidence.append(f"Task verification {index}: PASS - Final deterministic fixture check completed with exit code zero.")
+            evidence.append("Dispatch briefing reviewed: " + str(attempt["briefing_digest"]))
+            publication: dict[str, object] = {
+                "project_root": str(project),
+                "task_id": state["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": dispatch["profile"],
+                "report": worker_report,
+            }
+            if attempt.get("gate") == "plan":
+                publication["planning"] = planning(label)
+            published = cortex.publish_worker_report(publication)
+            if not published.get("ok"):
+                raise AssertionError(published)
+            value: dict[str, object] = {"report_ref": published["report_ref"]}
             if parallel:
                 value["worker"] = worker
             results.append(value)
@@ -58,7 +144,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     sequential = base / "sequential"
     sequential.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(sequential), "task": {"user_request": "sequential Luna fixture"},
+        "project_root": str(sequential), "task": task("sequential Luna fixture"),
     })
     completed = finish(sequential, current)
     scenarios.append({"name": "automatic_sequential", "outcome": completed["outcome"]})
@@ -66,7 +152,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     parallel = base / "parallel"
     parallel.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(parallel), "task": {"user_request": "parallel Luna fixture", "complexity": "standard"},
+        "project_root": str(parallel), "task": task("parallel Luna fixture", "standard"),
         "waves": [{"workers": [{"phase": "research"}, {"phase": "architecture"}]}],
     })
     if len(current.get("dispatches") or []) != 2:
@@ -77,7 +163,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     blocked = base / "blocked"
     blocked.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(blocked), "task": {"user_request": "blocked resume Luna fixture", "complexity": "C2"},
+        "project_root": str(blocked), "task": task("blocked resume Luna fixture", "C2"),
         "waves": [{"workers": [{"phase": "discover"}]}],
     })
     blocked_result = cortex.continue_orchestration({
@@ -157,7 +243,7 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
         if scenario == "follow_up_partial":
             source = cortex.start_orchestration({
                 "project_root": str(project),
-                "task": {"user_request": "Complete a deterministic source fixture before follow-up testing.", "complexity": "C1"},
+                "task": task("Complete a deterministic source fixture before follow-up testing.", "C1"),
             })
             completed_source = finish(project, source)
             if completed_source.get("outcome") != "completed":

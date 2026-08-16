@@ -4149,7 +4149,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
         )
         self.assertIn(
-            "every listed check must have integer exit_code 0",
+            "integer exit_code 0",
             self.briefing_from_response(started),
         )
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -4179,10 +4179,10 @@ class ControlPlaneTests(unittest.TestCase):
     def test_completion_report_rejects_placeholder_test_commands(self):
         started = self.v3_start(
             "reject unreproducible completion evidence",
-            waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
+            waves=[{"workers": [{"phase": "architecture", "profile": "architect"}]}],
         )
         self.assertIn(
-            "exact reproducible invocation with no `...` placeholder",
+            "exact command (no `...`)",
             self.briefing_from_response(started),
         )
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -4201,6 +4201,24 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "report_validation_failed")
         self.assertIn("exact reproducible invocation", rejected["diagnostics"][0]["message"])
         self.assertEqual(list((task_dir / "reports/records").glob("report-*.json")), [])
+
+    def test_close_markers_ignore_command_and_cwd_text_but_reject_semantic_blockers(self):
+        task_dir = self.base / "blocked-path-task"
+        task_dir.mkdir()
+        (task_dir / "task.json").write_text(json.dumps({
+            "acceptance_criteria": ["The task is complete."],
+            "verification": ["The close check passes."],
+        }), encoding="utf-8")
+        state = {"require_handoff": True}
+        attempt = {"gate": "close"}
+        report = self.v3_report("close verification completed")
+        report["tests"][0]["command"] = "python3 verify_blocked_resume.py"
+        report["tests"][0]["cwd"] = str(self.base / "blocked-resume-fixture")
+        control._validate_close_report(task_dir, state, attempt, report)
+
+        report["summary"] = "Close remains blocked on an unresolved dependency."
+        with self.assertRaisesRegex(ValueError, "unresolved completion markers: blocked"):
+            control._validate_close_report(task_dir, state, attempt, report)
 
     def test_read_only_result_rejects_new_generated_or_gitignored_artifacts(self):
         (self.project / ".gitignore").write_text("coverage.tmp\n", encoding="utf-8")
@@ -6363,7 +6381,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.1.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.1.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

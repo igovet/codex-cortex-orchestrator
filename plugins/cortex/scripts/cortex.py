@@ -3587,10 +3587,10 @@ def _validate_gate_result_report(
     if not report.get("evidence"):
         raise ValueError(f"{gate} result requires observed evidence")
     briefing_receipt = _validate_dispatch_briefing_review(task_dir, attempt, report)
-    if gate in EXECUTED_CHECK_RESULT_GATES:
-        tests = report.get("tests") or []
-        if not tests:
-            raise ValueError(f"{gate} result requires at least one executed check or inspection result")
+    tests = report.get("tests") or []
+    if gate in EXECUTED_CHECK_RESULT_GATES and not tests:
+        raise ValueError(f"{gate} result requires at least one executed check or inspection result")
+    if tests:
         successful_checks = 0
         unsuccessful_checks: list[int] = []
         for index, check in enumerate(tests, 1):
@@ -3629,7 +3629,7 @@ def _validate_gate_result_report(
                 successful_checks += 1
             else:
                 unsuccessful_checks.append(index)
-        if not successful_checks:
+        if gate in EXECUTED_CHECK_RESULT_GATES and not successful_checks:
             raise ValueError(f"{gate} result requires at least one successful executed check")
         if unsuccessful_checks:
             raise ValueError(
@@ -3694,7 +3694,7 @@ def _validate_close_report(task_dir: Path, state: dict[str, Any], attempt: dict[
         raise ValueError("C2/C3 close report requires observed evidence, not only a completion assertion")
     task = _read_private_json(task_dir / "task.json", "task definition")
     combined = "\n".join(
-        str(item) for field in ("summary", "findings", "tests", "evidence", "next_action")
+        str(item) for field in ("summary", "findings", "evidence", "uncertainty", "next_action")
         for item in (report.get(field) if isinstance(report.get(field), list) else [report.get(field)])
     ).lower()
     weak_markers = ("not run", "not tested", "unverified", "todo", "tbd", "blocked")
@@ -4817,12 +4817,11 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         if package.get("gate") == "plan" else ""
     )
     executed_test_contract = (
-        "For this gate, every report.tests item must contain exactly command, cwd, exit_code, and evidence from an "
-        "observed execution. The command must be the exact reproducible invocation with no `...` placeholder, and "
-        "every listed check must have integer exit_code 0. A negative-path assertion is "
-        "successful only when its harness exits 0. Never omit, disguise, or relabel a non-zero result to publish a "
-        "completion report: preserve it and return the exact report-tool error so the coordinator reworks the gate."
-        if package.get("gate") in EXECUTED_CHECK_RESULT_GATES else ""
+        "report.tests requires at least one exact reproducible command (no `...`), cwd, observed evidence, and integer "
+        "exit_code 0; negative-path harnesses must exit 0. Preserve any failure and return the report-tool error."
+        if package.get("gate") in EXECUTED_CHECK_RESULT_GATES else
+        "If report.tests is non-empty, every item needs the exact command (no `...`), cwd, observed evidence, and "
+        "integer exit_code 0; otherwise leave it empty."
     )
     if result_contract_is_read_only(package):
         artifact_delta_contract = (

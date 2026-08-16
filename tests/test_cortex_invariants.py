@@ -1084,7 +1084,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 else:
                     self.assertIn("put every path changed since this attempt began", prompt)
                 if gate in control.EXECUTED_CHECK_RESULT_GATES:
-                    self.assertIn("command, cwd, exit_code, and evidence", prompt)
+                    self.assertIn("report.tests requires at least one exact reproducible command (no `...`)", prompt)
+                else:
+                    self.assertIn("If report.tests is non-empty, every item needs the exact command (no `...`)", prompt)
+                self.assertIn("integer exit_code 0", prompt)
                 digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
                 bootstrap = control.host_spawn_bootstrap(
                     name,

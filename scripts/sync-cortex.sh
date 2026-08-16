@@ -240,8 +240,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "6.1.0":
-    raise SystemExit("plugin/server version must match the 6.1.0 release manifest")
+if module.SERVER_VERSION != version or base_version != "6.1.1":
+    raise SystemExit("plugin/server version must match the 6.1.1 release manifest")
 PY
 }
 

@@ -4,7 +4,7 @@ Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It uses canonical task-ledger schema
 `cortex/v8`, public lifecycle schema `cortex/orchestration/v4`, and plugin
-version **6.1.0**. The public MCP surface has exactly seven tools: three coordinator
+version **6.1.1**. The public MCP surface has exactly seven tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question`, `record_report`, exact
@@ -206,12 +206,10 @@ loads the updated hooks, skills, and MCP server.
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 6.1.0
-changes in this working tree are intentionally uncommitted, so
-`python3 scripts/verify-cortex-release.py --require-tracked` cannot attest the
-mutable candidate. Commit only with explicit authorization, then rerun the
-blocking check against that committed tree before any push, tag, or catalog
-submission.
+and secret-prone paths before validating the package again. Run
+`python3 scripts/verify-cortex-release.py --require-tracked` against the exact
+committed Cortex 6.1.1 candidate before any push, tag, or catalog submission;
+the command deliberately does not attest mutable working-tree changes.
 
 See [release readiness](docs/release-readiness.md) for the external gates:
 verified public-manifest schema, confidential vulnerability reporting route,
@@ -729,7 +727,7 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 6.1.0 source candidate passed the full Python suite, marketplace
+The current 6.1.1 source candidate passed the full Python suite, marketplace
 validation, Python compilation, shell syntax, the isolated fresh-plugin probe,
 and installed-content verification. It carries forward the 4.4.2 baseline of
 274 passing Python tests as historical evidence. File-size
@@ -739,7 +737,7 @@ bounded handoff/reconciliation state, and fail-closed actionable errors for
 oversized artifacts. Legacy ledgers are rejected rather than migrated; generated
 planning artifacts remain bounded by the runtime limits.
 The local plugin registration is installed and content-verified as
-`6.1.0+codex.<build>`; the installer preserved the user MCP approval
+`6.1.1+codex.<build>`; the installer preserved the user MCP approval
 override. Native live-model evidence includes a completed six-phase harvest
 with independent completeness review and close handoff, plus a fresh final-build
 dispatch that produced human label `Planner Pricing` and unique native key

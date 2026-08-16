@@ -69,16 +69,12 @@ def report(
             evidence.append(f"Task acceptance {index}: PASS - Completed workflow provides concrete end-to-end fixture evidence.")
         for index, _criterion in enumerate(task_verification, 1):
             evidence.append(f"Task verification {index}: PASS - Final cold-boot check completed successfully with observed output.")
-    checks: list[object]
-    if gate in {"implementation", "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close"}:
-        checks = [{
-            "command": "git status --short",
-            "cwd": str(project),
-            "exit_code": 0,
-            "evidence": "Command completed and the fixture repository state was observed successfully.",
-        }]
-    else:
-        checks = ["cold-boot public-orchestration simulation"]
+    checks = [{
+        "command": "git status --short",
+        "cwd": str(project),
+        "exit_code": 0,
+        "evidence": "Command completed and the fixture repository state was observed successfully.",
+    }]
     return {
         "summary": f"relative step {step} worker {worker} completed",
         "findings": [], "questions": [], "changed_files": changed_files,

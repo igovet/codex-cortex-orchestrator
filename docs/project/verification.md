@@ -15,9 +15,9 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Recorded Cortex 6.1.0 source-candidate evidence:
+Recorded Cortex 6.1.1 source-candidate evidence:
 
-- The full Python suite passed 274 tests.
+- The full Python suite passed 308 tests.
 - File-size hardening passed: ordinary JSON writes use the bounded
   `MAX_JSON_BYTES=8 MiB` limit with fail-before-replace diagnostics; manifests
   use `MAX_MANIFEST_BYTES=64 MiB`; baseline preflight runs before task-directory
@@ -30,11 +30,11 @@ Recorded Cortex 6.1.0 source-candidate evidence:
   dependency/cache/runtime directories. Conditional handling keeps ambiguous
   `build`/`dist`/`target`/`bin`/`obj` source directories visible unless an
   ignore rule or recognizable build marker identifies generated output.
-- The source candidate is 6.1.0 and the local plugin registration is installed
-  and content-verified as `6.1.0+codex.<build>`; installation preserved
+- The source candidate is 6.1.1 and the local plugin registration is installed
+  and content-verified as `6.1.1+codex.<build>`; installation preserved
   the user MCP approval override.
 - Marketplace validation, Python compilation, shell syntax checks, the isolated
-  fresh-plugin probe, the 300-test suite, and the cold-boot lifecycle passed.
+  fresh-plugin probe, the 308-test suite, and the cold-boot lifecycle passed.
   Native live evidence completed the canonical six-phase harvest with
   independent review and close verification; a fresh final-build dispatch also
   confirmed `Planner Pricing` plus a unique `planner_pricing_01_<digest>` key.
@@ -351,7 +351,7 @@ key. Its child snapshot records `model=gpt-5.6-luna` and
 `reasoning_effort=high`. This runtime metadata, rather than worker self-report,
 is the acceptance evidence. The worker returned to the parent and no
 user-owned visible task was created.
-This proof predates the current 6.1.0 candidate and is not a fresh-install or
+This proof predates the current 6.1.1 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:
