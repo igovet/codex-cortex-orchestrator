@@ -1314,6 +1314,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "summary of recent commits",
             "full census",
             "docs/features/index.md` is the coverage manifest",
+            "all five `docs/project/` files",
+            "docs/features/<feature>/index.md",
             "Completeness review",
             "depends_on",
         ):

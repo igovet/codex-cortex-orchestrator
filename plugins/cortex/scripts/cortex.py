@@ -3141,6 +3141,13 @@ def _predecessor_review_marker(report_ids: list[str]) -> str:
 
 
 KNOWLEDGE_INDEX_FILES = ("docs/project/index.md", "docs/features/index.md")
+HARVEST_PROJECT_DOCS = (
+    "docs/project/index.md",
+    "docs/project/conventions.md",
+    "docs/project/verification.md",
+    "docs/project/decisions.md",
+    "docs/project/gotchas.md",
+)
 
 
 def _project_knowledge_context(project_root: Path, explicit: object) -> tuple[list[str], list[str]]:
@@ -3242,6 +3249,38 @@ def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any]
     """Require harvest documentation to cover real, behavior-complete feature pages."""
     if gate not in {"documentation", "review", "close"} or not _is_knowledge_harvest_task(task):
         return
+    missing_project_docs: list[str] = []
+    project_doc_paths: dict[str, Path] = {}
+    for relative in HARVEST_PROJECT_DOCS:
+        project_doc = _contained_path(project_root, project_root / relative, "canonical harvest project document")
+        if not project_doc.is_file() or project_doc.is_symlink():
+            missing_project_docs.append(relative)
+            continue
+        if project_doc.stat().st_size > 512 * 1024:
+            raise ValueError(f"canonical harvest project document exceeds the 512 KiB validation limit: {relative}")
+        if len(re.findall(r"[A-Za-z0-9]+", project_doc.read_text(encoding="utf-8"))) < 12:
+            raise ValueError(f"canonical harvest project document is shallow or empty: {relative}")
+        project_doc_paths[relative] = project_doc
+    if missing_project_docs:
+        raise ValueError(
+            "harvest canonical project documentation is incomplete; missing: "
+            + ", ".join(missing_project_docs)
+        )
+    project_index = project_doc_paths["docs/project/index.md"]
+    linked_project_docs: set[Path] = set()
+    for raw_link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", project_index.read_text(encoding="utf-8")):
+        target = raw_link.strip().strip("<>").split("#", 1)[0].strip()
+        if target and "://" not in target and not target.startswith("/"):
+            linked_project_docs.add((project_index.parent / target).resolve())
+    unlinked_project_docs = [
+        relative for relative in HARVEST_PROJECT_DOCS[1:]
+        if project_doc_paths[relative].resolve() not in linked_project_docs
+    ]
+    if unlinked_project_docs:
+        raise ValueError(
+            "harvest project index must link every canonical project document; missing links: "
+            + ", ".join(unlinked_project_docs)
+        )
     path = _contained_path(
         project_root,
         project_root / "docs/features/index.md",
@@ -3342,6 +3381,7 @@ def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any]
         row_links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", documentation_cell)
         if status != "excluded" and not row_links:
             row_errors.append(f"row {row_number} Documentation must link to a canonical feature page")
+        row_has_canonical_index = status == "excluded"
         for raw_link in row_links:
             target = raw_link.strip().strip("<>").split("#", 1)[0].strip()
             if not target or "://" in target or target.startswith("/"):
@@ -3349,11 +3389,17 @@ def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any]
                 continue
             candidate = (path.parent / target).resolve()
             try:
-                candidate.relative_to((project_root / "docs/features").resolve())
+                relative_feature_page = candidate.relative_to((project_root / "docs/features").resolve())
             except ValueError:
                 row_errors.append(f"row {row_number} Documentation link leaves docs/features")
                 continue
+            if len(relative_feature_page.parts) >= 2 and relative_feature_page.name == "index.md":
+                row_has_canonical_index = True
             documentation_links.add(candidate)
+        if not row_has_canonical_index:
+            row_errors.append(
+                f"row {row_number} Documentation must include a canonical docs/features/<feature>/index.md link"
+            )
     if row_errors:
         raise ValueError("harvest coverage matrix rows are invalid: " + "; ".join(row_errors))
     if not documentation_links:
@@ -5274,12 +5320,19 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "briefing. Do not guess or borrow identity from another task; if the exact values are unavailable, "
                 "return this diagnostic to the parent coordinator and stop."
             )
-        elif "harvest coverage manifest" in message:
+        elif any(fragment in message for fragment in (
+            "canonical harvest project document",
+            "harvest canonical project documentation",
+            "harvest project index",
+            "harvest coverage manifest",
+            "harvest coverage matrix",
+            "harvest feature pages",
+        )):
             code = "harvest_manifest_invalid"
             outcome = "needs_correction"
             next_action = (
-                "Complete and verify the required harvest coverage manifest before retrying record_report on this "
-                "same attempt."
+                "Complete and verify the canonical harvest project documents, coverage manifest, and feature pages "
+                "named by the diagnostic before retrying record_report on this same attempt."
             )
         elif "unsuccessful executed check(s)" in message:
             code = "worker_verification_failed"

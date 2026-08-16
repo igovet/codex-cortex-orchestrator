@@ -80,6 +80,13 @@ docs/features/<feature>/index.md
 docs/features/<feature>/<focused-detail>.md
 ```
 
+Every completed harvest must contain all five `docs/project/` files above,
+even when one records only a verified absence or an evidence boundary; the
+project index must link the other four. Every non-excluded coverage row must
+link a canonical `docs/features/<feature>/index.md` entry point. A flat
+`docs/features/<feature>.md` page may be migrated into that directory but
+cannot satisfy the final structural gate by itself.
+
 `docs/features/index.md` is the coverage manifest. It must record the census
 scope, source categories checked, every discovered feature and its page,
 unmapped surfaces, justified exclusions, known unknowns, and coverage status.

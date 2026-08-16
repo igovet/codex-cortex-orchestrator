@@ -55,6 +55,28 @@ class ControlPlaneTests(unittest.TestCase):
         classified = control.classify_task({"complexity": complexity, "requirements": [], "principal": "thread-a"})
         return control.init_task({"task_id": task_id, "objective": "test objective", "complexity": complexity, "classification_id": classified["classification_id"], "principal": "thread-a"})
 
+    def write_canonical_harvest_project_docs(self):
+        project_docs = self.project / "docs/project"
+        project_docs.mkdir(parents=True, exist_ok=True)
+        (project_docs / "index.md").write_text(
+            "# Project knowledge\n\n"
+            "This index records verified repository behavior, operating boundaries, evidence, and durable project guidance.\n\n"
+            "- [Conventions](conventions.md)\n"
+            "- [Verification](verification.md)\n"
+            "- [Decisions](decisions.md)\n"
+            "- [Gotchas](gotchas.md)\n",
+            encoding="utf-8",
+        )
+        canonical_content = {
+            "conventions.md": "# Conventions\n\nThe repository follows verified naming, structure, configuration, and implementation conventions recorded from current source evidence.\n",
+            "verification.md": "# Verification\n\nThe repository uses focused automated checks and source inspection to verify behavior, failure paths, and integration boundaries.\n",
+            "decisions.md": "# Decisions\n\nNo explicit architectural decision record was found; this verified evidence boundary is retained for future investigation.\n",
+            "gotchas.md": "# Gotchas\n\nNo confirmed project-specific gotcha was found; this verified absence must be reconsidered when repository behavior changes.\n",
+        }
+        for name, content in canonical_content.items():
+            (project_docs / name).write_text(content, encoding="utf-8")
+        return project_docs
+
     def delegate(self, state, task_id, gate, agent, **extra):
         observed = control.status({"task_id": task_id, "principal": state.get("principal", "thread-a")})
         default_model = (
@@ -4732,11 +4754,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(accepted["ok"])
 
     def test_harvest_documentation_cannot_publish_with_a_shallow_feature_index(self):
-        project_docs = self.project / "docs/project"
+        project_docs = self.write_canonical_harvest_project_docs()
         feature_docs = self.project / "docs/features"
-        project_docs.mkdir(parents=True)
         feature_docs.mkdir(parents=True)
-        (project_docs / "index.md").write_text("# Project knowledge\n", encoding="utf-8")
         feature_index = feature_docs / "index.md"
         feature_index.write_text("# Features\n\n- [Trading](trading/index.md)\n", encoding="utf-8")
         started = self.v3_start("harvest exhaustive knowledge", waves=[
@@ -4754,6 +4774,8 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertIn("extra columns may follow only after them", writer_prompt)
         self.assertIn("status is exactly `covered`, `documented`, `verified`, or `excluded`", writer_prompt)
+        self.assertIn("docs/project/conventions.md", writer_prompt)
+        self.assertIn("docs/features/<feature>/index.md", writer_prompt)
         task_dir = next((self.ledger / "tasks").iterdir())
         state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
         attempt = state["attempts"][0]
@@ -4830,6 +4852,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(accepted["ok"])
 
     def test_harvest_coverage_matrix_requires_complete_structured_rows(self):
+        self.write_canonical_harvest_project_docs()
         feature_docs = self.project / "docs/features"
         feature_docs.mkdir(parents=True)
         (feature_docs / "index.md").write_text(
@@ -4851,6 +4874,107 @@ class ControlPlaneTests(unittest.TestCase):
                 {"objective": "harvest exhaustive repository knowledge"},
                 "documentation",
             )
+
+    def test_harvest_requires_all_canonical_project_documents_and_index_links(self):
+        project_docs = self.project / "docs/project"
+        project_docs.mkdir(parents=True)
+        (project_docs / "index.md").write_text(
+            "# Project knowledge\n\nThis sufficiently detailed index describes verified project behavior and evidence boundaries for maintainers.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "harvest canonical project documentation is incomplete.*conventions.md.*verification.md.*decisions.md.*gotchas.md",
+        ):
+            control._validate_harvest_coverage_manifest(
+                self.project,
+                {"objective": "harvest exhaustive repository knowledge"},
+                "documentation",
+            )
+
+        started = self.v3_start("harvest exhaustive repository knowledge", waves=[
+            {"workers": [{"phase": "documentation"}]},
+        ])
+        self.assertTrue(started["ok"], started)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self._report_with_briefing(attempt, self.v3_report("project documentation written"))
+        report["evidence"].append("Knowledge reviewed: docs/project/index.md")
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "harvest_manifest_invalid")
+        self.assertIn("harvest canonical project documentation is incomplete", rejected["diagnostics"][0]["message"])
+
+        self.write_canonical_harvest_project_docs()
+        (project_docs / "index.md").write_text(
+            "# Project knowledge\n\n"
+            "This sufficiently detailed index describes verified project behavior and evidence boundaries for maintainers without navigation links.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "harvest project index must link every canonical project document.*conventions.md.*verification.md.*decisions.md.*gotchas.md",
+        ):
+            control._validate_harvest_coverage_manifest(
+                self.project,
+                {"objective": "harvest exhaustive repository knowledge"},
+                "documentation",
+            )
+
+    def test_harvest_rejects_flat_feature_page_as_canonical_entry_point(self):
+        self.write_canonical_harvest_project_docs()
+        feature_docs = self.project / "docs/features"
+        feature_docs.mkdir(parents=True)
+        (feature_docs / "index.md").write_text(
+            "# Features\n\n## Inventory totals\n\nTotal: 1.\n\n"
+            "## Coverage matrix\n\n"
+            "| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| Trading | engine | command | service.py | [Trading](trading.md) | test.py | documented |\n\n"
+            "## Unmapped surfaces\n\nNone.\n\n## Exclusions\n\nNone.\n\n"
+            "## Known unknowns\n\nNone.\n",
+            encoding="utf-8",
+        )
+        (feature_docs / "trading.md").write_text(
+            "# Trading\n\n## Runtime owner\n\nThe runtime owner controls trading behavior.\n\n"
+            "## Behavior and workflow\n\nThe workflow accepts and processes an order scenario.\n\n"
+            "## State and data\n\nOrder state is stored and retrieved.\n\n"
+            "## Interfaces\n\nA command starts the operation.\n\n"
+            "## Failure and recovery\n\nErrors retain state and permit recovery.\n\n"
+            "## Verification\n\nFocused tests verify successful and failing behavior.\n",
+            encoding="utf-8",
+        )
+        started = self.v3_start("harvest exhaustive repository knowledge", waves=[
+            {"workers": [{"phase": "documentation"}]},
+        ])
+        self.assertTrue(started["ok"], started)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self._report_with_briefing(attempt, self.v3_report("flat feature page written"))
+        report["evidence"].append(
+            "Knowledge reviewed: docs/project/index.md, docs/features/index.md"
+        )
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "harvest_manifest_invalid")
+        self.assertIn(
+            "Documentation must include a canonical docs/features/<feature>/index.md link",
+            rejected["diagnostics"][0]["message"],
+        )
 
     def test_v3_context_files_reject_escape_missing_and_symlink_paths(self):
         docs = self.project / "docs"
