@@ -3,19 +3,44 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 4.4.3 task ledger, staged waves,
-worker questions/reports, maintenance, and optional execution lanes through exactly six public
+The local MCP server implements the Cortex 6.1.0 `cortex/v8` task ledger and
+public `cortex/orchestration/v4` lifecycle, staged waves,
+worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
-`continue_orchestration`, and `manage_orchestration`, worker-only
-`worker_question` and `record_report`, and coordinator-only `read_worker_report`.
-The private `cortex/v7` primitives and legacy v2 facade remain compatibility
-details; existing v7 tasks are inspectable and resumable through the v3 adapter.
+`continue_orchestration`, and `manage_orchestration`, worker
+`worker_question`, `record_report`, exact identity/digest-scoped immutable
+briefing fallback `read_dispatch_briefing`, and scoped predecessor
+`read_worker_report`.
+Legacy v7/v3 ledgers and facades are unsupported: they are not migrated or
+resumed and must be recreated.
 
 ## Key files and dependencies
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) implements task, report, and lane tools.
 - [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, 13 gate briefings, and the `cortex/report/v1` field contract.
 - [test_cortex_control.py](../../../tests/test_cortex_control.py) covers report-bus scoping/reconciliation and lane lifecycle behavior.
+
+Repository-root `AGENTS.md` is development-only and is not installed. Runtime
+guarantees come exclusively from the installable `plugins/cortex/` tree.
+
+## Canonical artifact layout
+
+The root ledger owns `.state.lock`, `activations.json`, `host-sessions.json`
+when bound, `task-index.json`, `orchestration-operations.json`, transaction
+files under `operations/`, retained classification receipts, and optional
+resource claims and lanes. A task owns `task.json`, `current.json`,
+`orchestration.json`, `baseline-manifest.json`, per-attempt delegation and
+baseline files, report records/Markdown/receipts/consumptions and indexes,
+evidence records, optional questions, planning pointers and immutable
+revisions, handoff JSON, and append-only journal/audit files. These separate
+runtime state, recovery checkpoints, immutable evidence, and human audit.
+
+The runtime deliberately does not create `v3-operations.json`, active-task or
+status-receipt files, `reports/grants`, `metrics.json`, task lock files,
+handoff-manifest snapshots, or evidence-snapshot files. `baseline-manifest.json`
+is intentional: the task baseline proves whole-task handoff stability and each
+attempt baseline reconciles actual changed files, including in non-Git or
+pre-existing-dirty repositories.
 
 ## Behavior and status
 
@@ -49,7 +74,7 @@ part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
 
-Cortex keeps each new v3 task on a generated task-local authorization identity.
+Cortex keeps each new v4 task on a generated task-local authorization identity.
 The synchronous `PostToolUse` hook separately binds its returned `task_ref` to
 the documented hook `session_id`; environment identity is only a compatibility
 hint. `SessionStart` handles `resume`, `clear`, and `compact` and exposes model
@@ -155,10 +180,18 @@ dispatches, wait, evaluate reports, route questions, and communicate with the
 user. It must never inspect, search, read, edit, patch, build, test, or run the
 target project and must remain idle while workers run. Worker delay, failure,
 or unavailability is handled through recovery, rework, or a blocker; it never
-authorizes direct root project work. `SessionStart` and every public v3
+authorizes direct root project work. `SessionStart` and every public v4
 `next_action`, including caller-correctable failures, reassert this lock.
 
-Worker prompts have three deliberate layers: the role-specific professional
+Host spawn prompts first de-duplicate the exact user request, then add the
+worker contract. `start_orchestration.next_action` is serialized before dispatch
+payloads. The compact native bootstrap is below 1,500 bytes; the full immutable
+briefing is regression-tested below 11,500 bytes and the complete public start response below 8,000 UTF-8
+bytes to prevent Codex tool-output truncation. A worker is not considered sent
+until native `spawn_agent` returns a child id; the coordinator must not announce
+a dispatch or call wait with an empty target list, and native dispatch failure
+is a blocker. Worker prompts have
+three deliberate layers: the role-specific professional
 playbook from the selected profile, the overall task assignment and context,
 and the current gate mission with its ownership, acceptance, and verification
 defaults. Task-level requirements and validation stay distinct from gate-level
@@ -210,7 +243,25 @@ Every dispatch reports `phase`, `profile`, `capability`, `sandbox`, and
 `selection_reason` separately from the unchanged native `call` arguments, so
 the coordinator can audit routing without rewriting the host request.
 
-Every worker calls only `worker_question` and `record_report`. A material
+Compact native dispatch responses carry `dispatch_ref`, one immutable scoped
+`briefing_path`, and its SHA-256 digest. The worker reads exactly that path,
+adds `Dispatch briefing reviewed: <sha256>` as a report evidence marker, and
+must not directly read any other Cortex ledger path. The complete prompt is
+never persisted in mutable `current.json` or delegation JSON; predecessor
+reports remain available only through scoped `read_worker_report` reads.
+
+The machine-validated profile contract also records required inputs, the
+project artifact each profile owns, and its completion deliverable. The attempt
+baseline is included in the worker prompt: implementation phases must reconcile
+real writes, while read-only profiles and phases must leave the project
+unchanged. This includes `build_verification` when assigned to the read-only
+`qa` profile; sandbox enforcement rejects writes that violate the contract.
+
+Every worker calls `worker_question` and `record_report`; a successor may also
+call `read_worker_report` only for predecessor refs explicitly supplied in its
+dispatch, with exact `project_root`, `task_ref`, `attempt_id`, and `profile`.
+Cortex rejects ungranted refs and emits no coordinator Markdown-link
+instruction in worker context. A material
 question is persisted with action `ask`; the worker returns only
 `QUESTION_RECORDED question_ref=<value>` plus a concise summary, ends the
 current native turn, and becomes idle/resumable. The coordinator passes only
@@ -262,26 +313,35 @@ next action. Preserve the opaque `task_ref`, inspect once after compaction,
 and continue the existing relative step. Cortex explicitly forbids restarting
 the task or replaying completed dispatches during this recovery.
 
+The documented `SubagentStart` event binds the parent session, native
+`agent_id`, and observed `model` to the next sequentially issued dispatch
+before a worker is considered active; dynamic workers report generic
+`agent_type=default`. The handoff separates `pending_dispatches` from `active_workers`:
+only matching top-level `inspect` dispatches authorize new spawns, while
+active workers expose exact persisted child wait IDs. Missing binding fails
+closed; the coordinator never guesses an identity or waits on a replacement.
+
 Native worker identity is separate from the canonical role label. Every
-dispatch keeps `profile` canonical and sets a human-readable `display_name` in
-the form `Profile Module NN` (for example, `Explorer Auth 02`), where the
-module is derived concisely from the assignment and `NN` is the attempt ordinal.
+dispatch keeps `profile` canonical and sets a human-readable `display_name`
+derived from the task domain in the user's request (for example,
+`Planner Authentication`), without an ordinal or digest. Gate mission verbs
+such as `plan`, `discover`, or `close` are not used as the display module.
 `spawn_agent.task_name` is the lower-underscore equivalent with a uniqueness
-digest (for example, `explorer_auth_02_<digest>`), remains unique to the task
+ordinal and digest (for example, `explorer_auth_02_<digest>`), remains unique to the task
 and attempt, and must satisfy the host's strict `[a-z0-9_]{1,80}` name contract.
 The deterministic digest preserves uniqueness without copying durable IDs,
 request text, or skill paths into the host-visible name. `followup_task` is
 reserved for the exact confirmed native worker being resumed; a reused
-`host_agent_id` is rejected for another attempt. Lifecycle hooks resolve the
-native task key (and its host aliases) back to the canonical profile before
-emitting worker context.
+`host_agent_id` is rejected for another attempt. Lifecycle hooks use required
+sequential spawn order to associate the opaque child ID with the issued native
+task key and canonical profile before emitting worker context.
 
 `manage_orchestration(intent="prune")` is project-scoped maintenance and must
 omit `task_ref`. With exact `confirmation: "PRUNE"`, it removes task-scoped
 ledger state whose last update is at least `older_than_days` old (default 7),
 including abandoned active tasks. Under the global state lock it reconciles
-`task-index.json`, `active-tasks.json`, `activations.json`,
-`v3-operations.json`, classification/transaction receipts, task resource
+`task-index.json`, `activations.json`, `orchestration-operations.json`,
+classification/transaction receipts, task resource
 claims, and lane bindings before deleting the task directories. Recent tasks,
 lane objects, project source/docs, and plugin content are preserved. Repeating
 prune is idempotent; Cortex intentionally has no clear-all route.
@@ -350,15 +410,15 @@ fail before replacement with actionable diagnostics. Baseline manifest reads
 use `MAX_MANIFEST_BYTES=64 MiB`; preflight runs before task-directory creation,
 and handoff/reconciliation snapshot serialization remains bounded, so oversized
 artifacts fail closed rather than surfacing at close. Every call includes an absolute
-`project_root`; the same server process may serve multiple roots. Mutating v3
+`project_root`; the same server process may serve multiple roots. Mutating v4
 operations use server-owned request-digest receipts tied to the internal
 active wave, so identical retries replay and changed or stale payloads
-conflict before partial writes. Expected public v3 validation and recovery
+conflict before partial writes. Expected public v4 validation and recovery
 outcomes return structured `ok: false` responses with bounded diagnostics and
 a corrective `next_action`; because these are caller-correctable protocol
 results, they do not enter the exception log. Exceptions raised at the MCP
 boundary remain redacted and logged. Host model/tool/effort values
-are selected routing metadata; v3 does not claim actual host attestation
+are selected routing metadata; v4 does not claim actual host attestation
 unless the host supplies observable evidence.
 Profiles and all 13 gate briefings are preloaded and validated at MCP startup;
 invariant coverage checks that all 21 playbooks contain the required
@@ -410,5 +470,5 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 4.4.3 evidence is 277 passing tests, marketplace validation, Python compilation, shell syntax, an isolated fresh-plugin probe, and installed-content verification at `4.4.3+codex.20260815231023`; the installer preserved the user MCP approval override. The recorded 4.4.2 source evidence of 274 passing tests is retained as historical baseline. Live-model, tracked-release, and publication evidence remain unverified. Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds and installed/content-verified cachebuster `4.0.0+codex.20260814231427`; it does not attest 4.4.3. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 6.1.0 evidence is the 300-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.0+codex.<build>`, a completed native six-phase harvest, and a fresh final-build worker-identity dispatch; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

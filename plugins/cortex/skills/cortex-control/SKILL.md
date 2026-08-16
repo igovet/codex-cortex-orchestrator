@@ -5,12 +5,16 @@ description: Use this skill when coordinating a non-trivial task across Codex ag
 
 # Cortex Control
 
-Cortex v3 exposes three coordinator lifecycle operations plus scoped worker
+The public Cortex API exposes three coordinator lifecycle operations plus scoped worker
 question/report transport. Coordinators use `start_orchestration` and
 `continue_orchestration` for normal work, `read_worker_report` to evaluate a
 persisted report, and `manage_orchestration` only for recovery or rare
-subsystems. Workers use only `worker_question` and `record_report`; they must not call lifecycle
-operations. The private v7 ledger API and retired public `orchestrate` facade
+subsystems. Workers use `worker_question` and `record_report`; a worker whose
+host filesystem read cannot open its exact briefing may call
+`read_dispatch_briefing` once with the complete identity/digest tuple from its
+bootstrap. A successor worker may also use `read_worker_report` with its exact attempt/profile only
+for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
+operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
 opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
 
@@ -46,16 +50,52 @@ signal, never permission for the root to perform the work directly.
    names exact completed or earlier prerequisite phases; omit it to receive all
    verified predecessor reports. `context_files` carries exact project/feature
    knowledge pages selected by the planner for that worker.
-3. Invoke each returned dispatch with its exact `call` and `arguments`.
+3. Invoke each returned dispatch with its exact `call` and `arguments`, one
+   native call at a time in returned worker order. The children still execute
+   concurrently after each spawn returns; the deterministic call order lets
+   generic host `SubagentStart` events bind to the matching issued dispatch.
    Before invoking it, check the sibling `phase`, `profile`, `capability`,
-   `sandbox`, and `selection_reason` against the latest worker evidence and
+   `sandbox`, `selection_reason`, `dispatch_ref`, `briefing_path`, and
+   `briefing_digest` against the latest worker evidence and
    the canonical roster in `cortex:orchestrator`. Arguments contain only
-   native host parameters. Never add ledger IDs or copy an expected model into
-   a missing native `model` field. Hidden `spawn_agent` dispatches must retain
+   native host parameters. Their message is intentionally only a compact
+   bootstrap: the complete prompt is the one immutable briefing named by the
+   returned path and digest. The coordinator must not read, inline, expand, or
+   reconstruct that file or expose the surrounding ledger. Never add ledger
+   IDs or copy an expected model into a missing native `model` field. Hidden `spawn_agent` dispatches must retain
    the returned `fork_turns: "none"`: the generated Cortex briefing is the
    complete worker context, and inheriting the coordinator transcript can leak
    localized user-language messages into the English-only worker channel.
-4. Workers do not call lifecycle operations. Any worker may call
+   A dispatch is successful only when the native call returns its child id.
+   Never announce that a worker was sent or wait before at least one returned
+   child id is durably bound. A host-level wait-any representation may omit an
+   explicit target list only while Cortex has a bound running child; otherwise
+   it is denied as an unspawned dispatch. If the native call is unavailable or
+   fails, stop with that blocker; otherwise wait only for bound children.
+4. Workers do not call lifecycle operations. A worker first reads only its
+   exact briefing path, confirms the file is
+   read-only and its SHA-256 equals `briefing_digest`, and stops on any
+   mismatch. That path is the sole direct-read exception below
+   `.codex/cortex`: never list or inspect the directory, mutable state,
+   baselines, delegation packages, another briefing, or report files. If the
+   host filesystem read says this exact path is missing or unreadable, the
+   worker may call `read_dispatch_briefing` once with the exact project root,
+   task id, attempt id, profile, dispatch ref, and digest from the bootstrap.
+   That scoped fallback returns only the same validated briefing and grants no
+   directory or ledger access. If it also fails, stop with its exact diagnostic.
+   After reviewing it, the worker includes the exact bootstrap-supplied `Dispatch
+   briefing reviewed: <sha256>` item in `report.evidence`; `record_report`
+   verifies the file again and rejects a missing marker or changed artifact.
+   Read-only workers must select non-writing verification modes before running
+   commands: use `PYTHONDONTWRITEBYTECODE=1` for Python, disable pytest and
+   equivalent test/build caches, and skip any check that requires cleanup.
+   They must never create an artifact and then use `rm`, `git clean`, or a
+   cleanup script. The result validator compares both ordinary files and
+   generated/gitignored artifact sentinels against the attempt baseline.
+   Predecessor reports remain accessible only through scoped
+   `read_worker_report`.
+
+   Any worker may call
    `worker_question(action="ask")` when repository evidence cannot resolve a
    material user decision. It returns a compact `question_ref`; the worker
    sends only that ref and a concise question summary through the native parent
@@ -75,9 +115,25 @@ signal, never permission for the root to perform the work directly.
    channel. When predecessor handoffs are supplied, they review all of them and
    include the generated `Predecessor review:` acknowledgement in report
    evidence; the report tool enforces complete acknowledgement.
+   A successor worker reads each supplied predecessor ref before repository
+   work through `read_worker_report`, passing the exact project root, task ref,
+   attempt id, profile, and supplied report ref from its generated briefing.
+   Cortex rejects attempts to read an ungranted report. This scoped read does
+   not authorize coordinator lifecycle calls or user-facing report links.
    A final report always has `questions: []`: material decisions must complete
    the durable question lifecycle first, and non-blocking evidence gaps belong
    in `uncertainty`.
+   `followup_task` is authorized only for a stopped attempt whose durable open
+   question has just been answered. If native worker completion contains a
+   `record_report` error or anything other than `REPORT_RECORDED` or
+   `QUESTION_RECORDED`, do not send a corrective follow-up: `SubagentStop` has
+   already classified that attempt. Call
+   `manage_orchestration(intent="inspect")` once, then consume a recovered
+   report, route the durable question, or submit the exact failed result that
+   inspect returns. Only a newly returned top-level dispatch authorizes rework.
+   Cortex permits at most three automatic failed attempts for one active phase;
+   it then blocks with a durable handoff. Resume only after repairing the
+   recorded cause, which resets that phase's bounded recovery counter.
 5. After all workers finish, read every ref with `read_worker_report`. Each
    result includes Cortex's derived absolute `report_markdown_path` for the
    persisted `reports/markdown/<report-ref>.md` artifact. After reading each
@@ -93,7 +149,11 @@ signal, never permission for the root to perform the work directly.
    Parallel results repeat only the returned integer `worker` slot. Omit
    status for success; non-success requires normalized `status` and `reason`
    and omits report fields. Until all workers finish, remain idle and perform
-   no project operation.
+   no project operation. A `SubagentStop` after `record_report` is recovered
+   from the persisted report ref; a stop on an open durable question remains
+   resumable; any other stop is durably failed and must be submitted as a
+   non-success result for canonical rework. Never wait on or respawn a stopped
+   child directly.
 6. Repeat one continue per completed wave. Finish only when `outcome` is
    `completed`; Cortex has then reconciled reports, evidence, documentation,
    close verification, the manifest, and handoff.
@@ -105,7 +165,15 @@ window, or the coordinator no longer has the exact Cortex protocol in active
 context, preserve the opaque `task_ref` and call
 `manage_orchestration(intent="inspect")` exactly once for that task. Use the
 returned `context_handoff`, current pipeline, report refs, and relative step
-as the authoritative recovery snapshot. Do not call `start_orchestration`
+as the authoritative recovery snapshot. Invoke only top-level inspect
+`dispatches` that correspond to `context_handoff.pending_dispatches`; the
+handoff itself is descriptive, not spawn authority. Never respawn entries in
+`active_workers`; wait only on their exact persisted `host_agent_id` values.
+The documented `SubagentStart` hook binds each native child id/model to the
+next sequentially issued attempt before project work (`agent_type` is
+`default` for dynamic workers), so inspect can distinguish those states.
+If a running attempt has no child id, fail closed instead of spawning or
+waiting without a target. Do not call `start_orchestration`
 again, replay completed dispatches, or reconstruct state from a raw
 transcript. After rehydration, continue the existing task and publish every
 exact `report_markdown_link` before the next lifecycle or report-read call.
@@ -307,5 +375,5 @@ report; narrow the dependency set with `depends_on`.
 ## Durable artifacts
 
 Every call supplies its exact absolute `project_root`. Runtime state stays in
-`${project_root}/.codex/cortex` using compatible `cortex/v7` ledgers.
+`${project_root}/.codex/cortex` using the canonical `cortex/v8` ledger.
 `CORTEX_ROOT`, `/tmp` fallback, and symlink traversal remain forbidden.

@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "4.4.3":
-        fail("plugin manifest must identify cortex at release version 4.4.3")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "6.1.0":
+        fail("plugin manifest must identify cortex at release version 6.1.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:
@@ -221,12 +221,17 @@ def main() -> int:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
     expected_public_operations = {
         "start_orchestration", "continue_orchestration", "manage_orchestration",
-        "worker_question", "record_report", "read_worker_report",
+        "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report",
     }
     if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the six public Cortex operations")
-    if shared.get("worker_operations") != ["worker_question", "record_report"]:
-        fail("workers must receive only the scoped worker_question and record_report operations")
+        fail("shared worker contract must declare the seven public Cortex operations")
+    if shared.get("worker_operations") != ["read_dispatch_briefing", "read_worker_report", "worker_question", "record_report"]:
+        fail("workers must receive scoped briefing/predecessor reads, question, and report operations")
+    if (
+        shared.get("dispatch_briefing_fallback")
+        != "one_scoped_read_dispatch_briefing_call_with_exact_identity_and_digest_only_when_host_file_read_is_unavailable"
+    ):
+        fail("worker briefing fallback must be exact-identity/digest scoped")
     if set(shared.get("coordinator_operations", [])) != {
         "start_orchestration", "continue_orchestration", "manage_orchestration", "read_worker_report",
     }:
@@ -245,6 +250,14 @@ def main() -> int:
     ):
         fail("shared worker contract must define bounded Codebase Memory discovery and fallback")
     EXPECTED_AGENTS = {item.get("name") for item in profile_contract["profiles"]}
+    execution_contracts = profile_contract.get("profile_execution_contracts")
+    if not isinstance(execution_contracts, dict) or set(execution_contracts) != EXPECTED_AGENTS:
+        fail("profile execution contracts must cover every supported agent exactly once")
+    for name, execution in execution_contracts.items():
+        if not isinstance(execution, dict) or set(execution) != {"inputs", "project_artifacts", "completion"}:
+            fail(f"profile execution contract has an invalid shape: {name}")
+        if not all(isinstance(value, str) and len(value.split()) >= 6 for value in execution.values()):
+            fail(f"profile execution contract is too shallow: {name}")
     # MCP configuration supports a plugin-relative working directory.  Unlike
     # hook commands, ${PLUGIN_ROOT} is not expanded in stdio-MCP arguments by
     # the host, so it would launch a non-existent literal path.

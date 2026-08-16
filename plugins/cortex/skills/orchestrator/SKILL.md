@@ -32,7 +32,7 @@ without asking for another activation.
 Do not guess unknown arguments. Show help and ask the user to choose.
 
 The help route explains invocation, opt-in behavior, the project-local
-`.codex/cortex` ledger, the six v3 public tools, internal workers, and that
+`.codex/cortex` ledger, the seven public v4 lifecycle/report tools, internal workers, and that
 source/tests outrank generated docs. Help performs no activation, dispatch, or
 write.
 
@@ -47,7 +47,7 @@ selection, call `manage_orchestration` once with exact absolute `project_root`,
 intent `prune`, no `task_ref`, and
 `payload: {"confirmation":"PRUNE","older_than_days":7}`. It removes only
 task-scoped `.codex/cortex` state last updated at least seven days ago,
-including abandoned active tasks, and reconciles task indexes, v3 starts,
+including abandoned active tasks, and reconciles task indexes, public starts,
 activations, operation receipts, classification receipts, task resource
 claims, and lane bindings. It preserves recent tasks, lanes, source,
 documentation, and plugin files. Never reinterpret `prune` as clear-all.
@@ -89,6 +89,10 @@ coverage, mapping/exclusion evidence, or a concrete next coverage action. A
 handful of top-level service summaries is not complete documentation when
 those services own distinct workflows, commands, state machines, integrations,
 configuration, failure behavior, or operational contracts.
+
+Both harvest routes always use `task.plan_approval: auto`. Planning remains a
+worker phase with a durable planning artifact, but a command-style knowledge
+harvest never pauses for separate user approval of that plan.
 
 ## Coordinator isolation invariant
 
@@ -176,17 +180,24 @@ Routing is evidence-driven:
    and `selection_reason`. Check that rationale against the latest evidence
    before invoking the dispatch. Never invent a role name or silently replace
    Cortex's native arguments.
+   Do not treat a planned dispatch, commentary, or an empty wait as proof that
+   a worker exists. The native call must return a child id before saying it was
+   sent; retain those exact ids and wait only on them. A missing or failed
+   native dispatch is a blocker, never permission to continue the wave.
 
 Multiple workers with the same profile are separate bounded instances. Keep
 their ownership, paths, dependencies, report refs, and native task identities
-distinct even though their display name is the same canonical profile. Cortex
-sets `spawn_agent.task_name` to a task/attempt-unique key; only
-`profile`/`display_name` carries the stable role label. A new dispatch must use
+distinct. `profile` preserves the exact canonical role. `display_name` is the
+human-readable `Profile Module` label (for example, `Explorer Auth`), and
+`spawn_agent.task_name` is its host-safe task/attempt-unique key with an
+ordinal and a
+uniqueness digest. A new dispatch must use
 `spawn_agent`; `followup_task` is reserved for resuming that exact native
 worker after its durable question or other explicitly resumable pause. Cortex
-rejects reuse of a `host_agent_id` already bound to another attempt, and the
-lifecycle hooks map native task keys back to the canonical profile before
-injecting worker context.
+rejects reuse of a `host_agent_id` already bound to another attempt. Since
+dynamic host events report `agent_type=default`, lifecycle hooks use the
+required sequential spawn order to bind each opaque child ID back to its issued
+native task key and canonical profile before injecting worker context.
 
 ## Repository knowledge consumption
 
@@ -241,14 +252,41 @@ should use canonical phases from the returned snapshot rather than guessing.
 2. Call `start_orchestration` with exact absolute `project_root` and the task.
    Omit waves for the standard pipeline. A compact override is
    `{waves: [{workers: [{phase, depends_on, context_files, ...}]}]}`; only phase is required.
-3. Invoke each returned `{worker, call, arguments}` exactly. Native arguments
-   are already filtered. Do not add IDs or turn expected model metadata into a
+3. Invoke each returned `{worker, call, arguments}` exactly, one native call at
+   a time in returned worker order. Spawned children still run concurrently;
+   the deterministic call order lets generic host `SubagentStart` events bind
+   to the matching issued dispatch. Also retain its
+   sibling `dispatch_ref`, `briefing_path`, and `briefing_digest` as the issued
+   immutable transport receipt. Native arguments are already filtered and the
+   native message is intentionally a compact bootstrap, not the complete
+   worker prompt. Do not read, inline, expand, or reconstruct the briefing in
+   the coordinator, and never browse the surrounding Cortex ledger. Do not add IDs or turn expected model metadata into a
    native model override. Hidden `spawn_agent` dispatches must retain the
    returned `fork_turns: "none"`: the generated Cortex briefing is the
    complete worker context, and inheriting the coordinator transcript can leak
    localized user-language messages into the English-only worker channel.
 4. Wait idly for the complete wave. Do not inspect or modify the project while
-   any worker is active. Any profile may first publish a material question with
+   any worker is active. Before any project action, each worker reads only the
+   exact briefing path named by its bootstrap, verifies its read-only mode and
+   SHA-256, and stops on a writable or mismatched artifact. If the host file
+   reader alone cannot open that exact path, it calls `read_dispatch_briefing`
+   once with the complete bootstrap identity/digest tuple. If the scoped read
+   also fails, it stops with that diagnostic. This is
+   its sole direct-read exception below `.codex/cortex`; it must never list or
+   inspect the ledger, mutable state, baselines, delegation packages, another
+   briefing, or report files. It records the exact bootstrap-provided
+   `Dispatch briefing reviewed: <sha256>` marker in `report.evidence`;
+   `record_report` revalidates both the marker and immutable file. Predecessor
+   reports remain scoped tool reads. The fallback cannot list or select a
+   different briefing and grants no general ledger access.
+   A read-only worker chooses non-writing verification flags up front:
+   `PYTHONDONTWRITEBYTECODE=1` for Python, no pytest/test/build cache, and no
+   coverage or snapshot output. It skips a check that cannot be non-mutating
+   and records the limitation; it never creates artifacts and then invokes
+   `rm`, `git clean`, or a cleanup script. Cortex rejects newly changed
+   generated or gitignored artifacts against that attempt's baseline.
+
+   Any profile may first publish a material question with
    `worker_question(action="ask")`. The worker returns only its `question_ref`
    and a concise summary, publishes no report, and finishes its current native
    turn into an idle/resumable state; it must not busy-wait for the user.
@@ -265,6 +303,22 @@ should use canonical phases from the returned snapshot rather than guessing.
    `cortex/report/v1` through the scoped public `record_report` tool, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
+   When the dispatch supplies predecessor report refs, that successor worker
+   first reads each ref through `read_worker_report` with the exact project
+   root, task ref, attempt id, and profile from its briefing. It may not read
+   any other report, publish the coordinator-only Markdown link, or call a
+   lifecycle operation.
+   `followup_task` is reserved for the durable-question path after the answer
+   is recorded. If a native worker finishes with a report-tool error or any
+   acknowledgement other than `REPORT_RECORDED`/`QUESTION_RECORDED`, never
+   follow it up directly: `SubagentStop` has already classified the attempt.
+   Inspect once, then use the recovered report/question or submit the exact
+   failed result so Cortex can issue a fresh authorized rework dispatch.
+   Automatic rework is durable and bounded per phase: after three failed
+   attempts Cortex blocks the task and creates a recovery handoff instead of
+   spawning indefinitely. Use `manage_orchestration(intent="resume")` only
+   after the reported cause is actually repaired; resume starts a fresh bounded
+   recovery cycle.
 5. Read every returned ref with `read_worker_report`. The result includes the
    derived absolute `report_markdown_path` for the persisted
    `reports/markdown/<report-ref>.md` artifact. After each completed report,
@@ -290,7 +344,14 @@ call `manage_orchestration` with `intent="inspect"` exactly once. Treat the
 returned `context_handoff` as the authoritative compact state and protocol
 snapshot. It restores the goal, acceptance criteria, verified reports,
 decisions, changed files, decisive checks, blockers, pipeline, and next
-action from the durable ledger. Never call `start_orchestration` again,
+action from the durable ledger. It also separates `pending_dispatches` from
+`active_workers`: invoke only the matching top-level inspect dispatches, never
+spawn from the handoff itself, and wait on active workers only by their exact
+persisted `host_agent_id`. The documented `SubagentStart` hook records the
+native child id and actual model against the next sequentially issued attempt;
+dynamic workers report generic `agent_type=default`. A running
+attempt without that binding fails closed rather than being respawned or
+waited on with an empty target. Never call `start_orchestration` again,
 replay completed dispatches, or rely on a raw transcript. After rehydration,
 continue the existing relative step and publish every returned exact
 `report_markdown_link` before any other lifecycle or report-read call.
@@ -312,9 +373,10 @@ evidence-based `rework` instead; `follow_up` rejects it.
 
 ### Required post-plan approval
 
-The v3 task field `task.plan_approval` accepts `auto` or `required`. It
+The public task field `task.plan_approval` accepts `auto` or `required`. It
 defaults to `required` for C2/C3 and `auto` for C1; `auto` does not make user
-confirmation mandatory. When policy is `required`, the plan phase must be in
+confirmation mandatory. Harvest routes force `auto` regardless of complexity.
+When policy is `required`, the plan phase must be in
 its own wave. After a successful plan wave, Cortex returns
 `outcome: awaiting_plan_approval`, sends no successor dispatch, and provides
 `plan_review` with the planner `report_ref`, derived absolute
@@ -352,8 +414,9 @@ coordinator identity, and no echoed host tool/model/effort. A relative `step`
 is required only to separate retries from an identical report used on a later
 wave. Preserve and echo the opaque `task_ref` returned by Cortex so concurrent
 tasks in the same project remain isolated. Durable task IDs, receipts,
-evidence, verification, manifest, and handoff stay private in the compatible
-v7 ledger.
+evidence, verification, manifest, and handoff stay private in the canonical
+v8 ledger. Legacy v7/v3 state is unsupported and is never created, migrated,
+or resumed.
 
 When several tasks are active Cortex returns `needs_selection` with objective
 and opaque `task_ref`; use the matching ref on every subsequent lifecycle and
@@ -454,6 +517,15 @@ native worker is interrupted after persisting but before returning its ack,
 use `manage_orchestration` inspect to recover `available_reports`, which also
 includes the derived report path; do not ask
 the worker to regenerate a large inline report.
+
+The public dispatch result is deliberately compact: it carries a
+`dispatch_ref`, immutable `briefing_path`, `briefing_digest`, and a short native
+bootstrap. The full worker prompt is absent from the MCP result and mutable
+`current.json`/delegation JSON. Workers may directly read only their issued
+briefing; a failed host file read has one identity-and-digest-scoped
+`read_dispatch_briefing` fallback. All reports, questions, and lifecycle state stay behind scoped Cortex
+tools. This prevents output-size truncation without granting general ledger
+filesystem access.
 
 When a dispatch contains predecessor handoffs, the worker must review every
 one before project work and include the generated `Predecessor review:` entry

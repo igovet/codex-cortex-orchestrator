@@ -9,12 +9,14 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative six-tool public facade
+## Relative seven-tool public facade
 
-The public API exposes exactly six tools. Coordinators use the three lifecycle
+The public API exposes exactly seven tools. Coordinators use the three lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; workers use only `worker_question` and `record_report`, and coordinators read
-the resulting refs with `read_worker_report`. A coordinator starts a task with
+`manage_orchestration`; workers use `worker_question`, `record_report`, may
+recover only their exact immutable briefing through `read_dispatch_briefing`, and may
+read only explicitly supplied predecessor refs with scoped `read_worker_report`.
+A coordinator starts a task with
 the compact task contract, then continues once per completed wave.
 The active-wave cursor is a relative `step`; parallel results use only
 relative worker slots. Start owns classification, ledger initialization,
@@ -41,16 +43,16 @@ ownership, dependencies, risk, sequencing, or validation. Planner and explorer
 recommendations are advisory, and every replacement carries the coordinator's
 concise reason. Changing a completed gate requires explicit rework.
 Semantically unchanged future-wave reassessment records an unchanged receipt
-and continues, while v3 future waves are internally renumbered so public
+and continues, while v4 future waves are internally renumbered so public
 relative steps never move backward or collide.
 
 The final advance reconciles reports and the project manifest, records the
 documentation decision, verifies close evidence observed by the server,
 creates the handoff and audit record, and completes the task. `inspect`,
 `resume`, `deactivate`, `lane`, `resource`, and `question` are recovery or
-nested operations of the same facade. Legacy v7 primitives remain internal;
-existing v7 task data stays inspectable and resumable. This reduces public
-lifecycle coupling while retaining the durable ledger's auditability.
+nested operations of the same facade. Legacy v7 primitives and task data are
+unsupported and are neither migrated nor resumed. This keeps the public
+lifecycle coupled only to the canonical v8 ledger.
 
 Project cleanup is a bounded `prune` management operation rather than clear.
 It requires explicit confirmation and an age threshold (seven days by default),
@@ -149,8 +151,8 @@ Task state, evidence, gate outcomes, handoffs, and authoritative report JSON
 use locked, fsync-backed per-file atomic replacement. Report Markdown and
 indexes are projections that `reconcile_report_bus` can rebuild from validated
 records. Related files are not one crash-atomic transaction. Lifecycle hook
-telemetry and model metrics are observational and must never block task
-execution; their durability is intentionally weaker.
+telemetry and model metrics are not canonical task artifacts and must not be
+used as completion proof.
 
 ## Bounded gate recovery
 
@@ -165,7 +167,7 @@ repair while guaranteeing a terminal control-plane outcome.
 ## C2/C3 proof requirements
 
 C2 and C3 tasks require delegation-linked evidence and a final handoff before
-completion. Schema v7 additionally requires a consumed classification receipt,
+completion. The v8 contract additionally requires a consumed classification receipt,
 a status observation before delegation, with stale revision/receipt hints safely corrected by the serialized server, a `technical_writer` documentation
 decision, an explicit reassessment decision, server-observed successful command
 evidence at close, a complete project-manifest receipt, and an attempt-tied
@@ -183,7 +185,7 @@ their prior evidence, so a later pass cannot accidentally reuse stale proof.
 
 ## Manifest-backed handoffs and bounded host correlation
 
-Each v7 task captures a project file manifest at initialization and compares it
+Each v8 task captures a project file manifest at initialization and compares it
 at reconciliation or handoff. A final handoff must name every detected changed
 file, including additions, deletions, modifications, and recognized renames.
 This makes touched-file reporting checkable without relying on a worker's
@@ -235,9 +237,9 @@ the route, and never present either bare token as a required user recovery
 step. Classification, task creation, delegation, gates, lanes, and claims
 cannot mutate state before activation.
 
-## Documented v3 lifecycle identity
+## Documented v4 lifecycle identity
 
-New v3 tasks keep their generated authorization identity immutable. A
+New v4 tasks keep their generated authorization identity immutable. A
 synchronous `PostToolUse` hook binds the returned opaque `task_ref` to the
 documented hook `session_id` in a separate private registry, so identities
 already embedded in a dispatch response remain valid. `SessionStart` uses that
@@ -250,16 +252,19 @@ required after installation or update so the new hook, skill, and MCP paths are
 loaded.
 
 Native worker identity follows the same separation: `profile` remains
-canonical, while `display_name` is the human-readable `Profile Module NN` form
-(for example, `Explorer Auth 02`). `spawn_agent.task_name` is its
+canonical, while `display_name` is derived from the task domain in the user's
+request (for example, `Planner Authentication`), without a number or digest.
+Gate mission verbs are not used as the display module. `spawn_agent.task_name` is its
 lower-underscore equivalent with a deterministic uniqueness digest; it uniquely
 names the task/attempt session and satisfies the host's `[a-z0-9_]{1,80}` name
 contract. Hyphens are normalized only for this native field and the digest
 prevents collisions; durable Cortex IDs retain their hyphen-compatible format.
 Cortex rejects reuse of a `host_agent_id` already
 bound to another attempt. Only `followup_task` for the exact confirmed native
-worker may resume it; lifecycle hooks map the native task key back to the
-canonical profile for worker-context injection.
+worker may resume it. Dynamic `SubagentStart` events expose
+`agent_type=default`, so lifecycle hooks use required sequential spawn order to
+map each opaque child ID back to the issued native task key and canonical
+profile for worker-context injection.
 
 ## Visible-thread checkout selection
 
@@ -275,7 +280,7 @@ deliberate trade-off and requires serializing writers.
 ## Project-local runtime state
 
 Production orchestration is fail-closed for each supplied absolute
-`project_root`; one MCP server process can serve multiple roots. The v3 public
+`project_root`; one MCP server process can serve multiple roots. The v4 public
 tools validate the selected root before preparing work, and an unavailable server
 or failed, unwritable, or mismatched root ends that task's workflow with a
 blocker. Ordinary/unledgered subagent work is not a substitute.
@@ -287,7 +292,7 @@ The supported native entry is the host-discovered `cortex:orchestrator` skill
 arguments, not separately registered slash commands. An empty argument selects
 ordinary task orchestration; `help`, `harvest`, `harvest-refresh`, and `normal`
 select the other routes. Help is read-only; normal deactivates session state
-without creating a task. Knowledge routes retain the v7 task, delegation,
+without creating a task. Knowledge routes retain the v8 task, delegation,
 gate, project-manifest, verification, and handoff contracts.
 
 ## Bundled profile contract and capability-aware routing
@@ -326,7 +331,7 @@ fallback is not part of model routing.
 ## Scoped worker report bus
 
 Workers publish a strict eight-field `cortex/report/v1` payload through public
-`continue_orchestration` results; the private v7 report primitive stores the canonical
+`record_report`; the v8 report primitive stores the canonical
 sanitized JSON record, which is task- and attempt-bound; server-owned receipts
 make retries idempotent. A receipt links one report to one C2/C3
 evidence record and is consumed once. Its `reports/consumptions/` tombstone is

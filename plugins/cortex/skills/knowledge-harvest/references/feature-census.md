@@ -57,6 +57,13 @@ contracts. Split it into discoverable feature pages and link shared flows.
 
 The feature index must contain a source-backed matrix with at least:
 
+Use these seven labels verbatim as the coverage table headers, in this order;
+additional columns may follow:
+
+```text
+| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |
+```
+
 | Field | Required meaning |
 | --- | --- |
 | Feature | Stable human-readable capability name |
@@ -65,13 +72,17 @@ The feature index must contain a source-backed matrix with at least:
 | Source evidence | Key project-relative paths |
 | Documentation | Canonical feature page(s) |
 | Verification | Relevant tests or safe checks |
-| Status | documented, partial, unknown, or excluded |
+| Status | `covered`, `documented`, `verified`, or `excluded` in a final accepted manifest; `partial` or `unknown` is in-progress only and blocks the gate |
 
 Also record totals for inventoried feature-bearing surfaces, mapped surfaces,
 documented features, partial/unknown items, unmapped items, and exclusions.
 The coverage gate passes only with zero unexplained unmapped surfaces. Partial
 or unknown items remain visible and prevent a claim of complete behavioral
 coverage unless their boundary is explicitly out of scope.
+
+Every non-excluded row must link its `Documentation` cell to a canonical page
+below `docs/features/`. Every row must contain all seven required cells; prose
+elsewhere in the file does not substitute for a missing header or cell.
 
 ## Required feature documentation
 

@@ -11,7 +11,7 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `4.4.3` (an installed build may carry a `+codex.<build>` suffix).
+  `6.1.0` (an installed build may carry a `+codex.<build>` suffix).
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
@@ -37,25 +37,27 @@ pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
 tracked-release archive validation.
 
-Current 4.4.3 source evidence includes 277 passing tests, marketplace
+Current 6.1.0 source evidence includes the full passing test suite, marketplace
 validation, Python compilation, shell syntax, the isolated fresh-plugin probe,
-and installed-content verification at `4.4.3+codex.20260815231023`. It carries
-forward the 4.4.2 baseline of 274 passing tests as historical evidence. File-size hardening covers
+and installed-content verification at `6.1.0+codex.<build>`. File-size hardening covers
 the 8 MiB ordinary-JSON bound with fail-before-replace diagnostics, the
 separate 64 MiB manifest bound, early baseline preflight, bounded
 handoff/reconciliation snapshots, and actionable fail-closed errors for
 oversized artifacts. A copy-based registry migration and the Planner prompt
 measurements are recorded in `docs/project/verification.md`. Installation
 preserved the user MCP approval override. Live-model and tracked-release
-validation remain unverified.
+validation are split deliberately: native live execution completed the full
+six-phase harvest and a fresh final-build dispatch confirmed the corrected
+human/native worker identities; the tracked-release archive check runs only
+after the candidate is committed and must pass before push.
 Historical 4.0.0 installation and validation evidence does not attest this
 patch.
-Commit, tag, push, catalog submission, approval, and publication remain
-unverified.
+Tag, catalog submission, approval, and public publication are not part of this
+local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 4.4.3 release commit only with explicit authorization.
+- Create the Cortex 6.1.0 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

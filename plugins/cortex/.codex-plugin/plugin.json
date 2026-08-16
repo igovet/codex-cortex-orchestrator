@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "4.4.3+codex.20260815231023",
+  "version": "6.1.0+codex.20260816042336",
   "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"
@@ -10,12 +10,14 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, three coordinator lifecycle operations, and scoped worker question/report transport over the local Cortex v7 ledger. Cortex preserves the exact user-authored request, blocks coordinator intent expansion, requires durable clarification for underspecified product work, and keeps receipt-backed gates, verification, maintenance, and handoff state.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, three coordinator lifecycle operations, scoped immutable dispatch briefings, and worker question/report transport over the canonical local Cortex v8 ledger. Cortex preserves the exact user-authored request, binds native workers for compaction-safe recovery, requires observable task and microtask contracts, reconciles worker claims with per-attempt file evidence, and keeps receipt-backed gates, verification, maintenance, and handoff state.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [
       "Local MCP control plane",
       "Task ledger",
+      "Scoped immutable dispatch briefings",
+      "Compaction-safe worker recovery",
       "Scoped worker report bus",
       "Durable worker question bus",
       "Agent profiles",

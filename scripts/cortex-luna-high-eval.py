@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixture and optional live evaluation for a Luna-high Cortex v3 parent."""
+"""Fixture and optional live evaluation for a Luna-high Cortex parent."""
 from __future__ import annotations
 
 import argparse
@@ -107,7 +107,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
 def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None) -> str:
     if scenario == "follow_up_partial":
         return (
-            "Use only Cortex v3 public tools for this isolated partial smoke test. "
+            "Use only the public Cortex tools for this isolated partial smoke test. "
             f"The exact project_root is {project}. The completed source task_ref is {source_task_ref!r}. "
             "Call manage_orchestration exactly once with intent=follow_up, that task_ref, and payload.user_request exactly "
             "'Correct the fixture result because the completed task produced the wrong behavior.' with complexity C1. "
@@ -116,7 +116,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "once with manage_orchestration to confirm it is awaiting its first worker."
         )
     common = (
-        "Use the Cortex v3 MCP public tools to complete this isolated task. "
+        "Use the Cortex MCP public tools to complete this isolated task. "
         "You are the parent orchestrator. Preserve the task text exactly in start_orchestration task.user_request, "
         "and use one continue_orchestration per wave; "
         "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "

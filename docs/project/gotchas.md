@@ -1,14 +1,28 @@
 # Gotchas
 
-## Public v3 coordinator contract
+## Canonical runtime artifacts
+
+- New tasks use the `cortex/v8` ledger and public `cortex/orchestration/v4`
+  lifecycle. Legacy v7/v3 state is unsupported and is neither migrated nor
+  resumed. The runtime does not create `v3-operations.json`, active-task or
+  status-receipt files, `reports/grants`, `metrics.json`, task lock files,
+  handoff-manifest snapshots, or evidence-snapshot files.
+- `baseline-manifest.json` is intentional: the task-start baseline proves
+  whole-task handoff stability, while each attempt baseline reconciles actual
+  `changed_files` and prevents read-only workers claiming writes. It works in
+  non-Git repositories and with pre-existing dirty files; Git HEAD/index alone
+  cannot provide that contract. Ignore/build policy keeps the manifest bounded.
+
+## Public v4 coordinator contract
 
 - Normal flow is `start_orchestration` once, then
   `continue_orchestration` once per completed relative `step`.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
   lane/resource/durable-question work. The legacy `orchestrate` facade and v7
-  primitives below are private compatibility internals. Together with
-  worker-only `worker_question`/`record_report` and coordinator-only
-  `read_worker_report`, the public surface is exactly six tools.
+  primitives below are private runtime internals. Together with worker
+  `worker_question`/`record_report`, identity/digest-scoped
+  `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
+  public surface is exactly seven tools.
 - Every public call requires the exact absolute `project_root`. Start requires
   the user's exact, unexpanded `task.user_request`; the sole host-metadata
   exception is Desktop's injected absolute local
@@ -26,7 +40,8 @@
   `cortex/report/v1` sections through the scoped public `record_report` tool,
   then return only `REPORT_RECORDED report_ref=<value>` plus at most a
   two-sentence summary. The coordinator reads the full report through
-  `read_worker_report`. Non-success results omit report refs and require a
+  `read_worker_report`; successor workers may use that tool only for explicitly
+  supplied predecessor refs with exact scope identifiers. Non-success results omit report refs and require a
   normalized status plus reason. Workers never call lifecycle, pipeline,
   gate, delegation, or management operations and never paste report JSON into
   the native parent result. If `record_report` fails, the native final contains
@@ -116,8 +131,22 @@
   Hidden `spawn_agent` arguments intentionally include `fork_turns: "none"`;
   do not replace it with inherited coordinator context.
 - Keep `profile` as the exact canonical role name, and use the human-readable
-  `display_name` format `Profile Module NN` (for example, `Explorer Auth 02`).
-  The native `spawn_agent.task_name` is the lower-underscore equivalent with a
+  `display_name` is derived from the task domain in the user's request (for
+  example, `Planner Authentication`), without an ordinal or digest. Gate
+  mission verbs are not used as the display module. The unique native
+  `spawn_agent.task_name` carries the lower-
+  underscore profile/module, ordinal, and digest (for example,
+  `explorer_auth_02_<digest>`); `followup_task` resumes only that same native
+  worker.
+  Host spawn prompts de-duplicate the exact user request; `start_orchestration.next_action`
+  is serialized before dispatch payloads. The nested realistic harvest Planner
+  prompt is regression-tested below 11,500 bytes, the compact native bootstrap
+  is below 1,500 bytes, and the complete public start response below 8,000
+  UTF-8 bytes. A worker is not sent until native
+  `spawn_agent` returns a child id; empty dispatch announcements or waits are
+  forbidden, and a synchronous `PreToolUse` hook denies a targetless wait
+  before it can block. Native failure is a blocker. The native
+  `spawn_agent.task_name` is the lower-underscore equivalent with a
   uniqueness digest and is a task/attempt-unique session key that must match
   the host's strict `[a-z0-9_]{1,80}` contract. Its deterministic digest
   preserves uniqueness without copying durable IDs, skill paths, or prompt
@@ -131,14 +160,14 @@
   even when a worker is delayed, fails, or is unavailable. Dispatch only the
   workers returned by Cortex, remain idle while they run, and use recovery,
   rework, or a blocker instead of taking over their project work. `SessionStart`
-  and every public v3 `next_action` repeat this rule so compaction or a resumed
+  and every public v4 `next_action` repeat this rule so compaction or a resumed
   turn does not weaken it.
 - After context compaction, do not trust the visible transcript or assume the
   loaded skill cache is current. Preserve the opaque `task_ref`, call
   `manage_orchestration(intent="inspect")` once, and rehydrate from its
   `context_handoff`. It is ledger-derived recovery state, not a replacement
   for the orchestrator skill; never restart the task or replay completed work.
-- New v3 starts use a generated task-local authorization identity, then the
+- New v4 starts use a generated task-local authorization identity, then the
   synchronous Cortex `PostToolUse` hook binds the returned `task_ref` to the
   documented event `session_id`. Explicitly forwarded `CODEX_SESSION_ID` or
   `CODEX_THREAD_ID` values are compatibility hints only. `SessionStart` handles
@@ -157,10 +186,10 @@
   project id or loop. An indexed repository never authorizes the root
   coordinator to inspect the project.
 
-## Private v2/v7 compatibility internals
+## Internal ledger invariants
 
-The remaining notes document invariants retained inside the v7 ledger and
-private adapter. They are not valid public v3 request envelopes.
+The remaining notes document internal invariants behind the public v4 lifecycle
+and v8 ledger. They are not caller-facing request envelopes.
 
 - Command evidence must include an explicit `exit_code`; a textual claim that
   a command was green is not sufficient. The final C2/C3 `advance` privately
@@ -172,11 +201,6 @@ private adapter. They are not valid public v3 request envelopes.
 - `orchestrate(operation="resource", payload.command="claim")` is the explicit
   exclusive-resource API. Use an expiry for ports, processes, databases,
   branches, and other resources that may survive a crashed agent.
-- The v2 coordinator workflow is `orchestrate(start)` followed by one
-  `orchestrate(advance)` call for each completed wave. Historical `cortex/v7`
-  tasks remain inspectable and resumable through recovery operations, but v7
-  primitive names are private implementation details and are not a public
-  coordinator workflow.
 - C2/C3 gates cannot silently skip or remove `documentation` or `close` from
   the pipeline. There is no `learn` gate. The documentation gate must be
   delegated to `technical_writer` and record `updated` or justified
@@ -205,18 +229,18 @@ private adapter. They are not valid public v3 request envelopes.
   `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
   the chat/thread session id, JSON-RPC request id, and any task/attempt or
   other call ids, but never stores secret-like input values verbatim.
-- Expected public v3 validation and recovery failures return structured
+- Expected public v4 validation and recovery failures return structured
   `ok: false` results with bounded `diagnostics` and a corrective `next_action`.
   They are caller-correctable protocol outcomes and are not written to
   `~/.codex/logs/cortex-tool-errors.jsonl`; only raised MCP-boundary exceptions
-  enter that private redacted log. Public v3 validation occurs before lifecycle
+  enter that private redacted log. Public v4 validation occurs before lifecycle
   writes where possible. Correct every diagnostic and retry according to the
   returned action.
 - Preflight aggregates independent request mistakes into one `ok: false`
   response. Each diagnostic has `path`, `message`, and `expected`; repair every
   listed path before retrying. Do not treat the first diagnostic as the only
   error or submit a sequence of one-field fixes.
-- The exact `start` envelope is `{operation:"start", project_root, principal,
+- The exact lifecycle start envelope is `{operation:"start", project_root, principal,
   thread_id, submission_id, host_capabilities, task, waves}`. `task` requires
   `{task_id, objective, complexity}` where complexity is `C1`, `C2`, or `C3`;
   it additionally accepts `requirements`, `acceptance_criteria`, `scope`,

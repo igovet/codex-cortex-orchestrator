@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import re
@@ -150,22 +151,25 @@ class OrchestrationInvariantTests(unittest.TestCase):
             name = f"added-{index:03d}.txt"
             (self.project / name).write_text(str(index), encoding="utf-8")
             added.append(name)
-        partial = control.reconcile_project_files({"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "paths": ["modified.txt"]})
-        self.assertFalse(partial["receipt"]["complete"])
-        self.assertGreater(len(partial["receipt"]["unaccounted_paths"]), 100)
+        task_dir = self.ledger / "tasks" / "0001-task"
+        partial, _ = control.reconcile_manifest(task_dir, state, ["modified.txt"])
+        self.assertFalse(partial["complete"])
+        self.assertGreater(len(partial["unaccounted_paths"]), 100)
         complete_paths = ["modified.txt", "deleted.txt", "old.txt", "new.txt", *added]
-        complete = control.reconcile_project_files({"task_id": "task", "principal": "owner", "expected_revision": partial["state"]["revision"], "paths": complete_paths})
-        self.assertTrue(complete["receipt"]["complete"])
-        self.assertEqual(complete["receipt"]["comparison"]["change_count"], 128)
-        incomplete = control.handoff({"task_id": "task", "principal": "owner", "expected_revision": complete["state"]["revision"], "completed": ["changes"], "files": ["modified.txt"], "next_action": "continue"})
+        complete, _ = control.reconcile_manifest(task_dir, state, complete_paths)
+        self.assertTrue(complete["complete"])
+        self.assertEqual(complete["comparison"]["change_count"], 128)
+        incomplete = control.handoff({"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "completed": ["changes"], "files": ["modified.txt"], "next_action": "continue"})
         self.assertFalse(incomplete["recorded"])
         self.assertTrue(incomplete["recoverable"])
         self.assertEqual(incomplete["next_action"], "retry_create_handoff_with_complete_files")
         self.assertEqual(incomplete["required_fields"], ["files"])
         self.assertGreater(len(incomplete["unaccounted_paths"]), 100)
         self.assertFalse(incomplete["state"]["handoff_created"])
-        handed = control.handoff({"task_id": "task", "principal": "owner", "expected_revision": complete["state"]["revision"], "completed": ["changes"], "files": complete_paths, "next_action": "continue"})
+        handed = control.handoff({"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "completed": ["changes"], "files": complete_paths, "next_action": "continue"})
         self.assertEqual(len(handed["file_manifest_receipt"]["reported_paths"]), len(complete_paths))
+        self.assertNotIn("manifest_file", handed)
+        self.assertFalse(any((task_dir / "handoffs").glob("*-manifest.json")))
 
     def test_c2_pipeline_requires_documentation(self):
         created = self.init(complexity="C2")
@@ -306,7 +310,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         second_report = self.report("task", second["attempt_id"], "second")
         second_evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": second["state"]["revision"], "gate": "plan", "attempt_id": second["attempt_id"], "report_receipt": second_report["receipt"]["receipt_id"], "summary": "replacement plan"})
         repassed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": second_evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
-        self.assertEqual(repassed["state"]["current_gate"], "discover")
+        self.assertEqual(repassed["state"]["current_gates"], ["discover"])
 
     def test_stop_reassessment_requires_current_handoff(self):
         state = self.init(complexity="C2")["state"]
@@ -610,6 +614,36 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertTrue(lifecycle.exists())
         self.assertEqual(lifecycle.stat().st_mode & 0o777, 0o600)
 
+    def test_agent_hook_rejects_empty_wait_as_unspawned_dispatch(self):
+        self.init(task_id="empty-wait")
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        for tool_name in ("Agent", "wait"):
+            with self.subTest(tool_name=tool_name):
+                event = {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "owner",
+                    "tool_name": tool_name,
+                    "tool_input": {"action": "wait", "receiver_thread_ids": []},
+                }
+                completed = subprocess.run(
+                    [sys.executable, str(hook)], input=json.dumps(event), text=True,
+                    capture_output=True, env=os.environ.copy(), check=True,
+                )
+                output = json.loads(completed.stdout)["hookSpecificOutput"]
+                self.assertEqual(output["hookEventName"], "PreToolUse")
+                self.assertEqual(output["permissionDecision"], "deny")
+                reason = output["permissionDecisionReason"]
+                self.assertIn("CORTEX DISPATCH FAILURE", reason)
+                self.assertIn("No worker was spawned", reason)
+                self.assertIn("Never retry an empty wait", reason)
+
+        event["tool_input"]["receiver_thread_ids"] = ["child-01"]
+        targeted = subprocess.run(
+            [sys.executable, str(hook)], input=json.dumps(event), text=True,
+            capture_output=True, env=os.environ.copy(), check=True,
+        )
+        self.assertEqual(targeted.stdout.strip(), "{}")
+
     def test_session_hook_reasserts_root_coordinator_lock(self):
         self.init(task_id="coordinator-lock")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
@@ -647,9 +681,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_compact_session_hook_reasserts_durable_recovery(self):
         self.init(task_id="compact-recovery")
         public_ref = control._v3_task_ref("compact-recovery")
-        (self.ledger / "v3-operations.json").write_text(
+        (self.ledger / "orchestration-operations.json").write_text(
             json.dumps({
-                "schema": "cortex/orchestration/v3",
+                "schema": "cortex/orchestration/v4",
                 "tasks": {"compact-recovery": {"start": {"task_ref": public_ref}}},
             }),
             encoding="utf-8",
@@ -685,7 +719,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "tool_name": "mcp__cortex__read_worker_report",
             "tool_input": {"project_root": str(self.project)},
             "tool_response": {"structuredContent": {
-                "schema": "cortex/orchestration/v3",
+                "schema": "cortex/orchestration/v4",
                 "ok": True,
                 "report_markdown_link": link,
             }},
@@ -704,7 +738,26 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("REPORT PUBLICATION REQUIRED", context)
         self.assertIn(link, context)
 
-    def test_hook_manifest_covers_clear_and_cortex_post_tool_contracts(self):
+    def test_start_hook_places_native_spawn_imperative_after_mcp_result(self):
+        context = cortex_hook.dispatch_required_context({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__cortex__start_orchestration",
+            "tool_response": {"structuredContent": {
+                "schema": "cortex/orchestration/v4",
+                "ok": True,
+                "task_ref": "task-live",
+                "dispatches": [{
+                    "call": "spawn_agent",
+                    "arguments": {"task_name": "explorer_auth_01_deadbeef"},
+                }],
+            }},
+        })
+        self.assertIn("CORTEX DISPATCH REQUIRED NOW", context)
+        self.assertIn("next tool call must invoke dispatches[0].call", context)
+        self.assertIn("Do not call wait", context)
+        self.assertIn("explorer_auth_01_deadbeef", context)
+
+    def test_hook_manifest_covers_clear_and_agent_tool_contracts(self):
         manifest = json.loads(
             (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
         )
@@ -713,6 +766,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__start_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__manage_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_report"))
+        pre_matcher = manifest["hooks"]["PreToolUse"][0]["matcher"]
+        self.assertTrue(re.fullmatch(pre_matcher, "Agent"))
+        self.assertTrue(re.fullmatch(pre_matcher, "wait"))
 
     def test_lifecycle_hook_commands_fail_open_when_a_retired_cache_path_disappears(self):
         manifest = json.loads(
@@ -724,7 +780,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             for registration in registrations
             for hook in registration["hooks"]
         ]
-        self.assertEqual(len(commands), 4)
+        self.assertEqual(len(commands), 5)
         for command in commands:
             self.assertIn("if test -f", command)
             self.assertIn("else printf '{}\\n'", command)
@@ -784,11 +840,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         payload = json.loads(completed.stdout)
         context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Canonical agent name: general", context)
+        self.assertIn("Canonical profile: general", context)
+        self.assertIn("Worker display name: General Invariant", context)
         task_dir = self.ledger / "tasks" / created["task_directory"]
         lifecycle = json.loads((task_dir / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(lifecycle["agent_type"], "general")
-        self.assertEqual(lifecycle["display_name"], "general")
+        self.assertEqual(lifecycle["display_name"], "General Invariant")
 
     def test_hook_hashes_thread_and_allowlists_telemetry_fields(self):
         created = self.init(task_id="hook-privacy")
@@ -817,7 +874,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual([item["index"] for item in events], [3, 4, 5])
         self.assertEqual(metadata["dropped"], 3)
 
-    def test_v7_rejects_older_task_schema(self):
+    def test_v8_rejects_older_task_schema(self):
         created = self.init(task_id="schema-check")
         task_dir = self.ledger / "tasks" / created["task_directory"]
         unsupported = "cortex/" + "v" + str(5)
@@ -826,7 +883,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["schema"] = unsupported
             path.write_text(json.dumps(payload), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "create a new v7 task"):
+        with self.assertRaisesRegex(ValueError, "create a new task"):
             control.status({"task_id": "schema-check", "principal": "owner"})
 
     def test_shipped_policy_and_plugin_have_no_retired_profile_contract(self):
@@ -849,7 +906,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("Cortex v3 exposes three coordinator lifecycle operations plus scoped worker", skill)
+        self.assertIn("The public Cortex API exposes three coordinator lifecycle operations plus scoped worker", skill)
         self.assertIn("Coordinators use `start_orchestration`", skill)
         self.assertIn("`continue_orchestration` for normal work", skill)
         self.assertIn("Invoke each returned dispatch", skill)
@@ -864,6 +921,13 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("docs/features/index.md", skill)
         self.assertIn("Knowledge reviewed:", skill)
         self.assertIn("context_files", skill)
+        self.assertIn("dispatch_ref", skill)
+        self.assertIn("briefing_digest", skill)
+        self.assertIn("sole direct-read exception", skill)
+        self.assertIn("do not send a corrective follow-up", skill)
+        self.assertIn("Only a newly returned top-level dispatch authorizes rework", skill)
+        self.assertIn("at most three automatic failed attempts", skill)
+        self.assertRegex(skill, r"Dispatch\s+briefing reviewed: <sha256>")
 
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -886,6 +950,38 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(len(list((repository / "plugins/cortex/agents").glob("*.toml"))), 21)
         self.assertEqual(len(list((repository / "plugins/cortex/skills").glob("*/SKILL.md"))), 10)
 
+    def test_runtime_contract_is_plugin_bundled_and_does_not_depend_on_root_agents(self):
+        repository = Path(__file__).parents[1]
+        plugin = repository / "plugins/cortex"
+        manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["skills"], "./skills/")
+        self.assertTrue((plugin / "hooks/hooks.json").is_file())
+        self.assertTrue((plugin / ".mcp.json").is_file())
+        self.assertIn(
+            '"dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing"',
+            (plugin / "profiles.json").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "def bind_host_worker_from_hook(",
+            (plugin / "scripts/cortex.py").read_text(encoding="utf-8"),
+        )
+        hook = (plugin / "scripts/cortex_hook.py").read_text(encoding="utf-8")
+        self.assertIn("bind_host_worker_from_hook", hook)
+        self.assertIn("Dispatch briefing reviewed digest", hook)
+        self.assertIn("def stopped_worker_after_wait_context(", hook)
+        self.assertIn("even when its native final text is a report-tool error", hook)
+        for relative in (
+            "skills/cortex-control/SKILL.md",
+            "skills/orchestrator/SKILL.md",
+            "skills/context-compaction/SKILL.md",
+        ):
+            skill = (plugin / relative).read_text(encoding="utf-8")
+            self.assertIn("pending_dispatches", skill, relative)
+            self.assertIn("active_workers", skill, relative)
+        installer = (repository / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
+        self.assertIn('plugin_source="${project_dir}/plugins/${plugin_name}"', installer)
+        self.assertNotIn('plugin_source="${project_dir}"', installer)
+
     def test_all_profiles_ship_complete_professional_playbooks(self):
         import tomllib
 
@@ -907,6 +1003,91 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "another engineer can execute without making design decisions",
         ):
             self.assertIn(marker, planner)
+
+    def test_every_profile_effective_prompt_has_exact_files_tools_and_completion_contract(self):
+        contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
+        profiles = {item["name"]: item for item in contract["profiles"]}
+        execution_contracts = contract["profile_execution_contracts"]
+        self.assertEqual(set(execution_contracts), set(profiles))
+        for name, profile in profiles.items():
+            gate = (profile["gates"] or ["implementation"])[0]
+            package = {
+                "task_id": "task-prompt-audit",
+                "task_ref": "task-ref-prompt-audit",
+                "gate": gate,
+                "attempt_id": f"{gate}-01",
+                "dispatch_ref": f"dispatch-{name.replace('_', '')[:12]}000000000000",
+                "project_root": "/workspace/prompt-audit",
+                "facade_managed": True,
+                "user_owned_thread": False,
+                "task_user_request": "Audit and complete the delegated project outcome.",
+                "task_objective": "Complete the audited task contract.",
+                "objective": f"Complete the {gate} mission.",
+                "ownership": f"Own only the delegated {gate} boundary.",
+                "task_requirements": ["Preserve unrelated project behavior."],
+                "task_scope": ["src", "tests"],
+                "allowed_paths": ["src", "tests"],
+                "context_files": ["docs/project/index.md"],
+                "knowledge_index_files": ["docs/project/index.md"],
+                "context_report_ids": ["report-0001"],
+                "result_baseline_file": f"delegations/{gate}-01.baseline.json",
+                "task_acceptance_criteria": ["The requested behavior is complete."],
+                "acceptance_criteria": ["The delegated gate outcome is complete."],
+                "task_verification": ["The final verification succeeds."],
+                "verification": ["The delegated result is independently verified."],
+                "pause_conditions": ["A material user decision is required."],
+                "budget": "No external side effects.",
+                "plan_feedback": None,
+                "intent_clarification_required": False,
+                "intent_clarification_reason": None,
+            }
+            prompt = control.host_spawn_prompt(name, package)
+            execution = execution_contracts[name]
+            with self.subTest(profile=name, gate=gate):
+                self.assertLess(len(prompt.encode("utf-8")), 16_000, name)
+                self.assertIn(f"You are the internal Cortex worker with profile `{name}`.", prompt)
+                self.assertIn("## Profile file and artifact contract", prompt)
+                self.assertIn(f"Required inputs: {execution['inputs']}", prompt)
+                self.assertIn(f"Project artifacts: {execution['project_artifacts']}", prompt)
+                self.assertIn(f"Completion deliverable: {execution['completion']}", prompt)
+                self.assertIn("Context files and predecessor reports are required read inputs, not write authorization.", prompt)
+                self.assertIn("The Cortex ledger under .codex/cortex is server-owned", prompt)
+                self.assertIn("Dispatch briefing transport:", prompt)
+                self.assertIn("authorized reading this exact briefing and no other path under .codex/cortex", prompt)
+                self.assertIn("Dispatch briefing reviewed: <sha256>", prompt)
+                self.assertIn("Use scoped Cortex tools for predecessor reports", prompt)
+                self.assertIn("read_dispatch_briefing", prompt)
+                self.assertIn(f"delegations/{gate}-01.baseline.json", prompt)
+                self.assertIn("read_worker_report", prompt)
+                self.assertIn(f"attempt_id='{gate}-01'", prompt)
+                self.assertIn(f"profile={name!r}", prompt)
+                self.assertIn("worker_question", prompt)
+                self.assertIn("record_report", prompt)
+                self.assertIn("Gate acceptance 1: PASS - ", prompt)
+                self.assertIn("Gate verification 1: PASS - ", prompt)
+                self.assertIn("REPORT_RECORDED report_ref=<value>", prompt)
+                if control.result_contract_is_read_only(package):
+                    self.assertIn("report.changed_files must be exactly []", prompt)
+                else:
+                    self.assertIn("put every path changed since this attempt began", prompt)
+                if gate in control.EXECUTED_CHECK_RESULT_GATES:
+                    self.assertIn("command, cwd, exit_code, and evidence", prompt)
+                digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+                bootstrap = control.host_spawn_bootstrap(
+                    name,
+                    Path("/workspace/prompt-audit/.codex/cortex/tasks/task/delegations/worker.briefing.md"),
+                    digest,
+                    package["dispatch_ref"],
+                    package["task_id"],
+                    package["attempt_id"],
+                    Path(package["project_root"]),
+                )
+                self.assertLess(len(bootstrap.encode("utf-8")), 1_500, name)
+                self.assertIn(package["dispatch_ref"], bootstrap)
+                self.assertIn(digest, bootstrap)
+                self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
+                self.assertIn("read_dispatch_briefing", bootstrap)
+                self.assertIn(control.dispatch_briefing_review_marker(digest), bootstrap)
 
     def test_installable_orchestration_contract_forbids_root_project_work(self):
         repository = Path(__file__).parents[1]
@@ -940,6 +1121,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         contract = json.loads((repository / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
         profiles = {item["name"]: item for item in contract["profiles"]}
         self.assertEqual(set(profiles), control.AGENTS)
+        self.assertEqual(set(contract["profile_execution_contracts"]), set(profiles))
+        for name, execution in contract["profile_execution_contracts"].items():
+            self.assertEqual(set(execution), {"inputs", "project_artifacts", "completion"}, name)
+            self.assertTrue(all(len(value.split()) >= 6 for value in execution.values()), name)
         for name, profile in profiles.items():
             self.assertTrue(profile["description"], name)
             self.assertTrue(profile["select_when"], name)
@@ -953,6 +1138,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         }
         self.assertEqual(routed, manual_writers)
         shared = contract["shared_worker_contract"]
+        self.assertEqual(
+            shared["worker_operations"],
+            ["read_dispatch_briefing", "read_worker_report", "worker_question", "record_report"],
+        )
+        self.assertEqual(
+            shared["dispatch_briefing_fallback"],
+            "one_scoped_read_dispatch_briefing_call_with_exact_identity_and_digest_only_when_host_file_read_is_unavailable",
+        )
         self.assertEqual(
             shared["repository_intelligence"],
             "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
@@ -1045,6 +1238,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(manifest["policy"]["gitignore_files"], [".gitignore"])
         self.assertIn("ignored-dir", manifest["policy"]["detected_ignored_roots"])
         self.assertIn(".venv-test", manifest["policy"]["detected_ignored_roots"])
+        self.assertIn("a.secret", manifest["policy"]["detected_ignored_entries"])
+        self.assertIn("node_modules", manifest["policy"]["detected_ignored_entries"])
+        self.assertEqual(
+            manifest["policy"]["detected_ignored_entries"]["node_modules"]["kind"],
+            "directory",
+        )
 
         frozen = control.capture_project_manifest(self.project, policy=manifest["policy"])
         self.assertEqual(manifest["digest"], frozen["digest"])

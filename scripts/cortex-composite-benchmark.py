@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report the Cortex v3 MCP round-trip reduction for a wave plan."""
+"""Report the public Cortex MCP round-trip reduction for a wave plan."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,7 @@ def counts(workers: int, waves: int) -> tuple[int, int]:
     # status, delegation, confirmation, report, finalization, evidence, gate,
     # reconciliation, handoff, close, and final status round-trips.
     legacy = 4 + workers * 4 + waves * 2 + 4
-    # Cortex v3.1 needs one start, one continue per wave, one durable report
+    # Public Cortex needs one start, one continue per wave, one durable report
     # publish per worker, and one coordinator report read per worker. Native
     # spawn_agent calls are deliberately outside this MCP-call budget.
     facade = 1 + waves + workers * 2
@@ -34,7 +34,7 @@ def main() -> int:
         "relative_v3_mcp_calls": facade,
         "reduction": round(reduction, 4),
         "target_met": facade == 1 + args.waves + args.workers * 2 and facade < legacy,
-        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"],
+        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"],
         "normal_operations": ["start_orchestration", "record_report", "read_worker_report", "continue_orchestration"],
         "note": "Call-count contract benchmark; durable worker report writes and coordinator reads are included, native host spawn calls are excluded.",
     }

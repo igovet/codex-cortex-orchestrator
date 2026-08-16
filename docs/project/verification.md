@@ -15,7 +15,7 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Recorded Cortex 4.4.2 source-candidate evidence:
+Recorded Cortex 6.1.0 source-candidate evidence:
 
 - The full Python suite passed 274 tests.
 - File-size hardening passed: ordinary JSON writes use the bounded
@@ -30,22 +30,23 @@ Recorded Cortex 4.4.2 source-candidate evidence:
   dependency/cache/runtime directories. Conditional handling keeps ambiguous
   `build`/`dist`/`target`/`bin`/`obj` source directories visible unless an
   ignore rule or recognizable build marker identifies generated output.
-- A migration exercised on a copy compacted a 291212-byte legacy registry to
-  9624 bytes.
-- The generated Planner prompt measured 13679 bytes.
-- The source candidate is 4.4.3 and the local plugin registration is installed
-  and content-verified as `4.4.3+codex.20260815231023`; installation preserved
+- The source candidate is 6.1.0 and the local plugin registration is installed
+  and content-verified as `6.1.0+codex.<build>`; installation preserved
   the user MCP approval override.
 - Marketplace validation, Python compilation, shell syntax checks, the isolated
-  fresh-plugin probe, and the full 277-test suite passed. Live-model and
-  tracked-release evidence remain unverified.
+  fresh-plugin probe, the 300-test suite, and the cold-boot lifecycle passed.
+  Native live evidence completed the canonical six-phase harvest with
+  independent review and close verification; a fresh final-build dispatch also
+  confirmed `Planner Pricing` plus a unique `planner_pricing_01_<digest>` key.
+  Run the tracked-release archive check against the resulting commit before
+  push.
 - Desktop wrapper regressions verify that the exact local
   `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` host metadata is
   canonicalized before task persistence, labels, identity, and worker prompts;
   arbitrary links remain untouched, and cache-version-only wrapper changes
   replay the same active task.
-- No live-model, commit, tag, push, catalog submission, or publication is
-  verified.
+- Tag, catalog submission, and public publication are outside this local plugin
+  update and are not claimed.
 
 Historical 4.0.0 evidence includes 241 passing tests in 15.770 seconds;
 changed-skill, plugin, and marketplace validation; Python compilation and shell
@@ -67,9 +68,9 @@ default, 220 tests, marketplace validation, cold boot, deterministic fixtures,
 the composite benchmark, isolated fresh-plugin probe, compilation, shell
 syntax, and installer dry-run. These results do not attest 4.0.2.
 
-`cortex-cold-boot-smoke.py` is the v3 cold-boot smoke. It creates a fresh
+`cortex-cold-boot-smoke.py` is the v4 cold-boot smoke. It creates a fresh
 temporary Git project, drives the stdio JSON-RPC server through the public
-lifecycle and scoped `worker_question`/`record_report`/`read_worker_report` tools, restarts the
+lifecycle and scoped `worker_question`/`record_report`/`read_dispatch_briefing`/`read_worker_report` tools, restarts the
 server mid-lifecycle, and proves one start/continue per wave plus compact report
 transport.
 It covers server-owned idempotent replay, relative steps and parallel worker
@@ -86,28 +87,28 @@ for 4.0.2.
 
 Coordinator-isolation regressions assert that `SessionStart` reasserts the
 root lock, that compact/resume starts reassert the durable inspect recovery
-route, and that every public v3 `next_action`, including validation failures,
+route, and that every public v4 `next_action`, including validation failures,
 tells the root to avoid project inspection, edits, builds, and tests, dispatch
 only workers, and remain idle while they run. The installable skill contracts
 are also checked for the same coordination-only boundary.
 
-The 2026-08-15 working-tree audit ran `python3 -m unittest discover -s tests
--v`: 265 tests passed. It also passed the focused v3 host-binding and
+The 2026-08-16 working-tree audit ran `python3 -m unittest discover -s tests`:
+292 tests passed. It also passed the focused v4 host-binding and
 ambiguous-session hook regressions, Python compilation for both runtime
 scripts, marketplace validation, `bash -n scripts/sync-cortex.sh`, and
 `git diff --check`. The isolated cold-boot JSON-RPC smoke also passed with
-seven continue calls, eight reports, a parallel wave, and post-plan approval.
-The regression cases cover v3 binding from documented `PostToolUse.session_id`
+seven continue calls, eight reports, a parallel wave, and task-plan approval;
+harvest routes are separately verified to force automatic plan progression.
+The regression cases cover v4 binding from documented `PostToolUse.session_id`
 without session environment variables, explicit compatibility fallbacks,
 documented `SessionStart.session_id` plus legacy `thread_id`, `clear` and
 `compact` recovery, exact report-link reinjection, the
 `hookSpecificOutput.additionalContext` envelope, and fail-closed recovery when
-multiple active tasks share a session. No plugin installation or reload was
-performed; those remain operator-owned, and a fresh thread is required to load
-an updated plugin. `cortex_hook.py` is clean under the available `pyright`
-command; the broader `cortex.py` module still reports 64 optional/type
-diagnostics in older, unrelated sections, so this audit did not claim a clean
-whole-module pyright gate. Adaptive-routing coverage exercises every ordinary
+multiple active tasks share a session. It also covers immutable briefing
+digests, exact native child-id persistence through compaction recovery, and a
+synchronous `PreToolUse` denial for targetless `Agent` waits. The plugin was
+installed and verified through `scripts/sync-cortex.sh --check`; a fresh thread
+is still required to load an updated hook definition. Adaptive-routing coverage exercises every ordinary
 profile class, efficient Luna `high`/`high`/`xhigh`, bounded adaptive Luna
 `high`/`xhigh`/`max`, C1/C2/C3 and risk floors, `terra_task_kinds` upgrades,
 explicit Luna/Terra overrides, bounded C3 Luna `max`, Security/Sol, Explorer/Luna, and
@@ -118,8 +119,9 @@ verification below.
 
 The same audit covers native worker identity: canonical `profile`/
 `display_name`, task/attempt-unique `spawn_agent.task_name`, rejection of reused
-`host_agent_id`, exact-worker-only `followup_task`, and hook recovery from the
-native task key back to the canonical profile.
+`host_agent_id`, exact-worker-only `followup_task`, and hook recovery that maps
+the sequentially observed opaque child ID back to the issued task key and
+canonical profile.
 
 On 2026-08-16 the native-worker identity fix was revalidated with 268 passing
 tests, Python compilation, marketplace validation, shell syntax validation, and
@@ -155,7 +157,7 @@ because `--live` was not supplied.
 On 2026-08-14 the live harness completed its three isolated scenarios in
 separate runs using the exact parent launch route `gpt-5.6-luna` with reasoning
 effort `high`. Sequential, compact-parallel, and future-wave reassessment all
-finished with one active task, public v3 tools only, strict reports, server-
+finished with one active task, public v4 tools only, strict reports, server-
 observed close evidence, and handoff. The Codex JSON event stream did not expose
 an independent effective-model field, so the exact launch configuration is
 evidence of the requested runtime route, not a separate host-model attestation.
@@ -210,7 +212,7 @@ manifest reconciliation, global resource claims, numbered task/hook resolution,
 and lane lifecycle safety.
 
 The JSON-RPC regressions distinguish protocol correction from server failure:
-structured public v3 `ok: false` results leave no exception log, while raised
+structured public v4 `ok: false` results leave no exception log, while raised
 MCP-boundary exceptions create a redacted
 `~/.codex/logs/cortex-tool-errors.jsonl` record. Exception records retain the
 chat/thread session id, request id, and available task/attempt ids with
@@ -223,9 +225,11 @@ Pipeline classification regressions prove that the bounded compatibility aliases
 `close`. Cross-wave duplicates of one canonical phase are rejected, while
 unrecognized gate IDs remain hard validation errors.
 
-Public-facade regressions require exactly six listed tools: the three
-coordinator lifecycle operations, worker `worker_question` and `record_report`, and coordinator
-`read_worker_report`. They verify that the public continue schema advertises
+Public-facade regressions require exactly seven listed tools: the three
+coordinator lifecycle operations, worker `worker_question` and `record_report`,
+identity/digest-scoped `read_dispatch_briefing`, and coordinator
+`read_worker_report`. They verify that the briefing fallback can return only
+the active worker's exact immutable artifact, and that the public continue schema advertises
 `report_ref` rather than an inline report body, that the coordinator can read
 and advance with a persisted exact eight-field report, and that inspect returns
 `available_reports` when native acknowledgement is interrupted after
@@ -248,15 +252,24 @@ regressions also require coordinator authority in the returned
 snapshot and an explicit reason for a future-wave replacement; planner and
 explorer evidence remains advisory.
 
-The current 274-test suite exercises opaque `task_ref` isolation for multiple and
+The current test suite exercises opaque `task_ref` isolation for multiple and
 concurrently started same-root tasks, same-request active-task replay, and
 `needs_selection` when an ambiguous call omits the ref. They also exercise
 phase-level `depends_on`, mandatory `Predecessor review:` evidence, public
 report rejection for an incomplete acknowledgement, and fail-closed
 ref-based predecessor access. Task and operation ledger reads enforce an
-8 MiB file bound; migration coverage compacted a 291212-byte legacy registry
-to 9624 bytes in a copy. The Planner prompt regression measured 13679 bytes
-and remains below its bounded contract. Repository-knowledge cases verify automatic
+8 MiB file bound. Host spawn prompt tests de-duplicate the exact user request;
+the full immutable briefing is regression-tested below 11,500 bytes, the
+compact native bootstrap below 1,500 bytes, and the complete public start response (with `next_action` before
+dispatch payloads) below 8,000 UTF-8 bytes. Tests also require a child id from
+native `spawn_agent` before a worker is considered sent, reject an unbound
+wait, allow host wait-any only with a persisted running child, and treat native
+dispatch failure as a blocker. `SubagentStop` regressions distinguish a
+persisted report, a resumable durable question, and a no-report failure so
+recovery never waits on a stopped child. A separate post-wait regression
+requires model-visible failed-stop recovery through the supported
+`PostToolUse(wait)` context and rejects corrective follow-up to that child.
+Repository-knowledge cases verify automatic
 index injection, compact-worker `context_files`, required `Knowledge reviewed:`
 evidence, and rejection of unsafe context paths. Worker-report coverage also
 requires safe project-relative `changed_files`; explanatory text belongs in
@@ -330,7 +343,7 @@ key. Its child snapshot records `model=gpt-5.6-luna` and
 `reasoning_effort=high`. This runtime metadata, rather than worker self-report,
 is the acceptance evidence. The worker returned to the parent and no
 user-owned visible task was created.
-This proof predates the current 4.4.3 candidate and is not a fresh-install or
+This proof predates the current 6.1.0 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:

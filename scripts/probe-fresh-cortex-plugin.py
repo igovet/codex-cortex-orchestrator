@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -112,15 +113,26 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: cached Cortex MCP failed to start")
         rows = [json.loads(line) for line in rpc.stdout.splitlines() if line.strip()]
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
-        expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"}
+        expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"}
         if set(tools) != expected_tools:
-            raise SystemExit("fresh plugin probe: Cortex v3 public tool set is incomplete")
+            raise SystemExit("fresh plugin probe: Cortex public tool set is incomplete")
         workspace = base / "workspace"
         workspace.mkdir()
+        rejected = mcp_tool(server, environment, workspace, "start_orchestration", {
+            "task": {
+                "user_request": "reject an installed task without an observable result contract",
+                "complexity": "C1", "requirements": [],
+            },
+            "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
+        })
+        if rejected.get("ok") is not False or rejected.get("outcome") != "needs_input":
+            raise SystemExit("fresh plugin probe: installed MCP accepted a task without acceptance and verification")
         created = mcp_tool(server, environment, workspace, "start_orchestration", {
             "task": {
-                "user_request": "verify the installed MCP workspace binding",
+                "user_request": "verify the installed MCP pricing feature workspace binding",
                 "complexity": "C1", "requirements": [],
+                "acceptance_criteria": ["The installed MCP creates one canonical project-local task ledger."],
+                "verification": ["Inspect the generated task and orchestration schemas and dispatch identity."],
             },
             "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
         })
@@ -128,9 +140,38 @@ def main() -> int:
         if not created.get("ok") or created.get("outcome") != "ready_to_spawn" or len(task_dirs) != 1:
             raise SystemExit("fresh plugin probe: installed MCP did not create a project-local task ledger")
         expected_task = task_dirs[0]
+        dispatch = created["dispatches"][0]
+        if dispatch.get("display_name") != "Explorer Pricing":
+            raise SystemExit(
+                "fresh plugin probe: human worker display name did not select the explicit feature domain"
+            )
+        if re.search(r"\s\d+$", str(dispatch.get("display_name") or "")):
+            raise SystemExit("fresh plugin probe: human worker display name still contains an identity suffix")
+        if not re.fullmatch(r"explorer_[a-z0-9_]+_01_[0-9a-f]{8}", str(dispatch["arguments"].get("task_name") or "")):
+            raise SystemExit("fresh plugin probe: native worker task name is not unique and host-safe")
         confirmed = mcp_tool(server, environment, workspace, "manage_orchestration", {"intent": "inspect"})
         task = json.loads((expected_task / "task.json").read_text(encoding="utf-8"))
-        if not confirmed.get("ok") or task.get("project_root") != str(workspace):
+        state = json.loads((expected_task / "current.json").read_text(encoding="utf-8"))
+        plan = json.loads((expected_task / "orchestration.json").read_text(encoding="utf-8"))
+        files = [path.relative_to(workspace / ".codex/cortex").as_posix() for path in (workspace / ".codex/cortex").rglob("*") if path.is_file()]
+        banned = ("v3-operations", "active-tasks", "status-receipts", "reports/grants", "metrics.json")
+        retired_snapshot = any(path.endswith("-snapshot.json") for path in files)
+        retired_handoff_manifest = any(
+            "/handoffs/" in f"/{path}" and path.endswith("-manifest.json")
+            for path in files
+        )
+        if (
+            not confirmed.get("ok")
+            or task.get("project_root") != str(workspace)
+            or task.get("schema") != "cortex/v8"
+            or state.get("schema") != "cortex/v8"
+            or "current_gate" in state
+            or plan.get("schema") != "cortex/orchestration-plan/v1"
+            or any(any(marker in path for marker in banned) for path in files)
+            or retired_snapshot
+            or retired_handoff_manifest
+            or any(path.startswith("operations/v3-") for path in files)
+        ):
             raise SystemExit("fresh plugin probe: created Cortex task was not immediately confirmed in the selected workspace")
         print(json.dumps({"status": "PASS", "plugin": record.get("pluginId"), "version": record.get("version"), "mcp": "cortex", "isolation": "temporary HOME and CODEX_HOME"}, sort_keys=True))
     return 0

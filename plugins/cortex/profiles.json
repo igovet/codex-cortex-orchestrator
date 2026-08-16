@@ -14,11 +14,16 @@
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
     "user_facing_language": "main_coordinator_only_task_language",
-    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"],
+    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"],
     "coordinator_operations": ["start_orchestration", "read_worker_report", "continue_orchestration", "manage_orchestration"],
-    "worker_operations": ["worker_question", "record_report"],
+    "worker_operations": ["read_dispatch_briefing", "read_worker_report", "worker_question", "record_report"],
     "normal_flow": ["start_orchestration", "worker_question", "record_report", "read_worker_report", "continue_orchestration"],
     "recovery_operations": ["manage_orchestration"],
+    "dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing",
+    "dispatch_briefing_scope": "read_only_the_exact_briefing_path_and_never_list_or_read_other_cortex_ledger_paths",
+    "dispatch_briefing_fallback": "one_scoped_read_dispatch_briefing_call_with_exact_identity_and_digest_only_when_host_file_read_is_unavailable",
+    "dispatch_briefing_integrity": "verify_sha256_and_read_only_mode_before_project_work",
+    "dispatch_briefing_evidence": "record_exact_dispatch_briefing_reviewed_digest_marker_in_report_evidence",
     "worker_final_response": "compact_report_ref_and_at_most_two_sentence_summary_or_exact_error",
     "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
     "codebase_memory_project_resolution": "list_projects_exact_project_root_match_never_guess",
@@ -34,6 +39,113 @@
       "uncertainty",
       "next_action"
     ]
+  },
+  "profile_execution_contracts": {
+    "accessibility_engineer": {
+      "inputs": "Read the delegated UI source, rendered states, semantics, interaction paths, accessibility configuration, and relevant tests.",
+      "project_artifacts": "Report-only by default: do not change project files unless the dispatch explicitly grants a writable accessibility fix.",
+      "completion": "Produce criterion-mapped findings with user impact, reproduction, evidence type, tested combinations, remediation, and residual risk."
+    },
+    "architect": {
+      "inputs": "Read current code boundaries, interfaces, data flow, deployment configuration, tests, integrations, and existing decisions relevant to the mission.",
+      "project_artifacts": "Report-only: do not create implementation files; identify ADR-worthy decisions and writer-ready contracts in the report.",
+      "completion": "Produce current-state evidence, proposed boundaries, interfaces, failure behavior, alternatives, rollout, rollback, and unresolved decisions."
+    },
+    "backend_dev": {
+      "inputs": "Read the delegated server entry points, domain logic, authorization, persistence, integration boundaries, and focused tests before editing.",
+      "project_artifacts": "Create or update only delegated backend source and test files inside allowed paths; generated clients, schemas, and migrations require explicit ownership.",
+      "completion": "Deliver the complete scoped behavior with focused positive, negative, boundary, authorization, persistence, and failure-path evidence."
+    },
+    "build_verification": {
+      "inputs": "Read project configuration, CI, package metadata, the reported change surface, and authoritative verification instructions.",
+      "project_artifacts": "Report-only: run non-mutating checks and never use source-rewriting, auto-fix, or generated-output commands that modify the project.",
+      "completion": "Record every observed command, cwd, exit code, decisive sanitized output, omitted check, environment limitation, and readiness conclusion."
+    },
+    "code_reviewer": {
+      "inputs": "Read the bounded diff plus callers, contracts, state transitions, tests, deployment implications, and predecessor evidence supplied by the dispatch.",
+      "project_artifacts": "Report-only: do not edit fixes, tests, or documentation.",
+      "completion": "Produce severity-ordered defect findings with path and line, preconditions, impact, proof, remedy, and residual verification gaps."
+    },
+    "data_engineer": {
+      "inputs": "Read delegated schemas, pipeline definitions, fixtures or safe metadata, delivery semantics, privacy constraints, and operational checks.",
+      "project_artifacts": "Create or update only delegated pipeline, migration, fixture, and test artifacts inside allowed paths; never access or mutate production data without authority.",
+      "completion": "Deliver rerunnable data behavior with reconciliation, rejects and duplicates handling, quality checks, rollback or quarantine, and privacy-safe evidence."
+    },
+    "database_architect": {
+      "inputs": "Read authoritative schemas, migration history, constraints, indexes, query paths, ORM mappings, transaction boundaries, and available workload evidence.",
+      "project_artifacts": "Report-only: do not apply DDL, migrations, data movement, or production queries.",
+      "completion": "Produce invariants, ordered expand-migrate-contract design, locking and capacity risks, verification queries, rollback limits, and compatibility evidence."
+    },
+    "debugger": {
+      "inputs": "Read and reproduce the exact symptom through the owning control and data path, logs, state, tests, and recent relevant changes.",
+      "project_artifacts": "Create or update only the smallest delegated root-cause fix and regression tests inside allowed paths; remove diagnostic residue.",
+      "completion": "Deliver reproduction, causal proof, rejected hypotheses, focused fix, failure-before or equivalent control, success-after evidence, and remaining uncertainty."
+    },
+    "devops_engineer": {
+      "inputs": "Read delegated desired-state files, pipelines, modules, policies, secret boundaries, health checks, rollout, and rollback definitions.",
+      "project_artifacts": "Create or update only delegated infrastructure and delivery files inside allowed paths; never apply production, network, billing, or credentialed changes without authority.",
+      "completion": "Deliver declarative changes with lint, render, dry-run, plan, or local simulation evidence plus blast radius, rollout, rollback, and environment limits."
+    },
+    "explorer": {
+      "inputs": "Read supplied knowledge pages first, then exact entry points, callers, state, configuration, persistence, integrations, tests, and alternate paths for the bounded domain.",
+      "project_artifacts": "Report-only: do not edit files or create solution artifacts.",
+      "completion": "Produce a source-cited execution and ownership map with constraints, contradictions, unknowns, counterexample search, and the next specialist recommendation."
+    },
+    "frontend_dev": {
+      "inputs": "Read delegated components, routes, state and data flow, API contracts, design tokens, accessibility patterns, localization, and UI tests.",
+      "project_artifacts": "Create or update only delegated frontend source, styles, assets, and tests inside allowed paths; do not invent unresolved backend or product contracts.",
+      "completion": "Deliver complete affected UI states with rendered or browser evidence, accessibility behavior, responsive coverage, tests, and compatibility gaps."
+    },
+    "fullstack_dev": {
+      "inputs": "Read the complete delegated user path across client, transport, authorization, domain logic, persistence, response mapping, telemetry, and tests.",
+      "project_artifacts": "Create or update only the delegated cross-layer source and tests inside allowed paths; schema, security, and infrastructure expansion require explicit ownership.",
+      "completion": "Deliver the coherent vertical slice with contract, partial-deployment, error, state, integration, and end-to-end verification evidence."
+    },
+    "general": {
+      "inputs": "Read the owning code path, local contracts, repository instructions, conventions, and tests for the bounded non-specialist mission.",
+      "project_artifacts": "Create or update only delegated files inside allowed paths; stop when a narrower specialist or broader ownership is required.",
+      "completion": "Deliver the complete bounded outcome with behavior, decisions, exact checks, uncertainty, residual risk, and the justified next owner."
+    },
+    "mobile_dev": {
+      "inputs": "Read delegated platform architecture, lifecycle, navigation, state, threading, persistence, networking, permissions, accessibility, build configuration, and tests.",
+      "project_artifacts": "Create or update only delegated mobile source, resources, configuration, and tests inside allowed paths; signing and store operations require explicit authority.",
+      "completion": "Deliver platform-idiomatic behavior across lifecycle and failure states with build or test evidence, permission and data effects, and device-matrix gaps."
+    },
+    "performance_engineer": {
+      "inputs": "Read the relevant execution path, representative workload, environment, resource boundaries, profiling evidence, and performance-sensitive tests.",
+      "project_artifacts": "Report-only: do not optimize source or run unsafe, production, privacy-sensitive, or cost-bearing load.",
+      "completion": "Produce a reproducible baseline, supported bottleneck, rejected hypotheses, measurement conditions, trade-offs, and before-after validation design."
+    },
+    "planner": {
+      "inputs": "Read supplied knowledge indexes and relevant pages, then current entry points, contracts, configuration, tests, requirements, acceptance, and predecessor reports.",
+      "project_artifacts": "Report-only: publish the separate structured planning object through record_report; never create planning or ledger files directly.",
+      "completion": "Produce a decision-complete work breakdown with paths, profile ownership, dependencies, acceptance, verification, risk gates, and no unresolved material decision."
+    },
+    "qa_engineer": {
+      "inputs": "Read every delegated acceptance criterion, changed contract, implementation path, existing test layer, fixtures, and predecessor evidence.",
+      "project_artifacts": "Create or update only delegated test and fixture files inside allowed paths; do not weaken assertions or change product behavior unless explicitly owned.",
+      "completion": "Deliver a criteria-to-scenario matrix, deterministic tests, controls or failure reproduction, exact outcomes, coverage gaps, flakes, and residual quality risk."
+    },
+    "refactorer": {
+      "inputs": "Read delegated callers, extension points, serialization, side effects, ordering, errors, performance-sensitive paths, and characterization tests.",
+      "project_artifacts": "Create or update only delegated source and characterization or regression tests inside allowed paths while preserving observable contracts.",
+      "completion": "Deliver the named structural improvement with preserved-contract evidence, exact checks, final-diff inspection, and remaining equivalence risk."
+    },
+    "security_auditor": {
+      "inputs": "Read delegated trust boundaries, authentication, authorization, sensitive-data flow, dependencies, configuration, failure paths, and security tests.",
+      "project_artifacts": "Report-only: do not edit code, expose secrets, use credentials, or attack systems.",
+      "completion": "Produce severity-ranked, sanitized findings with preconditions, attack or failure path, impact, proof, remediation, compensating controls, and residual risk."
+    },
+    "technical_writer": {
+      "inputs": "Read delegated authoritative source, tests, configuration, existing durable docs, protected-text boundaries, and explicitly supplied predecessor reports.",
+      "project_artifacts": "Create or update only delegated durable documentation inside allowed paths; never edit Cortex ledger artifacts or document unverified planned behavior as shipped.",
+      "completion": "Deliver evidence-backed canonical docs with validated paths, anchors, commands, links, preserved manual text, resolved contradictions, and declared gaps."
+    },
+    "ux_designer": {
+      "inputs": "Read the delegated current journey, user goals, product constraints, design tokens, component patterns, accessibility requirements, and responsive behavior.",
+      "project_artifacts": "Report-only: do not edit production UI or invent unstated product features.",
+      "completion": "Produce implementation-ready flows, hierarchy, state matrix, interaction rules, responsive and accessibility requirements, rationale, and measurable validation."
+    }
   },
   "gate_briefings": {
     "plan": {

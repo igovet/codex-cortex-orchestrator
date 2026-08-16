@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-Cortex is a repository-source Codex plugin that provides an opt-in, durable `cortex/v7` control plane for staged agent work. Its installable runtime is contained in [plugins/cortex](../../plugins/cortex/); root-level scripts and tests support its development.
+Cortex is a repository-source Codex plugin that provides an opt-in, durable `cortex/v8` control plane with public lifecycle schema `cortex/orchestration/v4` for staged agent work. Legacy v7/v3 ledgers are unsupported and are not migrated or resumed. Its installable runtime is contained in [plugins/cortex](../../plugins/cortex/); root-level scripts and tests support its development.
 
 ## Stack and entry points
 

@@ -106,5 +106,17 @@ expose secrets, source dumps, private operational values, or personal data.
 Every Cortex worker records the strict eight-field report through
 `record_report`, acknowledges all supplied predecessor handoffs, and identifies
 its inventory counts, mapped surfaces, exclusions, unknowns, evidence, and
-next coverage action. The coordinator reads each report before advancing and
+next coverage action. It must also review only the exact immutable briefing
+issued by its compact dispatch bootstrap, verify the supplied SHA-256, and add
+the exact `Dispatch briefing reviewed: <sha256>` evidence marker. That briefing
+is the sole direct filesystem read allowed below `.codex/cortex`; workers never
+list or inspect ledger state, baselines, delegation JSON, another briefing, or
+report artifacts. If the host file reader alone cannot open that exact file,
+the worker calls `read_dispatch_briefing` once with the complete identity and
+digest tuple from its bootstrap; failure of that scoped read is a blocker, not
+permission to browse or substitute another artifact. The coordinator reads each report before advancing and
 uses `depends_on` when a later worker needs only selected phase handoffs.
+A successor worker reads each supplied handoff through `read_worker_report`
+with the exact project root, task ref, attempt id, profile, and report ref from
+its generated briefing. It may not read an unlisted report or treat that
+scoped evidence read as permission to call coordinator lifecycle operations.

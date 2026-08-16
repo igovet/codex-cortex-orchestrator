@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Cortex v3 relative one-call-per-wave orchestration over JSON-RPC."""
+"""Exercise the public Cortex one-call-per-wave orchestration over JSON-RPC."""
 from __future__ import annotations
 
 import argparse
@@ -45,14 +45,44 @@ def waves() -> list[dict[str, object]]:
     ]
 
 
-def report(worker: int, step: int, predecessor_reports: list[str]) -> dict[str, object]:
-    evidence = [f"step {step} worker {worker} evidence"]
+def report(
+    worker: int,
+    step: int,
+    predecessor_reports: list[str],
+    gate: str,
+    acceptance: list[str],
+    verification: list[str],
+    project: Path,
+    task_acceptance: list[str],
+    task_verification: list[str],
+    changed_files: list[str],
+) -> dict[str, object]:
+    evidence = [f"step {step} worker {worker} observed the cold-boot fixture state"]
     if predecessor_reports:
         evidence.append("Predecessor review: " + ", ".join(predecessor_reports))
+    for index, _criterion in enumerate(acceptance, 1):
+        evidence.append(f"Gate acceptance {index}: PASS - Repository path inspection and fixture state comparison produced conclusive evidence.")
+    for index, _criterion in enumerate(verification, 1):
+        evidence.append(f"Gate verification {index}: PASS - Cold-boot verification command completed successfully with concrete observed output.")
+    if gate == "close":
+        for index, _criterion in enumerate(task_acceptance, 1):
+            evidence.append(f"Task acceptance {index}: PASS - Completed workflow provides concrete end-to-end fixture evidence.")
+        for index, _criterion in enumerate(task_verification, 1):
+            evidence.append(f"Task verification {index}: PASS - Final cold-boot check completed successfully with observed output.")
+    checks: list[object]
+    if gate in {"implementation", "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close"}:
+        checks = [{
+            "command": "git status --short",
+            "cwd": str(project),
+            "exit_code": 0,
+            "evidence": "Command completed and the fixture repository state was observed successfully.",
+        }]
+    else:
+        checks = ["cold-boot public-orchestration simulation"]
     return {
         "summary": f"relative step {step} worker {worker} completed",
-        "findings": [], "questions": [], "changed_files": [],
-        "tests": ["cold-boot v3 simulation"],
+        "findings": [], "questions": [], "changed_files": changed_files,
+        "tests": checks,
         "evidence": evidence,
         "uncertainty": [], "next_action": "advance",
     }
@@ -79,11 +109,11 @@ def planning(worker: int, step: int) -> dict[str, object]:
     }
 
 
-def run(base: Path) -> dict[str, object]:
+def run(base: Path, server: Path = SERVER) -> dict[str, object]:
     project, ledger = fixture(base)
     start_request = {
         "task": {
-            "user_request": "prove a fresh JSON-RPC process can complete Cortex v3 by relative waves",
+            "user_request": "prove a fresh JSON-RPC process can complete public Cortex orchestration by relative waves",
             "complexity": "standard",
             "requirements": ["implementation, verification, documentation, and close invariants"],
             "acceptance_criteria": ["complete every planned wave"],
@@ -92,11 +122,11 @@ def run(base: Path) -> dict[str, object]:
         },
         "waves": waves(),
     }
-    with JsonRpcHarness(SERVER, project, ledger) as rpc:
+    with JsonRpcHarness(server, project, ledger) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_worker_report"]:
-            raise AssertionError(f"unexpected Cortex v3 public tools: {names}")
+        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"]:
+            raise AssertionError(f"unexpected Cortex public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
         if (
@@ -111,17 +141,14 @@ def run(base: Path) -> dict[str, object]:
         task_ref = str(current["task_ref"])
         task_directory = next((ledger / "tasks").iterdir()).name
 
-    (project / "tracked.txt").write_text("after\n", encoding="utf-8")
-    (project / "delete.txt").unlink()
-    (project / "old.txt").rename(project / "new.txt")
-    (project / "added.txt").write_text("untracked\n", encoding="utf-8")
-
     # A fresh process must reconstruct the active relative step read-only.
-    with JsonRpcHarness(SERVER, project, ledger) as rpc:
+    with JsonRpcHarness(server, project, ledger) as rpc:
+        task_definition = json.loads((ledger / "tasks" / task_directory / "task.json").read_text(encoding="utf-8"))
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
         parallel_wave_seen = False
         plan_approval_seen = False
+        implementation_applied = False
         last_payload = None
         while current["outcome"] != "completed":
             if current.get("outcome") == "awaiting_plan_approval":
@@ -149,11 +176,34 @@ def run(base: Path) -> dict[str, object]:
             ][-len(dispatches):]
             results = []
             for index, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
+                changed_files: list[str] = []
+                if dispatch.get("phase") == "implementation" and not implementation_applied:
+                    (project / "tracked.txt").write_text("after\n", encoding="utf-8")
+                    (project / "delete.txt").unlink()
+                    (project / "old.txt").rename(project / "new.txt")
+                    (project / "added.txt").write_text("untracked\n", encoding="utf-8")
+                    changed_files = ["added.txt", "delete.txt", "new.txt", "old.txt", "tracked.txt"]
+                    implementation_applied = True
+                worker_report = report(
+                    index,
+                    int(current["step"]),
+                    list(attempt.get("context_report_ids") or []),
+                    str(attempt["gate"]),
+                    list(attempt.get("acceptance_criteria") or []),
+                    list(attempt.get("verification") or []),
+                    project,
+                    list(task_definition.get("acceptance_criteria") or []),
+                    list(task_definition.get("verification") or []),
+                    changed_files,
+                )
+                worker_report["evidence"].append(
+                    "Dispatch briefing reviewed: " + str(attempt["briefing_digest"])
+                )
                 publication = {
                     "task_id": state["task_id"],
                     "attempt_id": attempt["attempt_id"],
                     "profile": dispatch["profile"],
-                    "report": report(index, int(current["step"]), list(attempt.get("context_report_ids") or [])),
+                    "report": worker_report,
                 }
                 if dispatch.get("phase") == "plan":
                     publication["planning"] = planning(index, int(current["step"]))
@@ -192,8 +242,8 @@ def run(base: Path) -> dict[str, object]:
     task = json.loads((task_path / "task.json").read_text(encoding="utf-8"))
     receipts = [json.loads(path.read_text(encoding="utf-8")) for path in (task_path / "reports/receipts").glob("*.json")]
     operations = [json.loads(path.read_text(encoding="utf-8")) for path in (ledger / "operations").glob("*.json")]
-    if task.get("schema") != "cortex/v7" or state.get("status") != "completed":
-        raise AssertionError("v3 did not preserve the cortex/v7 ledger or complete the task")
+    if task.get("schema") != "cortex/v8" or state.get("schema") != "cortex/v8" or state.get("status") != "completed":
+        raise AssertionError("public orchestration did not preserve the cortex/v8 ledger or complete the task")
     if not receipts or any(not item.get("consumed_at") for item in receipts):
         raise AssertionError("every passed worker report must be consumed by evidence")
     if not state.get("handoff_created") or not all(item.get("status") == "committed" for item in operations):
@@ -211,12 +261,16 @@ def run(base: Path) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--server", type=Path, default=SERVER, help="Cortex MCP server path to exercise")
     arguments = parser.parse_args()
+    server = arguments.server.expanduser().resolve()
+    if not server.is_file() or server.is_symlink():
+        raise SystemExit(f"cold-boot smoke: invalid Cortex server path: {server}")
     if arguments.keep:
-        result_value = run(Path(tempfile.mkdtemp(prefix="cortex-boot-")))
+        result_value = run(Path(tempfile.mkdtemp(prefix="cortex-boot-")), server)
     else:
         with tempfile.TemporaryDirectory(prefix="cortex-boot-") as directory:
-            result_value = run(Path(directory))
+            result_value = run(Path(directory), server)
     print("cold-boot smoke: " + json.dumps(result_value, sort_keys=True))
     return 0
 

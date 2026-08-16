@@ -24,7 +24,18 @@ do not assume that the active skill version, transient protocol reminders, or
 the last visible lifecycle response survived. Preserve the opaque `task_ref`
 and call `manage_orchestration` with `intent="inspect"` exactly once for that
 task. Treat the returned `context_handoff`, current pipeline, report refs, and
-relative step as the authoritative recovery snapshot. Do not call
+relative step as the authoritative recovery snapshot. Reconcile
+`pending_dispatches` against the top-level inspect `dispatches` and invoke only
+those exact still-unstarted requests. Treat `active_workers[].host_agent_id` as
+the exact persisted native wait targets; never respawn them. A host wait-any
+form may omit explicit targets only while one of those bound workers is
+running. Treat `stopped_workers` as non-waitable: consume their persisted
+report refs, surface durable question refs, or submit their exact failed result
+to `continue_orchestration` so Cortex applies rework. Never use
+`followup_task` to repair a stopped worker's report error; it is permitted only
+for the same question-paused worker after the durable answer is recorded. Each pending dispatch retains its `dispatch_ref`, immutable
+`briefing_path`, and `briefing_digest`, but the coordinator must not read or
+inline the briefing. Do not call
 `start_orchestration` again, replay completed dispatches, or reconstruct state
 from a raw transcript. After rehydration, continue the existing task and
 publish every exact `report_markdown_link` before the next lifecycle or report

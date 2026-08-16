@@ -2,18 +2,21 @@
 
 Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
-privacy-limited lifecycle hooks. It is schema `cortex/v7` and plugin version
-**4.4.3**. The public MCP surface has exactly six tools: three coordinator
+privacy-limited lifecycle hooks. It uses canonical task-ledger schema
+`cortex/v8`, public lifecycle schema `cortex/orchestration/v4`, and plugin
+version **6.1.0**. The public MCP surface has exactly seven tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`—plus worker `worker_question` and `record_report`, and coordinator
-`read_worker_report`; existing v7 ledgers remain readable through a private
-compatibility adapter. Ledgers older than v7 have no compatibility reader and
-must be recreated.
+`manage_orchestration`—plus worker `worker_question`, `record_report`, exact
+immutable-briefing fallback `read_dispatch_briefing`, and scoped predecessor
+reads through `read_worker_report`. Legacy v7/v3 ledgers and facades are unsupported: they are
+neither migrated nor resumed and must be recreated.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
 configuration, and runtime code live below `plugins/cortex/`; root-level
-scripts, tests, and docs support repository development only.
+scripts, tests, docs, and the repository-root `AGENTS.md` support repository
+development only. `AGENTS.md` is not installed; all runtime guarantees are
+implemented and shipped under `plugins/cortex/`.
 
 ## Install, update, and verify
 
@@ -165,14 +168,19 @@ repository root.
 It is explicitly registered by the installer; no personal marketplace is used
 for the new installation.
 
-For v3, the synchronous `PostToolUse` hook binds a newly returned `task_ref` to
+For the public v4 lifecycle, the synchronous `PostToolUse` hook binds a newly returned `task_ref` to
 the documented hook `session_id`, using the tool's explicit `project_root` and
 the event `cwd`. The task authorization identity remains separate. Explicitly
 forwarded `CODEX_SESSION_ID` or `CODEX_THREAD_ID` values are compatibility hints
 only; standalone MCP falls back to a generated task-local identity until the
 hook runs. `SessionStart` recovers the binding for `resume`, `clear`, and
 `compact`, while `read_worker_report` PostToolUse context repeats the exact
-main-chat report link requirement. Model-visible context uses
+main-chat report link requirement. Native dispatch calls are issued one at a
+time in returned worker order (the children still run concurrently), allowing
+the documented generic `SubagentStart.agent_type=default` event to bind each
+opaque child ID to its issued dispatch. A synchronous `PreToolUse` guard denies an
+`Agent` wait with no child target before the native call can block; the
+PostToolUse check remains a compatibility fallback. Model-visible context uses
 `hookSpecificOutput.additionalContext`.
 
 ## Release boundary
@@ -180,7 +188,7 @@ main-chat report link requirement. Model-visible context uses
 The repository package is ready for local validation, not for publication by
 default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. The Cortex 4.4.3
+and secret-prone paths before validating the package again. The Cortex 6.1.0
 changes in this working tree are intentionally uncommitted, so
 `python3 scripts/verify-cortex-release.py --require-tracked` cannot attest the
 mutable candidate. Commit only with explicit authorization, then rerun the
@@ -315,6 +323,15 @@ for host `resume` and `compact` events, including the registry-backed opaque
 inspect instead of relying on the model's free-form summary to preserve the
 orchestration protocol.
 
+Compaction recovery relies on the documented `SubagentStart` binding: the
+parent session plus native `agent_id` and observed `model` are persisted
+against the next sequentially issued dispatch before the worker is treated as
+active (`agent_type` is `default` for these dynamic workers). `context_handoff` separates
+`pending_dispatches` (top-level `inspect` dispatch authority only) from
+`active_workers` (exact persisted child ids to wait on). Missing parent/child
+binding fails closed; the coordinator never guesses an identity or waits on a
+new child.
+
 Cortex deterministically marks a short, underspecified product-surface creation
 request for intent clarification. Repository evidence may support a useful
 question but cannot establish the user's desired product outcome. Discovery
@@ -350,8 +367,9 @@ unchanged reassessment is accepted as unchanged and keeps subsequent relative
 steps monotonic. A completed response explicitly
 reports `close_verified` and `handoff_ready` so Luna does not start a second
 run merely to rediscover terminal proof.
-Existing `cortex/v7` ledgers remain inspectable and resumable through this v3
-adapter; the legacy `orchestrate` facade is not published in `tools/list`.
+Legacy `cortex/v7` ledgers and the v3 facade are unsupported and are not
+inspected, migrated, or resumed; the legacy `orchestrate` facade is not
+published in `tools/list`.
 
 Workers never call Cortex lifecycle operations. They call scoped
 `worker_question` for unresolved material user decisions, use the native
@@ -438,6 +456,16 @@ and a profile that cannot own the requested phase is rejected before ledger
 writes. Every returned dispatch exposes `worker`, `phase`, `profile`,
 `capability`, `sandbox`, and `selection_reason` alongside `call` and unchanged
 native `arguments`.
+Each compact native dispatch carries a `dispatch_ref`, an immutable scoped
+`briefing_path`, and its SHA-256 digest. The bootstrap instructs the worker to
+read exactly that briefing path and no other `.codex/cortex` ledger path, then
+publish the exact `Dispatch briefing reviewed: <sha256>` marker in evidence.
+The full prompt is never stored in mutable `current.json` or delegation JSON;
+only the immutable briefing file is read directly. When the host file reader
+cannot open that exact path, `read_dispatch_briefing` provides one scoped
+fallback bound to the complete task/attempt/profile/dispatch/digest tuple; it
+cannot list the ledger or select another artifact. Predecessor reports remain
+available through scoped `read_worker_report` calls only.
 Every delegation records requested/expected model metadata separately from
 the native request override and always records reasoning effort. `explorer`
 always selects Luna; its effort is chosen by the coordinator or defaults from
@@ -488,12 +516,16 @@ Luna is unavailable to the host, Cortex may dispatch hidden Terra without
 changing the selected effort. Observed host metadata is stored separately,
 and Cortex never claims an actual worker model from expected routing alone.
 
-Each v3 dispatch is `{worker, phase, profile, capability, sandbox,
-selection_reason, call, arguments}`. `arguments` contains only the real native
+Each v4 dispatch is `{worker, dispatch_ref, phase, profile, display_name,
+capability, sandbox, selection_reason, briefing_path, briefing_digest, call,
+arguments}`. `arguments` contains only the real native
 `spawn_agent` or `create_thread` parameters; hidden `spawn_agent` arguments
 retain `fork_turns: "none"` so localized parent history is not inherited.
-`profile` remains the exact canonical role name and `display_name` is the
-human-readable `Profile Module NN` label, while
+`profile` remains the exact canonical role name and `display_name` is derived
+from the task domain in the user's request as a human-readable `Profile Module`
+label (for example, `Planner Authentication`). It contains no ordinal or
+digest, and gate mission verbs such as `plan`, `discover`, or `close` are not
+used as the module. Meanwhile
 `spawn_agent.task_name` is a task/attempt-unique native session key and must
 match the host's strict `[a-z0-9_]{1,80}` agent-name contract. The native key
 uses the lower-underscore profile/module/ordinal plus a deterministic digest;
@@ -504,9 +536,10 @@ native worker; only an explicit
 `followup_task` for the same confirmed host child may resume it. Routing and
 expected-model metadata is never copied into native `model`. Cortex rejects
 reuse of a `host_agent_id` already bound to another attempt. Lifecycle hooks
-map the unique native task key back to the canonical profile before injecting
-worker context. The main Codex agent invokes all
-independent requests in a wave, waits for them, and submits their reports in
+map each sequentially observed opaque child ID back to the issued native task
+key and canonical profile before injecting worker context. The main Codex
+agent invokes independent requests in returned order, lets them run in
+parallel, waits for them, and submits their reports in
 one relative continue call. A malformed report, duplicate/foreign slot, or
 incomplete wave is rejected before partial acceptance. Native spawn failures
 are submitted as explicit non-success results with a normalized status and
@@ -525,16 +558,39 @@ irreversible `reports/consumptions/` tombstone; reconciliation may repair
 derived receipts and indexes but never makes a consumed receipt reusable.
 Worker briefings contain only the exact task and attempt identifiers required
 for that one report write and explicitly forbid using them with lifecycle or
-pipeline tools. The native result is only `REPORT_RECORDED report_ref=<value>`
+pipeline tools. Host spawn prompts de-duplicate the exact user request before
+adding the worker contract. `start_orchestration.next_action` is serialized
+before dispatch payloads; the compact native bootstrap is below 1,500 bytes,
+the full immutable briefing is regression-tested below 11,500 bytes, and the complete public start response is
+regression-tested below 8,000 UTF-8 bytes to prevent Codex tool-output
+truncation. A worker is not considered sent until native `spawn_agent` returns
+a child id. The coordinator must not announce a dispatch or call wait with an
+empty target list; native dispatch failure is a blocker.
+The native result is only `REPORT_RECORDED report_ref=<value>`
 plus at most a two-sentence summary, or the exact report-tool error; the
 coordinator reads the durable report and maps its ref
 to the current relative slot. Cortex privately creates
 the durable report receipt, evidence, gate transitions, reconciliation, and
 handoff. The coordinator waits for every native worker in the current wave
 before calling `continue_orchestration`.
+`followup_task` is not a generic report-repair mechanism. It is used only to
+resume the same attempt after a durable question has been answered. If a
+worker finishes with a report-tool error, `SubagentStop` has already persisted
+the attempt outcome; the coordinator inspects once and submits the recovered
+report, question, or exact failure. Rework starts only from a fresh Cortex
+dispatch. The supported `PostToolUse(wait)` hook reasserts this recovery before
+the coordinator can mistake the stopped worker for a resumable report repair.
+Read-only briefings also require non-writing verification modes (including
+`PYTHONDONTWRITEBYTECODE=1` and disabled test/build caches) and forbid cleanup
+commands. Result validation tracks newly changed generated or gitignored
+artifact sentinels in addition to ordinary manifest paths, so a worker cannot
+hide a cache-producing check behind normal source-manifest exclusions.
 Predecessor handoffs are passed as compact report refs rather than embedded
-report bodies. Before project work, the successor reads every granted ref
-through `read_worker_report`, reconciles relevant findings and conflicts
+report bodies. Before project work, the successor may read only predecessor refs
+explicitly supplied in its dispatch through `read_worker_report`, using the exact
+`project_root`, `task_ref`, `attempt_id`, and `profile`; Cortex rejects ungranted
+refs and does not inject the coordinator's Markdown-link instruction into worker
+context. The successor reconciles relevant findings and conflicts
 against current evidence, and adds the generated `Predecessor review:` entry
 naming every supplied report ref to report evidence. Public `record_report` rejects
 an incomplete acknowledgement. Cortex also fails closed instead of silently
@@ -547,9 +603,9 @@ Worker execution is English-only: internal prompts, Cortex arguments, reports,
 questions, handoffs, and audit records are English. The main coordinator uses
 the user's task language (or explicit `user_language`) for all user-facing
 questions and summaries; localized display text does not replace the durable
-English record. The v7 report, evidence, gate, and recovery primitives remain
-available only inside the server so existing ledgers keep their invariants;
-coordinators and workers must not call them directly.
+English record. The v8 report, evidence, gate, and recovery primitives remain
+available only inside the server; coordinators and workers must not call them
+directly.
 Individual files are atomically replaced; the whole multi-file publication is
 not crash-atomic. Report bodies are task-bound and require an explicit
 per-attempt context grant. Hooks inject the report contract and internal-worker
@@ -613,7 +669,8 @@ The explicit `$cortex:orchestrator prune` route calls
 `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` without a task ref.
 It removes only task-scoped `.codex/cortex` records last updated at least seven
-days ago, including abandoned active tasks, and reconciles task/v3 indexes,
+days ago, including abandoned active tasks, and reconciles the canonical task
+index,
 activations, transaction and classification receipts, task resource claims,
 and lane bindings. It preserves recent tasks, lanes themselves, project source,
 documentation, and plugin files. This bounded weekly prune replaces the unsafe
@@ -643,19 +700,22 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 4.4.3 source candidate passed 277 Python tests, marketplace
+The current 6.1.0 source candidate passed the full Python suite, marketplace
 validation, Python compilation, shell syntax, the isolated fresh-plugin probe,
 and installed-content verification. It carries forward the 4.4.2 baseline of
 274 passing Python tests as historical evidence. File-size
 hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
 diagnostics, the separate 64 MiB manifest bound, early baseline preflight,
-bounded handoff/reconciliation snapshots, and fail-closed actionable errors for
-oversized artifacts. A copy-based migration compacted a 291212-byte legacy
-registry to 9624 bytes, and the generated Planner prompt measured 13679 bytes.
+bounded handoff/reconciliation state, and fail-closed actionable errors for
+oversized artifacts. Legacy ledgers are rejected rather than migrated; generated
+planning artifacts remain bounded by the runtime limits.
 The local plugin registration is installed and content-verified as
-`4.4.3+codex.20260815231023`; the installer preserved the user MCP approval
-override. Live-model and tracked-release evidence remain unverified until the
-tree is committed.
+`6.1.0+codex.<build>`; the installer preserved the user MCP approval
+override. Native live-model evidence includes a completed six-phase harvest
+with independent completeness review and close handoff, plus a fresh final-build
+dispatch that produced human label `Planner Pricing` and unique native key
+`planner_pricing_01_<digest>`. The tracked-release archive check remains the
+required post-commit verification before push.
 Historical 4.0.0 evidence includes
 241 passing tests in 15.770 seconds, installed and content-verified cachebuster
 `4.0.0+codex.20260814231427`, installer check/dry-run, cold boot, deterministic
