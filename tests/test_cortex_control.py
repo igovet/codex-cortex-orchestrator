@@ -2053,6 +2053,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("internal Cortex worker with profile `general`", self.briefing_from_request(delegation["spawn_request"]))
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
 
+    def test_delegation_skips_orphan_briefing_ordinals_after_a_partial_write(self):
+        state = self.init(task_id="orphan-briefing-recovery")["state"]
+        task_dir = control.db_task_artifact_path(self.ledger, "orphan-briefing-recovery")
+        delegations = task_dir / "delegations"
+        delegations.mkdir(parents=True, exist_ok=True)
+        (delegations / "discover-07.dispatch-orphan123.briefing.md").write_text(
+            "orphaned immutable briefing\n", encoding="utf-8"
+        )
+        delegation = self.delegate(state, "orphan-briefing-recovery", "discover", "explorer")
+        self.assertEqual(delegation["attempt_id"], "discover-08")
+
     def test_native_worker_task_name_compacts_long_request_derived_task_ids(self):
         long_task_id = "cortex-orchestrator-local-plugin-cache-ca-bd8a9ad4"
         task_name = control.native_worker_task_name("planner", long_task_id, "plan-01")
@@ -5583,6 +5594,19 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(implementation["wave_id"], "implementation")
         self.assertEqual(len(implementation["spawn_requests"]), 1)
 
+    def test_orchestrate_allows_multiple_parallel_documentation_slots(self):
+        waves = [{"wave_id": "documentation", "delegations": [
+            {"gate": "documentation", "agent": "technical_writer", "objective": "Write the project index."},
+            {"gate": "documentation", "agent": "technical_writer", "objective": "Write the trading feature pages."},
+            {"gate": "documentation", "agent": "technical_writer", "objective": "Write the operations feature pages."},
+        ]}]
+        started = self.facade_start("facade-parallel-documentation", waves, complexity="C2")
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["state"], "ready_to_spawn")
+        self.assertEqual(len(started["spawn_requests"]), 3)
+        self.assertEqual(len({item["attempt_id"] for item in started["spawn_requests"]}), 3)
+        self.assertEqual(len({item["briefing_digest"] for item in started["spawn_requests"]}), 3)
+
     def test_orchestrate_rejects_changed_idempotency_payload_without_duplicate_attempt(self):
         waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
         started = self.facade_start("facade-idempotency", waves, submission_id="same-submission")
@@ -6529,7 +6553,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.4.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.4.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

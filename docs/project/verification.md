@@ -19,9 +19,9 @@ python3 scripts/verify-cortex-release.py --require-tracked
 `verify-cortex-release.py --require-tracked` runs only after a commit exists;
 it validates `git archive HEAD`, not the mutable worktree.
 
-## Current 6.4.0 evidence
+## Current 6.4.1 evidence
 
-- The full standard-library suite passed 318 tests: 248 control-plane,
+- The full standard-library suite passed 320 tests: 250 control-plane,
   66 invariant, and 4 SQLite-ledger tests.
 - The public executable was reduced from 11,831 to 7,576 lines. It is a small
   public composition and stdio entrypoint; focused runtime modules own the
@@ -51,7 +51,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 - The installer preserves the explicit Cortex MCP approval mode, does not scan
   or remove earlier coordination state or unrelated plugin data, and the
   fresh-plugin probe verifies the installable package in isolated HOME/CODEX_HOME
-  directories. Build `6.4.0+codex.20260816160106` is installed and
+  directories. Build `6.4.1+codex.20260816170348` is installed and
   content-verified. Its final live Luna-high automatic-sequential run passed:
   one task/start, seven verified worker phases, scoped report reads and
   continue operations, no failed public calls, server-observed close evidence,

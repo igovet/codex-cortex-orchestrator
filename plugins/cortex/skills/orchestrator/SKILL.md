@@ -200,6 +200,14 @@ rejects reuse of a `host_agent_id` already bound to another attempt. Since
 dynamic host events report `agent_type=default`, lifecycle hooks use the
 required sequential spawn order to bind each opaque child ID back to its issued
 native task key and canonical profile before injecting worker context.
+The hidden `spawn_agent` host contract currently exposes only `task_name` to
+the native child list; it has no separate label field. Therefore the host may
+render the unique key (for example, `architect_repository_08_<digest>`) even
+though Cortex's `display_name` remains the human-readable `Architect
+Repository` metadata and is used by lifecycle context. Never remove the key's
+ordinal or digest to improve host rendering: that would reintroduce child
+identity collisions. Explicit `visible_thread` dispatches use their
+human-readable `display_name` as the native thread title.
 
 ## Repository knowledge consumption
 

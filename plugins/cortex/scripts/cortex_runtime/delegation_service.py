@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,26 @@ from cortex import (
     write_text_immutable,
 )
 
+
+def _next_attempt_id(state: dict[str, Any], task_dir: Path, gate: str) -> str:
+    """Allocate a monotonic attempt id even after a briefing-only crash.
+
+    Briefings are intentionally immutable and are written before the mutable
+    SQLite attempt row.  If a later step fails, the briefing remains as an
+    orphan.  Reusing ``len(state["attempts"]) + 1`` would then address the
+    same path with different bytes on recovery.  Include both durable attempts
+    and orphan briefing ordinals when selecting the next number.
+    """
+    highest = len(state.get("attempts", []))
+    pattern = re.compile(r"^[a-z0-9_]+-(\d+)\.dispatch-[a-z0-9]+\.briefing\.md$")
+    delegations = task_dir / "delegations"
+    if delegations.is_dir():
+        for path in delegations.iterdir():
+            match = pattern.fullmatch(path.name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+    return f"{gate}-{highest + 1:02d}"
+
 def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
@@ -106,12 +127,27 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         if retry < 0 or retry > 2:
             raise ValueError("retry must be between 0 and 2")
         if gate == "documentation":
-            existing = [
+            # A facade documentation wave may intentionally contain several
+            # parallel writers.  Their orchestration keys are the identity of
+            # each slot; treating any active documentation attempt as a
+            # duplicate prevents the third and later writers from ever being
+            # materialized.  Direct/non-facade delegation has no slot key and
+            # keeps the single-documentation-attempt retry guard.
+            delegation_key = str(params.get("orchestration_delegation_key") or "").strip()
+            active_documentation = [
                 item for item in state["attempts"]
                 if item.get("gate") == gate
                 and item.get("status") in {AWAITING_HOST_SPAWN, "running", "passed"}
                 and not item.get("invalidated")
             ]
+            existing = (
+                [
+                    item for item in active_documentation
+                    if item.get("orchestration_delegation_key") == delegation_key
+                ]
+                if delegation_key
+                else active_documentation
+            )
             if existing:
                 evidence = [
                     item for item in state.get("evidence", [])
@@ -158,7 +194,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         available_reports = {item["report_id"] for item in _report_index(report_paths, state["task_id"]).get("reports", [])}
         if len(context_report_ids) != len(set(context_report_ids)) or not set(context_report_ids).issubset(available_reports):
             raise ValueError("context_report_ids must be unique reports from this task")
-        attempt_id = f"{gate}-{len(state['attempts']) + 1:02d}"
+        attempt_id = _next_attempt_id(state, task_dir, gate)
         # The role label remains canonical, but the native task key must be
         # unique per task/attempt.  Keeping only ``agent`` here lets the host
         # mistake a fresh dispatch for a continuation of an older child.
