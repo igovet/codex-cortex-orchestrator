@@ -5,6 +5,21 @@ on:
   pull_request:
 
 jobs:
+  export-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create source bundle
+        run: git bundle create /tmp/cortex-source.bundle HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-source-bundle
+          path: /tmp/cortex-source.bundle
+          if-no-files-found: error
+          retention-days: 1
+
   verify:
     runs-on: ubuntu-latest
     steps:
