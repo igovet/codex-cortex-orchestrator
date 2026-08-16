@@ -10466,7 +10466,8 @@ def _v3_response(
                 next_action = (
                     f"{COORDINATOR_LOCK} The native worker stopped without a report and Cortex durably marked its "
                     "attempt failed. Never wait on or respawn it directly. Call continue_orchestration for this step "
-                    "with the matching worker slot, status=failed, and reason=native_worker_stopped_without_report; "
+                    "with the matching worker slot, that stopped worker's exact dispatch_ref, status=failed, and "
+                    "reason=native_worker_stopped_without_report; "
                     "Cortex will apply the canonical rework policy."
                 )
         else:
@@ -10858,7 +10859,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         for index, result in enumerate(results, 1):
             if not isinstance(result, dict):
                 raise ValueError("every result must be an object")
-            allowed_result = {"worker", "report_ref", "status", "reason"}
+            allowed_result = {"worker", "report_ref", "dispatch_ref", "status", "reason"}
             unknown_result = sorted(set(result) - allowed_result)
             if unknown_result:
                 raise ValueError("unsupported result fields: " + ", ".join(unknown_result))
@@ -10878,6 +10879,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             if status_value == "passed":
                 if not report_ref:
                     raise ValueError("successful results require report_ref from record_report")
+                if str(result.get("dispatch_ref") or "").strip():
+                    raise ValueError("successful results use report_ref only; do not supply dispatch_ref")
                 _pre_recorded_report(task_dir, state, attempt_ids[slot - 1], report_ref)
                 if str(result.get("reason") or "").strip():
                     raise ValueError("successful results must not include reason")
@@ -10886,6 +10889,18 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError("non-success results must omit report_ref")
                 if not str(result.get("reason") or "").strip():
                     raise ValueError("non-success results require reason")
+                dispatch_ref = str(result.get("dispatch_ref") or "").strip()
+                if not dispatch_ref:
+                    raise ValueError(
+                        "non-success results require the exact dispatch_ref returned for that worker; "
+                        "this prevents a stale failed result from being applied to a replacement attempt"
+                    )
+                attempt = next(
+                    (item for item in state.get("attempts", []) if item.get("attempt_id") == attempt_ids[slot - 1]),
+                    None,
+                )
+                if not isinstance(attempt, dict) or dispatch_ref != str(attempt.get("dispatch_ref") or ""):
+                    raise ValueError("non-success dispatch_ref does not match the exact active worker attempt")
             slots[slot] = result
         # Reserve the server-owned transaction only after all slots, reports,
         # statuses, and future-wave overrides pass validation.

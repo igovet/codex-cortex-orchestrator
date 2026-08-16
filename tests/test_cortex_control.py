@@ -5201,7 +5201,11 @@ class ControlPlaneTests(unittest.TestCase):
         started = self.v3_start("worker retry", waves=[{"workers": [{"phase": "discover"}]}])
         failed = control.continue_orchestration({
             "project_root": str(self.project), "step": started["step"],
-            "results": [{"status": "failed", "reason": "transient worker failure"}],
+            "results": [{
+                "status": "failed",
+                "reason": "transient worker failure",
+                "dispatch_ref": started["dispatches"][0]["dispatch_ref"],
+            }],
         })
         self.assertTrue(failed["ok"])
         self.assertEqual(failed["step"], started["step"])
@@ -5225,7 +5229,11 @@ class ControlPlaneTests(unittest.TestCase):
                 "project_root": str(self.project),
                 "task_ref": current["task_ref"],
                 "step": current["step"],
-                "results": [{"status": "failed", "reason": f"worker failure {failure_number}"}],
+                "results": [{
+                    "status": "failed",
+                    "reason": f"worker failure {failure_number}",
+                    "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
+                }],
             })
             self.assertTrue(current["ok"], current)
             if failure_number < control.MAX_ORCHESTRATE_GATE_FAILURES:
@@ -5248,6 +5256,41 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(resumed["outcome"], "ready_to_spawn")
         state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
         self.assertNotIn("discover", state["orchestrate_gate_failure_counts"])
+
+    def test_v3_failed_result_is_bound_to_the_dispatched_attempt(self):
+        started = self.v3_start("identical failed retries", waves=[{"workers": [{"phase": "discover"}]}])
+        first_payload = {
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{
+                "status": "failed",
+                "reason": "native_worker_stopped_without_report",
+                "dispatch_ref": started["dispatches"][0]["dispatch_ref"],
+            }],
+        }
+        first = control.continue_orchestration(first_payload)
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["outcome"], "ready_to_spawn")
+        first_replay = control.continue_orchestration(first_payload)
+        self.assertTrue(first_replay["replayed"])
+        self.assertEqual(first_replay["dispatches"], [])
+
+        second_payload = {
+            **first_payload,
+            "results": [{
+                "status": "failed",
+                "reason": "native_worker_stopped_without_report",
+                "dispatch_ref": first["dispatches"][0]["dispatch_ref"],
+            }],
+        }
+        second = control.continue_orchestration(second_payload)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["outcome"], "ready_to_spawn")
+        self.assertEqual(len(second["dispatches"]), 1)
+        replay = control.continue_orchestration(second_payload)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["dispatches"], [])
 
     def test_v3_final_continue_retry_replays_after_task_completion(self):
         started = self.v3_start("final replay", waves=[{"workers": [{"phase": "close"}]}], complexity="tiny")
@@ -6381,7 +6424,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.1.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.1.2")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

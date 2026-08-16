@@ -330,8 +330,11 @@ should use canonical phases from the returned snapshot rather than guessing.
    unrelated files. Then decide whether the coordinator-owned pipeline still fits, then call
    `continue_orchestration` once with `project_root`, the returned opaque
    `task_ref`, relative `step`, and results containing `report_ref`. Omit worker for one result;
-   repeat the returned integer worker slot for parallel results. Inline report
-   objects are compatibility-only and must not be requested from new workers.
+   repeat the returned integer worker slot for parallel results. A non-success
+   result instead carries `status`, `reason`, and the exact `dispatch_ref` from
+   that stopped worker's dispatch (or `context_handoff.stopped_workers`), with
+   no `report_ref`; this binds recovery to one attempt. Inline report objects
+   are compatibility-only and must not be requested from new workers.
 6. Repeat until `outcome: completed`. If evidence changes future scope, send a
    compact `future_waves` replacement in the same continue call. Set
    `rework: true` only for intentional repetition of a completed phase.

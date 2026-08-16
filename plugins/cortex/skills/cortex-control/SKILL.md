@@ -147,8 +147,11 @@ signal, never permission for the root to perform the work directly.
    once with `project_root`, the opaque `task_ref` and relative `step` from the
    prior response, and all `report_ref` results. A single result needs no worker reference.
    Parallel results repeat only the returned integer `worker` slot. Omit
-   status for success; non-success requires normalized `status` and `reason`
-   and omits report fields. Until all workers finish, remain idle and perform
+   status for success; non-success requires normalized `status`, `reason`, and
+   the exact `dispatch_ref` from that stopped worker's returned dispatch (or
+   from `context_handoff.stopped_workers`). It omits `report_ref`. This binds a
+   failure to one attempt, so a duplicate stale failure can never be applied to
+   its replacement. Until all workers finish, remain idle and perform
    no project operation. A `SubagentStop` after `record_report` is recovered
    from the persisted report ref; a stop on an open durable question remains
    resumable; any other stop is durably failed and must be submitted as a

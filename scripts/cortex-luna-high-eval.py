@@ -168,7 +168,11 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     })
     blocked_result = cortex.continue_orchestration({
         "project_root": str(blocked), "step": current["step"],
-        "results": [{"status": "blocked", "reason": "fixture dependency unavailable"}],
+        "results": [{
+            "status": "blocked",
+            "reason": "fixture dependency unavailable",
+            "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
+        }],
     })
     if blocked_result.get("outcome") != "blocked":
         raise AssertionError(blocked_result)

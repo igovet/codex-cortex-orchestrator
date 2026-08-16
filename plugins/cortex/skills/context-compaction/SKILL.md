@@ -31,7 +31,9 @@ the exact persisted native wait targets; never respawn them. A host wait-any
 form may omit explicit targets only while one of those bound workers is
 running. Treat `stopped_workers` as non-waitable: consume their persisted
 report refs, surface durable question refs, or submit their exact failed result
-to `continue_orchestration` so Cortex applies rework. Never use
+to `continue_orchestration` with its `worker` slot, `status`, `reason`, and
+the matching stopped-worker `dispatch_ref` so Cortex applies rework to that
+attempt only. Never use
 `followup_task` to repair a stopped worker's report error; it is permitted only
 for the same question-paused worker after the durable answer is recorded. Each pending dispatch retains its `dispatch_ref`, immutable
 `briefing_path`, and `briefing_digest`, but the coordinator must not read or

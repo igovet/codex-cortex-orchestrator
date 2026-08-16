@@ -18,9 +18,9 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server declare plugin version `6.1.1`; the
+The current source manifest and server declare plugin version `6.1.2`; the
 local registration is installed and content-verified as
-`6.1.1+codex.<build>`.
+`6.1.2+codex.<build>`.
 
 The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, 21 registered profile files with structured playbooks, 13 validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, sandbox parity, and the machine-validated execution contract. The tracked-release archive validator is blocking in CI and rejects runtime state and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the exact seven-tool v4 public surface—the three coordinator lifecycle operations plus worker `worker_question`/`record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped predecessor `read_worker_report`—and aligned plugin/server versions. A briefing read can return only the exact active dispatch artifact, and a successor report read is accepted only for explicitly supplied predecessor refs with exact scope identifiers; ungranted refs are rejected. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
 
@@ -47,5 +47,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). Current 6.1.1 evidence is the 308-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.1+codex.<build>`, a completed native six-phase harvest, and a fresh final-build worker-identity dispatch; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push.
+Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). Current 6.1.2 evidence is the 309-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.2+codex.<build>`, a completed native six-phase harvest, and a fresh final-build worker-identity dispatch; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->
