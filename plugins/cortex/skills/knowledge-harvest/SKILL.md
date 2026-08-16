@@ -119,8 +119,9 @@ the exact `Dispatch briefing reviewed: <sha256>` evidence marker. That briefing
 is the sole direct filesystem read allowed below `.codex/cortex`; workers never
 list or inspect ledger state, baselines, delegation JSON, another briefing, or
 report artifacts. If the host file reader alone cannot open that exact file,
-the worker calls `read_dispatch_briefing` once with the complete identity and
-digest tuple from its bootstrap; failure of that scoped read is a blocker, not
+the worker calls `read_dispatch_briefing` with the complete identity and
+digest tuple from its bootstrap; an incomplete bounded response may continue
+only with its returned cursor. Failure of that scoped read is a blocker, not
 permission to browse or substitute another artifact. The coordinator reads each report before advancing and
 uses `depends_on` when a later worker needs only selected phase handoffs.
 A successor worker reads each supplied handoff through `read_worker_report`

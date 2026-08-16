@@ -1,0 +1,436 @@
+"""Gate-transition policy behind the public Cortex facade.
+
+The public ``record_gate`` symbol intentionally remains in :mod:`cortex` for
+MCP and existing integrations.  This module keeps the policy itself focused:
+it resolves the active gate, validates evidence and C2/C3 obligations, then
+applies one durable state transition.  Runtime references stay late-bound so
+the stdio entrypoint remains the single composition root.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import cortex as _runtime
+
+
+_OUTCOMES = {"passed", "failed", "blocked", "skipped"}
+
+
+def _recoverable(
+    state: dict[str, Any],
+    revision_correction: dict[str, Any] | None,
+    *,
+    reason: str,
+    gate: str,
+    next_action: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Return the stable, non-mutating recovery shape used by the MCP API."""
+    return {
+        "recorded": False,
+        "reason": reason,
+        "gate": gate,
+        "next_action": next_action,
+        "recoverable": True,
+        "revision_correction": revision_correction,
+        "state": state,
+        **extra,
+    }
+
+
+def _resolve_active_gate(
+    state: dict[str, Any], params: dict[str, Any]
+) -> tuple[str, str, dict[str, Any] | None]:
+    expected_revision = params.get("expected_revision")
+    revision_correction = (
+        {"requested": expected_revision, "used": state["revision"]}
+        if expected_revision is not None and state["revision"] != expected_revision
+        else None
+    )
+    requested_gate = str(params["gate"])
+    current_wave = _runtime.active_gates(state)
+    gate = requested_gate if requested_gate in current_wave else (current_wave[0] if current_wave else "")
+    return requested_gate, gate, revision_correction
+
+
+def _validate_skip(
+    state: dict[str, Any],
+    params: dict[str, Any],
+    gate: str,
+    outcome: str,
+    revision_correction: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if outcome != "skipped":
+        return None
+    if gate == "close" or (gate == "documentation" and state.get("require_delegation")):
+        return _recoverable(
+            state,
+            revision_correction,
+            reason="mandatory_gate",
+            gate=gate,
+            next_action="record_delegation",
+        )
+    if state.get("require_delegation") and not str(params.get("skip_reason", "")).strip():
+        raise ValueError("C2/C3 skipped gates require an explicit skip_reason")
+    return None
+
+
+def _gate_inputs(
+    task_dir: Path, state: dict[str, Any], gate: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    gate_evidence = [
+        item for item in _runtime._validated_evidence_records(task_dir, state)
+        if item.get("gate") == gate and not item.get("invalidated")
+    ]
+    gate_attempts = [
+        item for item in state.get("attempts", [])
+        if item.get("gate") == gate and not item.get("invalidated")
+    ]
+    non_terminal_attempts = [
+        item for item in gate_attempts
+        if item.get("status") not in _runtime.TERMINAL_ATTEMPT_STATUSES
+    ]
+    terminal_non_success_attempts = [
+        item for item in gate_attempts
+        if item.get("status") in _runtime.TERMINAL_ATTEMPT_STATUSES - {"passed"}
+    ]
+    passed_attempts = [item for item in gate_attempts if item.get("status") == "passed"]
+    return gate_evidence, gate_attempts, non_terminal_attempts, terminal_non_success_attempts, passed_attempts
+
+
+def _documentation_recovery(
+    state: dict[str, Any],
+    revision_correction: dict[str, Any] | None,
+    reason: str,
+    gate: str,
+    candidates: list[str],
+) -> dict[str, Any]:
+    return _recoverable(
+        state,
+        revision_correction,
+        reason=reason,
+        gate=gate,
+        next_action="record_evidence",
+        candidate_attempt_ids=candidates,
+    )
+
+
+def _validate_pass_evidence(
+    task_dir: Path,
+    state: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    requested_gate: str,
+    gate: str,
+    outcome: str,
+    revision_correction: dict[str, Any] | None,
+    gate_evidence: list[dict[str, Any]],
+    gate_attempts: list[dict[str, Any]],
+    non_terminal_attempts: list[dict[str, Any]],
+    terminal_non_success_attempts: list[dict[str, Any]],
+    passed_attempts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Validate the evidence branch, returning only evidence tied to this transition."""
+    if outcome != "passed":
+        return gate_evidence, None
+    if not gate_evidence and not (
+        state.get("require_delegation")
+        and gate_attempts
+        and len(terminal_non_success_attempts) == len(gate_attempts)
+    ):
+        return [], {
+            "recorded": False,
+            "reason": "evidence_required",
+            "gate": gate,
+            "gate_correction": (
+                {"requested": requested_gate, "used": gate}
+                if requested_gate != gate else None
+            ),
+            "candidate_attempt_ids": [
+                item["attempt_id"] for item in non_terminal_attempts + passed_attempts
+            ],
+            "next_action": "record_delegation" if not gate_attempts else "record_evidence",
+            "revision_correction": revision_correction,
+            "state": state,
+        }
+    if any(
+        item.get("kind") == "command"
+        and (item.get("exit_code") != 0 or not item.get("verified_execution"))
+        for item in gate_evidence
+    ):
+        raise ValueError("cannot pass a gate with failed or self-attested command evidence; use execute_verification_command")
+    if not state.get("require_delegation"):
+        return gate_evidence, None
+    if not gate_attempts:
+        if gate == "documentation":
+            return [], _recoverable(
+                state,
+                revision_correction,
+                reason="documentation_attempt_required",
+                gate=gate,
+                next_action="record_delegation",
+            )
+        raise ValueError("C2/C3 gates require at least one delegation attempt")
+    missing = [
+        item["attempt_id"] for item in passed_attempts
+        if not any(evidence.get("attempt_id") == item["attempt_id"] for evidence in gate_evidence)
+    ]
+    if missing:
+        if gate == "documentation":
+            return [], _documentation_recovery(state, revision_correction, "documentation_evidence_required", gate, missing)
+        raise ValueError("every passed attempt needs linked evidence before the gate can pass: " + ", ".join(missing))
+    missing_reports = [
+        item["attempt_id"] for item in passed_attempts
+        if not any(
+            evidence.get("attempt_id") == item["attempt_id"]
+            and evidence.get("report_id") and evidence.get("report_receipt")
+            for evidence in gate_evidence
+        )
+    ]
+    if missing_reports:
+        if gate == "documentation":
+            return [], _documentation_recovery(state, revision_correction, "documentation_report_receipt_required", gate, missing_reports)
+        raise ValueError("every passed attempt needs a consumed report receipt before the gate can pass: " + ", ".join(missing_reports))
+    unvalidated_results = _runtime._attempts_missing_result_validation(task_dir, passed_attempts)
+    if unvalidated_results:
+        raise ValueError(
+            "every passed facade attempt needs a server-validated result contract before the gate can pass: "
+            + ", ".join(unvalidated_results)
+        )
+    evidence_attempt_ids = {item.get("attempt_id") for item in gate_evidence}
+    unexplained = [
+        item["attempt_id"] for item in non_terminal_attempts
+        if item["attempt_id"] not in evidence_attempt_ids
+    ]
+    if unexplained:
+        if gate == "documentation":
+            return [], _documentation_recovery(state, revision_correction, "documentation_evidence_required", gate, unexplained)
+        raise ValueError("every active delegated attempt needs linked evidence before the gate can pass: " + ", ".join(unexplained))
+    eligible_attempt_ids = {
+        item["attempt_id"] for item in gate_attempts
+        if item["attempt_id"] in evidence_attempt_ids
+        and item.get("status") in {"running", "passed"}
+    }
+    if passed_attempts and not eligible_attempt_ids:
+        if gate == "documentation":
+            return [], _documentation_recovery(
+                state,
+                revision_correction,
+                "documentation_evidence_required",
+                gate,
+                [item["attempt_id"] for item in passed_attempts],
+            )
+        raise ValueError("a passed gate requires linked evidence for at least one delegated attempt")
+    current_attempt_evidence = [
+        item for item in gate_evidence if item.get("attempt_id") in eligible_attempt_ids
+    ]
+    if gate == "documentation":
+        documentation = state.get("documentation_receipt")
+        technical_writer_attempt_ids = {
+            item["attempt_id"] for item in gate_attempts
+            if item.get("agent") == "technical_writer"
+        }
+        if not documentation or documentation.get("attempt_id") not in technical_writer_attempt_ids:
+            return [], _documentation_recovery(
+                state,
+                revision_correction,
+                "documentation_evidence_required",
+                gate,
+                [
+                    item["attempt_id"] for item in gate_attempts
+                    if item.get("agent") == "technical_writer"
+                ],
+            )
+    return current_attempt_evidence, None
+
+
+def _validate_handoff_and_close(
+    task_dir: Path,
+    state: dict[str, Any],
+    *,
+    gate: str,
+    outcome: str,
+    current_attempt_evidence: list[dict[str, Any]],
+) -> None:
+    if outcome == "blocked" and state.get("require_handoff") and (
+        not state.get("handoff_created") or state.get("handoff_gate") != gate
+    ):
+        raise ValueError("C2/C3 pause requires a current-gate handoff")
+    if outcome != "passed" or gate != "close" or not state.get("require_handoff"):
+        return
+    if not state.get("handoff_created") or state.get("handoff_gate") != "close":
+        raise ValueError("C2/C3 close requires a final handoff")
+    if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
+        raise ValueError("C2/C3 close requires completed documentation decision evidence")
+    if not state.get("reassessment_receipts"):
+        raise ValueError("C2/C3 close requires a recorded reassessment decision")
+    if not any(
+        item.get("kind") == "command" and item.get("verified_execution")
+        and item.get("exit_code") == 0
+        for item in current_attempt_evidence
+    ):
+        raise ValueError("C2/C3 close requires successful server-observed command evidence")
+    manifest = state.get("final_manifest_receipt")
+    if not manifest or not manifest.get("complete"):
+        raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
+    baseline_manifest = _runtime.task_manifest_baseline(task_dir, state)
+    current_manifest = _runtime.capture_project_manifest(
+        Path(_runtime.load_task_definition(task_dir, state)["project_root"]),
+        policy=baseline_manifest.get("policy"),
+    )
+    if current_manifest["digest"] != manifest.get("current_digest"):
+        raise ValueError("project files changed after the final handoff; create a new complete handoff")
+
+
+def _apply_transition(
+    task_dir: Path,
+    state: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    gate: str,
+    outcome: str,
+    gate_evidence: list[dict[str, Any]],
+) -> tuple[bool, list[dict[str, Any]]]:
+    state["gates"][gate] = {
+        "outcome": outcome,
+        "at": _runtime.now(),
+        "summary": _runtime.redact(params.get("summary", ""), 2000),
+        "skip_reason": _runtime.redact(params.get("skip_reason", ""), 2000),
+        "evidence_ids": [item["evidence_id"] for item in gate_evidence],
+    }
+    if outcome == "passed":
+        if gate not in state["completed_gates"]:
+            state["completed_gates"].append(gate)
+        for attempt in state["attempts"]:
+            if attempt["gate"] == gate and attempt["status"] == "running":
+                attempt["status"] = "passed"
+    elif outcome == "skipped":
+        if gate not in state["skipped_gates"]:
+            state["skipped_gates"].append(gate)
+    elif outcome == "blocked":
+        state["status"] = "blocked"
+    else:
+        for attempt in state["attempts"]:
+            if attempt["gate"] == gate and attempt["status"] in {"running", _runtime.AWAITING_HOST_SPAWN}:
+                attempt["status"] = "failed"
+    operations = params.get("pipeline_operations", [])
+    if operations:
+        change = _runtime.apply_pipeline_operations(
+            state,
+            operations=operations,
+            allow_rework=bool(params.get("allow_rework", False)),
+        )
+        _runtime.append_pipeline_change(
+            state,
+            change,
+            str(params.get("pipeline_reason", "adaptive gate outcome")),
+            params.get("signals", []),
+        )
+        _runtime.invalidate_reworked_report_receipts(
+            task_dir, state
+        )
+    if outcome in {"passed", "skipped"}:
+        candidate_wave = _runtime.sync_current_wave(state)
+        if not candidate_wave:
+            _runtime.validate_completion_invariants(state)
+            state["status"] = "completed"
+    else:
+        _runtime.sync_current_wave(state)
+    return state["status"] == "completed", operations
+
+
+def _persist_transition(
+    root: Path,
+    task_dir: Path,
+    state: dict[str, Any],
+    *,
+    gate: str,
+    outcome: str,
+    operations: list[dict[str, Any]],
+    completed: bool,
+) -> None:
+    if completed:
+        closed_receipt, _ = _runtime.reconcile_manifest(task_dir, state, [])
+        closed_paths = list(closed_receipt["comparison"]["changed_paths"])
+        closed_receipt["reported_paths"] = closed_paths
+        closed_receipt["unaccounted_paths"] = []
+        closed_receipt["complete"] = True
+        state["closed_manifest_receipt"] = closed_receipt
+        state["manifest_snapshot_cleanup"] = {"status": "pending", "at": _runtime.now()}
+    _runtime.save_state(
+        task_dir,
+        task_dir / "state.sqlite",
+        state,
+        "gate",
+        f"{gate}: {outcome}" + ("; pipeline adapted" if operations else ""),
+    )
+    if not completed:
+        return
+    task = _runtime.load_task_definition(task_dir, state)
+    _runtime.remove_active_mapping(root, state["task_id"], str(task.get("thread_id", "")))
+    cleanup = _runtime.cleanup_completed_manifest_snapshots(task_dir, state)
+    _runtime.save_state(
+        task_dir,
+        task_dir / "state.sqlite",
+        state,
+        "manifest_cleanup",
+        f"removed {cleanup['removed_count']} immutable manifest snapshot artifact(s)",
+    )
+
+
+def record_gate(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate and commit one gate outcome through focused policy phases."""
+    root = _runtime.ledger_root(params)
+    with _runtime.state_lock(root):
+        root, task_dir, state = _runtime.load_state(str(params["task_id"]), params)
+        _runtime.authorize(state, params)
+        requested_gate, gate, revision_correction = _resolve_active_gate(state, params)
+        outcome = str(params["outcome"])
+        if outcome not in _OUTCOMES:
+            raise ValueError("outcome must be passed, failed, blocked, or skipped")
+        skipped = _validate_skip(state, params, gate, outcome, revision_correction)
+        if skipped is not None:
+            return skipped
+        inputs = _gate_inputs(task_dir, state, gate)
+        current_attempt_evidence, recovery = _validate_pass_evidence(
+            task_dir,
+            state,
+            params,
+            requested_gate=requested_gate,
+            gate=gate,
+            outcome=outcome,
+            revision_correction=revision_correction,
+            gate_evidence=inputs[0],
+            gate_attempts=inputs[1],
+            non_terminal_attempts=inputs[2],
+            terminal_non_success_attempts=inputs[3],
+            passed_attempts=inputs[4],
+        )
+        if recovery is not None:
+            return recovery
+        _validate_handoff_and_close(
+            task_dir,
+            state,
+            gate=gate,
+            outcome=outcome,
+            current_attempt_evidence=current_attempt_evidence,
+        )
+        completed, operations = _apply_transition(
+            task_dir,
+            state,
+            params,
+            gate=gate,
+            outcome=outcome,
+            gate_evidence=inputs[0],
+        )
+        _persist_transition(
+            root,
+            task_dir,
+            state,
+            gate=gate,
+            outcome=outcome,
+            operations=operations,
+            completed=completed,
+        )
+        return {"state": state, "revision_correction": revision_correction}

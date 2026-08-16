@@ -18,19 +18,19 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server declare plugin version `6.1.3`; the
+The current source manifest and server declare plugin version `6.4.0`; the
 local registration is installed and content-verified as
-`6.1.3+codex.<build>`.
+`6.4.0+codex.<build>`.
 
-The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, 21 registered profile files with structured playbooks, 13 validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, sandbox parity, and the machine-validated execution contract. The tracked-release archive validator is blocking in CI and rejects runtime state and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the exact seven-tool v4 public surface—the three coordinator lifecycle operations plus worker `worker_question`/`record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped predecessor `read_worker_report`—and aligned plugin/server versions. A briefing read can return only the exact active dispatch artifact, and a successor report read is accepted only for explicitly supplied predecessor refs with exact scope identifiers; ungranted refs are rejected. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
+The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, 21 registered profile files with structured playbooks, 13 validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, sandbox parity, and the machine-validated execution contract. The tracked-release archive validator is blocking in CI and rejects runtime state and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the exact seven-tool v4 public surface—the three coordinator lifecycle operations plus worker `worker_question`/`record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped predecessor `read_worker_report`—and aligned plugin/server versions. Briefings and reports are returned only in scoped, server-bounded cursor pages; an incomplete response may continue only with its signed cursor. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
 
-The 4.0.x package carries the breaking start contract introduced in 4.0.0:
-`start_orchestration.task.user_request` is required and preserves the exact
-user-authored text. Deprecated `task.objective` is only an exact compatibility
-mirror. The runtime also requires final report `questions: []` and routes
-material ambiguity through durable `worker_question`; deterministic preflight
-holds short underspecified product-surface creation requests until the user
-answers a blocking question.
+The current start contract requires `start_orchestration.task.user_request` and
+preserves the exact user-authored text. If `task.objective` is supplied, request
+normalization accepts it only as an exact mirror of `user_request`; it can never
+change task identity or expand the worker contract. The runtime also requires
+final report `questions: []` and routes material ambiguity through durable
+`worker_question`; deterministic preflight holds short underspecified
+product-surface creation requests until the user answers a blocking question.
 
 The marketplace validator also enforces the machine-readable shared worker
 contract: one strict eight-field report, worker `worker_question` and `record_report`, the three
@@ -47,5 +47,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). Current 6.1.3 evidence is the 309-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.3+codex.<build>`, and a completed installed-plugin live harvest with eight reports, bounded documentation rework, repeat review, and close verification. A fresh final-build worker-identity dispatch also passed; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push.
+Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). The 6.4.0 candidate is verified by the current full test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.4.0+codex.<build>`, and final installed-plugin live validation recorded in [verification.md](../../project/verification.md). Its first MCP access applies checksummed project-local SQLite migrations automatically, including artifact catalog/chunk creation. Pre-SQLite task Markdown/JSON is ignored, never imported or removed. The installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

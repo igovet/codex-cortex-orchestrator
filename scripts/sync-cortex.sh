@@ -11,12 +11,6 @@ marketplace_root="${project_dir}"
 marketplace_manifest="${marketplace_root}/.agents/plugins/marketplace.json"
 home_root="${HOME:?HOME is required}"
 codex_home="${CODEX_HOME:-${home_root}/.codex}"
-legacy_profile="${codex_home}/agents/orchestrator.toml"
-legacy_plugin_name="codex-""orchestration-""control"
-legacy_cache="${codex_home}/plugins/cache/personal/${legacy_plugin_name}"
-legacy_marketplace="${home_root}/.agents/plugins/marketplace.json"
-# Only the exact retired profile distributed by this project is eligible for automatic removal.
-legacy_profile_sha256="6b74fa45aa5e2312aca5472a17b39a638bdba7a74da7c36ce9a2fa9db925c367"
 mode="install"
 # Preserve explicit user configuration, and install the Luna default when the
 # global subagent setting is absent. The native spawn_agent request can then
@@ -85,9 +79,6 @@ PY
 )" || return 1
   home_root="$(printf '%s\n' "${validated}" | sed -n '1p')"
   codex_home="$(printf '%s\n' "${validated}" | sed -n '2p')"
-  legacy_profile="${codex_home}/agents/orchestrator.toml"
-  legacy_cache="${codex_home}/plugins/cache/personal/${legacy_plugin_name}"
-  legacy_marketplace="${home_root}/.agents/plugins/marketplace.json"
 }
 
 validate_global_config_path() {
@@ -132,99 +123,6 @@ harden_backup_slot() {
   run chmod -R go-rwx -- "$1"
 }
 
-backup_file_and_remove() {
-  local target="$1" label="$2" root="$3" relative="$4"
-  [[ -e "${target}" || -L "${target}" ]] || return 0
-  validate_cleanup_target "${root}" "${relative}" "${target}" || return 1
-  [[ -f "${target}" && ! -L "${target}" ]] || { echo "error: refusing non-regular cleanup target: ${target}" >&2; return 1; }
-  if [[ "${mode}" == "check" ]]; then
-    echo "outdated legacy ${label}: ${target}" >&2
-    return 1
-  fi
-  local backup_dir="${codex_home}/backups/${plugin_name}-upgrade" backup_slot
-  prepare_backup_directory "${backup_dir}" || return 1
-  if [[ "${mode}" == "dry-run" ]]; then
-    backup_slot="${backup_dir}/${label}-DRY-RUN"
-    printf 'would reserve backup slot: %s\n' "${backup_slot}"
-  else
-    backup_slot="$(mktemp -d "${backup_dir}/${label}-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
-  fi
-  run cp -a -- "${target}" "${backup_slot}/${label}"
-  harden_backup_slot "${backup_slot}"
-  run rm -- "${target}"
-  echo "backed up and removed legacy ${label}: ${target} (${backup_slot})"
-}
-
-remove_authenticated_legacy_cache() {
-  [[ -e "${legacy_cache}" || -L "${legacy_cache}" ]] || return 0
-  validate_cleanup_target "${codex_home}" "plugins/cache/personal/${legacy_plugin_name}" "${legacy_cache}" || return 1
-  python3 - "${legacy_cache}" <<'PY' || return 1
-import json, re, stat, sys
-from pathlib import Path
-root = Path(sys.argv[1]).absolute()
-if root.is_symlink() or not root.is_dir():
-    raise SystemExit(f"error: refusing unexpected retired cache path: {root}")
-for path in root.rglob("*"):
-    if path.is_symlink():
-        raise SystemExit(f"error: retired cache contains a symlink: {path}")
-versions = [path for path in root.iterdir() if path.is_dir()]
-if len(versions) != 1:
-    raise SystemExit("error: retired cache must contain exactly one known version")
-version_root = versions[0]
-manifest_path = version_root / ".codex-plugin" / "plugin.json"
-server_path = version_root / "scripts" / "orchestration_control.py"
-try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    server = server_path.read_text(encoding="utf-8")
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"error: retired cache manifest is unreadable: {exc}")
-expected_name = "codex-" + "orchestration-" + "control"
-expected_version = "4." + "4.0"
-match = re.search(r'^SERVER_VERSION = "([^"]+)"$', server, re.MULTILINE)
-if version_root.name != expected_version or manifest.get("name") != expected_name or manifest.get("version") != expected_version or not match or match.group(1) != expected_version:
-    raise SystemExit("error: refusing unauthenticated retired plugin cache")
-PY
-  if [[ "${mode}" == "check" ]]; then
-    echo "outdated legacy personal-plugin-cache: ${legacy_cache}" >&2
-    return 1
-  fi
-  local backup_dir="${codex_home}/backups/${plugin_name}-upgrade" backup_slot
-  prepare_backup_directory "${backup_dir}" || return 1
-  if [[ "${mode}" == "dry-run" ]]; then
-    backup_slot="${backup_dir}/personal-plugin-cache-DRY-RUN"
-    printf 'would reserve backup slot: %s\n' "${backup_slot}"
-  else
-    backup_slot="$(mktemp -d "${backup_dir}/personal-plugin-cache-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
-  fi
-  run cp -a -- "${legacy_cache}" "${backup_slot}/personal-plugin-cache"
-  harden_backup_slot "${backup_slot}"
-  if [[ "${mode}" == "dry-run" ]]; then
-    echo "would remove authenticated retired plugin cache: ${legacy_cache}"
-    return 0
-  fi
-  python3 - "${legacy_cache}" <<'PY'
-import os, stat, sys
-from pathlib import Path
-root = Path(sys.argv[1]).absolute()
-for directory, names, files in os.walk(root, topdown=False, followlinks=False):
-    base = Path(directory)
-    if base.is_symlink():
-        raise SystemExit(f"error: refusing symlink during retired cache removal: {base}")
-    for name in files:
-        path = base / name
-        if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
-            raise SystemExit(f"error: refusing non-regular retired cache entry: {path}")
-        path.unlink()
-    for name in names:
-        path = base / name
-        if path.is_symlink() or not path.is_dir():
-            raise SystemExit(f"error: refusing unexpected retired cache directory: {path}")
-        path.rmdir()
-root.rmdir()
-PY
-  echo "backed up and removed authenticated retired plugin cache: ${legacy_cache} (${backup_slot})"
-}
-
 validate_sources() {
   [[ -f "${plugin_source}/.codex-plugin/plugin.json" ]] || { echo "error: plugin manifest is missing" >&2; return 1; }
   [[ -f "${plugin_source}/.mcp.json" ]] || { echo "error: MCP manifest is missing" >&2; return 1; }
@@ -240,61 +138,9 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "6.1.3":
-    raise SystemExit("plugin/server version must match the 6.1.3 release manifest")
+if module.SERVER_VERSION != version or base_version != "6.4.0":
+    raise SystemExit("plugin/server version must match the 6.4.0 release manifest")
 PY
-}
-
-remove_legacy_profile() {
-  [[ -e "${legacy_profile}" || -L "${legacy_profile}" ]] || return 0
-  validate_cleanup_target "${codex_home}" "agents/orchestrator.toml" "${legacy_profile}" || return 1
-  if [[ -L "${legacy_profile}" || ! -f "${legacy_profile}" ]]; then
-    echo "error: refusing unexpected legacy profile path: ${legacy_profile}" >&2; return 1
-  fi
-  if [[ "$(sha256sum -- "${legacy_profile}" | awk '{print $1}')" != "${legacy_profile_sha256}" ]]; then
-    echo "error: refusing to remove modified legacy profile: ${legacy_profile}" >&2; return 1
-  fi
-  backup_file_and_remove "${legacy_profile}" "orchestrator-profile" "${codex_home}" "agents/orchestrator.toml"
-}
-
-remove_legacy_marketplace_entry() {
-  [[ -e "${legacy_marketplace}" || -L "${legacy_marketplace}" ]] || return 0
-  validate_cleanup_target "${home_root}" ".agents/plugins/marketplace.json" "${legacy_marketplace}" || return 1
-  [[ -f "${legacy_marketplace}" && ! -L "${legacy_marketplace}" ]] || { echo "error: refusing unexpected retired marketplace path: ${legacy_marketplace}" >&2; return 1; }
-  if ! python3 - "${legacy_marketplace}" <<'PY'
-import json, sys
-try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
-except (OSError, json.JSONDecodeError):
-    raise SystemExit(1)
-legacy = "codex-" + "orchestration-" + "control"
-raise SystemExit(0 if any(item.get("name") == legacy and item.get("source", {}).get("source") == "local" and item.get("source", {}).get("path") == "./plugins/" + legacy for item in data.get("plugins", [])) else 1)
-PY
-  then return 0; fi
-  if [[ "${mode}" == "check" ]]; then echo "outdated legacy marketplace entry: ${legacy_marketplace}" >&2; return 1; fi
-  local backup_dir="${codex_home}/backups/${plugin_name}-upgrade" backup_slot
-  prepare_backup_directory "${backup_dir}" || return 1
-  if [[ "${mode}" == "dry-run" ]]; then
-    backup_slot="${backup_dir}/personal-marketplace-DRY-RUN"
-    printf 'would reserve backup slot: %s\n' "${backup_slot}"
-  else
-    backup_slot="$(mktemp -d "${backup_dir}/personal-marketplace-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
-  fi
-  run cp -a -- "${legacy_marketplace}" "${backup_slot}/personal-marketplace.json"
-  harden_backup_slot "${backup_slot}"
-  if [[ "${mode}" == "dry-run" ]]; then echo "would remove exact legacy marketplace entry from ${legacy_marketplace}"; return 0; fi
-  python3 - "${legacy_marketplace}" <<'PY'
-import json, os, sys, tempfile
-path = sys.argv[1]
-with open(path, encoding="utf-8") as stream: data = json.load(stream)
-legacy = "codex-" + "orchestration-" + "control"
-data["plugins"] = [item for item in data.get("plugins", []) if not (item.get("name") == legacy and item.get("source", {}).get("source") == "local" and item.get("source", {}).get("path") == "./plugins/" + legacy)]
-fd, temporary = tempfile.mkstemp(prefix=".marketplace.", dir=os.path.dirname(path))
-with os.fdopen(fd, "w", encoding="utf-8") as stream:
-    json.dump(data, stream, ensure_ascii=False, indent=2); stream.write("\n")
-os.replace(temporary, path)
-PY
-  echo "backed up and removed exact legacy marketplace entry: ${legacy_marketplace}"
 }
 
 plugin_version() {
@@ -689,13 +535,10 @@ validate_roots
 validate_global_config_path
 validate_sources
 status=0
-remove_legacy_profile || status=1
-remove_authenticated_legacy_cache || status=1
-remove_legacy_marketplace_entry || status=1
 install_or_check || status=1
 [[ "${status}" -eq 0 ]] || exit "${status}"
 if [[ "${mode}" == "check" ]]; then
   echo "Cortex is up to date."
 else
-  echo "Cortex installed from this repository. Start a new Codex thread before dispatching agents: existing threads can retain absolute paths to hooks in the retired plugin cache."
+  echo "Cortex installed from this repository. Start a new Codex thread before dispatching agents so it loads the installed hook paths."
 fi

@@ -34,16 +34,18 @@ def host_spawn_bootstrap(
     attempt_id: str,
     project_root: Path,
 ) -> str:
-    """Return the compact native prompt that grants one scoped briefing read."""
+    """Return the compact native prompt that grants a scoped briefing stream."""
     marker = dispatch_briefing_review_marker(briefing_digest)
     return (
         f"You are the internal Cortex worker with profile `{profile}` for dispatch_ref={dispatch_ref}. "
         f"Before any project action, read only the immutable Cortex briefing at {str(briefing_path)!r}. "
         f"Verify its SHA-256 is {briefing_digest}. If the host filesystem read alone reports this exact file missing "
-        "or unreadable, call public `read_dispatch_briefing` once with "
+        "or unreadable, call public `read_dispatch_briefing` with "
         f"project_root={str(project_root)!r}, task_id={task_id!r}, attempt_id={attempt_id!r}, "
-        f"profile={profile!r}, dispatch_ref={dispatch_ref!r}, briefing_digest={briefing_digest!r}; use only its "
-        "validated briefing. If both reads fail, or permissions/digest mismatch, stop with the exact blocker. "
+        f"profile={profile!r}, dispatch_ref={dispatch_ref!r}, briefing_digest={briefing_digest!r}. If it returns "
+        "complete=false, repeat only with next_cursor until complete=true; use the validated parts. If the host read "
+        "or scoped stream fails, or permissions/digest mismatch, stop with the "
+        "exact blocker. "
         "Follow the complete briefing. This exact file is your only direct-read "
         "exception under .codex/cortex: never list, inspect, or read any other Cortex ledger path. "
         f"After actually reviewing it, include `{marker}` as its own report.evidence item. Cortex rejects reports "
@@ -81,7 +83,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         )
         lifecycle_contract = (
             "Forbidden: coordinator lifecycle/pipeline/gate/delegation operations. Allowed Cortex operations only: "
-            "read_dispatch_briefing only after exact host-file failure, supplied read_worker_report refs, "
+            "read_dispatch_briefing only after exact host-file failure (continue only its supplied cursor if its "
+            "bounded response is incomplete), supplied read_worker_report refs, "
             "worker_question, and one final record_report. "
             "For a material decision, call worker_question(action=ask), return `QUESTION_RECORDED question_ref=<value>` "
             "plus a concise summary, publish no report, and end idle and resumable. Never busy-wait or use local UI. "
@@ -137,15 +140,12 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "short blocker description."
         )
     briefing_transport_contract = (
-        "Dispatch briefing transport: this file is the complete immutable instruction artifact for "
+        "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "
         f"dispatch_ref={package.get('dispatch_ref')!r}. The native bootstrap authorized reading this exact briefing "
-        "and no other path under .codex/cortex. Never list, browse, search, inspect, or read the surrounding ledger, "
-        "including another worker's briefing. If the native "
-        "filesystem read alone cannot open this exact file, use `read_dispatch_briefing` once with the complete "
-        "identity/digest tuple from the bootstrap; it is the only briefing fallback. Use scoped Cortex tools for "
-        "predecessor reports and durable coordination. The bootstrap also supplied the exact "
-        "`Dispatch briefing reviewed: <sha256>` evidence marker; after actually reviewing this file, include that "
-        "exact marker as its own report.evidence item. A missing marker, writable file, or digest mismatch fails closed."
+        "and no other path under .codex/cortex. If the host cannot read it, call `read_dispatch_briefing` with the "
+        "bootstrap identity/digest; when complete=false, continue only with its next_cursor until complete=true. Use "
+        "scoped Cortex tools for predecessor reports. Include the bootstrap `Dispatch briefing reviewed: <sha256>` "
+        "marker as one report.evidence item; a missing marker, writable file, or digest mismatch fails closed."
     )
     planning_contract = (
         "\n## Planner work-breakdown artifact\n"
@@ -345,7 +345,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         prompt_list("Allowed paths", package["allowed_paths"]),
         prompt_list("Context files", package.get("context_files", [])),
         "Context files and predecessor reports are required read inputs, not write authorization. Allowed paths alone authorize writes. The Cortex ledger under .codex/cortex is server-owned and must never be edited.",
-        f"Attempt result baseline: {package.get('result_baseline_file')!r}. Do not read or modify it; Cortex uses it to reconcile the final delta.",
+        f"Attempt baseline ref: {package.get('result_baseline_ref')!r}; server-only. Do not read or modify it.",
         follow_up_context(package.get("follow_up")),
         predecessor_context(package.get("context_report_ids", [])),
         predecessor_review_contract(package.get("context_report_ids", [])),

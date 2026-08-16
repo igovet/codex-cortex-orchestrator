@@ -15,6 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
 import cortex_hook
+from cortex_runtime import orchestration_engine
+from cortex_runtime import reports as runtime_reports
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -40,6 +42,21 @@ class ControlPlaneTests(unittest.TestCase):
 
     def activate(self, principal="thread-a"):
         return control.activate_orchestration({"user_command": "/cortex", "principal": principal, "thread_id": principal})
+
+    def task_state(self, task_dir: Path) -> dict:
+        return control.load_task_state_for_artifact(task_dir)
+
+    def task_definition(self, task_dir: Path) -> dict:
+        return control.load_task_definition(task_dir)
+
+    def write_task_state(self, state: dict) -> None:
+        control.db_update_task_state(self.ledger, state)
+
+    def task_document(self, task_dir: Path, key: str) -> dict:
+        state = self.task_state(task_dir)
+        document = control.db_get_task_document(self.ledger, state["task_id"], key)
+        self.assertIsNotNone(document)
+        return document
 
     @staticmethod
     def briefing_from_request(request):
@@ -121,7 +138,7 @@ class ControlPlaneTests(unittest.TestCase):
             attempt,
             report or self.v3_report(f"{attempt['gate']} worker completed"),
         )
-        package = json.loads((task_dir / "delegations" / f"{attempt['attempt_id']}.json").read_text(encoding="utf-8"))
+        package = self.task_document(task_dir, f"dispatch:{attempt['attempt_id']}")
         context_ids = package.get("context_report_ids") or []
         if context_ids and not any(str(item).startswith("Predecessor review:") for item in report["evidence"]):
             report["evidence"].append(control._predecessor_review_marker(context_ids))
@@ -274,7 +291,7 @@ class ControlPlaneTests(unittest.TestCase):
             )
             self.assertTrue(started["ok"])
             task_dir = next((self.ledger / "tasks").iterdir())
-            state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+            state = control.load_task_state_for_artifact(task_dir)
             self.assertEqual(state["thread_id"], state["principal"])
             bound = subprocess.run(
                 [sys.executable, str(hook)],
@@ -297,7 +314,7 @@ class ControlPlaneTests(unittest.TestCase):
                 "CORTEX DISPATCH REQUIRED NOW",
                 bound_payload["hookSpecificOutput"]["additionalContext"],
             )
-            bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+            bindings = control._host_session_bindings(self.ledger)
             self.assertEqual(bindings["tasks"][state["task_id"]], "host-session-42")
             self.assertEqual(cortex_hook.active_task(self.ledger, "host-session-42"), state["task_id"])
             self.assertFalse((self.ledger / "active-tasks.json").exists())
@@ -316,7 +333,7 @@ class ControlPlaneTests(unittest.TestCase):
                 env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
                 check=True,
             )
-            bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+            bindings = control._host_session_bindings(self.ledger)
             self.assertEqual(bindings["tasks"][state["task_id"]], "host-session-42")
             self.assertIsNone(cortex_hook.active_task(self.ledger, "different-host-session"))
             completed = subprocess.run(
@@ -351,7 +368,7 @@ class ControlPlaneTests(unittest.TestCase):
                 waves=[{"workers": [{"phase": "discover"}]}],
             )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         parent_session = "host-parent-session"
         subprocess.run(
@@ -369,7 +386,7 @@ class ControlPlaneTests(unittest.TestCase):
             env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
             check=True,
         )
-        bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+        bindings = control._host_session_bindings(self.ledger)
         self.assertEqual(bindings["tasks"][state["task_id"]], parent_session)
         self.assertEqual(cortex_hook.active_task(self.ledger, parent_session), state["task_id"])
         launched = subprocess.run(
@@ -393,7 +410,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("hookSpecificOutput", payload, launched.stderr)
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SubagentStart")
         self.assertNotIn("HOST BINDING BLOCKER", payload["hookSpecificOutput"]["additionalContext"])
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         self.assertEqual(attempt["status"], "running")
         self.assertEqual(attempt["host_spawn"]["agent_id"], "native.Child:01")
@@ -444,9 +461,9 @@ class ControlPlaneTests(unittest.TestCase):
                 waves=[{"workers": [{"phase": "discover"}]}],
             )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
-        self.assertFalse((self.ledger / "host-sessions.json").exists())
+        self.assertNotIn(state["task_id"], control._host_session_bindings(self.ledger)["tasks"])
 
         launched = subprocess.run(
             [sys.executable, str(hook)],
@@ -466,10 +483,10 @@ class ControlPlaneTests(unittest.TestCase):
         payload = json.loads(launched.stdout)
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SubagentStart")
         self.assertNotIn("HOST BINDING BLOCKER", payload["hookSpecificOutput"]["additionalContext"])
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["attempts"][0]["status"], "running")
         self.assertEqual(state["attempts"][0]["host_spawn"]["agent_id"], "native.Recovered:01")
-        bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+        bindings = control._host_session_bindings(self.ledger)
         self.assertEqual(bindings["tasks"][state["task_id"]], "host-recovered-session")
 
     def test_subagent_start_recovery_fails_closed_for_ambiguous_generic_workers(self):
@@ -483,7 +500,7 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertNotEqual(first["task_ref"], second["task_ref"])
         states = [
-            json.loads((path / "current.json").read_text(encoding="utf-8"))
+            control.load_task_state_for_artifact(path)
             for path in (self.ledger / "tasks").iterdir()
         ]
         models = {state["attempts"][0]["expected_model"] for state in states}
@@ -507,7 +524,7 @@ class ControlPlaneTests(unittest.TestCase):
                 waves=[{"workers": [{"phase": "discover"}]}],
             )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         parent_session = "host-stop-parent"
         control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
@@ -531,7 +548,7 @@ class ControlPlaneTests(unittest.TestCase):
             check=True,
         )
         self.assertEqual(stopped.stdout.strip(), "{}", stopped.stderr)
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         self.assertEqual(attempt["status"], "failed")
         self.assertEqual(attempt["finalization_reason"], "native_worker_stopped_without_report")
@@ -594,7 +611,7 @@ class ControlPlaneTests(unittest.TestCase):
                 waves=[{"workers": [{"phase": "discover"}]}],
             )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         parent_session = "host-report-stop-parent"
         control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
@@ -638,7 +655,7 @@ class ControlPlaneTests(unittest.TestCase):
                 waves=[{"workers": [{"phase": "discover"}]}],
             )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         parent_session = "host-question-stop-parent"
         control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
@@ -660,7 +677,7 @@ class ControlPlaneTests(unittest.TestCase):
             str(self.project), state["task_id"], parent_session, "native.QuestionStop:01",
         )
         self.assertEqual(stopped["outcome"], "awaiting_user")
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["attempts"][0]["status"], "running")
         inspected = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
@@ -764,15 +781,15 @@ class ControlPlaneTests(unittest.TestCase):
             )
             self.assertEqual(completed.stdout.strip(), "{}")
 
-            index = json.loads((self.ledger / "task-index.json").read_text(encoding="utf-8"))
-            bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+            index = control.read_task_index(self.ledger)
+            bindings = control._host_session_bindings(self.ledger)
             task_ids = sorted(task_id for task_id, session in bindings["tasks"].items() if session == "shared-host")
             self.assertEqual(len(task_ids), 3)
             for task_id in task_ids[:2]:
-                state_path = self.ledger / "tasks" / index[task_id]["directory"] / "current.json"
-                state = json.loads(state_path.read_text(encoding="utf-8"))
+                task_dir = self.ledger / "tasks" / index[task_id]["directory"]
+                state = self.task_state(task_dir)
                 state["status"] = "completed"
-                state_path.write_text(json.dumps(state), encoding="utf-8")
+                self.write_task_state(state)
                 control.remove_active_mapping(self.ledger, task_id, str(state.get("thread_id") or ""))
             self.assertEqual(cortex_hook.active_task(self.ledger, "shared-host"), task_ids[2])
 
@@ -825,7 +842,8 @@ class ControlPlaneTests(unittest.TestCase):
                 classified = self._handlers["classify_task"]({"complexity": "C1", "requirements": [], "principal": "thread-a", **arguments})
                 created = self._handlers["init_task"]({"task_id": "plugin-cwd", "objective": "workspace binding", "complexity": "C1", "classification_id": classified["classification_id"], "principal": "thread-a", **arguments})
                 self.assertEqual(created["ledger_root"], str(root / ".codex/cortex"))
-                self.assertTrue((root / ".codex/cortex/tasks" / created["task_directory"] / "task.json").is_file())
+                self.assertTrue((root / ".codex/cortex/cortex.db").is_file())
+                self.assertTrue((root / ".codex/cortex/tasks" / created["task_directory"]).is_dir())
                 observed = self._handlers["status"]({"task_id": "plugin-cwd", "principal": "thread-a", **arguments})
                 self.assertEqual(observed["task"]["project_root"], project)
                 self.assertEqual(observed["ledger_root"], str(root / ".codex/cortex"))
@@ -840,8 +858,8 @@ class ControlPlaneTests(unittest.TestCase):
         root = self.ledger
         self.assertEqual(first["task_number"], 1)
         self.assertEqual(second["task_number"], 2)
-        self.assertTrue((root / "tasks" / "0001-first-task" / "task.json").exists())
-        self.assertTrue((root / "tasks" / "0002-second-task" / "task.json").exists())
+        self.assertTrue((root / "tasks" / "0001-first-task").is_dir())
+        self.assertTrue((root / "tasks" / "0002-second-task").is_dir())
         self.assertEqual(control.status({"task_id": "first-task", "principal": "thread-a"})["task"]["task_number"], 1)
 
     def test_activation_persists_until_main_chat_returns_to_normal(self):
@@ -886,7 +904,7 @@ class ControlPlaneTests(unittest.TestCase):
             "classification_id": classified["classification_id"], "principal": "thread-a",
         })
         self.assertEqual(created["state"]["complexity"], "C2")
-        task = json.loads((self.ledger / "tasks" / created["task_directory"] / "task.json").read_text(encoding="utf-8"))
+        task = self.task_definition(self.ledger / "tasks" / created["task_directory"])
         self.assertEqual(task["requirements"], requirements)
 
     def test_init_ignores_duplicate_inputs_and_consumes_authoritative_receipt(self):
@@ -898,7 +916,7 @@ class ControlPlaneTests(unittest.TestCase):
             "principal": "thread-a",
         })
         self.assertEqual(created["state"]["complexity"], "C2")
-        task = json.loads((self.ledger / "tasks" / created["task_directory"] / "task.json").read_text(encoding="utf-8"))
+        task = self.task_definition(self.ledger / "tasks" / created["task_directory"])
         self.assertEqual(task["requirements"], ["original"])
 
     def test_init_ignores_truncated_c3_pipeline_and_uses_classification_receipt(self):
@@ -934,10 +952,9 @@ class ControlPlaneTests(unittest.TestCase):
     def test_incomplete_classification_receipt_is_never_repaired_from_caller_input(self):
         self.activate()
         classified = control.classify_task({"complexity": "C1", "requirements": ["preserve compatibility"], "principal": "thread-a"})
-        receipt_path = self.ledger / "classification-receipts" / f"{classified['classification_id']}.json"
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt = control.db_get_classification(self.ledger, classified["classification_id"])
         del receipt["requirements"]
-        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        control.db_put_classification(self.ledger, receipt)
         with self.assertRaisesRegex(ValueError, "classification receipt requirements are invalid"):
             control.init_task({
                 "task_id": "legacy-receipt", "objective": "require explicit legacy inputs",
@@ -1657,7 +1674,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(started["ok"])
         self.assertEqual(started["dispatches"][0]["arguments"]["model"], "gpt-5.6-sol")
         task_dir = next((self.ledger / "tasks").iterdir())
-        attempt = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))["attempts"][0]
+        attempt = control.load_task_state_for_artifact(task_dir)["attempts"][0]
         self.assertEqual(attempt["requested_model"], "gpt-5.6-sol")
         self.assertEqual(attempt["user_requested_model"], "gpt-5.6-sol")
 
@@ -1673,7 +1690,7 @@ class ControlPlaneTests(unittest.TestCase):
         state = result["state"]
         delegation = self.delegate(state, "demo", "discover", "explorer")
         self.assertEqual(delegation["state"]["attempts"][-1]["display_name"], "Explorer Objective")
-        delegation_file = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
+        delegation_file = self.task_document(control.db_task_artifact_path(self.ledger, "demo"), f"dispatch:{delegation['attempt_id']}")
         self.assertEqual(delegation_file["display_name"], "Explorer Objective")
         self.assertEqual(delegation_file["profile"], "explorer")
         self.assertEqual(delegation_file["selected_model"], "gpt-5.6-luna")
@@ -1727,18 +1744,18 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("documentation", passed["state"]["completed_gates"])
 
     def test_documentation_gate_rejects_noncanonical_receipt_state(self):
-        created = self.init(task_id="documentation-legacy", complexity="C2")
+        created = self.init(task_id="documentation-noncanonical", complexity="C2")
         narrowed = control.update_pipeline({
-            "task_id": "documentation-legacy",
+            "task_id": "documentation-noncanonical",
             "principal": "thread-a",
             "expected_revision": created["state"]["revision"],
             "pipeline": ["documentation", "close"],
-            "reason": "isolate legacy documentation receipt",
+            "reason": "isolate noncanonical documentation receipt",
         })
-        delegation = self.delegate(narrowed["state"], "documentation-legacy", "documentation", "technical_writer")
-        report = self.report("documentation-legacy", delegation["attempt_id"])
+        delegation = self.delegate(narrowed["state"], "documentation-noncanonical", "documentation", "technical_writer")
+        report = self.report("documentation-noncanonical", delegation["attempt_id"])
         evidence = control.record_evidence({
-            "task_id": "documentation-legacy",
+            "task_id": "documentation-noncanonical",
             "principal": "thread-a",
             "expected_revision": report["state"]["revision"],
             "gate": "documentation",
@@ -1746,31 +1763,24 @@ class ControlPlaneTests(unittest.TestCase):
             "report_receipt": report["receipt"]["receipt_id"],
             "kind": "documentation_sync",
             "decision": "updated",
-            "summary": "legacy documentation evidence",
+            "summary": "noncanonical documentation evidence",
         })
-        task_dir = self.ledger / "tasks" / "0001-documentation-legacy"
-        current_path = task_dir / "current.json"
-        current = json.loads(current_path.read_text(encoding="utf-8"))
+        task_dir = self.ledger / "tasks" / "0001-documentation-noncanonical"
+        current = self.task_state(task_dir)
         current["evidence"][-1]["kind"] = "documentation_sync"
         current["documentation_receipt"] = None
-        current_path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
-        evidence_path = task_dir / "evidence" / f"{evidence['evidence']['evidence_id']}.json"
-        legacy_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-        legacy_evidence["kind"] = "documentation_sync"
-        evidence_path.write_text(json.dumps(legacy_evidence, indent=2) + "\n", encoding="utf-8")
-        status = control.status({"task_id": "documentation-legacy", "principal": "thread-a"})
-        passed = control.record_gate({
-            "task_id": "documentation-legacy",
-            "principal": "thread-a",
-            "expected_revision": status["state"]["revision"],
-            "gate": "documentation",
-            "outcome": "passed",
-        })
-        self.assertFalse(passed["recorded"])
-        self.assertEqual(passed["reason"], "documentation_evidence_required")
-        self.assertNotIn("documentation", passed["state"]["completed_gates"])
+        self.write_task_state(current)
+        status = control.status({"task_id": "documentation-noncanonical", "principal": "thread-a"})
+        with self.assertRaisesRegex(ValueError, "SQLite evidence record failed reconciliation"):
+            control.record_gate({
+                "task_id": "documentation-noncanonical",
+                "principal": "thread-a",
+                "expected_revision": status["state"]["revision"],
+                "gate": "documentation",
+                "outcome": "passed",
+            })
 
-    def test_gate_rejects_evidence_file_that_no_longer_matches_state(self):
+    def test_gate_ignores_tampered_evidence_projection(self):
         created = self.init(task_id="evidence-reconciliation", complexity="C1")
         state = created["state"]
         evidence = control.record_evidence({
@@ -1781,11 +1791,11 @@ class ControlPlaneTests(unittest.TestCase):
         record = json.loads(path.read_text(encoding="utf-8"))
         record["summary"] = "tampered"
         path.write_text(json.dumps(record), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "evidence record failed reconciliation"):
-            control.record_gate({
-                "task_id": "evidence-reconciliation", "principal": "thread-a",
-                "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed",
-            })
+        passed = control.record_gate({
+            "task_id": "evidence-reconciliation", "principal": "thread-a",
+            "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed",
+        })
+        self.assertIn("discover", passed["state"]["completed_gates"])
 
     def test_documentation_retry_cannot_spawn_duplicate_worker(self):
         created = self.init(task_id="documentation-no-loop", complexity="C2")
@@ -2031,7 +2041,7 @@ class ControlPlaneTests(unittest.TestCase):
             "model": "gpt-5.6-terra",
             "reasoning_effort": "high",
         }
-        package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
+        package = self.task_document(control.db_task_artifact_path(self.ledger, "spawn-contract"), f"dispatch:{delegation['attempt_id']}")
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
         self.assertRegex(
             delegation["spawn_request"]["task_name"],
@@ -2367,7 +2377,7 @@ class ControlPlaneTests(unittest.TestCase):
             "acceptance_criteria": [], "verification": [],
         })
         self.assertEqual(delegated["gate_correction"], {"requested": "discover", "used": "plan"})
-        package = json.loads(Path(delegated["delegation_file"]).read_text(encoding="utf-8"))
+        package = self.task_document(control.db_task_artifact_path(self.ledger, "recoverable-sequence"), f"dispatch:{delegated['attempt_id']}")
         self.assertIn("Own planning and requirement closure", package["ownership"])
         self.assertEqual(package["allowed_paths"], ["."])
         self.assertTrue(package["acceptance_criteria"])
@@ -2608,7 +2618,10 @@ class ControlPlaneTests(unittest.TestCase):
         delegated = self.delegate(state, "no-report-grants", "plan", "planner")
         report_root = self.ledger / "tasks/0001-no-report-grants/reports"
         self.assertFalse((report_root / "grants").exists())
-        index = json.loads((report_root / "delegations" / delegated["attempt_id"] / "index.json").read_text(encoding="utf-8"))
+        index = self.task_document(
+            control.db_task_artifact_path(self.ledger, "no-report-grants"),
+            f"report_delegation:{delegated['attempt_id']}",
+        )
         self.assertNotIn("grant_ids", index)
 
     def test_commit_gate_retry_after_completed_transition_is_idempotent(self):
@@ -2801,7 +2814,7 @@ class ControlPlaneTests(unittest.TestCase):
         result = control.prepare_delegations({
             "task_id": "composite-rollback", "principal": "thread-a", "delegations": [
                 {"gate": "discover", "agent": "explorer", "task_kind": "discovery", "risk": "low", "parallel": True, "objective": "one", "ownership": "one", "allowed_paths": ["."], "acceptance_criteria": ["one"], "verification": ["one"]},
-                {"gate": "discover", "agent": "not-a-profile", "task_kind": "discovery", "risk": "low", "parallel": True, "objective": "two", "ownership": "two", "allowed_paths": ["."], "acceptance_criteria": ["two"], "verification": ["two"]},
+                {"gate": "discover", "agent": "explorer", "task_kind": "discovery", "risk": "low", "parallel": True, "objective": "two", "ownership": "two", "allowed_paths": ["."], "acceptance_criteria": ["two"], "verification": ["two"], "context_report_ids": ["report-does-not-exist"]},
             ],
         })
         self.assertFalse(result["recorded"])
@@ -2833,7 +2846,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("task_id", started)
         self.assertNotIn("wave_id", started)
         tasks = list((self.ledger / "tasks").iterdir())
-        definition = json.loads((tasks[0] / "task.json").read_text(encoding="utf-8"))
+        definition = self.task_definition(tasks[0])
         self.assertEqual(definition["complexity"], "C2")
         self.assertEqual(definition["plan_approval"], "required")
 
@@ -2856,38 +2869,37 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(continued["ok"])
 
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
-        plan = json.loads((task_dir / "orchestration.json").read_text(encoding="utf-8"))
-        registry = json.loads((self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
-        transaction = json.loads(next((self.ledger / "operations").glob("*.json")).read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
+        loaded = control.db_load_task(self.ledger, state["task_id"])
+        plan = loaded[2] if loaded is not None else None
+        registry = control._operation_registry(self.ledger)
         self.assertEqual(state["schema"], "cortex/v8")
         self.assertNotIn("current_gate", state)
+        self.assertIsInstance(plan, dict)
         self.assertEqual(plan["schema"], control.ORCHESTRATION_PLAN_SCHEMA)
         self.assertEqual(registry["schema"], "cortex/orchestration/v4")
-        self.assertEqual(transaction["schema"], control.ORCHESTRATION_TRANSACTION_SCHEMA)
+        self.assertEqual(
+            [item["version"] for item in control.db_migration_history(self.ledger)],
+            list(range(1, control.DATABASE_SCHEMA_VERSION + 1)),
+        )
         self.assertFalse((self.ledger / "v3-operations.json").exists())
         self.assertFalse((task_dir / "status-receipts").exists())
         self.assertFalse(any(task_dir.rglob("*-snapshot.json")))
         self.assertFalse(any((task_dir / "handoffs").glob("*-manifest.json")))
 
         allowed = [
+            re.compile(r"^cortex\.db(?:-(?:wal|shm))?$"),
             re.compile(r"^\.state\.lock$"),
-            re.compile(r"^(activations|host-sessions|task-index|orchestration-operations|resource-claims)\.json$"),
-            re.compile(r"^(classification-receipts|operations)/[^/]+\.json$"),
-            re.compile(r"^tasks/[^/]+/(baseline-manifest|current|orchestration|task)\.json$"),
             re.compile(r"^tasks/[^/]+/journal\.md$"),
-            re.compile(r"^tasks/[^/]+/(delegations|evidence)/[^/]+\.json$"),
+            re.compile(r"^tasks/[^/]+/evidence/[^/]+\.json$"),
             re.compile(r"^tasks/[^/]+/delegations/[^/]+\.briefing\.md$"),
-            re.compile(r"^tasks/[^/]+/reports/index\.json$"),
             re.compile(r"^tasks/[^/]+/reports/(records|receipts|consumptions)/[^/]+\.json$"),
             re.compile(r"^tasks/[^/]+/reports/markdown/[^/]+\.md$"),
-            re.compile(r"^tasks/[^/]+/reports/delegations/[^/]+/index\.json$"),
-            re.compile(r"^tasks/[^/]+/questions/records/[^/]+\.json$"),
-            re.compile(r"^tasks/[^/]+/planning/(manifest\.json|overview\.md)$"),
+            re.compile(r"^tasks/[^/]+/planning/overview\.md$"),
             re.compile(r"^tasks/[^/]+/planning/revisions/[^/]+/(manifest\.json|packages/[^/]+\.json)$"),
             re.compile(r"^tasks/[^/]+/handoffs/(?:manifests/)?[^/]+\.json$"),
             re.compile(r"^tasks/[^/]+/(?:\.lifecycle-events\.lock|lifecycle-events-meta\.json|lifecycle-events\.jsonl)$"),
-            re.compile(r"^lanes/[^/]+/(?:current\.json|journal\.md)$"),
+            re.compile(r"^lanes/[^/]+/journal\.md$"),
         ]
         files = [path.relative_to(self.ledger).as_posix() for path in self.ledger.rglob("*") if path.is_file()]
         self.assertFalse(any("v3" in path.lower() or "v7" in path.lower() for path in files))
@@ -3000,7 +3012,7 @@ class ControlPlaneTests(unittest.TestCase):
         started = self.v3_start("$cortex:orchestrator harvest", complexity="C3")
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task = control.load_task_definition(task_dir)
         self.assertEqual(task["plan_approval"], "auto")
 
     def test_v3_profile_schema_exposes_exact_roster_and_rejects_wrong_gate_owner(self):
@@ -3030,7 +3042,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_planner_rejects_microtasks_without_acceptance_and_verification(self):
         started = self.v3_start("plan a bounded change", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         planning = self.v3_planning()
         planning["work_packages"][0]["microtasks"][0]["verification"] = []
@@ -3052,7 +3064,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[{"workers": [{"phase": "implementation"}]}],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         identity = {
             "project_root": str(self.project), "task_id": state["task_id"],
@@ -3105,7 +3117,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[{"workers": [{"phase": "review"}]}],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("review used an unstructured check claim")
         report["tests"] = ["tests passed"]
@@ -3141,7 +3153,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_gate_rejects_a_report_without_server_result_validation_receipt(self):
         started = self.v3_start("inspect the bounded surface", waves=[{"workers": [{"phase": "discover"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         raw = control.record_report({
             "project_root": str(self.project), "task_id": state["task_id"],
@@ -3206,7 +3218,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_worker_question_pauses_report_and_continue_then_resumes_same_attempt(self):
         started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         identity = {
             "project_root": str(self.project),
@@ -3252,7 +3264,7 @@ class ControlPlaneTests(unittest.TestCase):
         polled = control.worker_question({**identity, "action": "poll", "question_ref": question_ref})
         self.assertEqual(polled["outcome"], "question_answered")
         self.assertEqual(polled["answer_text"], "Lead generation")
-        after = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        after = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(after["attempts"][0]["attempt_id"], attempt["attempt_id"])
         published = control.publish_worker_report({
             **identity,
@@ -3268,7 +3280,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[{"workers": [{"phase": "plan"}]}],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         identity = {
             "project_root": str(self.project),
@@ -3326,7 +3338,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_question_ref_opens_native_ui_once_without_coordinator_identity(self):
         started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         identity = {
             "project_root": str(self.project),
@@ -3376,7 +3388,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_question_management_rejects_guessed_identity_and_plain_text_fallback(self):
         started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         asked = control.worker_question({
             "project_root": str(self.project),
@@ -3405,7 +3417,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(unavailable["ok"])
         self.assertEqual(unavailable["code"], "host_question_unavailable")
         self.assertIn("Do not ask it through commentary", unavailable["next_action"])
-        question = json.loads((task_dir / "questions/records" / f"{asked['question_ref']}.json").read_text(encoding="utf-8"))
+        question = self.task_document(task_dir, f"question:{asked['question_ref']}")
         self.assertEqual(question["status"], "open")
 
         # A temporary host-capability failure is retryable rather than a
@@ -3450,8 +3462,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("idle and resumable", briefing)
         self.assertIn("followup_task", briefing)
         task_dir = next((self.ledger / "tasks").iterdir())
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        task = control.load_task_definition(task_dir)
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         self.assertEqual(task["user_request"], "создай лендинг")
         self.assertEqual(task["objective"], "создай лендинг")
@@ -3518,13 +3530,13 @@ class ControlPlaneTests(unittest.TestCase):
         started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task = control.load_task_definition(task_dir)
         self.assertEqual(task["user_request"], "$cortex:orchestrator создай лендинг")
         self.assertEqual(task["objective"], "$cortex:orchestrator создай лендинг")
         self.assertRegex(task_dir.name, r"^0001-task-[0-9a-f]{8}$")
         self.assertNotIn("home", task_dir.name)
         self.assertNotIn("plugins", task_dir.name)
-        self.assertNotIn("SKILL.md", (task_dir / "task.json").read_text(encoding="utf-8"))
+        self.assertNotIn("SKILL.md", json.dumps(task))
         briefing = self.briefing_from_response(started)
         self.assertNotIn("plugins/cache", briefing)
         self.assertTrue(task["intent_clarification_required"])
@@ -3541,7 +3553,7 @@ class ControlPlaneTests(unittest.TestCase):
             "orchestrator/SKILL.md) harvest",
             waves=[{"workers": [{"phase": "discover"}]}],
         )
-        self.assertTrue(first["ok"])
+        self.assertTrue(first["ok"], first)
         self.assertTrue(replay["ok"])
         self.assertEqual(replay["task_ref"], first["task_ref"])
         self.assertTrue(replay["replayed"])
@@ -3567,7 +3579,7 @@ class ControlPlaneTests(unittest.TestCase):
         started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task = control.load_task_definition(task_dir)
         self.assertFalse(task["intent_clarification_required"])
         self.assertEqual(control._intent_clarification_preflight("Implement mapping retry logic"), (False, None))
         self.assertEqual(control._intent_clarification_preflight("Fix the application crash"), (False, None))
@@ -3577,7 +3589,7 @@ class ControlPlaneTests(unittest.TestCase):
             "workers": [{"phase": "implementation", "profile": "backend_dev"}],
         }])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         identity = {
             "project_root": str(self.project),
@@ -3611,29 +3623,28 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_prune_removes_only_confirmed_stale_task_state_and_is_idempotent(self):
         old = self.v3_start("abandoned old task", waves=[{"workers": [{"phase": "discover"}]}])
         recent = self.v3_start("recent active task", waves=[{"workers": [{"phase": "discover"}]}])
-        index = json.loads((self.ledger / "task-index.json").read_text(encoding="utf-8"))
+        index = control.read_task_index(self.ledger)
         old_task_id = next(task_id for task_id in index if control._v3_task_ref(task_id) == old["task_ref"])
         old_dir = self.ledger / "tasks" / index[old_task_id]["directory"]
-        old_state_path = old_dir / "current.json"
-        old_state = json.loads(old_state_path.read_text(encoding="utf-8"))
+        old_state = self.task_state(old_dir)
+        old_state["status"] = "completed"
         old_state["updated_at"] = "2000-01-01T00:00:00+00:00"
-        old_state_path.write_text(json.dumps(old_state), encoding="utf-8")
-        old_task = json.loads((old_dir / "task.json").read_text(encoding="utf-8"))
-        classification_path = self.ledger / "classification-receipts" / f"{old_task['classification_id']}.json"
-        self.assertTrue(classification_path.is_file())
-        claims_path = self.ledger / "resource-claims.json"
-        claims_path.write_text(json.dumps({
+        self.write_task_state(old_state)
+        old_task = control.load_task_definition(old_dir)
+        self.assertIsNotNone(control.db_get_classification(self.ledger, old_task["classification_id"]))
+        control.db_put_global(self.ledger, "resource_claims", {
             "old": {"scope_kind": "task", "scope_id": old_task_id},
             "lane": {"scope_kind": "lane", "scope_id": "shared-lane"},
-        }), encoding="utf-8")
+        })
         lane_dir = self.ledger / "lanes" / "shared-lane"
         lane_dir.mkdir(parents=True)
-        lane_state_path = lane_dir / "current.json"
-        lane_state_path.write_text(json.dumps({
+        lane_definition = {"schema": control.SCHEMA, "lane_id": "shared-lane"}
+        lane_state = {
             "schema": control.SCHEMA,
             "lane_id": "shared-lane",
             "bound_tasks": [old_task_id, next(task_id for task_id in index if task_id != old_task_id)],
-        }), encoding="utf-8")
+        }
+        control.db_put_lane(self.ledger, lane_definition, lane_state)
         keep = self.project / "keep.txt"
         keep.write_text("project data", encoding="utf-8")
 
@@ -3651,34 +3662,61 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(pruned["pruned_task_refs"], [old["task_ref"]])
         self.assertFalse(old_dir.exists())
         self.assertTrue(keep.is_file())
-        remaining_index = json.loads((self.ledger / "task-index.json").read_text(encoding="utf-8"))
+        remaining_index = control.read_task_index(self.ledger)
         self.assertEqual(len(remaining_index), 1)
         recent_task_id = next(iter(remaining_index))
         self.assertEqual(control._v3_task_ref(recent_task_id), recent["task_ref"])
-        registry = json.loads((self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
+        registry = control._operation_registry(self.ledger)
         self.assertNotIn(old_task_id, registry["tasks"])
         self.assertTrue(all(item.get("task_id") != old_task_id for item in registry["starts"].values()))
-        self.assertFalse(classification_path.exists())
-        claims = json.loads(claims_path.read_text(encoding="utf-8"))
+        self.assertIsNone(control.db_get_classification(self.ledger, old_task["classification_id"]))
+        claims = control.db_get_global(self.ledger, "resource_claims", {})
         self.assertEqual(set(claims), {"lane"})
-        lane_state = json.loads(lane_state_path.read_text(encoding="utf-8"))
+        _, lane_state = control.db_get_lane(self.ledger, "shared-lane")
         self.assertEqual(lane_state["bound_tasks"], [recent_task_id])
         self.assertFalse((self.ledger / "active-tasks.json").exists())
-        if (self.ledger / "activations.json").exists():
-            activations = json.loads((self.ledger / "activations.json").read_text(encoding="utf-8"))
-            self.assertTrue(all(item.get("task_id") != old_task_id for item in activations.values()))
-        if (self.ledger / "operations").exists():
-            operation_task_ids = {
-                json.loads(path.read_text(encoding="utf-8")).get("task_id")
-                for path in (self.ledger / "operations").glob("*.json")
-            }
-            self.assertNotIn(old_task_id, operation_task_ids)
+        activations = control.db_get_global(self.ledger, "activations", {})
+        self.assertTrue(all(item.get("task_id") != old_task_id for item in activations.values()))
         replay = control.manage_orchestration({
             "project_root": str(self.project),
             "intent": "prune",
             "payload": {"confirmation": "PRUNE", "older_than_days": 7},
         })
         self.assertEqual(replay["pruned_count"], 0)
+
+    def test_v3_prune_retains_old_active_task_and_shared_classification_receipt(self):
+        active = self.v3_start("long-running task must survive prune", waves=[{"workers": [{"phase": "discover"}]}])
+        completed = self.v3_start("completed task can be pruned", waves=[{"workers": [{"phase": "discover"}]}])
+        index = control.read_task_index(self.ledger)
+        active_id = next(task_id for task_id in index if control._v3_task_ref(task_id) == active["task_ref"])
+        completed_id = next(task_id for task_id in index if control._v3_task_ref(task_id) == completed["task_ref"])
+        active_dir = self.ledger / "tasks" / index[active_id]["directory"]
+        completed_dir = self.ledger / "tasks" / index[completed_id]["directory"]
+        active_state = self.task_state(active_dir)
+        completed_state = self.task_state(completed_dir)
+        completed_task = control.load_task_definition(completed_dir)
+        active_state["updated_at"] = "2000-01-01T00:00:00+00:00"
+        completed_state["status"] = "completed"
+        completed_state["updated_at"] = "2000-01-01T00:00:00+00:00"
+        # Simulate an old shared receipt reference: pruning one task must not
+        # delete evidence still owned by the retained active contract.
+        active_state["classification_receipt"] = completed_task["classification_id"]
+        self.write_task_state(active_state)
+        self.write_task_state(completed_state)
+        self.assertIsNotNone(control.db_get_classification(self.ledger, completed_task["classification_id"]))
+
+        pruned = control.manage_orchestration({
+            "project_root": str(self.project),
+            "intent": "prune",
+            "payload": {"confirmation": "PRUNE", "older_than_days": 7},
+        })
+
+        self.assertTrue(pruned["ok"])
+        self.assertEqual(pruned["pruned_task_refs"], [completed["task_ref"]])
+        self.assertTrue(active_dir.exists())
+        self.assertFalse(completed_dir.exists())
+        self.assertGreaterEqual(pruned["retained_nonterminal_count"], 1)
+        self.assertIsNotNone(control.db_get_classification(self.ledger, completed_task["classification_id"]))
 
     def test_v3_multiple_same_project_tasks_are_isolated_by_task_ref(self):
         starts = [
@@ -3687,7 +3725,7 @@ class ControlPlaneTests(unittest.TestCase):
         ]
         self.assertTrue(all(item["ok"] for item in starts))
         self.assertEqual(len({item["task_ref"] for item in starts}), 3)
-        registry = json.loads((self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
+        registry = control._operation_registry(self.ledger)
         self.assertEqual(len(registry["starts"]), 3)
         self.assertEqual(len(registry["tasks"]), 3)
         ambiguous = control.continue_orchestration({
@@ -3764,7 +3802,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(all(item["ok"] for item in responses))
         self.assertEqual(len({item["task_ref"] for item in responses}), 3)
-        registry = json.loads((self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
+        registry = control._operation_registry(self.ledger)
         self.assertEqual(len(registry["tasks"]), 3)
 
     def test_v3_concurrent_identical_starts_share_the_pending_reservation(self):
@@ -3797,7 +3835,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(all(item["ok"] for item in responses))
         self.assertEqual(len({item["task_ref"] for item in responses}), 1)
-        registry = json.loads((self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
+        registry = control._operation_registry(self.ledger)
         self.assertEqual(len(registry["starts"]), 1)
         self.assertEqual(len(registry["tasks"]), 1)
 
@@ -3813,7 +3851,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task = control.load_task_definition(task_dir)
         self.assertEqual(task["user_language"], "en")
 
     def test_v3_compact_aliases_and_defaults_match_internal_delegation_contract(self):
@@ -3824,7 +3862,7 @@ class ControlPlaneTests(unittest.TestCase):
         }]}])
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         self.assertEqual((attempt["gate"], attempt["agent"]), ("discover", "explorer"))
         self.assertEqual(attempt["allowed_paths"], ["plugins/cortex"])
@@ -3877,7 +3915,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn(dispatch["dispatch_ref"], dispatch["arguments"]["message"])
 
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         fallback = control.read_dispatch_briefing({
             "project_root": str(self.project),
@@ -3903,9 +3941,9 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertFalse(denied["ok"])
         self.assertEqual(denied["code"], "dispatch_briefing_unavailable")
-        package = (task_dir / "delegations" / f"{attempt['attempt_id']}.json").read_text(encoding="utf-8")
-        self.assertNotIn("## Specialist playbook", (task_dir / "current.json").read_text(encoding="utf-8"))
-        self.assertNotIn("## Specialist playbook", package)
+        package = self.task_document(task_dir, f"dispatch:{attempt['attempt_id']}")
+        self.assertNotIn("## Specialist playbook", json.dumps(self.task_state(task_dir)))
+        self.assertNotIn("## Specialist playbook", json.dumps(package))
 
         missing = control.publish_worker_report({
             "project_root": str(self.project),
@@ -3930,7 +3968,7 @@ class ControlPlaneTests(unittest.TestCase):
         briefing_path.write_text(briefing_path.read_text(encoding="utf-8") + "\ntampered\n", encoding="utf-8")
         briefing_path.chmod(0o400)
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("tampered briefing")
         report["evidence"].append(control.dispatch_briefing_review_marker(attempt["briefing_digest"]))
@@ -3979,7 +4017,7 @@ class ControlPlaneTests(unittest.TestCase):
             "waves": [{"workers": [{"phase": "discover"}, {"phase": "architecture"}]}],
         })
         task_dir = max((self.ledger / "tasks").iterdir())
-        before = (task_dir / "current.json").read_bytes()
+        before = json.dumps(self.task_state(task_dir), sort_keys=True)
         rejected = control.continue_orchestration({
             "project_root": str(self.project), "step": started["step"],
             "results": [
@@ -3988,8 +4026,8 @@ class ControlPlaneTests(unittest.TestCase):
             ],
         })
         self.assertFalse(rejected["ok"])
-        self.assertEqual((task_dir / "current.json").read_bytes(), before)
-        self.assertFalse("inflight_continue" in (self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
+        self.assertEqual(json.dumps(self.task_state(task_dir), sort_keys=True), before)
+        self.assertFalse("inflight_continue" in control._operation_registry(self.ledger))
         accepted_results = self.v3_results(started, [self.v3_report("one"), self.v3_report("two")])
         accepted = control.continue_orchestration({
             "project_root": str(self.project), "step": started["step"],
@@ -4012,7 +4050,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(replay["dispatches"], [])
         self.assertNotEqual(replay, first)
         self.assertIn("Do not invoke or repeat a worker dispatch", replay["next_action"])
-        registry = json.loads((self.ledger / "orchestration-operations.json").read_text(encoding="utf-8"))
+        registry = control._operation_registry(self.ledger)
         task_record = next(iter(registry["tasks"].values()))
         self.assertEqual(task_record["last_continue"]["response"]["dispatches"], [])
         self.assertTrue(task_record["last_continue"]["response"]["replayed"])
@@ -4025,7 +4063,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(second["ok"])
         reports = list((next((self.ledger / "tasks").iterdir()) / "reports/records").glob("*.json"))
         self.assertEqual(len(reports), 2)
-        state = json.loads((next((self.ledger / "tasks").iterdir()) / "current.json").read_text(encoding="utf-8"))
+        state = self.task_state(next((self.ledger / "tasks").iterdir()))
         completed_attempts = [item for item in state["attempts"] if item["status"] == "passed"]
         self.assertEqual(completed_attempts[0]["dispatch_correlation"], "worker_report_received")
         self.assertNotIn("host_spawn", completed_attempts[0])
@@ -4038,7 +4076,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started["pipeline"]["authority"], "coordinator")
         self.assertEqual(started["dispatches"][0]["arguments"]["fork_turns"], "none")
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("repository-grounded discovery handoff")
         report["findings"] = ["Use the discovered service boundary."]
@@ -4086,8 +4124,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn(f"Predecessor review: {published['report_ref']}", prompt)
         self.assertIn(f"attempt_id='implementation-02'", prompt)
         self.assertIn("profile='general'", prompt)
-        self.assertIn("Attempt result baseline:", prompt)
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        self.assertIn("Attempt baseline ref: 'manifest-", prompt)
+        state = control.load_task_state_for_artifact(task_dir)
         successor = next(item for item in state["attempts"] if item["gate"] == "implementation")
         worker_read = control.read_worker_report({
             "project_root": str(self.project),
@@ -4112,7 +4150,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("If no exact usable index exists, do not create or refresh one in this gate.", prompt)
         records = list((task_dir / "reports/records").glob("*.json"))
         self.assertEqual(len(records), 1)
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         completed = next(item for item in state["attempts"] if item["gate"] == "discover")
         self.assertEqual(completed["report_ids"], [published["report_ref"]])
 
@@ -4127,7 +4165,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", prompt)
         self.assertIn("No rm, git clean, or cleanup scripts", prompt)
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         (self.project / "unexpected-verifier-write.txt").write_text("must be rejected\n", encoding="utf-8")
         rejected = control.publish_worker_report({
@@ -4153,7 +4191,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.briefing_from_response(started),
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("review found an unresolved defect")
         report["tests"].append({
@@ -4186,7 +4224,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.briefing_from_response(started),
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("review evidence must be reproducible")
         report["tests"][0]["command"] = "python3 - <<'PY' ... assertions ... PY"
@@ -4203,13 +4241,13 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(list((task_dir / "reports/records").glob("report-*.json")), [])
 
     def test_close_markers_ignore_command_and_cwd_text_but_reject_semantic_blockers(self):
-        task_dir = self.base / "blocked-path-task"
-        task_dir.mkdir()
-        (task_dir / "task.json").write_text(json.dumps({
-            "acceptance_criteria": ["The task is complete."],
-            "verification": ["The close check passes."],
-        }), encoding="utf-8")
-        state = {"require_handoff": True}
+        created = self.init(task_id="blocked-path-task")
+        task_dir = self.ledger / "tasks" / created["task_directory"]
+        task = self.task_definition(task_dir)
+        task["acceptance_criteria"] = ["The task is complete."]
+        task["verification"] = ["The close check passes."]
+        control.db_update_task_definition(self.ledger, task)
+        state = {"require_handoff": True, "task_id": "blocked-path-task"}
         attempt = {"gate": "close"}
         report = self.v3_report("close verification completed")
         report["tests"][0]["command"] = "python3 verify_blocked_resume.py"
@@ -4227,7 +4265,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         cache = self.project / "src" / "__pycache__"
         cache.mkdir(parents=True)
@@ -4280,7 +4318,7 @@ class ControlPlaneTests(unittest.TestCase):
             f"[Report plan — report-0001](<{task_dir / 'reports/markdown/report-0001.md'}>)",
         )
         self.assertIn("manage_orchestration", held["next_action"])
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["plan_approval"]["status"], "awaiting_user")
         self.assertEqual([item["gate"] for item in state["attempts"]], ["plan"])
 
@@ -4310,7 +4348,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[{"workers": [{"phase": "discover"}]}],
         )
         source_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((source_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(source_dir)
         attempt = state["attempts"][0]
         published = control.publish_worker_report({
             "project_root": str(self.project), "task_id": state["task_id"],
@@ -4337,14 +4375,14 @@ class ControlPlaneTests(unittest.TestCase):
                 "results": results,
             })
         self.assertEqual(completed["outcome"], "completed")
-        state = json.loads((source_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(source_dir)
         created_handoff = control.handoff({
             "project_root": str(self.project), "task_id": state["task_id"], "principal": state["principal"],
             "expected_revision": state["revision"], "completed": ["Source task closed."],
             "files": [], "next_action": "Use this source only as corrective-task context.",
         })
-        source_task_before = (source_dir / "task.json").read_text(encoding="utf-8")
-        source_state_before = (source_dir / "current.json").read_text(encoding="utf-8")
+        source_task_before = json.dumps(self.task_definition(source_dir), sort_keys=True)
+        source_state_before = json.dumps(self.task_state(source_dir), sort_keys=True)
 
         follow_up = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": source["task_ref"], "intent": "follow_up",
@@ -4364,12 +4402,12 @@ class ControlPlaneTests(unittest.TestCase):
             created_handoff["handoff_file"],
         )
         self.assertTrue(Path(follow_up["follow_up"]["source_report_markdown_paths"][0]).is_file())
-        self.assertEqual((source_dir / "task.json").read_text(encoding="utf-8"), source_task_before)
-        self.assertEqual((source_dir / "current.json").read_text(encoding="utf-8"), source_state_before)
+        self.assertEqual(json.dumps(self.task_definition(source_dir), sort_keys=True), source_task_before)
+        self.assertEqual(json.dumps(self.task_state(source_dir), sort_keys=True), source_state_before)
 
         task_dirs = sorted((self.ledger / "tasks").iterdir())
         corrective_dir = next(path for path in task_dirs if path != source_dir)
-        corrective_task = json.loads((corrective_dir / "task.json").read_text(encoding="utf-8"))
+        corrective_task = control.load_task_definition(corrective_dir)
         self.assertEqual(corrective_task["follow_up"]["source_task_ref"], source["task_ref"])
         self.assertEqual(corrective_task["follow_up"]["source_report_refs"], [published["report_ref"]])
         self.assertEqual(corrective_task["user_language"], "ru")
@@ -4381,7 +4419,7 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "task_ref": follow_up["task_ref"], "intent": "deactivate",
         })
         self.assertTrue(deactivated["ok"])
-        corrective_state = json.loads((corrective_dir / "current.json").read_text(encoding="utf-8"))
+        corrective_state = control.load_task_state_for_artifact(corrective_dir)
         corrective_principal = corrective_state["principal"]
         self.assertFalse(control.activation_status({"project_root": str(self.project), "principal": corrective_principal})["active"])
 
@@ -4402,8 +4440,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("idempotent replay", replay["next_action"])
         self.assertNotIn("/cortex", replay["next_action"])
         self.assertTrue(control.activation_status({"project_root": str(self.project), "principal": corrective_principal})["active"])
-        self.assertEqual((source_dir / "task.json").read_text(encoding="utf-8"), source_task_before)
-        self.assertEqual((source_dir / "current.json").read_text(encoding="utf-8"), source_state_before)
+        self.assertEqual(json.dumps(self.task_definition(source_dir), sort_keys=True), source_task_before)
+        self.assertEqual(json.dumps(self.task_state(source_dir), sort_keys=True), source_state_before)
 
     def test_v3_follow_up_rejects_an_active_source_task(self):
         source = self.v3_start("active source task", waves=[{"workers": [{"phase": "discover"}]}])
@@ -4425,7 +4463,7 @@ class ControlPlaneTests(unittest.TestCase):
             ],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("planner produced a package graph")
         planning = {
@@ -4458,7 +4496,7 @@ class ControlPlaneTests(unittest.TestCase):
             "report": report, "planning": planning,
         })
         self.assertTrue(published["ok"])
-        manifest = json.loads((task_dir / "planning/manifest.json").read_text(encoding="utf-8"))
+        manifest = control.current_planning_manifest(task_dir)
         self.assertEqual(manifest["schema"], control.PLANNING_SCHEMA)
         self.assertEqual(manifest["source_report_ref"], published["report_ref"])
         self.assertEqual([package["id"] for package in manifest["work_packages"]], ["api", "ui"])
@@ -4472,13 +4510,13 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(held["outcome"], "awaiting_plan_approval")
         artifacts = held["plan_review"]["planning_artifacts"]
-        self.assertEqual(artifacts["manifest_path"], "planning/manifest.json")
+        self.assertEqual(artifacts["manifest_ref"], "sqlite:task_documents/planning_current")
         self.assertEqual([package["id"] for package in artifacts["work_packages"]], ["api", "ui"])
 
     def test_planner_work_packages_reject_cycles_and_missing_artifact(self):
         started = self.v3_start("validate work breakdown artifacts", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         cyclic = self.v3_planning()
         cyclic["work_packages"][0]["depends_on"] = ["core"]
@@ -4528,7 +4566,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(revised["dispatches"][0]["phase"], "plan")
         self.assertIn("Keep the public API unchanged", self.briefing_from_response(revised))
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["plan_approval"]["status"], "pending_plan")
         self.assertEqual(len([item for item in state["attempts"] if item["gate"] == "plan"]), 2)
 
@@ -4544,8 +4582,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_report_read_accepts_bounded_large_task_state_without_embedding_reports(self):
         started = self.v3_start("large harvest state", waves=[{"workers": [{"phase": "discover"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state_path = task_dir / "current.json"
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state = self.task_state(task_dir)
         attempt = state["attempts"][0]
         published = control.publish_worker_report({
             "project_root": str(self.project),
@@ -4556,9 +4593,9 @@ class ControlPlaneTests(unittest.TestCase):
                 attempt, self.v3_report("large-state report remains readable")
             ),
         })
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state = self.task_state(task_dir)
         state["bounded_large_state_fixture"] = "x" * (control.MAX_REPORT_BYTES * 5)
-        state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.write_task_state(state)
         read = control.read_worker_report({
             "project_root": str(self.project),
             "task_ref": started["task_ref"],
@@ -4566,6 +4603,79 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(read["ok"])
         self.assertEqual(read["report"]["summary"], "large-state report remains readable")
+
+    def test_v3_artifact_management_pages_metadata_and_streams_large_markdown(self):
+        started = self.v3_start("stream task artifacts", waves=[{"workers": [{"phase": "discover"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        content = "# Evidence\n\n" + ("source-backed behavior\n" * 5000)
+        artifact = control.store_immutable_artifact(
+            task_dir,
+            state["task_id"],
+            kind="report_markdown",
+            title="reports/markdown/large.md",
+            mime_type="text/markdown",
+            content=content,
+            export_path="reports/markdown/large.md",
+        )
+        page = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
+            "payload": {"action": "list", "kind": "report_markdown", "page_size": 1},
+        })
+        self.assertTrue(page["ok"])
+        self.assertEqual(page["artifacts"], [artifact])
+        metadata = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
+            "payload": {"action": "metadata", "artifact_ref": artifact["artifact_ref"]},
+        })
+        first = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
+            "payload": {"action": "read", "artifact_ref": artifact["artifact_ref"], "cursor": metadata["read_cursor"], "max_bytes": 4096},
+        })
+        self.assertTrue(first["ok"])
+        self.assertFalse(first["complete"])
+        self.assertLessEqual(first["returned_bytes"], 4096)
+        self.assertTrue(first["content_part"].startswith("# Evidence"))
+        denied = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
+            "payload": {"action": "read", "artifact_ref": artifact["artifact_ref"], "cursor": first["next_cursor"] + "x"},
+        })
+        self.assertFalse(denied["ok"])
+        self.assertIn("cursor", denied["diagnostics"][0]["message"])
+
+    def test_v3_scoped_large_report_read_uses_cursor_not_an_inline_body(self):
+        started = self.v3_start("page a large report", waves=[{"workers": [{"phase": "discover"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        record = {
+            "schema": control.REPORT_SCHEMA, "report_id": "report-0099", "task_id": state["task_id"],
+            "gate": "discover", "attempt_id": attempt["attempt_id"], "submission_id": "large-report",
+            "producer": {"profile": attempt["profile"], "model": attempt["selected_model"], "reasoning_effort": attempt["selected_reasoning_effort"]},
+            "report": {"summary": "large", "findings": ["x" * 50000], "questions": [], "changed_files": [], "tests": [], "evidence": ["bounded"], "uncertainty": [], "next_action": "page"},
+            "planning": None, "result_validation": None, "content_digest": "test", "created_at": control.now(),
+        }
+        artifact = control.store_immutable_artifact(
+            task_dir, state["task_id"], kind="worker_report", title="reports/records/report-0099.json",
+            mime_type="application/json", content=json.dumps(record), export_path="reports/records/report-0099.json",
+        )
+        control.store_immutable_artifact(
+            task_dir, state["task_id"], kind="report_markdown", title="reports/markdown/report-0099.md",
+            mime_type="text/markdown", content="# Large report\n", export_path="reports/markdown/report-0099.md",
+        )
+        first = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "report_ref": "report-0099", "max_bytes": 4096,
+        })
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["report_artifact"]["artifact_ref"], artifact["artifact_ref"])
+        self.assertNotIn("report", first)
+        self.assertFalse(first["complete"])
+        self.assertLessEqual(first["returned_bytes"], 4096)
+        second = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "report_ref": "report-0099", "cursor": first["next_cursor"], "max_bytes": 4096,
+        })
+        self.assertTrue(second["ok"])
+        self.assertGreater(second["byte_offset"], first["byte_offset"])
 
     def test_v3_report_read_returns_recoverable_result_for_missing_identity_or_record(self):
         missing_root = control.read_worker_report({"report_ref": "report-0001"})
@@ -4581,11 +4691,15 @@ class ControlPlaneTests(unittest.TestCase):
     def test_large_baseline_manifest_is_readable_during_handoff_and_reconciliation(self):
         started = self.v3_start("large baseline handoff", waves=[{"workers": [{"phase": "discover"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
-        baseline_path = task_dir / "baseline-manifest.json"
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        baseline["test_padding"] = "x" * (control.MAX_REPORT_BYTES * 5)
-        baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = self.task_state(task_dir)
+        baseline = control.load_manifest_snapshot(
+            task_dir, state["initial_manifest_ref"], "test task baseline"
+        )
+        baseline["policy"]["test_padding"] = "x" * (control.MAX_REPORT_BYTES * 5)
+        padded_ref = control.manifest_snapshot_ref(baseline)
+        control.db_put_manifest_snapshot(self.ledger, padded_ref, baseline["digest"], baseline)
+        state["initial_manifest_ref"] = padded_ref
+        self.write_task_state(state)
 
         receipt, _ = control.reconcile_manifest(task_dir, state, [])
         self.assertEqual(receipt["baseline_digest"], baseline["digest"])
@@ -4647,7 +4761,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"workers": [{"phase": "implementation", "depends_on": ["discover"]}]},
         ])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         first_attempt = state["attempts"][0]
         first = control.publish_worker_report({
             "project_root": str(self.project),
@@ -4665,7 +4779,7 @@ class ControlPlaneTests(unittest.TestCase):
             "results": [{"report_ref": first["report_ref"]}],
         })
         self.assertTrue(advanced["ok"])
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         second_attempt = next(item for item in state["attempts"] if item["gate"] == "implementation")
         changed_path = self.project / "implemented.txt"
         changed_path.write_text("implemented\n", encoding="utf-8")
@@ -4701,7 +4815,7 @@ class ControlPlaneTests(unittest.TestCase):
         ])
         self.assertTrue(started["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
 
         missing_identity = control.publish_worker_report({
@@ -4776,7 +4890,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Required report evidence acknowledgements for this exact attempt", prompt)
         self.assertIn("Knowledge reviewed: docs/project/index.md, docs/features/index.md", prompt)
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         self.assertEqual(
             attempt["knowledge_index_files"],
@@ -4833,7 +4947,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("docs/project/conventions.md", writer_prompt)
         self.assertIn("docs/features/<feature>/index.md", writer_prompt)
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self.v3_report("documentation written")
         report["evidence"].append(
@@ -4953,7 +5067,7 @@ class ControlPlaneTests(unittest.TestCase):
         ])
         self.assertTrue(started["ok"], started)
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self._report_with_briefing(attempt, self.v3_report("project documentation written"))
         report["evidence"].append("Knowledge reviewed: docs/project/index.md")
@@ -5012,7 +5126,7 @@ class ControlPlaneTests(unittest.TestCase):
         ])
         self.assertTrue(started["ok"], started)
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         report = self._report_with_briefing(attempt, self.v3_report("flat feature page written"))
         report["evidence"].append(
@@ -5109,7 +5223,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"workers": [{"phase": "implementation"}]},
         ])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         published = control.publish_worker_report({
             "project_root": str(self.project),
@@ -5216,7 +5330,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(retried["ok"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         failed_attempts = [item for item in state["attempts"] if item["status"] == "failed"]
         self.assertEqual(len(failed_attempts), 1)
         self.assertTrue(failed_attempts[0]["invalidated"])
@@ -5242,7 +5356,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(current["outcome"], "blocked")
         self.assertEqual(current["dispatches"], [])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["orchestrate_gate_failure_counts"]["discover"], 3)
         self.assertIn("rework budget exhausted", state["blocked_reason"])
 
@@ -5254,7 +5368,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(resumed["ok"], resumed)
         self.assertEqual(resumed["outcome"], "ready_to_spawn")
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertNotIn("discover", state["orchestrate_gate_failure_counts"])
 
     def test_v3_failed_result_is_bound_to_the_dispatched_attempt(self):
@@ -5394,7 +5508,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(reworked["outcome"], "ready_to_spawn")
         self.assertEqual(reworked["dispatches"][0]["phase"], "documentation")
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["status"], "active")
         self.assertEqual(state["completed_gates"], [])
         prior_close = [item for item in state["attempts"] if item["gate"] == "close"][0]
@@ -5421,7 +5535,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(advanced["step"], 2)
         self.assertEqual(len(advanced["dispatches"]), 1)
         task_dir = next((self.ledger / "tasks").iterdir())
-        plan = json.loads((task_dir / "orchestration.json").read_text(encoding="utf-8"))
+        plan = control.db_load_task(self.ledger, self.task_state(task_dir)["task_id"])[2]
         wave_ids = [wave["wave_id"] for wave in plan["waves"]]
         self.assertEqual(wave_ids, sorted(set(wave_ids)))
 
@@ -5487,7 +5601,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_orchestrate_start_recovers_after_every_transaction_phase(self):
         waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
-        original_checkpoint = control._checkpoint_orchestrate_transaction
+        original_checkpoint = orchestration_engine._checkpoint_orchestrate_transaction
         for phase in ("activated", "classified", "initialized", "plan_recorded", "wave_prepared"):
             with self.subTest(phase=phase):
                 task_id = f"start-crash-{phase.replace('_', '-')}"
@@ -5500,7 +5614,7 @@ class ControlPlaneTests(unittest.TestCase):
                         fired = True
                         raise RuntimeError(f"simulated crash after {phase}")
 
-                with mock.patch.object(control, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
+                with mock.patch.object(orchestration_engine, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
                     interrupted = self.facade_start(task_id, waves)
                 self.assertFalse(interrupted["ok"])
                 recovered = self.facade_start(task_id, waves)
@@ -5508,7 +5622,8 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(len(recovered["spawn_requests"]), 1)
                 state = control.orchestrate({"operation": "inspect", "task_id": task_id, "principal": "thread-a"})
                 self.assertEqual(len(state["state_summary"]["attempts"]), 1)
-                receipt = json.loads((self.ledger / "operations" / f"{task_id}-start.json").read_text(encoding="utf-8"))
+                receipt = control.db_get_operation(self.ledger, f"{task_id}-start")
+                self.assertIsNotNone(receipt)
                 self.assertEqual(receipt["status"], "committed")
 
     def test_orchestrate_advance_recovers_after_every_transaction_phase(self):
@@ -5517,7 +5632,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"wave_id": "implementation", "delegations": [{"gate": "implementation", "agent": "general"}]},
             {"wave_id": "review", "delegations": [{"gate": "review", "agent": "code_reviewer"}]},
         ]
-        original_checkpoint = control._checkpoint_orchestrate_transaction
+        original_checkpoint = orchestration_engine._checkpoint_orchestrate_transaction
         for phase in ("attempts_completed", "gates_recorded", "next_wave_prepared"):
             with self.subTest(phase=phase):
                 task_id = f"advance-crash-{phase.replace('_', '-')}"
@@ -5536,7 +5651,7 @@ class ControlPlaneTests(unittest.TestCase):
                         fired = True
                         raise RuntimeError(f"simulated crash after {phase}")
 
-                with mock.patch.object(control, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
+                with mock.patch.object(orchestration_engine, "_checkpoint_orchestrate_transaction", side_effect=crash_after_checkpoint):
                     interrupted = control.orchestrate(arguments)
                 self.assertFalse(interrupted["ok"])
                 recovered = control.orchestrate(arguments)
@@ -5547,7 +5662,8 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(len(inspected["state_summary"]["attempts"]), 2)
                 reports = control.list_task_reports({"task_id": task_id, "principal": "thread-a"})["reports"]
                 self.assertEqual(len(reports), 1)
-                receipt = json.loads((self.ledger / "operations" / f"{task_id}-advance.json").read_text(encoding="utf-8"))
+                receipt = control.db_get_operation(self.ledger, f"{task_id}-advance")
+                self.assertIsNotNone(receipt)
                 self.assertEqual(receipt["status"], "committed")
 
     def test_orchestrate_malformed_report_and_host_mismatch_are_recoverable(self):
@@ -5627,14 +5743,13 @@ class ControlPlaneTests(unittest.TestCase):
         created = self.init(task_id="facade-v7-compatibility", complexity="C1")
         delegated = self.delegate(created["state"], "facade-v7-compatibility", "discover", "explorer")
         task_dir = next((self.ledger / "tasks").iterdir())
-        plan_path = task_dir / "orchestration.json"
-        self.assertFalse(plan_path.exists())
+        self.assertIsNone(control.db_load_task(self.ledger, "facade-v7-compatibility")[2])
         inspected = control.orchestrate({
             "operation": "inspect", "task_id": "facade-v7-compatibility", "principal": "thread-a",
         })
         self.assertFalse(inspected["ok"])
         self.assertIn("canonical orchestration plan is missing", inspected["diagnostics"][0]["message"])
-        self.assertFalse(plan_path.exists())
+        self.assertIsNone(control.db_load_task(self.ledger, "facade-v7-compatibility")[2])
         spawn_request = {**delegated["spawn_request"], "attempt_id": delegated["attempt_id"]}
         advanced = control.orchestrate({
             "operation": "advance", "submission_id": "facade-v7-compatibility-advance",
@@ -5648,7 +5763,7 @@ class ControlPlaneTests(unittest.TestCase):
             )],
         })
         self.assertFalse(advanced["ok"])
-        self.assertFalse(plan_path.exists())
+        self.assertIsNone(control.db_load_task(self.ledger, "facade-v7-compatibility")[2])
 
     def test_orchestrate_lane_and_resource_modes_keep_rare_capabilities(self):
         started = self.facade_start("facade-resource", [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}])
@@ -5788,7 +5903,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_report_bus_scoping_receipts_reconciliation_and_router(self):
         state = self.init(task_id="reports", complexity="C2")["state"]
         delegation = self.delegate(state, "reports", "plan", "planner", risk="low", requested_model="gpt-5.6-terra", requested_reasoning_effort="none")
-        package = json.loads(Path(delegation["delegation_file"]).read_text(encoding="utf-8"))
+        package = self.task_document(control.db_task_artifact_path(self.ledger, "reports"), f"dispatch:{delegation['attempt_id']}")
         self.assertEqual(package["requested_model"], "gpt-5.6-terra")
         self.assertEqual(package["selected_model"], "gpt-5.6-terra")
         self.assertIsNone(package["fallback_reason"])
@@ -5883,7 +5998,7 @@ class ControlPlaneTests(unittest.TestCase):
         reconciled = control.reconcile_report_bus({"task_id": "crash", "principal": "thread-a"})
         self.assertEqual(reconciled["report_count"], 2)
 
-    def test_reconcile_preserves_orphan_receipt_consumption_as_tombstone(self):
+    def test_reconcile_ignores_manual_receipt_projection_edits(self):
         state = self.init(task_id="receipt-boundary", complexity="C2")["state"]
         delegation = self.delegate(state, "receipt-boundary", "plan", "planner")
         report = self.report("receipt-boundary", delegation["attempt_id"])
@@ -5894,13 +6009,11 @@ class ControlPlaneTests(unittest.TestCase):
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
         reconciled = control.reconcile_report_bus({"task_id": "receipt-boundary", "principal": "thread-a"})
         repaired = json.loads(receipt_path.read_text(encoding="utf-8"))
-        self.assertNotIn("receipts/report-receipt-report-0001.json", reconciled["repaired"])
-        self.assertIsNotNone(repaired["consumed_at"])
-        self.assertEqual(repaired["consumed_by_evidence_id"], "evidence-0001")
-        tombstone = receipt_path.parents[1] / "consumptions" / "report-receipt-report-0001.json"
-        self.assertTrue(tombstone.is_file())
-        with self.assertRaisesRegex(ValueError, "consumed"):
-            control.record_evidence({"task_id": "receipt-boundary", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "recovered"})
+        self.assertIn("receipts/report-receipt-report-0001.json", reconciled["repaired"])
+        self.assertIsNone(repaired["consumed_at"])
+        self.assertIsNone(repaired["consumed_by_evidence_id"])
+        evidence = control.record_evidence({"task_id": "receipt-boundary", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "recovered"})
+        self.assertEqual(evidence["evidence"]["report_id"], "report-0001")
 
     def test_consumed_report_replay_reconstructs_consumed_receipt(self):
         state = self.init(task_id="receipt-replay", complexity="C2")["state"]
@@ -5932,10 +6045,9 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(list(target.iterdir()), [])
 
     def test_report_crash_points_recover_deterministically(self):
-        original_exclusive_json = control.write_json_exclusive
-        original_exclusive_text = control.write_text_exclusive
-        original_json = control.write_json
-        phases = ("markdown", "receipt", "index", "delegation")
+        original_report_index = runtime_reports._write_report_index
+        original_delegation_report_index = runtime_reports._write_delegation_report_index
+        phases = ("index", "delegation")
         for phase_index, phase in enumerate(phases, 1):
             with self.subTest(phase=phase):
                 task_id = f"crash-{phase}"
@@ -5943,43 +6055,38 @@ class ControlPlaneTests(unittest.TestCase):
                 delegation = self.delegate(state, task_id, "plan", "planner")
                 fired = {"value": False}
 
-                def exclusive_text(path, text):
-                    if phase == "markdown" and path.parent.name == "markdown" and not fired["value"]:
+                def write_report_index(*args, **kwargs):
+                    if phase == "index" and not fired["value"]:
                         fired["value"] = True
-                        raise OSError("simulated crash after record")
-                    return original_exclusive_text(path, text)
+                        raise OSError("simulated crash while updating report index")
+                    return original_report_index(*args, **kwargs)
 
-                def exclusive_json(path, value):
-                    if phase == "receipt" and path.parent.name == "receipts" and not fired["value"]:
+                def write_delegation_report_index(*args, **kwargs):
+                    if phase == "delegation" and not fired["value"]:
                         fired["value"] = True
-                        raise OSError("simulated crash after markdown")
-                    return original_exclusive_json(path, value)
+                        raise OSError("simulated crash while updating delegation report index")
+                    return original_delegation_report_index(*args, **kwargs)
 
-                def write_json(path, value):
-                    target = (phase == "index" and path.name == "index.json" and path.parent.name == "reports") or (phase == "delegation" and path.name == "index.json" and path.parent.parent.name == "delegations")
-                    if target and not fired["value"]:
-                        fired["value"] = True
-                        raise OSError("simulated crash after authoritative artifact")
-                    return original_json(path, value)
-
-                control.write_text_exclusive, control.write_json_exclusive, control.write_json = exclusive_text, exclusive_json, write_json
+                runtime_reports._write_report_index = write_report_index
+                runtime_reports._write_delegation_report_index = write_delegation_report_index
                 try:
                     with self.assertRaises(OSError):
                         self.report(task_id, delegation["attempt_id"], submission_id="stable")
                 finally:
-                    control.write_text_exclusive, control.write_json_exclusive, control.write_json = original_exclusive_text, original_exclusive_json, original_json
+                    runtime_reports._write_report_index = original_report_index
+                    runtime_reports._write_delegation_report_index = original_delegation_report_index
                 recovered = self.report(task_id, delegation["attempt_id"], submission_id="stable")
-                self.assertTrue(recovered["idempotent"])
+                self.assertFalse(recovered["idempotent"])
                 self.assertEqual(recovered["report"]["report_id"], "report-0001")
                 self.assertEqual(control.reconcile_report_bus({"task_id": task_id, "principal": "thread-a"})["report_count"], 1)
 
-    def test_report_allocation_skips_orphaned_markdown_artifacts(self):
+    def test_report_allocation_ignores_orphaned_markdown_projections(self):
         state = self.init(task_id="orphan-markdown", complexity="C2")["state"]
         delegation = self.delegate(state, "orphan-markdown", "plan", "planner")
         task_dir = self.ledger / "tasks/0001-orphan-markdown"
         (task_dir / "reports/markdown/report-0001.md").write_text("orphan\n", encoding="utf-8")
         recorded = self.report("orphan-markdown", delegation["attempt_id"])
-        self.assertEqual(recorded["report"]["report_id"], "report-0002")
+        self.assertEqual(recorded["report"]["report_id"], "report-0001")
 
     def test_report_quotas_and_terminal_attempt_are_rejected(self):
         state = self.init(task_id="quotas", complexity="C2")["state"]
@@ -6129,11 +6236,9 @@ class ControlPlaneTests(unittest.TestCase):
     def test_lane_expired_lease_requires_explicit_reclaim(self):
         self.activate()
         control.create_lane({"lane_id": "recover-lane", "principal": "thread-a"})
-        root = self.ledger
-        lane_state = root / "lanes" / "recover-lane" / "current.json"
-        state = json.loads(lane_state.read_text())
+        definition, state = control.db_get_lane(self.ledger, "recover-lane")
         state["lease"] = {"owner": "thread-a", "run_id": "old", "expires_at": "2000-01-01T00:00:00+00:00"}
-        lane_state.write_text(json.dumps(state))
+        control.db_put_lane(self.ledger, definition, state)
         with self.assertRaisesRegex(ValueError, "reclaim=true"):
             control.claim_lane({"lane_id": "recover-lane", "principal": "thread-a", "run_id": "new", "expires_at": "2999-01-01T00:00:00+00:00"})
         recovered = control.claim_lane({"lane_id": "recover-lane", "principal": "thread-a", "run_id": "new", "expires_at": "2999-01-01T00:00:00+00:00", "reclaim": True})
@@ -6424,7 +6529,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.1.3")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.4.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

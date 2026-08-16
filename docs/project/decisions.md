@@ -29,6 +29,23 @@ refs before state writes, records evidence and gates, and returns the next
 step. Interrupted native acknowledgement is recoverable because inspect lists
 persisted `available_reports`.
 
+## Chunked immutable artifact transport
+
+Large coordination evidence is stored as immutable SQLite artifacts, not as a
+large JSON field returned from MCP. Each artifact has a content SHA-256,
+MIME type, exact byte size, and 32 KiB `TEXT` or `BLOB` chunks; the database
+schema does not impose a small per-field storage cap. Metadata is indexed by
+task/kind/time, task/time, digest, and chunk sequence. Public transport is
+separate from storage: `manage_orchestration(intent="artifacts")` pages
+metadata and reads an artifact part, while existing briefing/report tools use
+the same bounded mechanism for their established scopes. Signed opaque cursors
+bind reader, task, artifact, digest, and byte offset, so they cannot be reused
+to enumerate a ledger or switch content. Markdown and JSON task files remain
+materialized audit/Desktop projections; normal reads and report validation use
+the database copy. A missing or damaged projection may be regenerated from its
+canonical SQLite artifact, but pre-SQLite coordination files are never scanned,
+imported, or repaired.
+
 The separate worker question operation exists because a native parent-channel
 message alone cannot enforce a pause. Every profile may persist a material
 question, return its compact ref, remain alive, and poll the answer on the same
@@ -65,10 +82,12 @@ lifecycle coupled only to the canonical v8 ledger.
 
 Project cleanup is a bounded `prune` management operation rather than clear.
 It requires explicit confirmation and an age threshold (seven days by default),
-then removes stale task-scoped state and its secondary references while keeping
-recent tasks, durable lanes, and all project/plugin content. Age is the only
-safe cross-session liveness boundary because several sessions may use one
-project ledger concurrently.
+then removes only completed task-scoped state older than that threshold and its
+unreferenced secondary records. Active and blocked tasks are preserved
+regardless of age, and classification receipts remain while any retained task
+references them. Recent completed tasks, durable lanes, and all project/plugin
+content are also preserved. Exact `PRUNE` confirmation and omission of
+`task_ref` keep this as project-scoped maintenance rather than task mutation.
 
 Each mutating request uses server-owned digest receipts. Identical retries
 replay safely; changed payloads and stale steps conflict before partial writes.
@@ -98,20 +117,24 @@ by treating common phase labels as new work.
 ## Modular executable facade
 
 `plugins/cortex/scripts/cortex.py` remains the stable executable, hook-import,
-and compatibility facade. Its runtime responsibilities are deliberately split
+and public facade. Its runtime responsibilities are deliberately split
 into focused bundled modules: identity formatting, route policy, delegation
 persistence, immutable dispatch briefings, scoped reports and questions,
+gate-transition policy, orchestration state transitions, harvest validation,
 context-compaction handoff rendering, and the public MCP schema/transport
-adapter. The public adapter owns the declarative seven-tool contract and JSON-
-RPC stdio loop; the facade passes the current business handlers into it.
+adapter. The public adapter owns the declarative
+seven-tool contract and JSON-RPC stdio loop; the facade passes the current
+business handlers into it. Gate transitions are further separated into active-
+gate resolution, evidence/C2-C3 validation, durable state mutation, and
+terminal manifest cleanup, so routing changes cannot accidentally weaken
+completion policy.
 
-The facade re-exports documented compatibility symbols so installed hooks and
-external tests do not depend on a module's physical source location. Tests
-therefore assert behavior and exported contracts rather than `def` placement.
-The import bridge also supports Codex's installer validation, which loads the
-entrypoint through `importlib` without first registering a module name. This is
-runtime loading compatibility only; it neither reads nor migrates retired task
-state, which remains unsupported under the v8 ledger policy.
+The facade exports documented public symbols so installed hooks and tests do
+not depend on a module's physical source location. Tests therefore assert
+behavior and exported contracts rather than `def` placement. The import bridge
+also supports Codex's installer validation, which loads the entrypoint through
+`importlib` without first registering a module name. It neither reads nor
+migrates pre-SQLite task state, which remains unsupported under the v8 policy.
 
 ## Conditional indexed repository intelligence
 
@@ -225,6 +248,27 @@ at reconciliation or handoff. A final handoff must name every detected changed
 file, including additions, deletions, modifications, and recognized renames.
 This makes touched-file reporting checkable without relying on a worker's
 summary.
+The initial and each per-attempt capture are stored as immutable,
+content-addressed records in `cortex.db`. State and attempt records carry
+compact `manifest-<sha256>` references; repeated captures of the same project
+state deduplicate to the same record, while a fresh capture at every dispatch
+preserves detection of external changes. Once terminal completion is persisted,
+the manifest records are removed because the final receipts already retain
+digest and change proof. An
+explicit `allow_rework` transition from completed to active establishes a fresh
+initial baseline before replacement dispatches.
+
+### SQLite migration contract
+
+`cortex.db` is the sole mutable source of truth for new tasks. The plugin keeps
+numbered, checksummed migrations in `ledger_db.py`; the first MCP call after a
+Marketplace update takes the project-ledger lock, applies every missing
+migration in order inside one SQLite transaction, and records each version in
+`schema_migrations`. Repeated calls only verify the history. A mismatched
+checksum or failed migration aborts without mutating the database. Pre-SQLite
+filesystem state is never read, imported, deleted, or resumed. Future releases
+add a new numbered SQLite migration rather than introducing a second
+file-backed runtime.
 The manifest scope is policy-driven: Cortex honors each applicable project
 `.gitignore`, including ordered negations, and freezes the discovered rules in
 the baseline policy for the lifetime of the task. It also excludes

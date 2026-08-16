@@ -19,6 +19,7 @@ from cortex import (
     _question_payload,
     _question_records,
     _question_sequence,
+    _write_question_record,
     append_journal_best_effort,
     authorize,
     authorize_principal,
@@ -34,8 +35,6 @@ from cortex import (
     safe_id,
     sanitize_structured,
     state_lock,
-    write_json,
-    write_json_exclusive,
 )
 
 def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +106,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "created_at": now(),
             "answered_at": None,
         }
-        write_json_exclusive(paths["records"] / f"{question_id}.json", record)
+        _write_question_record(task_dir, state, record)
         append_journal_best_effort(task_dir, "worker_question", f"{attempt_id} published {question_id}")
         return {"idempotent": False, "question": record, "cursor": sequence}
 
@@ -277,7 +276,7 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "answered_sequence": _question_sequence(records) + 1,
             "answered_at": now(),
         })
-        write_json(paths["records"] / f"{question_id}.json", record)
+        _write_question_record(task_dir, state, record)
         append_journal_best_effort(task_dir, "worker_answer", f"{question_id} answered for {record['attempt_id']}")
         return {"idempotent": False, "question": record, "cursor": record["answered_sequence"]}
 

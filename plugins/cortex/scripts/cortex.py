@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterator
 _SCRIPTS_ROOT = str(Path(__file__).resolve().parent)
 if _SCRIPTS_ROOT not in sys.path:
     sys.path.insert(0, _SCRIPTS_ROOT)
-# Extracted runtime modules consume the stable ``cortex`` compatibility facade
+# Extracted runtime modules consume the stable public ``cortex`` facade
 # while the entrypoint is loaded through normal import, importlib, or direct
 # stdio execution. Point that name at this exact module rather than allowing a
 # second server instance to be imported under a different name.
@@ -60,10 +60,54 @@ from cortex_runtime.identity import (
 from cortex_runtime.mcp_api import (
     PUBLIC_TOOL_DESCRIPTIONS,
     build_public_schemas,
-    configure_legacy_schemas,
+    configure_internal_schemas,
     public_tools as build_public_tools,
     serve_stdio,
     v3_response as render_v3_response,
+)
+from cortex_runtime.ledger_db import (
+    ARTIFACT_TRANSPORT_MAX_BYTES,
+    DATABASE_SCHEMA_VERSION,
+    all_lanes as db_all_lanes,
+    artifact_path as db_task_artifact_path,
+    create_task as db_create_task,
+    delete_classifications as db_delete_classifications,
+    delete_global as db_delete_global,
+    delete_operations_for_tasks as db_delete_operations_for_tasks,
+    delete_task_manifest_snapshots as db_delete_task_manifest_snapshots,
+    delete_tasks as db_delete_tasks,
+    ensure_database as ensure_ledger_database,
+    get_classification as db_get_classification,
+    get_global as db_get_global,
+    get_lane as db_get_lane,
+    get_manifest_snapshot as db_get_manifest_snapshot,
+    get_artifact_for_export_path as db_get_artifact_for_export_path,
+    get_artifact_metadata as db_get_artifact_metadata,
+    manifest_snapshot_refs as db_manifest_snapshot_refs,
+    get_operation as db_get_operation,
+    get_task_document as db_get_task_document,
+    list_task_documents as db_list_task_documents,
+    load_task as db_load_task,
+    migration_history as db_migration_history,
+    next_task_number as db_next_task_number,
+    put_classification as db_put_classification,
+    put_global as db_put_global,
+    put_lane as db_put_lane,
+    put_manifest_snapshot as db_put_manifest_snapshot,
+    put_artifact as db_put_artifact,
+    put_operation as db_put_operation,
+    put_task_document as db_put_task_document,
+    savepoint as db_savepoint,
+    list_artifacts as db_list_artifacts,
+    read_artifact_content as db_read_artifact_content,
+    read_artifact_range as db_read_artifact_range,
+    encode_artifact_cursor as db_encode_artifact_cursor,
+    decode_artifact_cursor as db_decode_artifact_cursor,
+    task_index as db_task_index,
+    transaction as db_transaction,
+    update_task_definition as db_update_task_definition,
+    update_task_plan as db_update_task_plan,
+    update_task_state as db_update_task_state,
 )
 from cortex_runtime.routing import (
     profile_can_own_gate as routing_profile_can_own_gate,
@@ -658,6 +702,8 @@ TRACKER_POLICY = {
     "special_files": "record type and metadata without reading content",
     "gitignore": "honor directory and file patterns from .gitignore, including negation",
 }
+MANIFEST_SNAPSHOT_PREFIX = "manifest-"
+MANIFEST_SNAPSHOT_REF_RE = re.compile(r"^manifest-([0-9a-f]{64})$")
 VERIFICATION_COMMANDS = {
     "benign_success": {"argv": ["/usr/bin/true"], "cwd": "."},
     "benign_failure": {"argv": ["/usr/bin/false"], "cwd": "."},
@@ -1101,15 +1147,146 @@ def compare_manifests(before: dict[str, Any], after: dict[str, Any]) -> dict[str
     return {"added": sorted(remaining_added), "modified": modified, "deleted": sorted(remaining_deleted), "renamed": renamed, "changed_paths": changed_paths, "change_count": len(modified) + len(remaining_added) + len(remaining_deleted) + len(renamed)}
 
 
-def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    baseline_path = task_dir / "baseline-manifest.json"
-    if not baseline_path.exists():
-        raise ValueError("task is missing its canonical baseline manifest")
-    baseline = _read_private_json(
-        baseline_path,
-        "baseline manifest",
-        max_bytes=MAX_MANIFEST_BYTES,
+def manifest_snapshot_ref(manifest: dict[str, Any]) -> str:
+    """Return the canonical immutable reference for one captured manifest."""
+    manifest_digest = str(manifest.get("digest") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest_digest):
+        raise ValueError("manifest digest must be a SHA-256 value")
+    if not isinstance(manifest.get("policy"), dict) or not isinstance(manifest.get("entries"), dict):
+        raise ValueError("manifest snapshot requires entries and policy")
+    # ``manifest.digest`` deliberately fingerprints project entries only.  A
+    # snapshot must also pin the frozen ignore policy and root, otherwise two
+    # captures could have the same entries but different reconciliation scope.
+    snapshot_digest = digest_text(json.dumps({
+        "schema": manifest.get("schema"),
+        "project_root": manifest.get("project_root"),
+        "policy": manifest.get("policy"),
+        "entries": manifest.get("entries"),
+        "entry_count": manifest.get("entry_count"),
+        "manifest_digest": manifest_digest,
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    return f"{MANIFEST_SNAPSHOT_PREFIX}{snapshot_digest}"
+
+
+def _manifest_snapshot_path(task_dir: Path, reference: object, label: str) -> Path:
+    match = MANIFEST_SNAPSHOT_REF_RE.fullmatch(str(reference or "").strip().lower())
+    if not match:
+        raise ValueError(f"{label} must be a canonical manifest snapshot reference")
+    return _contained_path(
+        task_dir,
+        task_dir / "snapshots" / f"{match.group(1)}.json",
+        label,
     )
+
+
+def _ledger_root_for_artifact(task_dir: Path) -> Path:
+    """Resolve the one database ledger that owns a task artifact directory."""
+    for candidate in (task_dir, *task_dir.parents):
+        if candidate.name == "cortex" and (candidate / "cortex.db").is_file():
+            return candidate
+    raise ValueError("task artifact directory is not owned by a Cortex SQLite ledger")
+
+
+def _validate_manifest_snapshot(manifest: Any, reference: object, label: str) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise ValueError(f"{label} is invalid")
+    expected = manifest_snapshot_ref(manifest)
+    if expected != str(reference or "").strip().lower():
+        raise ValueError(f"{label} digest does not match its reference")
+    if manifest.get("schema") != TRACKER_POLICY["schema"]:
+        raise ValueError(f"{label} schema is not supported")
+    if not isinstance(manifest.get("entries"), dict) or not isinstance(manifest.get("policy"), dict):
+        raise ValueError(f"{label} is missing entries or policy")
+    return manifest
+
+
+def store_manifest_snapshot(task_dir: Path, manifest: dict[str, Any]) -> str:
+    """Persist one content-addressed immutable manifest in SQLite and return its ref."""
+    # Capture time is diagnostic metadata, not project state.  Omitting it is
+    # what lets independent captures of the same state reuse one immutable
+    # file instead of producing byte-different duplicates.
+    snapshot = dict(manifest)
+    snapshot.pop("captured_at", None)
+    _json_text(snapshot, label="manifest snapshot", max_bytes=MAX_MANIFEST_BYTES)
+    reference = manifest_snapshot_ref(manifest)
+    db_put_manifest_snapshot(_ledger_root_for_artifact(task_dir), reference, str(manifest["digest"]), snapshot)
+    return reference
+
+
+def load_manifest_snapshot(task_dir: Path, reference: object, label: str) -> dict[str, Any]:
+    if not MANIFEST_SNAPSHOT_REF_RE.fullmatch(str(reference or "").strip().lower()):
+        raise ValueError(f"{label} must be a canonical manifest snapshot reference")
+    manifest = db_get_manifest_snapshot(_ledger_root_for_artifact(task_dir), str(reference).strip().lower())
+    if manifest is None:
+        raise ValueError(f"{label} is unavailable")
+    _json_text(manifest, label=label, max_bytes=MAX_MANIFEST_BYTES)
+    return _validate_manifest_snapshot(manifest, reference, label)
+
+
+def task_manifest_baseline(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Load the task start snapshot from the canonical SQLite ledger."""
+    reference = state.get("initial_manifest_ref")
+    if reference:
+        return load_manifest_snapshot(task_dir, reference, "task baseline manifest")
+    raise ValueError("task is missing its canonical baseline manifest")
+
+
+def attempt_manifest_baseline(task_dir: Path, attempt: dict[str, Any]) -> dict[str, Any]:
+    """Load an attempt start snapshot from the canonical SQLite ledger."""
+    reference = attempt.get("result_baseline_ref")
+    if reference:
+        return load_manifest_snapshot(task_dir, reference, "attempt result baseline")
+    raise ValueError("attempt is missing its canonical result baseline")
+
+
+def establish_task_manifest_baseline(task_dir: Path, state: dict[str, Any], project_root: Path) -> dict[str, Any]:
+    """Start or restart the active-task file-delta contract from current state."""
+    baseline = capture_project_manifest(project_root)
+    reference = store_manifest_snapshot(task_dir, baseline)
+    state["initial_manifest_ref"] = reference
+    state["initial_manifest_digest"] = baseline["digest"]
+    state["manifest_snapshot_cleanup"] = {"status": "active", "at": now()}
+    return baseline
+
+
+def cleanup_completed_manifest_snapshots(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Delete unreferenced snapshots after a completed task's terminal state is durable."""
+    if state.get("status") != "completed":
+        raise ValueError("manifest snapshots may be cleaned only after task completion")
+    removed_count = db_delete_task_manifest_snapshots(
+        _ledger_root_for_artifact(task_dir), str(state.get("task_id") or "")
+    )
+    state["manifest_snapshot_cleanup"] = {
+        "status": "completed",
+        "removed_count": removed_count,
+        "at": now(),
+    }
+    return dict(state["manifest_snapshot_cleanup"])
+
+
+def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: list[Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        state.get("status") == "completed"
+        and (state.get("manifest_snapshot_cleanup") or {}).get("status") == "completed"
+    ):
+        checkpoint = state.get("closed_manifest_receipt") or state.get("final_manifest_receipt")
+        if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("comparison"), dict):
+            raise ValueError("completed task has no retained manifest receipt")
+        task = load_task_definition(task_dir, state)
+        current = capture_project_manifest(Path(task["project_root"]))
+        if current.get("digest") != checkpoint.get("current_digest"):
+            raise ValueError("project files changed after task completion; create a corrective task instead")
+        supplied = {Path(str(item)).as_posix().removeprefix("./") for item in reported_paths}
+        changed_paths = list((checkpoint.get("comparison") or {}).get("changed_paths") or [])
+        missing = sorted(set(changed_paths) - supplied)
+        return {
+            **checkpoint,
+            "reported_paths": sorted(supplied),
+            "unaccounted_paths": missing,
+            "complete": not missing,
+            "created_at": now(),
+        }, current
+    baseline = task_manifest_baseline(task_dir, state)
     current = capture_project_manifest(Path(baseline["project_root"]), policy=baseline.get("policy"))
     comparison = compare_manifests(baseline, current)
     supplied = {Path(str(item)).as_posix().removeprefix("./") for item in reported_paths}
@@ -1129,31 +1306,27 @@ def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: li
 
 
 def remove_active_mapping(root: Path, task_id: str, thread_id: str) -> None:
-    activation_file = activation_path(root)
-    if activation_file.exists():
-        try:
-            activations = json.loads(activation_file.read_text(encoding="utf-8"))
-            changed = False
-            for key, record in activations.items():
-                if isinstance(record, dict) and record.get("task_id") == task_id:
-                    record["task_id"] = None
-                    record.pop("initialized_at", None)
-                    activations[key] = record
-                    changed = True
-            if changed:
-                write_json(activation_file, activations)
-        except (OSError, json.JSONDecodeError):
-            pass
+    try:
+        activations = _activation_records(root)
+        changed = False
+        for key, record in activations.items():
+            if isinstance(record, dict) and record.get("task_id") == task_id:
+                record["task_id"] = None
+                record.pop("initialized_at", None)
+                activations[key] = record
+                changed = True
+        if changed:
+            _write_activation_records(root, activations)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
     try:
         bindings = _host_session_bindings(root)
         if bindings["tasks"].pop(task_id, None) is not None:
             bindings["updated_at"] = now()
             if bindings["tasks"]:
-                write_json(_host_session_bindings_path(root), bindings)
+                db_put_global(root, "host_sessions", bindings)
             else:
-                path = _host_session_bindings_path(root)
-                if path.exists():
-                    path.unlink()
+                db_delete_global(root, "host_sessions")
     except (OSError, ValueError, json.JSONDecodeError):
         pass
 
@@ -1229,8 +1402,13 @@ def ledger_root(params: dict[str, Any] | None = None) -> Path:
     path = _contained_path(base, base / ".codex" / "cortex", "Cortex root")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
+    ensure_ledger_database(path)
+    # The remaining filesystem tree contains only worker-facing artifacts.
+    # Mutable task/lane state is exclusively in cortex.db.
     (path / "tasks").mkdir(exist_ok=True, mode=0o700)
     (path / "tasks").chmod(0o700)
+    (path / "lanes").mkdir(exist_ok=True, mode=0o700)
+    (path / "lanes").chmod(0o700)
     return path
 
 
@@ -1246,18 +1424,24 @@ def activation_key(params: dict[str, Any]) -> str:
 
 
 def activation_path(root: Path) -> Path:
-    return root / "activations.json"
+    """Compatibility label only; activations now reside in ``cortex.db``."""
+    return root / "cortex.db"
+
+
+def _activation_records(root: Path) -> dict[str, Any]:
+    return db_get_global(root, "activations", {})
+
+
+def _write_activation_records(root: Path, activations: dict[str, Any]) -> None:
+    if activations:
+        db_put_global(root, "activations", activations)
+    else:
+        db_delete_global(root, "activations")
 
 
 def activation_record(root: Path, params: dict[str, Any], task_id: str | None = None) -> dict[str, Any] | None:
     key = activation_key(params)
-    path = activation_path(root)
-    if not path.exists():
-        return None
-    try:
-        record = json.loads(path.read_text(encoding="utf-8")).get(key)
-    except (OSError, json.JSONDecodeError):
-        return None
+    record = _activation_records(root).get(key)
     if not record or record.get("schema") != SCHEMA or record.get("coordinator") != "main" or record.get("mode") != "main-orchestrator":
         return None
     bound_task = record.get("task_id")
@@ -1305,8 +1489,7 @@ def activate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     key = activation_key(params)
     with state_lock(root):
-        path = activation_path(root)
-        activations = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        activations = _activation_records(root)
         activations[key] = {
             "schema": SCHEMA,
             "thread_id": redact(thread_id, 256),
@@ -1321,7 +1504,7 @@ def activate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "task_id": None,
             "activated_at": now(),
         }
-        write_json(path, activations)
+        _write_activation_records(root, activations)
         return {"active": True, "key": key, "activation": activations[key], "ledger_root": str(root)}
 
 
@@ -1331,26 +1514,16 @@ def deactivate_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     key = activation_key(params)
     with state_lock(root):
-        path = activation_path(root)
-        activations = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        activations = _activation_records(root)
         removed = activations.pop(key, None)
-        if activations:
-            write_json(path, activations)
-        elif path.exists():
-            path.unlink()
+        _write_activation_records(root, activations)
         return {"active": False, "key": key, "removed": bool(removed)}
 
 
 def activation_status(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     if not str(params.get("thread_id") or params.get("principal") or "").strip():
-        path = activation_path(root)
-        if not path.exists():
-            return {"active": False, "activation": None, "ledger_root": str(root), "identity_inferred": False}
-        try:
-            activations = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            activations = {}
+        activations = _activation_records(root)
         valid = [
             item for item in activations.values()
             if isinstance(item, dict) and item.get("schema") == SCHEMA
@@ -1391,14 +1564,13 @@ def classify_task(params: dict[str, Any]) -> dict[str, Any]:
             "classification": result,
             "created_at": now(),
         }
-        receipt_path = root / "classification-receipts" / f"{receipt_id}.json"
-        write_json(receipt_path, payload)
+        db_put_classification(root, payload)
         return {**result, "classification_id": receipt_id}
 
 
 @contextlib.contextmanager
 def state_lock(root: Path) -> Iterator[None]:
-    """Serialize the entire read/validate/write mutation across MCP processes."""
+    """Serialize one filesystem+SQLite mutation and hold its DB transaction open."""
     # Composite tools call the existing mutation primitives while holding one
     # transaction lock.  Keep the lock re-entrant inside this MCP process while
     # retaining fcntl serialization between independent MCP processes.
@@ -1423,7 +1595,8 @@ def state_lock(root: Path) -> Iterator[None]:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         stack.append((root, stream))
         try:
-            yield
+            with db_transaction(root):
+                yield
         finally:
             stack.pop()
             if fcntl is not None:
@@ -1564,29 +1737,21 @@ def append_journal_best_effort(directory: Path, event: str, detail: str) -> None
 
 
 def task_index_path(root: Path) -> Path:
-    return root / "task-index.json"
+    """Compatibility label only; task indexes now reside in ``cortex.db``."""
+    return root / "cortex.db"
 
 
 def read_task_index(root: Path) -> dict[str, Any]:
-    path = task_index_path(root)
-    if not path.exists():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("task index is unreadable") from exc
-    return value if isinstance(value, dict) else {}
+    return db_task_index(root)
 
 
 def _host_session_bindings_path(root: Path) -> Path:
-    return root / "host-sessions.json"
+    """Compatibility label only; host session bindings now reside in SQLite."""
+    return root / "cortex.db"
 
 
 def _host_session_bindings(root: Path) -> dict[str, Any]:
-    path = _host_session_bindings_path(root)
-    if not path.exists():
-        return {"schema": HOST_SESSION_SCHEMA, "tasks": {}, "updated_at": now()}
-    payload = _read_private_json(path, "host session bindings")
+    payload = db_get_global(root, "host_sessions", {"schema": HOST_SESSION_SCHEMA, "tasks": {}, "updated_at": now()})
     if payload.get("schema") != HOST_SESSION_SCHEMA or not isinstance(payload.get("tasks"), dict):
         raise ValueError("host session binding registry is invalid")
     return payload
@@ -1634,7 +1799,7 @@ def bind_host_session_from_hook(project_root_value: object, task_ref_value: obje
             return {"bound": False, "reason": "session_conflict"}
         bindings["tasks"][task_id] = session_id
         bindings["updated_at"] = now()
-        write_json(_host_session_bindings_path(root), bindings)
+        db_put_global(root, "host_sessions", bindings)
         active = _active_host_session_task_ids(root, bindings, session_id)
         return {"bound": True, "task_id": task_id, "ambiguous": len(active) != 1}
 
@@ -1726,14 +1891,13 @@ def bind_host_worker_from_hook(
                     ):
                         resumed_attempt.pop(field, None)
                     resumed_attempt["host_resumed_at"] = now()
-                    package_path = resumed_task_dir / "delegations" / f"{resumed_attempt['attempt_id']}.json"
-                    package = _read_private_json(package_path, "delegation package")
+                    package = _delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]))
                     package["spawn_status"] = "resumed_after_question"
                     package["host_resumed_at"] = resumed_attempt["host_resumed_at"]
-                    write_json(package_path, package)
+                    _write_delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]), package)
                     save_state(
                         resumed_task_dir,
-                        resumed_task_dir / "current.json",
+                        resumed_task_dir / "state.sqlite",
                         resumed_state,
                         "host_resume_after_question",
                         str(resumed_attempt["attempt_id"]),
@@ -1827,8 +1991,7 @@ def finalize_host_worker_stop_from_hook(
             and str(item.get("report_id") or "").strip()
         ]
         attempt["host_stopped_at"] = stopped_at
-        package_path = task_dir / "delegations" / f"{safe_id(attempt_id)}.json"
-        package = _read_private_json(package_path, "delegation package")
+        package = _delegation_package(task_dir, state["task_id"], attempt_id)
         if report_refs:
             attempt["host_stop_outcome"] = "report_recorded"
             attempt["host_report_refs"] = report_refs
@@ -1860,8 +2023,8 @@ def finalize_host_worker_stop_from_hook(
             event = "host_stop_without_report"
             detail = f"{attempt_id}: {reason}"
             outcome = reason
-        write_json(package_path, package)
-        save_state(task_dir, task_dir / "current.json", state, event, detail)
+        _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+        save_state(task_dir, task_dir / "state.sqlite", state, event, detail)
         return {
             "updated": True,
             "attempt_id": attempt_id,
@@ -1875,34 +2038,17 @@ def task_paths(task_id: str, params: dict[str, Any]) -> tuple[Path, Path, Path]:
     root = ledger_root(params)
     normalized = safe_id(task_id)
     tasks_dir = root / "tasks"
-    index = read_task_index(root)
-    indexed = index.get(normalized)
-    directory = indexed.get("directory") if isinstance(indexed, dict) else None
-    if isinstance(directory, str) and directory not in {"", ".", ".."} and Path(directory).name == directory:
-        task_dir = _contained_path(tasks_dir, tasks_dir / directory, "indexed task directory")
-    else:
+    task_dir = db_task_artifact_path(root, normalized)
+    if task_dir is None:
         task_dir = _contained_path(tasks_dir, tasks_dir / f"missing-{normalized}", "task directory")
     if task_dir.exists():
         _reject_symlink_ancestry(task_dir, "task directory")
-        for filename in ("task.json", "current.json"):
-            candidate = task_dir / filename
-            if candidate.exists() and candidate.is_symlink():
-                raise ValueError(f"{filename} must not be a symlink")
-    return root, task_dir, task_dir / "current.json"
+    return root, task_dir, task_dir / "state.sqlite"
 
 
 def allocate_task_directory(root: Path, task_id: str) -> tuple[int, Path]:
     tasks_dir = root / "tasks"
-    index = read_task_index(root)
-    numbers = []
-    for entry in index.values():
-        if isinstance(entry, dict) and isinstance(entry.get("number"), int):
-            numbers.append(entry["number"])
-    for candidate in tasks_dir.iterdir():
-        match = re.match(r"^(\d+)-", candidate.name)
-        if match:
-            numbers.append(int(match.group(1)))
-    number = max(numbers, default=0) + 1
+    number = db_next_task_number(root)
     return number, tasks_dir / f"{number:04d}-{task_id}"
 
 
@@ -1912,14 +2058,15 @@ def lane_paths(lane_id: str, params: dict[str, Any]) -> tuple[Path, Path, Path]:
     lane_dir = root / "lanes" / normalized
     if lane_dir.exists() and lane_dir.is_symlink():
         raise ValueError("lane directory must not be a symlink")
-    return root, lane_dir, lane_dir / "current.json"
+    return root, lane_dir, lane_dir / "state.sqlite"
 
 
 def load_lane(lane_id: str, params: dict[str, Any]) -> tuple[Path, Path, dict[str, Any]]:
     root, lane_dir, state_path = lane_paths(lane_id, params)
-    if not state_path.exists():
+    loaded = db_get_lane(root, safe_id(lane_id))
+    if loaded is None:
         raise ValueError(f"lane '{lane_id}' does not exist")
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+    _, state = loaded
     if state.get("schema") != SCHEMA:
         raise ValueError("lane ledger schema is not supported; create a new lane")
     return root, lane_dir, state
@@ -2095,7 +2242,7 @@ def higher_effort(*efforts: str) -> str:
 
 
 def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
-    """Compatibility facade for the pure routing-policy evaluator."""
+    """Public delegating entrypoint for the pure routing-policy evaluator."""
     return routing_resolve_dispatch_route(
         params,
         profiles=PROFILES,
@@ -2179,7 +2326,7 @@ def _validate_report_decision_closure(
             "final report questions must be empty; publish every material user decision through worker_question "
             "and wait for its answer, or move a genuinely non-blocking evidence limitation to uncertainty"
         )
-    task = _read_private_json(task_dir / "task.json", "task definition")
+    task = load_task_definition(task_dir, state)
     if (
         task.get("intent_clarification_required")
         and attempt.get("gate") in INTENT_CLOSURE_GATES
@@ -2490,21 +2637,36 @@ def materialize_planning_artifacts(
             "created_at": manifest["created_at"],
         }
         write_json(_contained_path(packages_root, packages_root / f"{package['id']}.json", "planning package artifact"), package_document)
+        store_immutable_artifact(
+            task_dir, state["task_id"], kind="planning_revision",
+            title=f"planning/revisions/{revision}/packages/{package['id']}.json",
+            mime_type="application/json", content=_json_text(package_document, label="planning package artifact", max_bytes=MAX_JSON_BYTES),
+            export_path=f"planning/revisions/{revision}/packages/{package['id']}.json",
+        )
     write_json(_contained_path(revision_root, revision_root / "manifest.json", "planning revision manifest"), manifest)
-    write_json(paths["manifest"], manifest)
-    write_text_atomic(paths["overview"], _planning_overview_markdown({**manifest, "work_packages": packages}))
+    store_immutable_artifact(
+        task_dir, state["task_id"], kind="planning_revision",
+        title=f"planning/revisions/{revision}/manifest.json", mime_type="application/json",
+        content=_json_text(manifest, label="planning revision manifest", max_bytes=MAX_JSON_BYTES),
+        export_path=f"planning/revisions/{revision}/manifest.json",
+    )
+    db_put_task_document(_task_document_root(task_dir, state["task_id"]), state["task_id"], "planning_current", manifest)
+    overview = _planning_overview_markdown({**manifest, "work_packages": packages})
+    write_text_atomic(paths["overview"], overview)
+    store_immutable_artifact(
+        task_dir, state["task_id"], kind="planning_overview", title="planning/overview.md",
+        mime_type="text/markdown", content=overview, export_path="planning/overview.md",
+    )
     append_journal_best_effort(task_dir, "planning", f"materialized {revision} from {report_id}")
     return manifest
 
 
 def current_planning_manifest(task_dir: Path) -> dict[str, Any] | None:
-    root = _contained_path(task_dir, task_dir / "planning", "planning root")
-    path = _contained_path(root, root / "manifest.json", "planning manifest")
-    if not path.exists():
+    task = load_task_definition(task_dir)
+    root = _task_document_root(task_dir, str(task["task_id"]))
+    value = db_get_task_document(root, str(task["task_id"]), "planning_current")
+    if value is None:
         return None
-    if path.is_symlink():
-        raise ValueError("planning manifest must not be a symlink")
-    value = _read_private_json(path, "planning manifest", max_bytes=MAX_PLANNING_BYTES)
     if value.get("schema") != PLANNING_SCHEMA:
         raise ValueError("planning manifest schema is not supported")
     return value
@@ -2519,7 +2681,6 @@ def report_bus_paths(task_dir: Path) -> dict[str, Path]:
         "receipts": reports / "receipts",
         "consumptions": reports / "consumptions",
         "delegations": reports / "delegations",
-        "index": reports / "index.json",
     }
     for key in ("root", "records", "markdown", "receipts", "consumptions", "delegations"):
         path = _contained_path(task_dir, paths[key], f"report bus {key}")
@@ -2631,18 +2792,30 @@ def _question_payload(params: dict[str, Any]) -> tuple[str, Any, bool, dict[str,
 
 
 def _question_records(paths: dict[str, Path], state: dict[str, Any]) -> list[dict[str, Any]]:
-    records = []
-    for path in sorted(paths["records"].glob("question-*.json")):
-        match = re.fullmatch(r"question-(\d+)\.json", path.name)
-        if path.is_symlink() or not match:
-            raise ValueError("question record namespace contains an unsafe entry")
-        record = _read_private_json(path, "question record")
+    task_dir = paths["root"].parent
+    root = _task_document_root(task_dir, str(state["task_id"]))
+    records: list[dict[str, Any]] = []
+    for document_key, record in db_list_task_documents(root, str(state["task_id"]), "question:"):
+        question_id_from_key = document_key.removeprefix("question:")
         question_id = str(record.get("question_id", ""))
-        if record.get("schema") != QUESTION_SCHEMA or record.get("task_id") != state["task_id"] or f"{question_id}.json" != path.name:
-            raise ValueError(f"question record failed validation: {path.name}")
+        if (
+            record.get("schema") != QUESTION_SCHEMA
+            or record.get("task_id") != state["task_id"]
+            or question_id != question_id_from_key
+            or not re.fullmatch(r"question-\d+", question_id)
+        ):
+            raise ValueError("question record failed validation")
         _attempt(state, safe_id(str(record.get("attempt_id", ""))))
         records.append(record)
     return records
+
+
+def _write_question_record(task_dir: Path, state: dict[str, Any], record: dict[str, Any]) -> None:
+    question_id = str(record.get("question_id") or "")
+    if not re.fullmatch(r"question-\d+", question_id):
+        raise ValueError("question record identity is invalid")
+    root = _task_document_root(task_dir, str(state["task_id"]))
+    db_put_task_document(root, str(state["task_id"]), f"question:{question_id}", record)
 
 
 def _question_sequence(records: list[dict[str, Any]]) -> int:
@@ -2668,40 +2841,6 @@ def _open_blocking_questions(
         and bool(item.get("blocking", True))
         and (attempt_id is None or item.get("attempt_id") == attempt_id)
     ]
-
-
-def _read_private_json(
-    path: Path,
-    label: str,
-    *,
-    max_bytes: int = MAX_REPORT_BYTES * 4,
-) -> Any:
-    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
-        raise ValueError(f"{label} size limit is invalid")
-    path = _reject_symlink_ancestry(path, label)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f"{label} must be a regular file")
-        if info.st_size > max_bytes:
-            raise ValueError(f"{label} is oversized")
-        chunks = []
-        size = 0
-        while True:
-            chunk = os.read(descriptor, 65536)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > max_bytes:
-                raise ValueError(f"{label} is oversized")
-            chunks.append(chunk)
-        return json.loads(b"".join(chunks).decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{label} is unreadable") from exc
-    finally:
-        os.close(descriptor)
 
 
 def _read_private_text(path: Path, label: str, *, max_bytes: int) -> str:
@@ -2739,37 +2878,6 @@ def _receipt_identity(value: dict[str, Any]) -> tuple[Any, ...]:
         value.get("schema"), value.get("receipt_id"), value.get("report_id"), value.get("task_id"),
         value.get("gate"), value.get("attempt_id"), value.get("content_digest"),
     )
-
-
-def _consumption_path(paths: dict[str, Path], receipt_id: str) -> Path:
-    receipt = safe_id(receipt_id)
-    return _contained_path(paths["consumptions"], paths["consumptions"] / f"{receipt}.json", "report consumption tombstone")
-
-
-def _consumption_tombstone(receipt: dict[str, Any], evidence_id: str, consumed_at: str | None = None) -> dict[str, Any]:
-    return {
-        "schema": REPORT_SCHEMA,
-        "receipt_id": receipt["receipt_id"],
-        "report_id": receipt["report_id"],
-        "task_id": receipt["task_id"],
-        "gate": receipt["gate"],
-        "attempt_id": receipt["attempt_id"],
-        "content_digest": receipt["content_digest"],
-        "consumed_at": consumed_at or now(),
-        "consumed_by_evidence_id": safe_id(evidence_id),
-    }
-
-
-def _read_consumption(paths: dict[str, Path], receipt: dict[str, Any]) -> dict[str, Any] | None:
-    path = _consumption_path(paths, str(receipt.get("receipt_id", "")))
-    if not path.exists():
-        return None
-    tombstone = _read_private_json(path, "report consumption tombstone")
-    if _receipt_identity(tombstone) != _receipt_identity(receipt):
-        raise ValueError(f"report consumption tombstone failed validation: {path.name}")
-    if not tombstone.get("consumed_at") or not SAFE_ID_RE.fullmatch(str(tombstone.get("consumed_by_evidence_id", ""))):
-        raise ValueError(f"report consumption tombstone is incomplete: {path.name}")
-    return tombstone
 
 
 def _report_markdown(record: dict[str, Any]) -> str:
@@ -2826,7 +2934,13 @@ def _report_metadata(record: dict[str, Any]) -> dict[str, Any]:
 def _recover_report_receipt(
     paths: dict[str, Path], record: dict[str, Any], state: dict[str, Any], invalidated: bool = False,
 ) -> tuple[dict[str, Any], bool]:
-    """Recover a receipt without ever reversing a durable consumption decision."""
+    """Load receipt state from SQLite and repair only its export projection.
+
+    The immutable receipt artifact records the report binding. Its mutable
+    consumption state is a task document in the same database transaction as
+    evidence. Neither the receipt JSON export nor a tombstone file is ever
+    consulted as state.
+    """
     report_id = safe_id(str(record["report_id"]))
     receipt_path = paths["receipts"] / f"report-receipt-{report_id}.json"
     base = {
@@ -2842,41 +2956,170 @@ def _recover_report_receipt(
         "invalidated": bool(invalidated),
         "created_at": record.get("created_at") or now(),
     }
-    existing = _read_private_json(receipt_path, "report receipt") if receipt_path.exists() else None
-    if existing is not None and _receipt_identity(existing) != _receipt_identity(base):
-        raise ValueError(f"report receipt failed reconciliation: {receipt_path.name}")
-    evidence = next((item for item in state.get("evidence", []) if item.get("report_id") == report_id), None)
-    tombstone = _read_consumption(paths, base)
-    if tombstone is None and evidence is not None:
-        tombstone = _consumption_tombstone(base, str(evidence["evidence_id"]), str(evidence.get("created_at") or now()))
-        write_json_exclusive(_consumption_path(paths, base["receipt_id"]), tombstone)
-    if tombstone is None and existing is not None and (existing.get("consumed_at") or existing.get("consumed_by_evidence_id")):
-        evidence_id = safe_id(str(existing.get("consumed_by_evidence_id") or "unknown-consumption"))
-        tombstone = _consumption_tombstone(base, evidence_id, str(existing.get("consumed_at") or now()))
-        write_json_exclusive(_consumption_path(paths, base["receipt_id"]), tombstone)
-    if tombstone is not None:
-        base["consumed_at"] = tombstone["consumed_at"]
-        base["consumed_by_evidence_id"] = tombstone["consumed_by_evidence_id"]
-    if existing is not None:
-        base["invalidated"] = bool(existing.get("invalidated") or invalidated)
-        base["created_at"] = existing.get("created_at") or base["created_at"]
-    repaired = existing != base
-    if existing is None:
-        write_json_exclusive(receipt_path, base)
-    elif repaired:
-        write_json(receipt_path, base)
-    return base, repaired
+    root = _task_document_root(paths["root"].parent, state["task_id"])
+    persisted, _ = read_immutable_json_artifact(
+        paths["root"].parent,
+        state["task_id"],
+        f"reports/receipts/{base['receipt_id']}.json",
+        kinds={"report_receipt"},
+    )
+    if _receipt_identity(persisted) != _receipt_identity(base):
+        raise ValueError("SQLite report receipt identity is invalid")
+    receipt_state = db_get_task_document(root, state["task_id"], f"receipt_state:{base['receipt_id']}")
+    if receipt_state is not None:
+        if _receipt_identity(receipt_state) != _receipt_identity(base):
+            raise ValueError("SQLite report receipt state is invalid")
+        base["consumed_at"] = receipt_state.get("consumed_at")
+        base["consumed_by_evidence_id"] = receipt_state.get("consumed_by_evidence_id")
+        base["invalidated"] = bool(receipt_state.get("invalidated") or invalidated)
+        base["created_at"] = receipt_state.get("created_at") or base["created_at"]
+    else:
+        evidence = next((item for item in state.get("evidence", []) if item.get("report_id") == report_id), None)
+        if evidence is not None:
+            base["consumed_at"] = str(evidence.get("created_at") or now())
+            base["consumed_by_evidence_id"] = safe_id(str(evidence["evidence_id"]))
+            db_put_task_document(root, state["task_id"], f"receipt_state:{base['receipt_id']}", base)
+    # This is an export only. Do not read it to make a state decision: an
+    # absent, stale, or manually edited projection is replaced from SQLite.
+    write_json(receipt_path, base)
+    return base, True
+
+
+def _load_report_receipt(
+    task_dir: Path,
+    state: dict[str, Any],
+    receipt_id: object,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve one report receipt through its SQLite artifact and task state."""
+    normalized = safe_id(str(receipt_id or ""))
+    if not normalized.startswith("report-receipt-report-"):
+        raise ValueError("C2/C3 evidence requires an attempt-tied report receipt")
+    report_id = normalized.removeprefix("report-receipt-")
+    record, _ = read_immutable_json_artifact(
+        task_dir,
+        state["task_id"],
+        f"reports/records/{report_id}.json",
+        kinds={"worker_report", "report_record"},
+    )
+    if record.get("task_id") != state["task_id"] or record.get("report_id") != report_id:
+        raise ValueError("report receipt does not belong to this task")
+    receipt, _ = _recover_report_receipt(
+        report_bus_paths(task_dir),
+        record,
+        state,
+        bool(_attempt(state, safe_id(str(record["attempt_id"]))).get("invalidated")),
+    )
+    if receipt["receipt_id"] != normalized:
+        raise ValueError("report receipt id does not match its report")
+    return receipt, record
+
+
+def _available_report_receipts(
+    task_dir: Path,
+    state: dict[str, Any],
+    *,
+    attempt_id: object,
+    gate: object,
+) -> list[dict[str, Any]]:
+    """Return unconsumed valid receipts without enumerating file projections."""
+    normalized_attempt = safe_id(str(attempt_id or ""))
+    normalized_gate = str(gate or "")
+    index = _report_index(report_bus_paths(task_dir), state["task_id"])
+    receipts: list[dict[str, Any]] = []
+    for metadata in index.get("reports", []):
+        if not isinstance(metadata, dict) or metadata.get("attempt_id") != normalized_attempt:
+            continue
+        report_id = safe_id(str(metadata.get("report_id") or ""))
+        if not report_id:
+            continue
+        receipt, record = _load_report_receipt(task_dir, state, f"report-receipt-{report_id}")
+        if (
+            record.get("gate") == normalized_gate
+            and receipt.get("attempt_id") == normalized_attempt
+            and receipt.get("gate") == normalized_gate
+            and not receipt.get("consumed_at")
+            and not receipt.get("invalidated")
+        ):
+            receipts.append(receipt)
+    return receipts
+
+
+def _task_document_root(task_dir: Path, task_id: str) -> Path:
+    root = _ledger_root_for_artifact(task_dir)
+    registered = db_task_artifact_path(root, task_id)
+    if registered is None or registered.resolve() != task_dir.resolve():
+        raise ValueError("task document scope does not match the SQLite task ledger")
+    return root
+
+
+def store_immutable_artifact(
+    task_dir: Path,
+    task_id: str,
+    *,
+    kind: str,
+    title: str,
+    mime_type: str,
+    content: str | bytes,
+    export_path: str | None = None,
+) -> dict[str, Any]:
+    """Persist canonical immutable content before/alongside its local export."""
+    root = _task_document_root(task_dir, task_id)
+    return db_put_artifact(
+        root, task_id, kind=kind, title=title, mime_type=mime_type,
+        content=content, immutable=True, export_path=export_path,
+    )
+
+
+def read_immutable_json_artifact(
+    task_dir: Path,
+    task_id: str,
+    export_path: str,
+    *,
+    kinds: set[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read canonical JSON by its task-scoped export projection name.
+
+    The path is an address retained for a convenient on-disk export, not the
+    content source. State-machine callers therefore retain exact digest and
+    chunk validation even when an export has not yet been rematerialized.
+    """
+    candidate = Path(export_path)
+    if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
+        raise ValueError("immutable artifact export path is invalid")
+    root = _task_document_root(task_dir, task_id)
+    metadata = db_get_artifact_for_export_path(root, task_id, candidate.as_posix())
+    if metadata is None or metadata.get("kind") not in kinds:
+        raise ValueError("immutable artifact is unavailable for the selected task")
+    content = db_read_artifact_content(root, task_id, str(metadata["artifact_ref"]))
+    if not isinstance(content, str):
+        raise ValueError("immutable JSON artifact is not UTF-8 text")
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError("immutable JSON artifact is invalid") from exc
+    if not isinstance(value, dict):
+        raise ValueError("immutable JSON artifact must be an object")
+    return value, metadata
 
 
 def _report_index(paths: dict[str, Path], task_id: str) -> dict[str, Any]:
-    if not paths["index"].exists():
+    task_dir = paths["root"].parent
+    root = _task_document_root(task_dir, task_id)
+    value = db_get_task_document(root, task_id, "report_index")
+    if value is None:
         return {"schema": REPORT_SCHEMA, "task_id": task_id, "reports": [], "submissions": {}, "updated_at": now()}
-    value = _read_private_json(paths["index"], "report index")
     if value.get("schema") != REPORT_SCHEMA or value.get("task_id") != task_id:
         raise ValueError("report index does not belong to this task")
     if len(value.get("reports", [])) > MAX_REPORTS_PER_TASK or len(value.get("submissions", {})) > MAX_REPORTS_PER_TASK:
         raise ValueError("report index exceeds its bounded capacity")
     return value
+
+
+def _write_report_index(paths: dict[str, Path], task_id: str, value: dict[str, Any]) -> None:
+    if value.get("schema") != REPORT_SCHEMA or value.get("task_id") != task_id:
+        raise ValueError("report index does not belong to this task")
+    _task_document_root(paths["root"].parent, task_id)
+    db_put_task_document(_ledger_root_for_artifact(paths["root"].parent), task_id, "report_index", value)
 
 
 def _compact_report_context(record: dict[str, Any]) -> dict[str, Any]:
@@ -3015,193 +3258,10 @@ def _required_task_result_contract(task: dict[str, Any]) -> tuple[list[str], lis
 
 
 def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any], gate: str) -> None:
-    """Require harvest documentation to cover real, behavior-complete feature pages."""
-    if gate not in {"documentation", "review", "close"} or not _is_knowledge_harvest_task(task):
-        return
-    missing_project_docs: list[str] = []
-    project_doc_paths: dict[str, Path] = {}
-    for relative in HARVEST_PROJECT_DOCS:
-        project_doc = _contained_path(project_root, project_root / relative, "canonical harvest project document")
-        if not project_doc.is_file() or project_doc.is_symlink():
-            missing_project_docs.append(relative)
-            continue
-        if project_doc.stat().st_size > 512 * 1024:
-            raise ValueError(f"canonical harvest project document exceeds the 512 KiB validation limit: {relative}")
-        if len(re.findall(r"[A-Za-z0-9]+", project_doc.read_text(encoding="utf-8"))) < 12:
-            raise ValueError(f"canonical harvest project document is shallow or empty: {relative}")
-        project_doc_paths[relative] = project_doc
-    if missing_project_docs:
-        raise ValueError(
-            "harvest canonical project documentation is incomplete; missing: "
-            + ", ".join(missing_project_docs)
-        )
-    project_index = project_doc_paths["docs/project/index.md"]
-    linked_project_docs: set[Path] = set()
-    for raw_link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", project_index.read_text(encoding="utf-8")):
-        target = raw_link.strip().strip("<>").split("#", 1)[0].strip()
-        if target and "://" not in target and not target.startswith("/"):
-            linked_project_docs.add((project_index.parent / target).resolve())
-    unlinked_project_docs = [
-        relative for relative in HARVEST_PROJECT_DOCS[1:]
-        if project_doc_paths[relative].resolve() not in linked_project_docs
-    ]
-    if unlinked_project_docs:
-        raise ValueError(
-            "harvest project index must link every canonical project document; missing links: "
-            + ", ".join(unlinked_project_docs)
-        )
-    path = _contained_path(
-        project_root,
-        project_root / "docs/features/index.md",
-        "harvest coverage manifest",
-    )
-    if not path.is_file() or path.is_symlink():
-        raise ValueError("harvest coverage manifest is missing: docs/features/index.md")
-    if path.stat().st_size > 512 * 1024:
-        raise ValueError("harvest coverage manifest exceeds the 512 KiB validation limit")
-    raw_text = path.read_text(encoding="utf-8")
-    text = raw_text.lower()
-    missing = []
-    expected_section_labels = (
-        "Coverage matrix", "Inventory totals", "Unmapped surfaces",
-        "Exclusions", "Known unknowns",
-    )
-    headings = {
-        re.sub(r"\s+", " ", match.group(1).strip().rstrip("#").strip()).lower()
-        for line in raw_text.splitlines()
-        if (match := re.match(r"^#{2,6}\s+(.+?)\s*$", line.strip()))
-    }
-    absent_sections = [
-        label for label in expected_section_labels if label.lower() not in headings
-    ]
-    if absent_sections:
-        missing.append("sections (" + ", ".join(absent_sections) + ")")
-    expected_header_labels = (
-        "Feature", "Runtime owner", "Entry points", "Source evidence",
-        "Documentation", "Verification", "Status",
-    )
-    expected_headers = tuple(label.lower() for label in expected_header_labels)
-    table_headers: list[tuple[int, tuple[str, ...]]] = []
-    lines = raw_text.splitlines()
-    for index, line in enumerate(lines[:-1]):
-        if "|" not in line:
-            continue
-        cells = tuple(
-            re.sub(r"\s+", " ", cell.strip().strip("`")).lower()
-            for cell in line.strip().strip("|").split("|")
-        )
-        separator_cells = tuple(
-            cell.strip() for cell in lines[index + 1].strip().strip("|").split("|")
-        )
-        if len(cells) != len(separator_cells) or not cells:
-            continue
-        if all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells):
-            table_headers.append((index, cells))
-    coverage_table = next(
-        (
-            (index, headers)
-            for index, headers in table_headers
-            if headers[:len(expected_headers)] == expected_headers
-        ),
-        None,
-    )
-    if coverage_table is None:
-        missing.append(
-            "matrix columns (expected exact header prefix: "
-            + " | ".join(expected_header_labels)
-            + ")"
-        )
-    if missing:
-        raise ValueError(
-            "harvest coverage manifest is shallow or incomplete; missing: " + ", ".join(missing)
-        )
-    header_index, coverage_headers = coverage_table
-    coverage_rows: list[tuple[str, ...]] = []
-    for line in lines[header_index + 2:]:
-        if not line.strip().startswith("|"):
-            break
-        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
-        if len(cells) != len(coverage_headers):
-            raise ValueError(
-                "harvest coverage matrix row has "
-                f"{len(cells)} columns but the header has {len(coverage_headers)}"
-            )
-        coverage_rows.append(cells)
-    if not coverage_rows:
-        raise ValueError("harvest coverage matrix has no feature rows")
-    documentation_links: set[Path] = set()
-    row_errors: list[str] = []
-    allowed_statuses = {"covered", "documented", "verified", "excluded"}
-    for row_number, cells in enumerate(coverage_rows, 1):
-        required_cells = cells[:len(expected_headers)]
-        empty_labels = [
-            expected_header_labels[index]
-            for index, value in enumerate(required_cells)
-            if not value.strip()
-        ]
-        if empty_labels:
-            row_errors.append(f"row {row_number} has empty: {', '.join(empty_labels)}")
-        status = re.sub(r"\s+", " ", required_cells[6].strip()).lower()
-        if status not in allowed_statuses:
-            row_errors.append(
-                f"row {row_number} status must be covered, documented, verified, or excluded; got {required_cells[6]!r}"
-            )
-        documentation_cell = required_cells[4]
-        row_links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", documentation_cell)
-        if status != "excluded" and not row_links:
-            row_errors.append(f"row {row_number} Documentation must link to a canonical feature page")
-        row_has_canonical_index = status == "excluded"
-        for raw_link in row_links:
-            target = raw_link.strip().strip("<>").split("#", 1)[0].strip()
-            if not target or "://" in target or target.startswith("/"):
-                row_errors.append(f"row {row_number} Documentation has an invalid project-relative link")
-                continue
-            candidate = (path.parent / target).resolve()
-            try:
-                relative_feature_page = candidate.relative_to((project_root / "docs/features").resolve())
-            except ValueError:
-                row_errors.append(f"row {row_number} Documentation link leaves docs/features")
-                continue
-            if len(relative_feature_page.parts) >= 2 and relative_feature_page.name == "index.md":
-                row_has_canonical_index = True
-            documentation_links.add(candidate)
-        if not row_has_canonical_index:
-            row_errors.append(
-                f"row {row_number} Documentation must include a canonical docs/features/<feature>/index.md link"
-            )
-    if row_errors:
-        raise ValueError("harvest coverage matrix rows are invalid: " + "; ".join(row_errors))
-    if not documentation_links:
-        raise ValueError("harvest coverage manifest has no feature documentation links")
-    missing_pages = sorted(
-        item.relative_to(project_root).as_posix()
-        for item in documentation_links
-        if not item.is_file() or item.is_symlink()
-    )
-    if missing_pages:
-        raise ValueError("harvest coverage manifest references missing feature pages: " + ", ".join(missing_pages))
-    incomplete_rows = [
-        line.strip() for line in text.splitlines()
-        if line.lstrip().startswith("|") and re.search(r"\|\s*(?:partial|unknown|planned|unmapped)\b", line)
-    ]
-    if incomplete_rows:
-        raise ValueError("harvest coverage manifest still has incomplete feature rows; finish every feature before reporting")
-    required_page_topics = {
-        "runtime": ("runtime", "owner"),
-        "behavior": ("behavior", "workflow", "scenario", "logic"),
-        "state/data": ("state", "data", "persistence"),
-        "interfaces": ("interface", "entry point", "route", "api"),
-        "failure/recovery": ("failure", "recovery", "error"),
-        "verification": ("verification", "test"),
-    }
-    shallow_pages: list[str] = []
-    for page in sorted(documentation_links):
-        content = page.read_text(encoding="utf-8").lower()
-        absent = [topic for topic, markers in required_page_topics.items() if not any(marker in content for marker in markers)]
-        if absent:
-            shallow_pages.append(f"{page.relative_to(project_root).as_posix()} ({', '.join(absent)})")
-    if shallow_pages:
-        raise ValueError("harvest feature pages lack required behavior coverage: " + "; ".join(shallow_pages))
+    """Delegate harvest completeness validation to its focused runtime module."""
+    from cortex_runtime.harvest_validation import validate_harvest_coverage_manifest
+
+    validate_harvest_coverage_manifest(project_root, task, gate)
 
 
 def _result_contract_markers(attempt: dict[str, Any], task: dict[str, Any]) -> list[tuple[str, str]]:
@@ -3252,13 +3312,7 @@ def _validate_result_artifacts(
     if out_of_scope:
         raise ValueError("report changed_files fall outside delegated allowed_paths: " + ", ".join(out_of_scope))
 
-    baseline_name = str(attempt.get("result_baseline_file") or "")
-    baseline_path = _contained_path(
-        task_dir,
-        task_dir / baseline_name if baseline_name else task_dir / "baseline-manifest.json",
-        "attempt result baseline",
-    )
-    baseline = _read_private_json(baseline_path, "attempt result baseline", max_bytes=MAX_MANIFEST_BYTES)
+    baseline = attempt_manifest_baseline(task_dir, attempt)
     current = capture_project_manifest(Path(baseline["project_root"]), policy=baseline.get("policy"))
     comparison = compare_manifests(baseline, current)
     changed = set(comparison["changed_paths"])
@@ -3303,6 +3357,7 @@ def _validate_result_artifacts(
 
 def _validate_dispatch_briefing_review(
     task_dir: Path,
+    state: dict[str, Any],
     attempt: dict[str, Any],
     report: dict[str, Any],
 ) -> dict[str, Any]:
@@ -3325,6 +3380,17 @@ def _validate_dispatch_briefing_review(
     actual_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if actual_digest != expected_digest:
         raise ValueError("immutable dispatch briefing digest changed after dispatch")
+    task_id = str(state.get("task_id") or "")
+    root = _task_document_root(task_dir, task_id)
+    artifact_ref = str(attempt.get("briefing_artifact_ref") or "")
+    artifact = db_get_artifact_metadata(root, task_id, artifact_ref) if artifact_ref else None
+    if artifact is None:
+        artifact = db_get_artifact_for_export_path(root, task_id, relative)
+    if artifact is None or artifact.get("kind") != "dispatch_briefing" or artifact.get("digest_sha256") != expected_digest:
+        raise ValueError("dispatch briefing has no matching immutable artifact catalog entry")
+    canonical = db_read_artifact_content(root, task_id, str(artifact["artifact_ref"]))
+    if canonical != content:
+        raise ValueError("dispatch briefing export differs from its immutable artifact")
     marker = dispatch_briefing_review_marker(expected_digest)
     if marker not in [item for item in report.get("evidence", []) if isinstance(item, str)]:
         raise ValueError(
@@ -3346,10 +3412,10 @@ def _validate_gate_result_report(
 ) -> dict[str, Any]:
     """Fail closed unless a worker proves its gate contract and any claimed writes."""
     gate = str(attempt.get("gate") or "")
-    task = _read_private_json(task_dir / "task.json", "task definition")
+    task = load_task_definition(task_dir, state)
     if not report.get("evidence"):
         raise ValueError(f"{gate} result requires observed evidence")
-    briefing_receipt = _validate_dispatch_briefing_review(task_dir, attempt, report)
+    briefing_receipt = _validate_dispatch_briefing_review(task_dir, state, attempt, report)
     tests = report.get("tests") or []
     if gate in EXECUTED_CHECK_RESULT_GATES and not tests:
         raise ValueError(f"{gate} result requires at least one executed check or inspection result")
@@ -3455,7 +3521,7 @@ def _validate_close_report(task_dir: Path, state: dict[str, Any], attempt: dict[
         raise ValueError("C2/C3 close report requires at least one executed verification command or test result")
     if not report.get("evidence"):
         raise ValueError("C2/C3 close report requires observed evidence, not only a completion assertion")
-    task = _read_private_json(task_dir / "task.json", "task definition")
+    task = load_task_definition(task_dir, state)
     combined = "\n".join(
         str(item) for field in ("summary", "findings", "evidence", "uncertainty", "next_action")
         for item in (report.get(field) if isinstance(report.get(field), list) else [report.get(field)])
@@ -3501,17 +3567,17 @@ def _context_report_payloads(
             f"worker context requires {len(report_ids)} predecessor reports but the safe limit is "
             f"{MAX_CONTEXT_REPORTS}; set depends_on to the exact prerequisite phases"
         )
-    paths = report_bus_paths(task_dir)
     payloads: list[dict[str, Any]] = []
     used_chars = 0
     for report_id in report_ids:
-        record_path = _contained_path(
-            paths["records"],
-            paths["records"] / f"{safe_id(report_id)}.json",
-            "context report record",
+        normalized_report_id = safe_id(report_id)
+        record, _ = read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{normalized_report_id}.json",
+            kinds={"worker_report", "report_record"},
         )
-        record = _read_private_json(record_path, "context report record")
-        if record.get("task_id") != state.get("task_id"):
+        if record.get("task_id") != state.get("task_id") or record.get("report_id") != normalized_report_id:
             raise ValueError("context report crosses task scope")
         payload = _compact_report_context(record)
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -3531,20 +3597,47 @@ def _context_report_payloads(
     return payloads
 
 
-def _delegation_report_index(paths: dict[str, Path], task_id: str, attempt_id: str) -> tuple[Path, dict[str, Any]]:
+def _delegation_report_index(paths: dict[str, Path], task_id: str, attempt_id: str) -> tuple[str, dict[str, Any]]:
     attempt = safe_id(attempt_id)
-    directory = _contained_path(paths["delegations"], paths["delegations"] / attempt, "delegation report index")
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path = directory / "index.json"
-    if path.exists():
-        value = _read_private_json(path, "delegation report index")
-    else:
+    task_dir = paths["root"].parent
+    root = _task_document_root(task_dir, task_id)
+    document_key = f"report_delegation:{attempt}"
+    value = db_get_task_document(root, task_id, document_key)
+    if value is None:
         value = {"schema": REPORT_SCHEMA, "task_id": task_id, "attempt_id": attempt, "owned_report_ids": [], "context_report_ids": [], "updated_at": now()}
     if value.get("task_id") != task_id or value.get("attempt_id") != attempt:
         raise ValueError("delegation report index scope mismatch")
     if len(value.get("owned_report_ids", [])) > MAX_REPORTS_PER_ATTEMPT or len(value.get("context_report_ids", [])) > MAX_REPORTS_PER_TASK:
         raise ValueError("delegation report index exceeds its bounded capacity")
-    return path, value
+    return document_key, value
+
+
+def _write_delegation_report_index(
+    paths: dict[str, Path], task_id: str, attempt_id: str, value: dict[str, Any],
+) -> None:
+    attempt = safe_id(attempt_id)
+    if value.get("schema") != REPORT_SCHEMA or value.get("task_id") != task_id or value.get("attempt_id") != attempt:
+        raise ValueError("delegation report index scope mismatch")
+    root = _task_document_root(paths["root"].parent, task_id)
+    db_put_task_document(root, task_id, f"report_delegation:{attempt}", value)
+
+
+def _delegation_package(task_dir: Path, task_id: str, attempt_id: str) -> dict[str, Any]:
+    """Read mutable dispatch metadata from SQLite, never from worker artifacts."""
+    attempt = safe_id(attempt_id)
+    root = _task_document_root(task_dir, task_id)
+    value = db_get_task_document(root, task_id, f"dispatch:{attempt}")
+    if value is None or value.get("schema") != SCHEMA or value.get("task_id") != task_id or value.get("attempt_id") != attempt:
+        raise ValueError("delegation package is unavailable or out of scope")
+    return value
+
+
+def _write_delegation_package(task_dir: Path, task_id: str, attempt_id: str, value: dict[str, Any]) -> None:
+    attempt = safe_id(attempt_id)
+    if value.get("schema") != SCHEMA or value.get("task_id") != task_id or value.get("attempt_id") != attempt:
+        raise ValueError("delegation package scope mismatch")
+    root = _task_document_root(task_dir, task_id)
+    db_put_task_document(root, task_id, f"dispatch:{attempt}", value)
 
 
 def safe_declared_path(value: object, label: str, must_exist: bool = False) -> Path:
@@ -3579,20 +3672,63 @@ def require_lane_lease(state: dict[str, Any], params: dict[str, Any]) -> dict[st
 def save_lane(lane_dir: Path, state_path: Path, state: dict[str, Any], event: str, detail: str) -> dict[str, Any]:
     state["revision"] += 1
     state["updated_at"] = now()
-    write_json(state_path, state)
+    root = _ledger_root_for_artifact(lane_dir)
+    loaded = db_get_lane(root, str(state.get("lane_id") or ""))
+    if loaded is None:
+        raise ValueError("lane state refers to an unknown lane")
+    definition, _ = loaded
+    db_put_lane(root, definition, state, event=event, detail=detail)
     append_journal_best_effort(lane_dir, event, detail)
     return state
 
 
 def load_state(task_id: str, params: dict[str, Any]) -> tuple[Path, Path, dict[str, Any]]:
     root, task_dir, state_path = task_paths(task_id, params)
-    if not state_path.exists():
+    loaded = db_load_task(root, safe_id(task_id))
+    if loaded is None:
         raise ValueError(f"task '{task_id}' does not exist")
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+    task, state, _, artifact_dir = loaded
+    resolved_artifacts = Path(artifact_dir)
+    if resolved_artifacts.is_absolute() or ".." in resolved_artifacts.parts:
+        raise ValueError("task artifact directory is unsafe")
+    task_dir = root / resolved_artifacts
     if state.get("schema") != SCHEMA or task.get("schema") != SCHEMA:
         raise ValueError("task ledger schema is not supported; create a new task")
     return root, task_dir, state
+
+
+def load_task_definition(task_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Load a task's immutable definition from its owning SQLite ledger."""
+    root = _ledger_root_for_artifact(task_dir)
+    raw_task_id = str((state or {}).get("task_id") or "").strip()
+    task_id = safe_id(raw_task_id) if raw_task_id else ""
+    if not task_id:
+        task_dir_resolved = task_dir.resolve()
+        for candidate_id in db_task_index(root):
+            candidate_path = db_task_artifact_path(root, candidate_id)
+            if candidate_path is not None and candidate_path.resolve() == task_dir_resolved:
+                task_id = candidate_id
+                break
+    loaded = db_load_task(root, task_id) if task_id else None
+    if loaded is None:
+        raise ValueError("task definition is unavailable")
+    definition, _, _, _ = loaded
+    if definition.get("schema") != SCHEMA or definition.get("task_id") != task_id:
+        raise ValueError("task definition schema or identity is invalid")
+    return definition
+
+
+def load_task_state_for_artifact(task_dir: Path) -> dict[str, Any]:
+    """Diagnostic/test helper: resolve an artifact directory to canonical SQLite state."""
+    root = _ledger_root_for_artifact(task_dir)
+    target = task_dir.resolve()
+    for task_id in db_task_index(root):
+        candidate = db_task_artifact_path(root, task_id)
+        if candidate is not None and candidate.resolve() == target:
+            loaded = db_load_task(root, task_id)
+            if loaded is not None:
+                return loaded[1]
+    raise ValueError("task artifact directory is not registered in the SQLite ledger")
 
 
 def guard_revision(state: dict[str, Any], expected: int | None) -> None:
@@ -3603,7 +3739,7 @@ def guard_revision(state: dict[str, Any], expected: int | None) -> None:
 def save_state(task_dir: Path, state_path: Path, state: dict[str, Any], event: str, detail: str) -> dict[str, Any]:
     state["revision"] += 1
     state["updated_at"] = now()
-    write_json(state_path, state)
+    db_update_task_state(_ledger_root_for_artifact(task_dir), state, event=event, detail=detail)
     append_journal_best_effort(task_dir, event, detail)
     return state
 
@@ -3763,8 +3899,8 @@ def lock_key(path: str) -> str:
 
 
 def _global_claims(root: Path) -> tuple[Path, dict[str, Any]]:
-    path = root / "resource-claims.json"
-    claims = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    path = root / "cortex.db"
+    claims = db_get_global(root, "resource_claims", {})
     active: dict[str, Any] = {}
     for key, entry in claims.items():
         try:
@@ -3787,22 +3923,21 @@ def _claim_global_resource(root: Path, resource: str, owner: str, scope_kind: st
         raise ValueError(f"resource already claimed globally: {redact(resource, 300)}")
     entry = {"resource": redact(resource, 500), "owner": redact(owner, 256), "owner_digest": owner_digest, "scope_kind": scope_kind, "scope_id": scope_id, "kind": redact(kind, 128), "expires_at": expiry.isoformat(), "claimed_at": existing.get("claimed_at") if existing else now()}
     claims[key] = entry
-    write_json(path, claims)
+    db_put_global(root, "resource_claims", claims)
     return entry
 
 
 def _release_global_resource(root: Path, resource: str, owner: str, scope_kind: str, scope_id: str) -> None:
-    path = root / "resource-claims.json"
-    claims = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    claims = db_get_global(root, "resource_claims", {})
     key = digest_text(resource)
     existing = claims.get(key)
     if not existing or (existing.get("owner_digest"), existing.get("scope_kind"), existing.get("scope_id")) != (digest_text(owner), scope_kind, scope_id):
         raise ValueError("global resource is not held by this owner and scope")
     del claims[key]
     if claims:
-        write_json(path, claims)
-    elif path.exists():
-        path.unlink()
+        db_put_global(root, "resource_claims", claims)
+    else:
+        db_delete_global(root, "resource_claims")
 
 
 def _insert_gate(current: list[str], gate: str, operation: dict[str, Any]) -> None:
@@ -3908,16 +4043,22 @@ def append_pipeline_change(state: dict[str, Any], change: dict[str, Any], reason
 
 
 def invalidate_reworked_report_receipts(task_dir: Path, state: dict[str, Any]) -> None:
-    paths = report_bus_paths(task_dir)
     invalidated_attempts = {item["attempt_id"] for item in state.get("attempts", []) if item.get("invalidated")}
-    for path in paths["receipts"].glob("report-receipt-*.json"):
-        if path.is_symlink():
-            raise ValueError("report receipt must not be a symlink")
-        receipt = _read_private_json(path, "report receipt")
+    paths = report_bus_paths(task_dir)
+    index = _report_index(paths, state["task_id"])
+    root = _task_document_root(task_dir, state["task_id"])
+    for metadata in index.get("reports", []):
+        if not isinstance(metadata, dict):
+            continue
+        report_id = safe_id(str(metadata.get("report_id") or ""))
+        if not report_id:
+            continue
+        receipt, record = _load_report_receipt(task_dir, state, f"report-receipt-{report_id}")
         if receipt.get("attempt_id") in invalidated_attempts and not receipt.get("invalidated"):
             receipt["invalidated"] = True
             receipt["invalidated_at"] = now()
-            write_json(path, receipt)
+            db_put_task_document(root, state["task_id"], f"receipt_state:{receipt['receipt_id']}", receipt)
+            _recover_report_receipt(paths, record, state, invalidated=True)
 
 
 def create_lane(params: dict[str, Any]) -> dict[str, Any]:
@@ -3926,8 +4067,9 @@ def create_lane(params: dict[str, Any]) -> dict[str, Any]:
     require_activation(params)
     with state_lock(root):
         _, lane_dir, state_path = lane_paths(lane_id, params)
-        if state_path.exists():
-            existing = json.loads(state_path.read_text(encoding="utf-8"))
+        existing_lane = db_get_lane(root, lane_id)
+        if existing_lane is not None:
+            _, existing = existing_lane
             if existing.get("schema") != SCHEMA:
                 raise ValueError("task ledger schema is not supported; create a new task")
             if existing.get("owner") != str(params.get("principal") or "local"):
@@ -3943,16 +4085,20 @@ def create_lane(params: dict[str, Any]) -> dict[str, Any]:
         lane_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         preflight_journal(lane_dir)
         state = {"schema": SCHEMA, "lane_id": lane_id, "status": "active", "owner": owner, "mode": mode, "purpose": redact(params.get("purpose", ""), 2000), "declarations": sanitize_structured(declarations), "lease": None, "resources": {}, "bound_tasks": [], "recovery_events": [], "materializations": [], "revision": 0, "created_at": now(), "updated_at": now()}
-        write_json(lane_dir / "lane.json", {"schema": SCHEMA, "lane_id": lane_id, "owner": owner, "mode": mode, "purpose": state["purpose"], "declarations": state["declarations"], "created_at": state["created_at"]})
-        write_json(state_path, state)
+        definition = {"schema": SCHEMA, "lane_id": lane_id, "owner": owner, "mode": mode, "purpose": state["purpose"], "declarations": state["declarations"], "created_at": state["created_at"]}
+        db_put_lane(root, definition, state, event="initialized", detail=f"{mode} lane")
         append_journal_best_effort(lane_dir, "initialized", f"{mode} lane")
         return {"created": True, "lane_id": lane_id, "state": state}
 
 
 def lane_status(params: dict[str, Any]) -> dict[str, Any]:
-    _, lane_dir, state = load_lane(str(params["lane_id"]), params)
+    root, lane_dir, state = load_lane(str(params["lane_id"]), params)
     authorize_principal({"principal": state.get("owner")}, params)
-    return {"lane": json.loads((lane_dir / "lane.json").read_text(encoding="utf-8")), "state": state}
+    loaded = db_get_lane(root, str(state.get("lane_id") or ""))
+    if loaded is None:
+        raise ValueError("lane definition is unavailable")
+    definition, _ = loaded
+    return {"lane": definition, "state": state}
 
 
 def claim_lane(params: dict[str, Any]) -> dict[str, Any]:
@@ -3976,7 +4122,7 @@ def claim_lane(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("lane lease is expired; pass reclaim=true to recover it")
             state.setdefault("recovery_events", []).append({"at": now(), "kind": "expired_lease_reclaimed", "previous_owner": existing.get("owner"), "previous_run_id": existing.get("run_id")})
         state["lease"] = {"owner": str(params.get("principal") or "local"), "run_id": redact(params.get("run_id", ""), 256), "expires_at": expires_at.isoformat(), "acquired_at": now()}
-        save_lane(lane_dir, lane_dir / "current.json", state, "lease", f"claimed by {state['lease']['owner']}")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "lease", f"claimed by {state['lease']['owner']}")
         return {"state": state, "reclaimed": bool(existing)}
 
 
@@ -3991,7 +4137,7 @@ def release_lane(params: dict[str, Any]) -> dict[str, Any]:
         if params.get("run_id") and lease.get("run_id") != str(params["run_id"]):
             raise ValueError("lane lease belongs to a different run")
         state["lease"] = None
-        save_lane(lane_dir, lane_dir / "current.json", state, "release", "lane lease released")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "release", "lane lease released")
         return {"state": state}
 
 
@@ -4048,7 +4194,7 @@ def materialize_lane(params: dict[str, Any]) -> dict[str, Any]:
                 run_git(repo, ["worktree", "remove", str(worktree)])
             raise
         state["materializations"] = results
-        save_lane(lane_dir, lane_dir / "current.json", state, "materialize", f"materialized {len(results)} declaration(s)")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "materialize", f"materialized {len(results)} declaration(s)")
         return {"state": state, "materializations": results}
 
 
@@ -4071,7 +4217,7 @@ def reconcile_lane(params: dict[str, Any]) -> dict[str, Any]:
             dirty_probe = run_git(worktree, ["status", "--porcelain"])
             results.append({"worktree_path": str(worktree), "branch": branch_probe.stdout.strip(), "expected_branch": expected_branch, "dirty": bool(dirty_probe.stdout.strip()), "status": "ok" if branch_probe.returncode == 0 and branch_probe.stdout.strip() == expected_branch else "drift"})
         state["last_reconcile"] = {"at": now(), "results": results}
-        save_lane(lane_dir, lane_dir / "current.json", state, "reconcile", f"reconciled {len(results)} declaration(s)")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "reconcile", f"reconciled {len(results)} declaration(s)")
         return {"state": state, "results": results}
 
 
@@ -4109,7 +4255,7 @@ def retire_lane(params: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"git worktree remove failed: {redact(removed.stderr, 1000)}")
             state["materializations"] = []
         state["status"] = "retired"
-        save_lane(lane_dir, lane_dir / "current.json", state, "retire", "clean retirement")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "retire", "clean retirement")
         return {"state": state}
 
 
@@ -4128,8 +4274,8 @@ def bind_task_lane(params: dict[str, Any]) -> dict[str, Any]:
         state["lane_id"] = lane["lane_id"]
         if state["task_id"] not in lane.setdefault("bound_tasks", []):
             lane["bound_tasks"].append(state["task_id"])
-        save_state(task_dir, task_dir / "current.json", state, "lane", f"bound to {lane['lane_id']}")
-        save_lane(lane_dir, lane_dir / "current.json", lane, "bind", state["task_id"])
+        save_state(task_dir, task_dir / "state.sqlite", state, "lane", f"bound to {lane['lane_id']}")
+        save_lane(lane_dir, lane_dir / "state.sqlite", lane, "bind", state["task_id"])
         return {"state": state, "lane": lane}
 
 
@@ -4148,7 +4294,7 @@ def claim_lane_resource(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"lane resource already claimed: {redact(path, 300)}")
         global_entry = _claim_global_resource(root, path, owner, "lane", state["lane_id"], expiry.isoformat(), str(params.get("kind", "resource")))
         state["resources"][key] = {"resource": redact(path, 500), "owner": redact(owner, 256), "owner_digest": digest_text(owner), "expires_at": expiry.isoformat(), "claimed_at": global_entry["claimed_at"], "kind": redact(params.get("kind", "resource"), 128), "global": True}
-        save_lane(lane_dir, lane_dir / "current.json", state, "resource", f"{redact(path, 300)} → {redact(owner, 128)}")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "resource", f"{redact(path, 300)} → {redact(owner, 128)}")
         return {"state": state, "advisory": False}
 
 
@@ -4165,7 +4311,7 @@ def release_lane_resource(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("lane resource is not held by this owner")
         _release_global_resource(root, path, str(params["owner"]), "lane", state["lane_id"])
         del state["resources"][key]
-        save_lane(lane_dir, lane_dir / "current.json", state, "resource_release", f"{redact(path, 300)} released")
+        save_lane(lane_dir, lane_dir / "state.sqlite", state, "resource_release", f"{redact(path, 300)} released")
         return {"state": state}
 
 
@@ -4285,20 +4431,20 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
     activation = require_activation(params, task_id)
     with state_lock(root):
         _, task_dir, state_path = task_paths(task_id, params)
-        if state_path.exists():
-            existing = json.loads(state_path.read_text(encoding="utf-8"))
+        existing_task = db_load_task(root, task_id)
+        if existing_task is not None:
+            task_definition, existing, _, artifact_dir = existing_task
+            task_dir = root / artifact_dir
             if existing.get("schema") != SCHEMA:
                 raise ValueError("task ledger schema is not supported; create a new task")
             authorize_principal(existing, params)
-            task_definition = _read_private_json(task_dir / "task.json", "task definition")
             requested_objective = str(params.get("objective", "")).strip()
             stored_objective = str(task_definition.get("objective", ""))
             objective_correction = (
                 {"requested": requested_objective, "used": stored_objective, "source": "immutable_task_definition"}
                 if requested_objective and requested_objective != stored_objective else None
             )
-            activation_file = activation_path(root)
-            activations = json.loads(activation_file.read_text(encoding="utf-8"))
+            activations = _activation_records(root)
             activation_id = activation_key(params)
             current_activation = activations.get(activation_id)
             if not isinstance(current_activation, dict) or current_activation.get("schema") != SCHEMA:
@@ -4307,15 +4453,14 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
             current_activation["initialized_at"] = current_activation.get("initialized_at") or now()
             current_activation["resumed_at"] = now()
             activations[activation_id] = current_activation
-            write_json(activation_file, activations)
+            _write_activation_records(root, activations)
             return {"created": False, "resumed": True, "task_id": task_id, "state": existing, "objective_correction": objective_correction, "ledger_root": str(root)}
         if not str(params.get("classification_id", "")).strip():
             raise ValueError("init_task requires a prior classify_task classification_id")
         classification_id = safe_id(str(params["classification_id"]))
-        receipt_path = root / "classification-receipts" / f"{classification_id}.json"
-        if not receipt_path.exists() or receipt_path.is_symlink():
+        receipt = db_get_classification(root, classification_id)
+        if receipt is None:
             raise ValueError("init_task requires a prior classify_task classification_id")
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         if receipt.get("schema") != SCHEMA:
             raise ValueError("classification receipt schema is not supported; classify the task again")
         if receipt.get("consumed_by"):
@@ -4345,15 +4490,13 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if classification["complexity"] in {"C2", "C3"} and pipeline.index("documentation") > pipeline.index("close"):
             raise ValueError("documentation must run before close")
         task_number, task_dir = allocate_task_directory(root, task_id)
-        state_path = task_dir / "current.json"
+        state_path = task_dir / "state.sqlite"
         thread_id = str(params.get("thread_id", "")).strip()
         principal = redact(params.get("principal") or thread_id or "local", 256)
         baseline = capture_project_manifest(select_project_root(params))
-        baseline_text = _json_text(
-            baseline,
-            label="baseline manifest",
-            max_bytes=MAX_MANIFEST_BYTES,
-        )
+        baseline_preflight = dict(baseline)
+        baseline_preflight.pop("captured_at", None)
+        _json_text(baseline_preflight, label="baseline manifest", max_bytes=MAX_MANIFEST_BYTES)
         task_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         preflight_journal(task_dir)
         for name in ("delegations", "reports", "handoffs", "evidence"):
@@ -4363,18 +4506,15 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if plan_approval_policy not in {"auto", "required"}:
             raise ValueError("plan_approval must be auto or required")
         follow_up = params.get("follow_up") if isinstance(params.get("follow_up"), dict) else None
-        task = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "user_request": redact(params.get("user_request") or params.get("objective", ""), 4000), "objective": redact(params.get("objective", "")), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        baseline_ref = store_manifest_snapshot(task_dir, baseline)
+        task = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "user_request": redact(params.get("user_request") or params.get("objective", ""), 4000), "objective": redact(params.get("objective", "")), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan"}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
-        write_json(task_dir / "task.json", task)
-        write_text_atomic(task_dir / "baseline-manifest.json", baseline_text)
-        write_json(state_path, state)
+        state = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan"}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        artifact_relative = str(task_dir.relative_to(root))
+        db_create_task(root, task, state, artifact_relative)
         report_paths = report_bus_paths(task_dir)
-        write_json(report_paths["index"], {"schema": REPORT_SCHEMA, "task_id": task_id, "reports": [], "submissions": {}, "updated_at": now()})
-        index = read_task_index(root)
-        index[task_id] = {"number": task_number, "directory": task_dir.name}
-        write_json(task_index_path(root), index)
+        _write_report_index(report_paths, task_id, {"schema": REPORT_SCHEMA, "task_id": task_id, "reports": [], "submissions": {}, "updated_at": now()})
         if thread_id and (
             thread_id != principal
             or not principal.startswith("orchestration-task-")
@@ -4382,9 +4522,8 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
             bindings = _host_session_bindings(root)
             bindings["tasks"][task_id] = thread_id
             bindings["updated_at"] = now()
-            write_json(_host_session_bindings_path(root), bindings)
-        activation_file = activation_path(root)
-        activations = json.loads(activation_file.read_text(encoding="utf-8"))
+            db_put_global(root, "host_sessions", bindings)
+        activations = _activation_records(root)
         activation_id = activation_key(params)
         current_activation = activations.get(activation_id)
         if not isinstance(current_activation, dict) or current_activation.get("schema") != SCHEMA:
@@ -4392,18 +4531,18 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         current_activation["task_id"] = task_id
         current_activation["initialized_at"] = now()
         activations[activation_id] = current_activation
-        write_json(activation_file, activations)
+        _write_activation_records(root, activations)
         append_journal_best_effort(task_dir, "initialized", f"{classification['complexity']} pipeline: {', '.join(pipeline)}")
         receipt["consumed_by"] = task_id
         receipt["consumed_at"] = now()
-        write_json(receipt_path, receipt)
+        db_put_classification(root, receipt)
         return {"created": True, "task_id": task_id, "task_number": task_number, "task_directory": task_dir.name, "state": state, "classification": classification, "pipeline_correction": pipeline_correction, "ledger_root": str(root)}
 
 
 def status(params: dict[str, Any]) -> dict[str, Any]:
     root, task_dir, state = load_state(str(params["task_id"]), params)
     authorize_principal(state, params)
-    task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+    task = load_task_definition(task_dir, state)
     receipt_id = "status-" + digest_text(json.dumps({
         "task_id": state["task_id"],
         "principal": state.get("principal", "local"),
@@ -4457,10 +4596,18 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
         submissions: dict[str, str] = {}
         by_attempt: dict[str, list[str]] = {}
         repaired: list[str] = []
-        for path in sorted(paths["records"].glob("report-*.json")):
-            if path.is_symlink():
-                raise ValueError("report record must not be a symlink")
-            record = _read_private_json(path, "report record")
+        aggregate_bytes = 0
+        source_index = _report_index(paths, state["task_id"])
+        for metadata in source_index.get("reports", []):
+            if not isinstance(metadata, dict):
+                raise ValueError("SQLite report index contains an invalid entry")
+            report_id = safe_id(str(metadata.get("report_id", "")))
+            record, _ = read_immutable_json_artifact(
+                task_dir,
+                state["task_id"],
+                f"reports/records/{report_id}.json",
+                kinds={"worker_report", "report_record"},
+            )
             report_id = safe_id(str(record.get("report_id", "")))
             attempt = _attempt(state, safe_id(str(record.get("attempt_id", ""))))
             sanitized = sanitize_report_payload(record.get("report"))
@@ -4476,14 +4623,15 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
                 if "planning" in record else sanitized
             )
             digest = digest_text(json.dumps(digest_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-            if record.get("schema") != REPORT_SCHEMA or record.get("task_id") != state["task_id"] or report_id + ".json" != path.name or record.get("gate") != attempt.get("gate") or record.get("content_digest") != digest:
-                raise ValueError(f"report record failed reconciliation: {path.name}")
+            if record.get("schema") != REPORT_SCHEMA or record.get("task_id") != state["task_id"] or not report_id or record.get("gate") != attempt.get("gate") or record.get("content_digest") != digest:
+                raise ValueError("SQLite report record failed reconciliation")
             records.append(_report_metadata(record))
             submissions[f"{record['attempt_id']}:{safe_id(str(record['submission_id']))}"] = report_id
             by_attempt.setdefault(record["attempt_id"], []).append(report_id)
             if len(records) > MAX_REPORTS_PER_TASK or len(by_attempt[record["attempt_id"]]) > MAX_REPORTS_PER_ATTEMPT:
                 raise ValueError("authoritative reports exceed count quota")
-            if sum(len(json.dumps(item.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8")) for item in [_read_private_json(item, "report record") for item in paths["records"].glob("report-*.json")]) > MAX_REPORT_AGGREGATE_BYTES:
+            aggregate_bytes += len(json.dumps(record.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8"))
+            if aggregate_bytes > MAX_REPORT_AGGREGATE_BYTES:
                 raise ValueError("authoritative reports exceed aggregate byte quota")
             markdown_path = paths["markdown"] / f"{report_id}.md"
             generated = _report_markdown(record)
@@ -4498,18 +4646,18 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
             receipt, receipt_repaired = _recover_report_receipt(paths, record, state, bool(attempt.get("invalidated")))
             if receipt_repaired:
                 repaired.append((paths["receipts"] / f"{receipt['receipt_id']}.json").relative_to(paths["root"]).as_posix())
-        write_json(paths["index"], {"schema": REPORT_SCHEMA, "task_id": state["task_id"], "reports": records, "submissions": submissions, "updated_at": now()})
+        _write_report_index(paths, state["task_id"], {"schema": REPORT_SCHEMA, "task_id": state["task_id"], "reports": records, "submissions": submissions, "updated_at": now()})
         for attempt in state.get("attempts", []):
-            delegation_path, delegation_index = _delegation_report_index(paths, state["task_id"], attempt["attempt_id"])
+            _, delegation_index = _delegation_report_index(paths, state["task_id"], attempt["attempt_id"])
             delegation_index["owned_report_ids"] = sorted(by_attempt.get(attempt["attempt_id"], []))
             delegation_index["updated_at"] = now()
-            write_json(delegation_path, delegation_index)
+            _write_delegation_report_index(paths, state["task_id"], attempt["attempt_id"], delegation_index)
         append_journal_best_effort(task_dir, "report_reconcile", f"{len(records)} record(s); {len(repaired)} repair(s)")
         return {"schema": REPORT_SCHEMA, "task_id": state["task_id"], "report_count": len(records), "repaired": repaired, "state": state}
 
 
 def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
-    """Compatibility facade for the extracted delegation persistence service."""
+    """Public delegating entrypoint for the delegation persistence service."""
     return _record_delegation_service(params)
 
 
@@ -4547,39 +4695,41 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
             for path in task_dir.rglob("*")
             if path.is_file() and not path.is_symlink()
         }
-        prepared: list[dict[str, Any]] = []
         for index, raw in enumerate(specs):
             if not isinstance(raw, dict):
-                return {"recorded": False, "reason": "invalid_batch_spec", "index": index, "prepared": prepared, "recoverable": True}
-            # The batch endpoint itself is the explicit parallel declaration;
-            # tolerate omitted/false per-item flags and persist the canonical
-            # value instead of forcing the coordinator into a recoverable
-            # error/retry loop.
-            raw = {**raw, "parallel": True}
+                return {"recorded": False, "reason": "invalid_batch_spec", "index": index, "prepared": [], "recoverable": True}
             gate = str(raw.get("gate") or (current_wave[0] if current_wave else "")).strip()
             if gate not in current_wave:
-                return {"recorded": False, "reason": "batch_requires_one_gate", "current_gates": current_wave, "index": index, "prepared": prepared, "recoverable": True}
-            try:
-                result = prepare_delegation({**params, "delegation": raw})
-            except Exception as exc:
-                for path in sorted(task_dir.rglob("*"), reverse=True):
-                    if path.is_file() and not path.is_symlink() and path.relative_to(task_dir).as_posix() not in snapshot:
-                        path.unlink()
-                for relative, content in snapshot.items():
-                    restore = task_dir / relative
-                    write_text_atomic(restore, content)
-                append_journal_best_effort(task_dir, "delegation_batch_rollback", f"spec {index}: {type(exc).__name__}")
-                return {
-                    "recorded": False,
-                    "atomic": True,
-                    "reason": "partial_failure",
-                    "index": index,
-                    "error": redact(str(exc), 1000),
-                    "prepared": [],
-                    "recoverable": True,
-                    "next_action": "retry the batch after correcting the returned error; no batch attempts were committed",
-                }
-            prepared.append(result)
+                return {"recorded": False, "reason": "batch_requires_one_gate", "current_gates": current_wave, "index": index, "prepared": [], "recoverable": True}
+        prepared: list[dict[str, Any]] = []
+        try:
+            with db_savepoint(root, "delegation_batch"):
+                for index, raw in enumerate(specs):
+                    # The batch endpoint itself is the explicit parallel declaration;
+                    # tolerate omitted/false per-item flags and persist the canonical
+                    # value instead of forcing the coordinator into a recoverable
+                    # error/retry loop.
+                    raw = {**raw, "parallel": True}
+                    result = prepare_delegation({**params, "delegation": raw})
+                    prepared.append(result)
+        except Exception as exc:
+            for path in sorted(task_dir.rglob("*"), reverse=True):
+                if path.is_file() and not path.is_symlink() and path.relative_to(task_dir).as_posix() not in snapshot:
+                    path.unlink()
+            for relative, content in snapshot.items():
+                restore = task_dir / relative
+                write_text_atomic(restore, content)
+            append_journal_best_effort(task_dir, "delegation_batch_rollback", f"partial_failure: {type(exc).__name__}")
+            return {
+                "recorded": False,
+                "atomic": True,
+                "reason": "partial_failure",
+                "index": len(prepared),
+                "error": redact(str(exc), 1000),
+                "prepared": [],
+                "recoverable": True,
+                "next_action": "retry the batch after correcting the returned error; no batch attempts were committed",
+            }
         return {
             "recorded": True,
             "atomic": True,
@@ -4717,14 +4867,13 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             attempt["status"] = "failed"
             attempt["finalized_at"] = host_spawn["confirmed_at"]
             attempt["finalization_reason"] = mismatch_reason
-            package_path = task_dir / "delegations" / f"{attempt_id}.json"
-            package = _read_private_json(package_path, "delegation package")
+            package = _delegation_package(task_dir, state["task_id"], attempt_id)
             package["spawn_status"] = "confirmed_model_mismatch"
             package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
             package["host_spawn"] = host_spawn
             package["model_verification"] = model_verification
-            write_json(package_path, package)
-            save_state(task_dir, task_dir / "current.json", state, "host_spawn_model_mismatch", f"{attempt_id}: {mismatch_reason}")
+            _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+            save_state(task_dir, task_dir / "state.sqlite", state, "host_spawn_model_mismatch", f"{attempt_id}: {mismatch_reason}")
             return {
                 "confirmed": False,
                 "failed": True,
@@ -4743,13 +4892,12 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
         attempt["dispatch_correlation"] = "coordinator_recorded_host_spawn"
         attempt["status"] = "running"
         attempt["started_at"] = host_spawn["confirmed_at"]
-        package_path = task_dir / "delegations" / f"{attempt_id}.json"
-        package = _read_private_json(package_path, "delegation package")
+        package = _delegation_package(task_dir, state["task_id"], attempt_id)
         package["spawn_status"] = "confirmed"
         package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
         package["host_spawn"] = host_spawn
-        write_json(package_path, package)
-        save_state(task_dir, task_dir / "current.json", state, "host_spawn", f"{attempt_id}: {expected_task_name}")
+        _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+        save_state(task_dir, task_dir / "state.sqlite", state, "host_spawn", f"{attempt_id}: {expected_task_name}")
         return {"confirmed": True, "attempt_id": attempt_id, "idempotent": False, "host_spawn": host_spawn, "task_name_correction": task_name_correction, "revision_correction": revision_correction, "state": state}
 
 
@@ -4769,16 +4917,16 @@ def _validated_evidence_records(task_dir: Path, state: dict[str, Any]) -> list[d
         if evidence_id in seen:
             raise ValueError("task evidence index contains a duplicate evidence_id")
         seen.add(evidence_id)
-        path = _contained_path(
-            task_dir / "evidence",
-            task_dir / "evidence" / f"{evidence_id}.json",
-            "evidence record",
+        record, _ = read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"evidence/{evidence_id}.json",
+            kinds={"evidence"},
         )
-        record = _read_private_json(path, "evidence record")
         indexed = dict(state_record)
         invalidated = bool(indexed.pop("invalidated", False))
         if indexed != record:
-            raise ValueError(f"evidence record failed reconciliation: {evidence_id}")
+            raise ValueError(f"SQLite evidence record failed reconciliation: {evidence_id}")
         validated.append({**record, **({"invalidated": True} if invalidated else {})})
     return validated
 
@@ -4834,24 +4982,28 @@ def finalize_attempt(params: dict[str, Any]) -> dict[str, Any]:
         attempt["finalized_at"] = now()
         if reason:
             attempt["finalization_reason"] = redact(reason, 2000)
-        save_state(task_dir, task_dir / "current.json", state, "attempt", f"{attempt_id}: {status}")
+        save_state(task_dir, task_dir / "state.sqlite", state, "attempt", f"{attempt_id}: {status}")
         return {"attempt_id": attempt_id, "status": status, "idempotent": False, "revision_correction": revision_correction, "state": state}
 
 
 def _attempts_missing_result_validation(task_dir: Path, attempts: list[dict[str, Any]]) -> list[str]:
     """Return facade attempts that have no server-validated result receipt."""
-    records_root = report_bus_paths(task_dir)["records"]
-    task = _read_private_json(task_dir / "task.json", "task definition")
+    task = load_task_definition(task_dir)
     missing: list[str] = []
     for attempt in attempts:
         if not attempt.get("facade_managed"):
             continue
         valid = False
         for report_id in attempt.get("report_ids") or []:
-            record_path = records_root / f"{safe_id(str(report_id))}.json"
-            if not record_path.is_file() or record_path.is_symlink():
+            try:
+                record, _ = read_immutable_json_artifact(
+                    task_dir,
+                    str(task["task_id"]),
+                    f"reports/records/{safe_id(str(report_id))}.json",
+                    kinds={"worker_report", "report_record"},
+                )
+            except ValueError:
                 continue
-            record = _read_private_json(record_path, "report record")
             validation = record.get("result_validation")
             gate = str(attempt.get("gate") or "")
             result_contract = {
@@ -4949,18 +5101,12 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         if attempt and attempt.get("agent") == "technical_writer" and evidence_kind in DOCUMENTATION_EVIDENCE_KINDS:
             params = {**params, "kind": "documentation"}
     report_receipt = None
-    report_receipt_path = None
     report_paths = None
+    report_record = None
     if state.get("require_delegation"):
         receipt_id = safe_id(str(params.get("report_receipt", "")))
         report_paths = report_bus_paths(task_dir)
-        report_receipt_path = report_paths["receipts"] / f"{receipt_id}.json"
-        tombstone_path = _consumption_path(report_paths, receipt_id)
-        if tombstone_path.exists():
-            raise ValueError("report receipt is consumed and cannot be replayed")
-        if not report_receipt_path.exists() or report_receipt_path.is_symlink():
-            raise ValueError("C2/C3 evidence requires an attempt-tied report receipt")
-        report_receipt = _read_private_json(report_receipt_path, "report receipt")
+        report_receipt, report_record = _load_report_receipt(task_dir, state, receipt_id)
         if report_receipt.get("schema") != REPORT_SCHEMA or report_receipt.get("task_id") != state["task_id"] or report_receipt.get("gate") != gate or report_receipt.get("attempt_id") != attempt_id or report_receipt.get("invalidated") or report_receipt.get("consumed_at") or report_receipt.get("consumed_by_evidence_id"):
             raise ValueError("report receipt is invalid, consumed, or does not belong to this attempt")
     summary = str(params.get("summary", "")).strip()
@@ -5001,12 +5147,26 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "paths": [redact(path, 500) for path in params.get("paths", [])],
         "created_at": now(),
     }
-    if report_receipt is not None and report_receipt_path is not None and report_paths is not None:
-        tombstone = _consumption_tombstone(report_receipt, evidence_id)
-        write_json_exclusive(_consumption_path(report_paths, report_receipt["receipt_id"]), tombstone)
-        report_receipt["consumed_at"] = tombstone["consumed_at"]
-        report_receipt["consumed_by_evidence_id"] = tombstone["consumed_by_evidence_id"]
-        write_json(report_receipt_path, report_receipt)
+    if report_receipt is not None and report_paths is not None and report_record is not None:
+        report_receipt["consumed_at"] = now()
+        report_receipt["consumed_by_evidence_id"] = evidence_id
+        receipt_root = _task_document_root(task_dir, state["task_id"])
+        db_put_task_document(
+            receipt_root,
+            state["task_id"],
+            f"receipt_state:{report_receipt['receipt_id']}",
+            report_receipt,
+        )
+        _recover_report_receipt(report_paths, report_record, state)
+    store_immutable_artifact(
+        task_dir,
+        state["task_id"],
+        kind="evidence",
+        title=f"evidence/{evidence_id}.json",
+        mime_type="application/json",
+        content=json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        export_path=f"evidence/{evidence_id}.json",
+    )
     write_json(task_dir / "evidence" / f"{evidence_id}.json", evidence)
     state["evidence"].append(evidence)
     if kind == "documentation":
@@ -5016,7 +5176,7 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
             attempt["evidence_ids"].append(evidence_id)
             if evidence.get("report_id") and evidence["report_id"] not in attempt.setdefault("report_ids", []):
                 attempt["report_ids"].append(evidence["report_id"])
-    save_state(task_dir, task_dir / "current.json", state, "evidence", f"{gate}: {evidence_id}")
+    save_state(task_dir, task_dir / "state.sqlite", state, "evidence", f"{gate}: {evidence_id}")
     return {"evidence_id": evidence_id, "state": state, "evidence": evidence}
 
 
@@ -5034,11 +5194,12 @@ def record_evidence(params: dict[str, Any]) -> dict[str, Any]:
         # several parallel attempts when the attempt_id was omitted.
         if state.get("require_delegation") and not resolved.get("attempt_id") and resolved.get("report_receipt"):
             receipt_id = safe_id(str(resolved["report_receipt"]))
-            receipt_path = report_bus_paths(task_dir)["receipts"] / f"{receipt_id}.json"
-            if receipt_path.exists() and not receipt_path.is_symlink():
-                receipt = _read_private_json(receipt_path, "report receipt")
-                if receipt.get("task_id") == state["task_id"] and receipt.get("gate") == resolved["gate"] and not receipt.get("consumed_at") and not receipt.get("invalidated"):
-                    resolved["attempt_id"] = receipt.get("attempt_id")
+            try:
+                receipt, _ = _load_report_receipt(task_dir, state, receipt_id)
+            except ValueError:
+                receipt = None
+            if receipt and receipt.get("task_id") == state["task_id"] and receipt.get("gate") == resolved["gate"] and not receipt.get("consumed_at") and not receipt.get("invalidated"):
+                resolved["attempt_id"] = receipt.get("attempt_id")
         if state.get("require_delegation") and not resolved.get("attempt_id"):
             eligible = [
                 item for item in state.get("attempts", [])
@@ -5057,14 +5218,12 @@ def record_evidence(params: dict[str, Any]) -> dict[str, Any]:
                 }
             resolved["attempt_id"] = eligible[0]["attempt_id"]
         if state.get("require_delegation") and not resolved.get("report_receipt"):
-            paths = report_bus_paths(task_dir)
-            receipts = []
-            for receipt_path in paths["receipts"].glob("report-receipt-*.json"):
-                if receipt_path.is_symlink():
-                    continue
-                receipt = _read_private_json(receipt_path, "report receipt")
-                if receipt.get("attempt_id") == resolved.get("attempt_id") and receipt.get("gate") == resolved["gate"] and not receipt.get("consumed_at") and not receipt.get("invalidated"):
-                    receipts.append(receipt)
+            receipts = _available_report_receipts(
+                task_dir,
+                state,
+                attempt_id=resolved.get("attempt_id"),
+                gate=resolved["gate"],
+            )
             if len(receipts) != 1:
                 return {
                     "recorded": False,
@@ -5122,14 +5281,12 @@ def execute_verification(params: dict[str, Any]) -> dict[str, Any]:
                     "state": state,
                 }
         if state.get("require_delegation") and not resolved.get("report_receipt"):
-            paths = report_bus_paths(task_dir)
-            receipts = []
-            for receipt_path in paths["receipts"].glob("report-receipt-*.json"):
-                if receipt_path.is_symlink():
-                    continue
-                receipt = _read_private_json(receipt_path, "report receipt")
-                if receipt.get("attempt_id") == resolved.get("attempt_id") and receipt.get("gate") == resolved["gate"] and not receipt.get("consumed_at") and not receipt.get("invalidated"):
-                    receipts.append(receipt)
+            receipts = _available_report_receipts(
+                task_dir,
+                state,
+                attempt_id=resolved.get("attempt_id"),
+                gate=resolved["gate"],
+            )
             if len(receipts) == 1:
                 resolved["report_receipt"] = receipts[0]["receipt_id"]
             else:
@@ -5157,7 +5314,7 @@ def execute_verification(params: dict[str, Any]) -> dict[str, Any]:
         timeout = int(params.get("timeout_seconds", 60))
         if timeout < 1 or timeout > 120:
             raise ValueError("timeout_seconds must be between 1 and 120")
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task = load_task_definition(task_dir, state)
         base = select_project_root(params)
         if task.get("project_root") != str(base):
             raise ValueError("task project_root does not match the current tool call")
@@ -5179,229 +5336,10 @@ def execute_verification(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def record_gate(params: dict[str, Any]) -> dict[str, Any]:
-    root = ledger_root(params)
-    with state_lock(root):
-        root, task_dir, state = load_state(str(params["task_id"]), params)
-        authorize(state, params)
-        expected_revision = params.get("expected_revision")
-        revision_correction = None
-        if expected_revision is not None and state["revision"] != expected_revision:
-            revision_correction = {"requested": expected_revision, "used": state["revision"]}
-        requested_gate, outcome = str(params["gate"]), str(params["outcome"])
-        current_wave = active_gates(state)
-        gate = requested_gate if requested_gate in current_wave else (current_wave[0] if current_wave else "")
-        if outcome not in {"passed", "failed", "blocked", "skipped"}:
-            raise ValueError("outcome must be passed, failed, blocked, or skipped")
-        if outcome == "skipped":
-            if gate in {"documentation", "close"} and state.get("require_delegation"):
-                return {
-                    "recorded": False,
-                    "reason": "mandatory_gate",
-                    "gate": gate,
-                    "next_action": "record_delegation",
-                    "recoverable": True,
-                    "revision_correction": revision_correction,
-                    "state": state,
-                }
-            if gate == "close":
-                return {
-                    "recorded": False,
-                    "reason": "mandatory_gate",
-                    "gate": gate,
-                    "next_action": "record_delegation",
-                    "recoverable": True,
-                    "revision_correction": revision_correction,
-                    "state": state,
-                }
-            if state.get("require_delegation") and not str(params.get("skip_reason", "")).strip():
-                raise ValueError("C2/C3 skipped gates require an explicit skip_reason")
-        gate_evidence = [
-            item for item in _validated_evidence_records(task_dir, state)
-            if item.get("gate") == gate and not item.get("invalidated")
-        ]
-        gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
-        non_terminal_attempts = [item for item in gate_attempts if item.get("status") not in TERMINAL_ATTEMPT_STATUSES]
-        terminal_non_success_attempts = [
-            item for item in gate_attempts
-            if item.get("status") in TERMINAL_ATTEMPT_STATUSES - {"passed"}
-        ]
-        passed_attempts = [item for item in gate_attempts if item.get("status") == "passed"]
-        if outcome == "passed" and not gate_evidence:
-            if not (state.get("require_delegation") and gate_attempts and len(terminal_non_success_attempts) == len(gate_attempts)):
-                return {
-                    "recorded": False,
-                    "reason": "evidence_required",
-                    "gate": gate,
-                    "gate_correction": ({"requested": requested_gate, "used": gate} if requested_gate != gate else None),
-                    "candidate_attempt_ids": [item["attempt_id"] for item in non_terminal_attempts + passed_attempts],
-                    "next_action": ("record_delegation" if not gate_attempts else "record_evidence"),
-                    "revision_correction": revision_correction,
-                    "state": state,
-                }
-        if outcome == "passed" and state.get("require_delegation"):
-            if not gate_attempts:
-                if gate == "documentation":
-                    return {
-                        "recorded": False,
-                        "reason": "documentation_attempt_required",
-                        "gate": gate,
-                        "next_action": "record_delegation",
-                        "recoverable": True,
-                        "revision_correction": revision_correction,
-                        "state": state,
-                    }
-                raise ValueError("C2/C3 gates require at least one delegation attempt")
-            missing = [
-                item["attempt_id"] for item in passed_attempts
-                if not any(e.get("attempt_id") == item["attempt_id"] for e in gate_evidence)
-            ]
-            if missing:
-                if gate == "documentation":
-                    return {
-                        "recorded": False,
-                        "reason": "documentation_evidence_required",
-                        "gate": gate,
-                        "candidate_attempt_ids": missing,
-                        "next_action": "record_evidence",
-                        "recoverable": True,
-                        "revision_correction": revision_correction,
-                        "state": state,
-                    }
-                raise ValueError("every passed attempt needs linked evidence before the gate can pass: " + ", ".join(missing))
-            missing_reports = [
-                item["attempt_id"] for item in passed_attempts
-                if not any(e.get("attempt_id") == item["attempt_id"] and e.get("report_id") and e.get("report_receipt") for e in gate_evidence)
-            ]
-            if missing_reports:
-                if gate == "documentation":
-                    return {
-                        "recorded": False,
-                        "reason": "documentation_report_receipt_required",
-                        "gate": gate,
-                        "candidate_attempt_ids": missing_reports,
-                        "next_action": "record_evidence",
-                        "recoverable": True,
-                        "revision_correction": revision_correction,
-                        "state": state,
-                    }
-                raise ValueError("every passed attempt needs a consumed report receipt before the gate can pass: " + ", ".join(missing_reports))
-            unvalidated_results = _attempts_missing_result_validation(task_dir, passed_attempts)
-            if unvalidated_results:
-                raise ValueError(
-                    "every passed facade attempt needs a server-validated result contract before the gate can pass: "
-                    + ", ".join(unvalidated_results)
-                )
-            evidence_attempt_ids = {item.get("attempt_id") for item in gate_evidence}
-            unexplained = [item["attempt_id"] for item in non_terminal_attempts if item["attempt_id"] not in evidence_attempt_ids]
-            if unexplained:
-                if gate == "documentation":
-                    return {
-                        "recorded": False,
-                        "reason": "documentation_evidence_required",
-                        "gate": gate,
-                        "candidate_attempt_ids": unexplained,
-                        "next_action": "record_evidence",
-                        "recoverable": True,
-                        "revision_correction": revision_correction,
-                        "state": state,
-                    }
-                raise ValueError("every active delegated attempt needs linked evidence before the gate can pass: " + ", ".join(unexplained))
-            eligible_attempt_ids = {
-                item["attempt_id"] for item in gate_attempts
-                if item["attempt_id"] in evidence_attempt_ids and item.get("status") in {"running", "passed"}
-            }
-            if passed_attempts and not eligible_attempt_ids:
-                if gate == "documentation":
-                    return {
-                        "recorded": False,
-                        "reason": "documentation_evidence_required",
-                        "gate": gate,
-                        "candidate_attempt_ids": [item["attempt_id"] for item in passed_attempts],
-                        "next_action": "record_evidence",
-                        "recoverable": True,
-                        "revision_correction": revision_correction,
-                        "state": state,
-                    }
-                raise ValueError("a passed gate requires linked evidence for at least one delegated attempt")
-            current_attempt_evidence = [item for item in gate_evidence if item.get("attempt_id") in eligible_attempt_ids]
-        else:
-            current_attempt_evidence = gate_evidence
-        if outcome == "passed" and any(item.get("kind") == "command" and (item.get("exit_code") != 0 or not item.get("verified_execution")) for item in current_attempt_evidence):
-            raise ValueError("cannot pass a gate with failed or self-attested command evidence; use execute_verification_command")
-        if outcome == "passed" and gate == "documentation" and state.get("require_delegation"):
-            documentation = state.get("documentation_receipt")
-            technical_writer_attempt_ids = {
-                item["attempt_id"] for item in gate_attempts if item.get("agent") == "technical_writer"
-            }
-            if not documentation or documentation.get("attempt_id") not in technical_writer_attempt_ids:
-                return {
-                    "recorded": False,
-                    "reason": "documentation_evidence_required",
-                    "gate": gate,
-                    "candidate_attempt_ids": [item["attempt_id"] for item in gate_attempts if item.get("agent") == "technical_writer"],
-                    "next_action": "record_evidence",
-                    "recoverable": True,
-                    "revision_correction": revision_correction,
-                    "state": state,
-                }
-        if outcome == "blocked" and state.get("require_handoff") and (not state.get("handoff_created") or state.get("handoff_gate") != gate):
-            raise ValueError("C2/C3 pause requires a current-gate handoff")
-        if outcome == "passed" and gate == "close" and state.get("require_handoff") and (not state.get("handoff_created") or state.get("handoff_gate") != "close"):
-            raise ValueError("C2/C3 close requires a final handoff")
-        if outcome == "passed" and gate == "close" and state.get("require_handoff"):
-            if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
-                raise ValueError("C2/C3 close requires completed documentation decision evidence")
-            if not state.get("reassessment_receipts"):
-                raise ValueError("C2/C3 close requires a recorded reassessment decision")
-            if not any(item.get("kind") == "command" and item.get("verified_execution") and item.get("exit_code") == 0 for item in current_attempt_evidence):
-                raise ValueError("C2/C3 close requires successful server-observed command evidence")
-            manifest = state.get("final_manifest_receipt")
-            if not manifest or not manifest.get("complete"):
-                raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
-            baseline_manifest = _read_private_json(
-                task_dir / "baseline-manifest.json",
-                "baseline manifest",
-                max_bytes=MAX_MANIFEST_BYTES,
-            )
-            current_manifest = capture_project_manifest(
-                Path(json.loads((task_dir / "task.json").read_text(encoding="utf-8"))["project_root"]),
-                policy=baseline_manifest.get("policy"),
-            )
-            if current_manifest["digest"] != manifest.get("current_digest"):
-                raise ValueError("project files changed after the final handoff; create a new complete handoff")
-        state["gates"][gate] = {"outcome": outcome, "at": now(), "summary": redact(params.get("summary", ""), 2000), "skip_reason": redact(params.get("skip_reason", ""), 2000), "evidence_ids": [item["evidence_id"] for item in gate_evidence]}
-        if outcome == "passed":
-            if gate not in state["completed_gates"]:
-                state["completed_gates"].append(gate)
-            for attempt in state["attempts"]:
-                if attempt["gate"] == gate and attempt["status"] == "running":
-                    attempt["status"] = "passed"
-        elif outcome == "skipped":
-            if gate not in state["skipped_gates"]:
-                state["skipped_gates"].append(gate)
-        elif outcome == "blocked":
-            state["status"] = "blocked"
-        else:
-            for attempt in state["attempts"]:
-                if attempt["gate"] == gate and attempt["status"] in {"running", AWAITING_HOST_SPAWN}:
-                    attempt["status"] = "failed"
-        operations = params.get("pipeline_operations", [])
-        if operations:
-            change = apply_pipeline_operations(state, operations=operations, allow_rework=bool(params.get("allow_rework", False)))
-            append_pipeline_change(state, change, str(params.get("pipeline_reason", "adaptive gate outcome")), params.get("signals", []))
-            invalidate_reworked_report_receipts(task_dir, state)
-        if outcome in {"passed", "skipped"}:
-            candidate_wave = sync_current_wave(state)
-            if not candidate_wave:
-                validate_completion_invariants(state)
-                state["status"] = "completed"
-        else:
-            sync_current_wave(state)
-        save_state(task_dir, task_dir / "current.json", state, "gate", f"{gate}: {outcome}" + ("; pipeline adapted" if operations else ""))
-        if state["status"] == "completed":
-            task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
-            remove_active_mapping(root, state["task_id"], str(task.get("thread_id", "")))
-        return {"state": state, "revision_correction": revision_correction}
+    """Public delegating entrypoint for the independently testable gate policy."""
+    from cortex_runtime.gate_transitions import record_gate as _record_gate
+
+    return _record_gate(params)
 
 
 def _record_commit_gate_recovery(
@@ -5452,7 +5390,7 @@ def _record_commit_gate_recovery(
         next_action = "repair_report_receipt_then_retry_commit_gate_once"
     else:
         next_action = "inspect_commit_gate_error_then_retry_once"
-    save_state(task_dir, task_dir / "current.json", state, "gate_recovery", f"{gate}: {reason}")
+    save_state(task_dir, task_dir / "state.sqlite", state, "gate_recovery", f"{gate}: {reason}")
     return {
         "failure": event,
         "recoverable": not terminal,
@@ -5552,7 +5490,7 @@ def resume_task(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("only blocked tasks can be resumed")
         state["status"] = "active"
         state.setdefault("resume_events", []).append({"reason": redact(params.get("reason", ""), 2000), "at": now()})
-        save_state(task_dir, task_dir / "current.json", state, "resume", redact(params.get("reason", "task resumed")))
+        save_state(task_dir, task_dir / "state.sqlite", state, "resume", redact(params.get("reason", "task resumed")))
         return {"state": state}
 
 
@@ -5562,7 +5500,8 @@ def update_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
         guard_revision(state, params.get("expected_revision"))
-        if state["status"] == "completed" and not params.get("allow_rework", False):
+        was_completed = state["status"] == "completed"
+        if was_completed and not params.get("allow_rework", False):
             raise ValueError("completed task cannot change pipeline without allow_rework=true")
         requested, operations = params.get("pipeline"), params.get("operations", [])
         if requested is None and not operations:
@@ -5572,9 +5511,11 @@ def update_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         append_pipeline_change(state, change, str(params.get("reason", "pipeline updated")), params.get("signals", []))
         invalidate_reworked_report_receipts(task_dir, state)
         sync_current_wave(state)
-        if primary_gate(state) is not None and state["status"] == "completed":
+        if primary_gate(state) is not None and was_completed:
+            task = load_task_definition(task_dir, state)
+            establish_task_manifest_baseline(task_dir, state, Path(task["project_root"]))
             state["status"] = "active"
-        save_state(task_dir, task_dir / "current.json", state, "pipeline", str(params.get("reason", "pipeline updated")))
+        save_state(task_dir, task_dir / "state.sqlite", state, "pipeline", str(params.get("reason", "pipeline updated")))
         return {"state": state, "change": change}
 
 
@@ -5586,7 +5527,7 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         guard_revision(state, params.get("expected_revision"))
         if state["status"] == "completed":
             raise ValueError("completed task cannot be reassessed")
-        task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task = load_task_definition(task_dir, state)
         signals = [redact(item, 500) for item in params.get("signals", [])][:50]
         decision = str(params.get("decision", "")).strip()
         reason = redact(params.get("reason", ""), 2000)
@@ -5649,7 +5590,7 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
             state["status"] = "blocked"
             state["replan_count"] += 1
             state.setdefault("reassessment_receipts", []).append(receipt)
-            save_state(task_dir, task_dir / "current.json", state, "reassess", "pipeline stopped by policy")
+            save_state(task_dir, task_dir / "state.sqlite", state, "reassess", "pipeline stopped by policy")
             result.update({"applied": True, "state": state})
             return result
         pipeline_changed = explicit_pipeline is not None and current != state["current_pipeline"]
@@ -5669,13 +5610,13 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
             sync_current_wave(state)
             state["replan_count"] += 1
             state.setdefault("reassessment_receipts", []).append(receipt)
-            save_state(task_dir, task_dir / "current.json", state, "reassess", str(params.get("reason", "reassessment")))
+            save_state(task_dir, task_dir / "state.sqlite", state, "reassess", str(params.get("reason", "reassessment")))
             result.update({"applied": True, "state": state, "change": change})
         else:
             if state.get("require_delegation") and decision == "updated":
                 raise ValueError("decision=updated requires applied pipeline operations")
             state.setdefault("reassessment_receipts", []).append(receipt)
-            save_state(task_dir, task_dir / "current.json", state, "reassess", reason or "pipeline unchanged")
+            save_state(task_dir, task_dir / "state.sqlite", state, "reassess", reason or "pipeline unchanged")
             result["state"] = state
         return result
 
@@ -5696,7 +5637,7 @@ def acquire_lock(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"advisory lock already held for '{redact(path, 300)}'")
         entry = {"path": redact(path, 500), "owner": redact(owner, 256), "owner_digest": digest_text(owner), "gate": redact(params.get("gate") or primary_gate(state) or "", 64), "acquired_at": now(), "expires_at": params.get("expires_at"), "advisory": bool(params.get("advisory", True))}
         state["locks"][key] = entry
-        save_state(task_dir, task_dir / "current.json", state, "lock", f"{redact(path, 300)} → {redact(owner, 128)}")
+        save_state(task_dir, task_dir / "state.sqlite", state, "lock", f"{redact(path, 300)} → {redact(owner, 128)}")
         return {"state": state, "advisory": entry["advisory"]}
 
 
@@ -5712,7 +5653,7 @@ def release_lock(params: dict[str, Any]) -> dict[str, Any]:
         if not existing or existing.get("owner_digest") != digest_text(owner):
             raise ValueError("lock is not held by this owner")
         del state["locks"][key]
-        save_state(task_dir, task_dir / "current.json", state, "unlock", f"{redact(path, 300)} released by {redact(owner, 128)}")
+        save_state(task_dir, task_dir / "state.sqlite", state, "unlock", f"{redact(path, 300)} released by {redact(owner, 128)}")
         return {"state": state}
 
 
@@ -5749,13 +5690,18 @@ def handoff(params: dict[str, Any]) -> dict[str, Any]:
         payload = {"schema": SCHEMA, "task_id": state["task_id"], "created_at": now(), "source_revision": state["revision"], "gate": primary_gate(state), "completed": completed, "files": [redact(item, 500) for item in files], "file_manifest_receipt": receipt, "decisions": [redact(item, 2000) for item in params.get("decisions", [])][:100], "risks": [redact(item, 2000) for item in params.get("risks", [])][:100], "next_action": next_action}
         path = task_dir / "handoffs" / f"{name}.json"
         write_json(path, payload)
+        artifact = store_immutable_artifact(
+            task_dir, state["task_id"], kind="handoff", title=f"handoffs/{name}.json",
+            mime_type="application/json", content=_json_text(payload, label="handoff artifact", max_bytes=MAX_JSON_BYTES),
+            export_path=f"handoffs/{name}.json",
+        )
         state["handoff_created"] = True
         state["handoff_gate"] = primary_gate(state)
         state["handoff_source_revision"] = payload["source_revision"]
         state["final_manifest_receipt"] = receipt
         state.setdefault("manifest_receipts", []).append({"handoff": path.name, **receipt})
-        save_state(task_dir, task_dir / "current.json", state, "handoff", path.name)
-        return {"handoff_file": str(path), "file_manifest_receipt": receipt, "state": state}
+        save_state(task_dir, task_dir / "state.sqlite", state, "handoff", path.name)
+        return {"handoff_file": str(path), "artifact_ref": artifact["artifact_ref"], "file_manifest_receipt": receipt, "state": state}
 
 
 def claim_resource(params: dict[str, Any]) -> dict[str, Any]:
@@ -5768,7 +5714,7 @@ def claim_resource(params: dict[str, Any]) -> dict[str, Any]:
         entry = _claim_global_resource(root, resource, owner, "task", state["task_id"], params.get("expires_at"), str(params.get("kind", "resource")))
         key = lock_key(resource)
         state["locks"][key] = {"path": redact(resource, 500), "owner": redact(owner, 256), "owner_digest": digest_text(owner), "gate": redact(params.get("gate") or primary_gate(state) or "", 64), "acquired_at": entry["claimed_at"], "expires_at": entry["expires_at"], "advisory": False, "global": True}
-        save_state(task_dir, task_dir / "current.json", state, "resource", f"{redact(resource, 300)} → {redact(owner, 128)}")
+        save_state(task_dir, task_dir / "state.sqlite", state, "resource", f"{redact(resource, 300)} → {redact(owner, 128)}")
         return {"state": state, "advisory": False}
 
 
@@ -5785,7 +5731,7 @@ def release_resource(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("global resource is not held by this task owner")
         _release_global_resource(root, resource, owner, "task", state["task_id"])
         del state["locks"][key]
-        save_state(task_dir, task_dir / "current.json", state, "resource_release", f"{redact(resource, 300)} released")
+        save_state(task_dir, task_dir / "state.sqlite", state, "resource_release", f"{redact(resource, 300)} released")
         return {"state": state}
 
 
@@ -5966,739 +5912,57 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
     return diagnostics
 
 
-def _orchestrate_error(
-    operation: str,
-    code: str,
-    message: object,
-    *,
-    phase: str = "validation",
-    recoverable: bool = True,
-    next_operation: str | None = None,
-    task_id: str | None = None,
-    diagnostics: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    resolved_next_operation = next_operation or (operation if operation in ORCHESTRATE_OPERATIONS else None)
-    return {
-        "schema": ORCHESTRATE_SCHEMA,
-        "ok": False,
-        "operation": operation,
-        "transaction_id": None,
-        "task_id": task_id,
-        "wave_id": None,
-        "state": "blocked" if not recoverable else "needs_input",
-        "spawn_requests": [],
-        "phase": phase,
-        "code": code,
-        "diagnostics": diagnostics or [{"code": code, "phase": phase, "message": redact(message, 1000)}],
-        "recoverable": recoverable,
-        "next_operation": resolved_next_operation,
-        "next_action": (
-            f"retry orchestrate(operation={resolved_next_operation}) with a new submission_id after correcting the diagnostic"
-            if recoverable and resolved_next_operation else
-            "retry orchestrate with a supported operation" if recoverable else
-            "inspect the Cortex installation"
-        ),
-    }
+def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
+    """Internal engine facade retained for v4 lifecycle composition."""
+    from cortex_runtime.orchestration_engine import orchestrate as _orchestrate
+
+    return _orchestrate(params)
 
 
-def _orchestrate_state_name(state: dict[str, Any]) -> str:
-    if state.get("status") == "completed":
-        return "completed"
-    if state.get("status") == "blocked":
-        return "blocked"
-    if _plan_approval_is_pending(state):
-        return "awaiting_plan_approval"
-    current = set(active_gates(state))
-    attempts = [item for item in state.get("attempts", []) if item.get("gate") in current and not item.get("invalidated")]
-    if any(item.get("status") == AWAITING_HOST_SPAWN for item in attempts):
-        return "ready_to_spawn"
-    if any(item.get("status") == "running" for item in attempts):
-        return "waiting_workers"
-    return "needs_input"
-
-
-def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
-    done = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    return {
-        "status": state.get("status"),
-        "revision": state.get("revision"),
-        "complexity": state.get("complexity"),
-        "current_gates": active_gates(state),
-        "completed_gates": list(state.get("completed_gates", [])),
-        "skipped_gates": list(state.get("skipped_gates", [])),
-        "current_pipeline": list(state.get("current_pipeline", [])),
-        "remaining_gates": [gate for gate in state.get("current_pipeline", []) if gate not in done],
-        "close_verified": any(
-            item.get("gate") == "close"
-            and item.get("verified_execution")
-            and item.get("exit_code") == 0
-            for item in state.get("evidence", [])
-        ),
-        "handoff_created": bool(state.get("handoff_created")),
-        "plan_approval": {
-            "policy": _plan_approval(state).get("policy", "auto"),
-            "status": _plan_approval(state).get("status", "not_required"),
-            "plan_report_ref": _plan_approval(state).get("plan_report_ref"),
-        },
-        "attempts": [
-            {
-                "attempt_id": item.get("attempt_id"),
-                "gate": item.get("gate"),
-                "profile": item.get("profile"),
-                "status": item.get("status"),
-                "wave_id": item.get("orchestration_wave_id"),
-            }
-            for item in state.get("attempts", [])
-            if not item.get("invalidated")
-        ],
-    }
-
-
-def _context_handoff(
-    task_dir: Path,
-    state: dict[str, Any],
-    task: dict[str, Any],
-    plan: dict[str, Any],
-) -> dict[str, Any]:
-    """Compatibility facade for the context-compaction handoff renderer."""
-    return _context_handoff_service(task_dir, state, task, plan)
-
-
-
-def _orchestrate_pipeline_snapshot(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
-    """Expose the coordinator-owned canonical plan without durable attempt ids."""
-    completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    current = set(active_gates(state))
-    waves = []
-    for index, wave in enumerate(plan.get("waves", []), 1):
-        gates = list(wave.get("gates", []))
-        if gates and set(gates).issubset(completed):
-            status_value = "completed"
-        elif set(gates) == current and state.get("status") == "blocked":
-            status_value = "blocked"
-        elif set(gates) == current:
-            status_value = "active"
-        else:
-            status_value = "pending"
-        waves.append({
-            "wave": index,
-            "status": status_value,
-            "workers": [
-                {
-                    "phase": item.get("gate"),
-                    "profile": item.get("agent"),
-                }
-                for item in wave.get("delegations", [])
-                if isinstance(item, dict)
-            ],
-        })
-    return {
-        "authority": "coordinator",
-        "revision": state.get("revision"),
-        "waves": waves,
-        "change_policy": (
-            "Follow this plan by default. The coordinator may replace future_waves when new evidence changes "
-            "ownership, dependencies, risk, or validation; include the reason. Cortex validates canonical phases, "
-            "profile ownership, mandatory documentation/close, and duplicate gates."
-        ),
-    }
-
-
-def _orchestrate_transaction_path(root: Path, submission_id: str) -> Path:
-    directory = root / "operations"
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    return directory / f"{safe_id(submission_id)}.json"
-
-
+# These helpers remain importable for the v4 projection and compaction module,
+# but their implementation belongs exclusively to the orchestration engine.
+# Keeping the late binding avoids a second partially initialized ``cortex``
+# module when Codex loads the executable through importlib.
 def _orchestrate_request_digest(params: dict[str, Any]) -> str:
-    return digest_text(json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    from cortex_runtime.orchestration_engine import _orchestrate_request_digest as _implementation
+
+    return _implementation(params)
 
 
-def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
-    submission_id = safe_id(str(params.get("submission_id", "")))
-    path = _orchestrate_transaction_path(root, submission_id)
-    request_digest = _orchestrate_request_digest(params)
-    if path.exists():
-        receipt = _read_private_json(path, "orchestrate transaction")
-        if receipt.get("schema") != ORCHESTRATION_TRANSACTION_SCHEMA or receipt.get("request_digest") != request_digest:
-            raise ValueError("orchestrate submission_id was reused with different content")
-        if receipt.get("status") == "committed" and isinstance(receipt.get("result"), dict):
-            replay = dict(receipt["result"])
-            replay["idempotent"] = True
-            return path, receipt, replay
-        receipt["resumed_at"] = now()
-        receipt["status"] = "running"
-        write_json(path, receipt)
-        return path, receipt, None
-    receipt = {
-        "schema": ORCHESTRATION_TRANSACTION_SCHEMA,
-        "transaction_id": f"transaction-{submission_id}",
-        "submission_id": submission_id,
-        "operation": params["operation"],
-        "request_digest": request_digest,
-        "task_id": str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None,
-        "status": "running",
-        "phase": "started",
-        "context": {},
-        "created_at": now(),
-        "updated_at": now(),
-    }
-    write_json(path, receipt)
-    return path, receipt, None
+def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import _orchestrate_inspect as _implementation
 
-
-def _checkpoint_orchestrate_transaction(path: Path, receipt: dict[str, Any], phase: str, **context: Any) -> None:
-    receipt["phase"] = phase
-    receipt.setdefault("context", {}).update(context)
-    receipt["updated_at"] = now()
-    write_json(path, receipt)
-
-
-def _commit_orchestrate_transaction(path: Path, receipt: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    result = {**result, "transaction_id": receipt["transaction_id"], "idempotent": False}
-    receipt.update({"status": "committed", "phase": "committed", "result": result, "updated_at": now(), "committed_at": now()})
-    write_json(path, receipt)
-    return result
-
-
-def _leave_orchestrate_transaction_retryable(
-    path: Path,
-    receipt: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    """Return a recoverable host-bound result without caching it as success."""
-    result = {**result, "transaction_id": receipt["transaction_id"], "idempotent": False}
-    receipt.update(
-        {
-            "status": "retryable",
-            "phase": "awaiting_host_capability",
-            "result": result,
-            "updated_at": now(),
-        }
-    )
-    write_json(path, receipt)
-    return result
-
-
-def _default_profile_for_gate(gate: str) -> str:
-    return {
-        "plan": "planner",
-        "discover": "explorer",
-        "architecture": "architect",
-        "database_architecture": "database_architect",
-        "implementation": "general",
-        "qa": "qa_engineer",
-        "security": "security_auditor",
-        "performance": "performance_engineer",
-        "accessibility": "accessibility_engineer",
-        "ux": "ux_designer",
-        "review": "code_reviewer",
-        "documentation": "technical_writer",
-        "close": "build_verification",
-    }.get(gate, "general")
-
-
-def _default_task_kind_for_gate(gate: str) -> str:
-    return {
-        "plan": "planning", "discover": "discovery", "architecture": "architecture",
-        "database_architecture": "database", "implementation": "implementation", "qa": "testing",
-        "security": "security", "performance": "performance", "accessibility": "accessibility",
-        "ux": "ux", "review": "code_review", "documentation": "documentation", "close": "verification",
-    }.get(gate, gate)
-
-
-def _normalize_orchestrate_waves(
-    raw_waves: object,
-    task: dict[str, Any],
-    host_capabilities: dict[str, Any],
-    project_root_value: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if not isinstance(raw_waves, list) or not raw_waves:
-        raise ValueError("start requires a non-empty waves array")
-    by_gate: dict[str, list[dict[str, Any]]] = {}
-    original_ids: dict[tuple[str, ...], str] = {}
-    proposed_pipeline: list[str] = []
-    proposed_groups: list[list[str]] = []
-    for index, raw_wave in enumerate(raw_waves, 1):
-        if not isinstance(raw_wave, dict):
-            raise ValueError("each wave must be an object")
-        wave_id = safe_id(str(raw_wave.get("wave_id") or f"wave-{index:02d}"))
-        raw_delegations = raw_wave.get("delegations")
-        if not isinstance(raw_delegations, list) or not raw_delegations or len(raw_delegations) > 32:
-            raise ValueError("each wave requires 1..32 delegation specs")
-        group: list[str] = []
-        for raw_spec in raw_delegations:
-            if not isinstance(raw_spec, dict):
-                raise ValueError("delegation specs must be objects")
-            gate = canonical_pipeline_gate(raw_spec.get("gate") or "")
-            if gate not in AVAILABLE_GATES:
-                raise ValueError(f"unsupported gate in wave: {gate}")
-            if gate not in group:
-                group.append(gate)
-            if gate not in proposed_pipeline:
-                proposed_pipeline.append(gate)
-            by_gate.setdefault(gate, []).append(dict(raw_spec))
-        original_ids[tuple(group)] = wave_id
-        proposed_groups.append(group)
-    complexity = str(task.get("complexity", "C2")).upper()
-    classification = classify({
-        "complexity": complexity,
-        "requirements": task.get("requirements", []),
-        "pipeline": proposed_pipeline,
-        "parallel_groups": proposed_groups,
-    })
-    spawn_models = host_capabilities.get("spawn_agent_models") or host_capabilities.get("available_models")
-    thread_models = host_capabilities.get("create_thread_models") or host_capabilities.get("available_thread_models")
-    configured_default_model = str(
-        host_capabilities.get("spawn_agent_default_model")
-        or host_capabilities.get("configured_default_model")
-        or ""
-    ).strip()
-    if configured_default_model and configured_default_model not in SUPPORTED_MODELS:
-        raise ValueError("host_capabilities.spawn_agent_default_model must be a supported model")
-    if not isinstance(spawn_models, list) or not spawn_models:
-        raise ValueError("host_capabilities.spawn_agent_models must be a non-empty array")
-    normalized: list[dict[str, Any]] = []
-    used_ids: set[str] = set()
-    for index, group in enumerate(classification["parallel_groups"], 1):
-        wave_id = original_ids.get(tuple(group), f"wave-{index:02d}")
-        if wave_id in used_ids:
-            wave_id = f"wave-{index:02d}"
-        used_ids.add(wave_id)
-        delegations: list[dict[str, Any]] = []
-        for gate in group:
-            specs = by_gate.get(gate) or [{"gate": gate}]
-            for spec_index, raw_spec in enumerate(specs, 1):
-                agent = str(raw_spec.get("agent") or _default_profile_for_gate(gate))
-                if agent not in AGENTS:
-                    raise ValueError(f"unknown Cortex profile: {agent}")
-                briefing = render_gate_briefing(gate, task.get("objective", ""), agent)
-                objective = str(raw_spec.get("objective") or briefing["objective"]).strip()
-                ownership = str(raw_spec.get("ownership") or briefing["ownership"]).strip()
-                task_kind = str(raw_spec.get("task_kind") or _default_task_kind_for_gate(gate))
-                risk = str(raw_spec.get("risk") or ("high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate"))
-                spec = {
-                    **raw_spec,
-                    "gate": gate,
-                    "agent": agent,
-                    "task_kind": task_kind,
-                    "risk": risk,
-                    "objective": objective,
-                    "ownership": ownership,
-                    "allowed_paths": raw_spec.get("allowed_paths") or task.get("allowed_paths") or ["."],
-                    "acceptance_criteria": raw_spec.get("acceptance_criteria") or briefing["acceptance_criteria"],
-                    "verification": raw_spec.get("verification") or briefing["verification"],
-                    "available_models": raw_spec.get("available_models") or spawn_models,
-                    "available_thread_models": raw_spec.get("available_thread_models") or thread_models,
-                    "configured_default_model": raw_spec.get("configured_default_model") or configured_default_model,
-                    "parallel": len(group) > 1 or len(specs) > 1,
-                    "facade_managed": True,
-                    "orchestration_wave_id": wave_id,
-                    "orchestration_delegation_key": f"{wave_id}-{gate}-{spec_index:02d}",
-                }
-                route = resolve_dispatch_route({
-                    **spec,
-                    "complexity": complexity,
-                    "_security_gate": gate == "security",
-                    "project_root": project_root_value,
-                })
-                if (
-                    str(spec.get("dispatch_mode", "hidden_subagent")) == "visible_thread"
-                    and (not isinstance(thread_models, list) or "gpt-5.6-luna" not in thread_models)
-                ):
-                    raise ValueError("visible_thread requires create_thread_models to include gpt-5.6-luna")
-                delegations.append(spec)
-        normalized.append({"wave_id": wave_id, "gates": list(group), "delegations": delegations, "status": "pending"})
-    return normalized, classification
-
-
-def _orchestrate_plan_path(task_dir: Path) -> Path:
-    return task_dir / "orchestration.json"
-
-
-def _write_orchestrate_plan(task_dir: Path, plan: dict[str, Any]) -> None:
-    plan["updated_at"] = now()
-    write_json(_orchestrate_plan_path(task_dir), plan)
-
-
-def _orchestrate_wave_contract(waves: object) -> list[dict[str, Any]]:
-    """Return the immutable portion of a facade wave plan for replay checks."""
-    if not isinstance(waves, list):
-        return []
-    return [
-        {
-            "wave_id": wave.get("wave_id"),
-            "gates": wave.get("gates"),
-            "delegations": wave.get("delegations"),
-        }
-        for wave in waves
-        if isinstance(wave, dict)
-    ]
+    return _implementation(params)
 
 
 def _load_orchestrate_plan(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
-    """Load the canonical plan; tasks without one are not orchestration tasks."""
-    path = _orchestrate_plan_path(task_dir)
-    if not path.exists():
-        raise ValueError("canonical orchestration plan is missing; legacy task ledgers are not supported")
-    plan = _read_private_json(path, "orchestrate plan")
-    if plan.get("schema") != ORCHESTRATION_PLAN_SCHEMA or plan.get("task_id") != state.get("task_id"):
-        raise ValueError("orchestrate plan schema or task identity is not supported")
-    return plan
+    from cortex_runtime.orchestration_engine import _load_orchestrate_plan as _implementation
+
+    return _implementation(task_dir, state)
+
+
+def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import _orchestrate_summary as _implementation
+
+    return _implementation(state)
+
+
+def _orchestrate_pipeline_snapshot(state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    from cortex_runtime.orchestration_engine import _orchestrate_pipeline_snapshot as _implementation
+
+    return _implementation(state, plan)
 
 
 def _wave_for_gates(plan: dict[str, Any], gates: list[str]) -> dict[str, Any] | None:
-    gate_set = set(gates)
-    return next((wave for wave in plan.get("waves", []) if set(wave.get("gates", [])) == gate_set), None)
+    from cortex_runtime.orchestration_engine import _wave_for_gates as _implementation
+
+    return _implementation(plan, gates)
 
 
-def _predecessor_context_report_ids(
-    state: dict[str, Any],
-    required_gates: set[str] | None = None,
-) -> list[str]:
-    """Select verified reports from completed predecessor attempts in ledger order."""
-    completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    valid_report_ids = {
-        str(item.get("report_id"))
-        for item in state.get("evidence", [])
-        if item.get("report_id") and not item.get("invalidated")
-    }
-    selected: list[str] = []
-    for attempt in state.get("attempts", []):
-        if (
-            attempt.get("status") != "passed"
-            or attempt.get("invalidated")
-            or attempt.get("gate") not in completed
-            or (required_gates is not None and attempt.get("gate") not in required_gates)
-        ):
-            continue
-        for report_id in attempt.get("report_ids", []):
-            value = str(report_id)
-            if value in valid_report_ids and value not in selected:
-                selected.append(value)
-    return selected
+def _default_profile_for_gate(gate: str) -> str:
+    from cortex_runtime.orchestration_engine import _default_profile_for_gate as _implementation
 
-
-def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
-    current_gates = active_gates(state)
-    if not current_gates:
-        return {"wave_id": None, "spawn_requests": [], "attempt_ids": [], "state": state}
-    wave = _wave_for_gates(plan, current_gates)
-    if wave is None:
-        raise ValueError("orchestrate plan has no wave for the current gates")
-    retired_failures = False
-    for attempt in state.get("attempts", []):
-        if (
-            attempt.get("gate") in current_gates
-            and attempt.get("status") in {"failed", "cancelled", "superseded"}
-            and not attempt.get("invalidated")
-        ):
-            attempt["invalidated"] = True
-            attempt["invalidated_at"] = now()
-            attempt["invalidation_reason"] = "retry_after_failure"
-            retired_failures = True
-    if retired_failures:
-        save_state(
-            task_dir,
-            task_dir / "current.json",
-            state,
-            "retry_invalidation",
-            "retired unsuccessful attempts before retry",
-        )
-    prepared_attempts: list[dict[str, Any]] = []
-    predecessor_report_ids = _predecessor_context_report_ids(state)
-    for spec in wave["delegations"]:
-        key = spec["orchestration_delegation_key"]
-        existing = next(
-            (
-                item for item in state.get("attempts", [])
-                if not item.get("invalidated")
-                and item.get("status") in {AWAITING_HOST_SPAWN, "running", "passed"}
-                and (
-                    item.get("orchestration_delegation_key") == key
-                    or (
-                        not item.get("orchestration_delegation_key")
-                        and item.get("gate") == spec["gate"]
-                        and item.get("agent") == spec["agent"]
-                    )
-                )
-            ),
-            None,
-        )
-        if existing is not None:
-            if not existing.get("orchestration_wave_id"):
-                existing["orchestration_wave_id"] = wave["wave_id"]
-                existing["orchestration_delegation_key"] = key
-            prepared_attempts.append(existing)
-            continue
-        observed = status({**params, "task_id": state["task_id"]})
-        if "context_report_ids" in spec:
-            context_report_ids = list(spec.get("context_report_ids") or [])
-        elif "context_gates" in spec:
-            context_report_ids = _predecessor_context_report_ids(
-                state,
-                {canonical_pipeline_gate(item) for item in spec.get("context_gates") or []},
-            )
-        else:
-            context_report_ids = predecessor_report_ids
-        delegated = record_delegation({
-            **params,
-            **spec,
-            **(
-                {"plan_feedback": _plan_approval(state).get("feedback")}
-                if spec.get("gate") == "plan" and _plan_approval(state).get("feedback") else {}
-            ),
-            "context_report_ids": context_report_ids,
-            "task_id": state["task_id"],
-            "expected_revision": observed["state"]["revision"],
-            "status_receipt": observed["status_receipt"],
-        })
-        if delegated.get("recorded") is False:
-            raise ValueError(str(delegated.get("reason") or "wave delegation was not recorded"))
-        state = delegated["state"]
-        prepared_attempts.append(_attempt(state, delegated["attempt_id"]))
-    wave["status"] = "active"
-    wave["attempt_ids"] = [item["attempt_id"] for item in prepared_attempts]
-    _write_orchestrate_plan(task_dir, plan)
-    save_state(task_dir, task_dir / "current.json", state, "orchestrate_wave", wave["wave_id"])
-    spawn_requests = [
-        {**item["spawn_request"], "attempt_id": item["attempt_id"]}
-        for item in prepared_attempts
-        if item.get("status") == AWAITING_HOST_SPAWN
-    ]
-    return {"wave_id": wave["wave_id"], "spawn_requests": spawn_requests, "attempt_ids": wave["attempt_ids"], "state": state}
-
-
-def _orchestrate_response(
-    operation: str,
-    state: dict[str, Any],
-    *,
-    wave_id: str | None = None,
-    spawn_requests: list[dict[str, Any]] | None = None,
-    diagnostics: list[dict[str, Any]] | None = None,
-    result: dict[str, Any] | None = None,
-    plan: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    facade_state = _orchestrate_state_name(state)
-    if facade_state == "ready_to_spawn":
-        next_action = "invoke every returned native spawn request, wait for the wave, then call orchestrate(operation=advance) once"
-    elif facade_state == "waiting_workers":
-        next_action = "wait for every worker in the current wave, then call orchestrate(operation=advance) once"
-    elif facade_state == "completed":
-        next_action = "report the verified task result to the user"
-    elif facade_state == "blocked":
-        next_action = "resolve the blocker, then call orchestrate(operation=resume)"
-    elif facade_state == "awaiting_plan_approval":
-        next_action = (
-            "read the planner report, present a concise main-chat plan summary, and wait for explicit user approval; "
-            "then call orchestrate(operation=plan_approval) with decision approve or revise"
-        )
-    else:
-        next_action = "inspect the returned diagnostics or provide the required completion data"
-    response = {
-        "schema": ORCHESTRATE_SCHEMA,
-        "ok": True,
-        "operation": operation,
-        "transaction_id": None,
-        "task_id": state.get("task_id"),
-        "wave_id": wave_id,
-        "state": facade_state,
-        "state_summary": _orchestrate_summary(state),
-        "spawn_requests": spawn_requests or [],
-        "diagnostics": diagnostics or [],
-        "next_action": next_action,
-    }
-    if isinstance(plan, dict):
-        response["pipeline"] = _orchestrate_pipeline_snapshot(state, plan)
-    if result is not None:
-        response["result"] = result
-    return response
-
-
-def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
-    task = params.get("task")
-    if not isinstance(task, dict):
-        raise ValueError("start requires a task object")
-    task_id = safe_id(str(task.get("task_id", "")))
-    objective = str(task.get("objective", "")).strip()
-    if not objective:
-        raise ValueError("start task.objective is required")
-    principal = str(params.get("principal", "")).strip()
-    thread_id = str(params.get("thread_id", "")).strip()
-    if not principal or not thread_id:
-        raise ValueError("start requires principal and thread_id")
-    host_capabilities = params.get("host_capabilities")
-    if not isinstance(host_capabilities, dict):
-        raise ValueError("start requires host_capabilities")
-    waves, classification_preview = _normalize_orchestrate_waves(params.get("waves"), task, host_capabilities, str(params["project_root"]))
-    if str(task.get("plan_approval") or "auto") == "required":
-        plan_wave = next((wave for wave in waves if "plan" in wave.get("gates", [])), None)
-        if plan_wave is not None and len(plan_wave.get("gates", [])) != 1:
-            raise ValueError("plan_approval=required requires plan to be in its own wave")
-    root = ledger_root(params)
-    with state_lock(root):
-        activated = activate_orchestration({**params, "user_command": ACTIVATION_COMMAND})
-        if not activated.get("active"):
-            raise ValueError(str(activated.get("next_action") or "orchestration activation failed"))
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "activated", task_id=task_id)
-        existing_state = None
-        existing_task_dir = None
-        try:
-            _, existing_task_dir, existing_state = load_state(task_id, params)
-            authorize_principal(existing_state, params)
-        except (FileNotFoundError, ValueError):
-            existing_state = None
-            existing_task_dir = None
-        if existing_state is None:
-            classification_id = str(transaction.get("context", {}).get("classification_id") or "")
-            if not classification_id:
-                classified = classify_task({
-                    **params,
-                    "complexity": classification_preview["complexity"],
-                    "requirements": task.get("requirements", []),
-                    "pipeline": classification_preview["pipeline"],
-                    "parallel_groups": classification_preview["parallel_groups"],
-                })
-                classification_id = classified["classification_id"]
-                _checkpoint_orchestrate_transaction(transaction_path, transaction, "classified", classification_id=classification_id)
-            created = init_task({
-                **params,
-                **task,
-                "task_id": task_id,
-                "objective": objective,
-                "classification_id": classification_id,
-            })
-            state = created["state"]
-            _, task_dir, _ = task_paths(task_id, params)
-            _checkpoint_orchestrate_transaction(transaction_path, transaction, "initialized", task_directory=task_dir.name)
-        else:
-            state = existing_state
-            task_dir = existing_task_dir
-            stored_task = _read_private_json(task_dir / "task.json", "task definition")
-            if stored_task.get("objective") != redact(objective):
-                raise ValueError("existing task_id belongs to a different objective")
-        plan = {
-            "schema": ORCHESTRATION_PLAN_SCHEMA,
-            "task_id": task_id,
-            "waves": waves,
-            "host_capabilities": sanitize_structured(host_capabilities),
-            "classification": classification_preview,
-            "created_at": now(),
-        }
-        plan_path = _orchestrate_plan_path(task_dir)
-        if plan_path.exists():
-            existing_plan = _read_private_json(plan_path, "orchestrate plan")
-            if digest_text(json.dumps(_orchestrate_wave_contract(existing_plan.get("waves")), sort_keys=True)) != digest_text(json.dumps(_orchestrate_wave_contract(waves), sort_keys=True)):
-                raise ValueError("existing task has a different orchestration wave plan")
-            plan = existing_plan
-        else:
-            _write_orchestrate_plan(task_dir, plan)
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "plan_recorded")
-        prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
-        return _orchestrate_response(
-            "start",
-            prepared["state"],
-            wave_id=prepared["wave_id"],
-            spawn_requests=prepared["spawn_requests"],
-            plan=plan,
-        )
-
-
-def _report_receipt_for_attempt(task_dir: Path, state: dict[str, Any], attempt_id: str) -> dict[str, Any] | None:
-    paths = report_bus_paths(task_dir)
-    reports = [
-        item for item in _report_index(paths, state["task_id"]).get("reports", [])
-        if item.get("attempt_id") == attempt_id
-    ]
-    if not reports:
-        return None
-    report_id = safe_id(str(reports[-1]["report_id"]))
-    receipt_path = paths["receipts"] / f"report-receipt-{report_id}.json"
-    if not receipt_path.exists():
-        return None
-    return _read_private_json(receipt_path, "report receipt")
-
-
-def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
-    """Return a bounded coordinator-facing summary of the completed plan."""
-    planner_attempts = [
-        item for item in state.get("attempts", [])
-        if item.get("gate") == "plan" and item.get("status") == "passed" and not item.get("invalidated")
-    ]
-    if not planner_attempts:
-        raise ValueError("plan approval requires a passed planner report")
-    planner_attempt = planner_attempts[-1]
-    report_refs = [safe_id(str(item)) for item in planner_attempt.get("report_ids", []) if str(item).strip()]
-    if not report_refs:
-        report_refs = [
-            safe_id(str(item.get("report_id")))
-            for item in _report_index(report_bus_paths(task_dir), state["task_id"]).get("reports", [])
-            if item.get("attempt_id") == planner_attempt["attempt_id"] and str(item.get("report_id") or "").strip()
-        ]
-    if not report_refs:
-        raise ValueError("plan approval requires a persisted planner report")
-    report_ref = report_refs[-1]
-    record, _ = _pre_recorded_report(task_dir, state, planner_attempt["attempt_id"], report_ref)
-    report = sanitize_report_payload(record.get("report"))
-    manifest = current_planning_manifest(task_dir)
-    artifact_summary = None
-    if manifest and manifest.get("source_report_ref") == report_ref:
-        artifact_summary = {
-            "manifest_path": "planning/manifest.json",
-            "overview_path": "planning/overview.md",
-            "revision": manifest.get("revision"),
-            "work_packages": [
-                {
-                    "id": package.get("id"), "title": package.get("title"),
-                    "depends_on": package.get("depends_on", []),
-                    "microtask_count": package.get("microtask_count", 0),
-                    "artifact_path": package.get("artifact_path"),
-                }
-                for package in manifest.get("work_packages", [])[:MAX_WORK_PACKAGES]
-                if isinstance(package, dict)
-            ],
-        }
-    return {
-        "report_ref": report_ref,
-        "report_markdown_path": str(report_markdown_path(task_dir, report_ref)),
-        "report_markdown_link": report_markdown_link(task_dir, report_ref, planner_attempt.get("gate", "plan")),
-        "summary": redact(report["summary"], 2400),
-        "findings": [redact(item, 1000) for item in report.get("findings", [])][:12],
-        "uncertainty": [redact(item, 1000) for item in report.get("uncertainty", [])][:12],
-        "next_action": redact(report["next_action"], 1200),
-        "remaining_phases": list(active_gates(state)),
-        **({"planning_artifacts": artifact_summary} if artifact_summary else {}),
-    }
-
-
-def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any]) -> dict[str, Any] | None:
-    """Persist the post-plan human gate before any successor is prepared."""
-    approval = _plan_approval(state)
-    if (
-        approval.get("policy") != "required"
-        or "plan" not in state.get("completed_gates", [])
-        or not active_gates(state)
-        or state.get("status") != "active"
-    ):
-        return None
-    if approval.get("status") == "approved":
-        return None
-    if approval.get("status") == "awaiting_user":
-        return dict(approval.get("review") or {})
-    review = _plan_review_payload(task_dir, state)
-    history = approval.setdefault("history", [])
-    history.append({"event": "requested", "at": now(), "report_ref": review["report_ref"]})
-    approval.update({
-        "policy": "required",
-        "status": "awaiting_user",
-        "review": review,
-        "plan_report_ref": review["report_ref"],
-        "requested_at": now(),
-    })
-    state["plan_approval"] = approval
-    save_state(task_dir, task_dir / "current.json", state, "plan_approval", "awaiting explicit user approval of the completed plan")
-    return review
+    return _implementation(gate)
 
 
 def _pre_recorded_report(
@@ -6707,814 +5971,22 @@ def _pre_recorded_report(
     attempt_id: str,
     report_ref: object,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    report_id = safe_id(str(report_ref or ""))
-    if not report_id:
-        raise ValueError("passed completion requires report_ref")
-    paths = report_bus_paths(task_dir)
-    record = _read_private_json(
-        _contained_path(paths["records"], paths["records"] / f"{report_id}.json", "worker report"),
-        "worker report",
-    )
-    if (
-        record.get("schema") != REPORT_SCHEMA
-        or record.get("task_id") != state.get("task_id")
-        or record.get("attempt_id") != attempt_id
-    ):
-        raise ValueError("report_ref does not belong to the active worker attempt")
-    sanitize_report_payload(record.get("report"))
-    receipt = _read_private_json(
-        _contained_path(
-            paths["receipts"],
-            paths["receipts"] / f"report-receipt-{report_id}.json",
-            "worker report receipt",
-        ),
-        "worker report receipt",
-    )
-    if (
-        receipt.get("schema") != REPORT_SCHEMA
-        or receipt.get("report_id") != report_id
-        or receipt.get("task_id") != state.get("task_id")
-        or receipt.get("attempt_id") != attempt_id
-        or receipt.get("invalidated")
-    ):
-        raise ValueError("report_ref receipt is invalid for the active worker attempt")
-    return record, receipt
+    """Expose the engine's report ownership validator to v4 adapter code."""
+    from cortex_runtime.orchestration_engine import _pre_recorded_report as _implementation
+
+    return _implementation(task_dir, state, attempt_id, report_ref)
 
 
-def _preflight_orchestrate_completion(
-    task_dir: Path,
-    state: dict[str, Any],
-    completion: dict[str, Any],
-) -> None:
-    """Validate a host completion without mutating the task ledger."""
-    attempt_id = safe_id(str(completion.get("attempt_id", "")))
-    attempt = _attempt(state, attempt_id)
-    requested_status = str(completion.get("status", "passed")).strip().lower()
-    if requested_status not in TERMINAL_ATTEMPT_STATUSES:
-        raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
-    if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
-        if attempt.get("status") != requested_status:
-            raise ValueError("completion status does not match the terminal ledger attempt")
-        return
-    open_questions = _open_blocking_questions(task_dir, state, attempt_id)
-    if open_questions:
-        refs = ", ".join(str(item["question_id"]) for item in open_questions)
-        raise ValueError(
-            f"attempt has unanswered blocking worker question(s): {refs}; "
-            "answer the question and resume the same worker before completion"
-        )
-    observation_source = str(completion.get("host_observation_source") or "").strip()
-    if observation_source != "unattested_parent_result":
-        required_host_fields = ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort")
-        missing_host = [field for field in required_host_fields if not str(completion.get(field, "")).strip()]
-        if missing_host:
-            raise ValueError("completion requires actual host fields: " + ", ".join(missing_host))
-        spawn_request = attempt.get("spawn_request") or {}
-        expected = {
-            "host_tool": spawn_request.get("host_tool") or "spawn_agent",
-            "host_task_name": spawn_request.get("task_name") or attempt.get("agent"),
-            # `model` is absent for configured-default requests.  The host still
-            # reports its effective model and it is checked against the durable
-            # expected_model metadata instead.
-            "host_model": spawn_request.get("model") or spawn_request.get("expected_model") or attempt.get("expected_model"),
-            "host_reasoning_effort": spawn_request.get("reasoning_effort"),
-        }
-        mismatches = [
-            field for field, expected_value in expected.items()
-            if expected_value is not None and str(completion.get(field)) != str(expected_value)
-        ]
-        if mismatches:
-            raise ValueError("host completion mismatch for: " + ", ".join(mismatches))
-    if requested_status == "passed":
-        report_ref = str(completion.get("report_ref") or "").strip()
-        if not report_ref:
-            raise ValueError("passed completion requires report_ref from record_report")
-        record, _ = _pre_recorded_report(task_dir, state, attempt_id, report_ref)
-        _validate_report_decision_closure(task_dir, state, attempt, record["report"])
-    elif not str(completion.get("reason", "")).strip():
-        raise ValueError("non-success completion requires an explicit reason")
-
-
-def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any], next_action: str) -> dict[str, Any]:
-    baseline = _read_private_json(
-        task_dir / "baseline-manifest.json",
-        "baseline manifest",
-        max_bytes=MAX_MANIFEST_BYTES,
-    )
-    current = capture_project_manifest(Path(baseline["project_root"]), policy=baseline.get("policy"))
-    comparison = compare_manifests(baseline, current)
-    completed = [
-        f"{gate}: {state.get('gates', {}).get(gate, {}).get('summary') or state.get('gates', {}).get(gate, {}).get('outcome', 'completed')}"
-        for gate in state.get("completed_gates", [])
-    ] or [f"Prepared handoff for {primary_gate(state)}"]
-    return handoff({
-        **params,
-        "task_id": state["task_id"],
-        "expected_revision": state["revision"],
-        "name": f"orchestrate-{primary_gate(state)}-{state['revision'] + 1}",
-        "completed": completed,
-        "files": comparison["changed_paths"],
-        "decisions": ["Unified orchestrate facade reconciled the current wave."],
-        "risks": [],
-        "next_action": next_action,
-    })
-
-
-def _complete_orchestrate_attempt(
+def _auto_handoff(
     params: dict[str, Any],
     task_dir: Path,
     state: dict[str, Any],
-    completion: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    attempt_id = safe_id(str(completion.get("attempt_id", "")))
-    attempt = _attempt(state, attempt_id)
-    requested_status = str(completion.get("status", "passed")).strip().lower()
-    if requested_status not in TERMINAL_ATTEMPT_STATUSES:
-        raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
-    if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
-        if attempt.get("status") != requested_status:
-            raise ValueError("completion status does not match the terminal ledger attempt")
-        return state, _report_receipt_for_attempt(task_dir, state, attempt_id)
-    report_ref = str(completion.get("report_ref") or "").strip()
-    if requested_status == "passed" and report_ref:
-        record, receipt = _pre_recorded_report(task_dir, state, attempt_id, report_ref)
-        if attempt.get("status") == AWAITING_HOST_SPAWN:
-            attempt["status"] = "running"
-            attempt["dispatch_correlation"] = "worker_report_received"
-            attempt["expected_route"] = {
-                "tool": (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
-                "model": (attempt.get("spawn_request") or {}).get("model"),
-                "expected_model": (attempt.get("spawn_request") or {}).get("expected_model") or attempt.get("expected_model"),
-                "reasoning_effort": (attempt.get("spawn_request") or {}).get("reasoning_effort"),
-            }
-        attempt.setdefault("report_ids", [])
-        if record["report_id"] not in attempt["report_ids"]:
-            attempt["report_ids"].append(record["report_id"])
-        package_path = task_dir / "delegations" / f"{attempt_id}.json"
-        package = _read_private_json(package_path, "delegation package")
-        package["spawn_status"] = "worker_report_received"
-        package["dispatch_correlation"] = "worker_report_received"
-        package["report_ref"] = record["report_id"]
-        write_json(package_path, package)
-        save_state(task_dir, task_dir / "current.json", state, "worker_report", attempt_id)
-        finalized = finalize_attempt({
-            **params,
-            "task_id": state["task_id"],
-            "attempt_id": attempt_id,
-            "expected_revision": state["revision"],
-            "status": "passed",
-        })
-        if finalized.get("recorded") is False:
-            raise ValueError(str(finalized.get("reason") or "worker report attempt finalization failed"))
-        return finalized["state"], receipt
-    observation_source = str(completion.get("host_observation_source") or "").strip()
-    completion_fields = dict(completion)
-    if observation_source == "unattested_parent_result" and attempt.get("status") == AWAITING_HOST_SPAWN:
-        # V3 deliberately does not ask Luna to echo host metadata.  A returned
-        # parent result proves that the dispatch ran, but it is not independent
-        # evidence of the effective model or reasoning effort.
-        attempt["status"] = "running"
-        attempt["dispatch_correlation"] = observation_source
-        attempt["expected_route"] = {
-            "tool": (attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent",
-            "model": (attempt.get("spawn_request") or {}).get("model"),
-            "expected_model": (attempt.get("spawn_request") or {}).get("expected_model") or attempt.get("expected_model"),
-            "reasoning_effort": (attempt.get("spawn_request") or {}).get("reasoning_effort"),
-        }
-        package_path = task_dir / "delegations" / f"{attempt_id}.json"
-        package = _read_private_json(package_path, "delegation package")
-        package["spawn_status"] = "parent_result_received"
-        package["dispatch_correlation"] = observation_source
-        package["expected_route"] = attempt["expected_route"]
-        write_json(package_path, package)
-        save_state(task_dir, task_dir / "current.json", state, "parent_result", attempt_id)
-        for field in ("host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort"):
-            completion_fields.pop(field, None)
-    if requested_status == "passed":
-        raise ValueError("passed completion requires report_ref from record_report")
-    finalized = finalize_attempt({
-        **params,
-        **completion_fields,
-        "task_id": state["task_id"],
-        "attempt_id": attempt_id,
-        "status": requested_status,
-        "reason": str(completion.get("reason") or "host adapter reported terminal non-success"),
-    })
-    if finalized.get("recorded") is False:
-        raise ValueError(str(finalized.get("reason") or "attempt finalization failed"))
-    return finalized["state"], None
-
-
-def _ensure_attempt_evidence(
-    params: dict[str, Any],
-    task_dir: Path,
-    state: dict[str, Any],
-    attempt: dict[str, Any],
-    receipt: dict[str, Any] | None,
-    *,
-    command: bool = False,
+    next_action: str,
 ) -> dict[str, Any]:
-    existing = next((item for item in state.get("evidence", []) if item.get("attempt_id") == attempt["attempt_id"] and not item.get("invalidated")), None)
-    if existing is not None:
-        return state
-    evidence_params = {
-        **params,
-        "task_id": state["task_id"],
-        "expected_revision": state["revision"],
-        "gate": attempt["gate"],
-        "attempt_id": attempt["attempt_id"],
-        "report_receipt": receipt.get("receipt_id") if receipt else None,
-        "summary": f"Unified facade accepted the {attempt['gate']} report from {attempt['agent']}",
-        "paths": [],
-    }
-    if attempt["gate"] == "documentation":
-        report_record = _read_private_json(report_bus_paths(task_dir)["records"] / f"{receipt['report_id']}.json", "report record") if receipt else {"report": {}}
-        changed_files = report_record.get("report", {}).get("changed_files", [])
-        evidence_params.update({
-            "kind": "documentation",
-            "decision": "updated" if changed_files else "not_applicable",
-            "justification": "The documentation worker reported no changed documentation files." if not changed_files else "The documentation worker reported updated files.",
-            "paths": changed_files,
-        })
-        result = record_evidence(evidence_params)
-    elif command:
-        result = execute_verification({**evidence_params, "verification_id": "benign_success"})
-    else:
-        result = record_evidence({**evidence_params, "kind": "report"})
-    if result.get("recorded") is False:
-        raise ValueError(str(result.get("reason") or "attempt evidence was not recorded"))
-    return result["state"]
+    """Expose the engine's automatic handoff helper to existing v4 tests."""
+    from cortex_runtime.orchestration_engine import _auto_handoff as _implementation
 
-
-def _replace_future_orchestrate_waves(
-    params: dict[str, Any],
-    task_dir: Path,
-    state: dict[str, Any],
-    plan: dict[str, Any],
-    raw_future: object,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    task = _read_private_json(task_dir / "task.json", "task definition")
-    host_capabilities = plan.get("host_capabilities") or {}
-    future, classification = _normalize_orchestrate_waves(raw_future, task, host_capabilities, str(params["project_root"]))
-    completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    requested_future_gates = {gate for wave in future for gate in wave["gates"]}
-    rework_gates = sorted(completed_set & requested_future_gates)
-    if rework_gates and not params.get("allow_rework", False):
-        raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
-    if rework_gates:
-        revised = update_pipeline({
-            **params,
-            "task_id": state["task_id"],
-            "expected_revision": state["revision"],
-            "operations": [{"op": "rework", "gate": gate} for gate in rework_gates],
-            "allow_rework": True,
-            "reason": "Unified facade explicitly reintroduced completed gates in future_waves.",
-        })
-        state = revised["state"]
-        completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
-    completed_waves = [wave for wave in plan.get("waves", []) if set(wave.get("gates", [])).issubset(completed_set)]
-    relative_v3 = any(
-        item.get("host_observation_source") == "unattested_parent_result"
-        for item in params.get("completions", [])
-        if isinstance(item, dict)
-    )
-    if relative_v3:
-        for index, wave in enumerate(future, len(completed_waves) + 1):
-            wave["wave_id"] = f"wave-{index:02d}"
-            for delegation_index, delegation in enumerate(wave.get("delegations", []), 1):
-                delegation["orchestration_wave_id"] = wave["wave_id"]
-                delegation["orchestration_delegation_key"] = (
-                    f"{wave['wave_id']}-{delegation['gate']}-{delegation_index:02d}"
-                )
-    full_pipeline = [gate for gate in state["current_pipeline"] if gate in completed_set]
-    for gate in classification["pipeline"]:
-        if gate not in full_pipeline:
-            full_pipeline.append(gate)
-    full_groups = [[gate] for gate in full_pipeline if gate in completed_set] + [wave["gates"] for wave in future]
-    normalized_current_groups = normalize_parallel_groups(state.get("parallel_groups"), state["current_pipeline"])
-    normalized_future_groups = normalize_parallel_groups(full_groups, full_pipeline)
-    pipeline_or_group_change = (
-        full_pipeline != state["current_pipeline"]
-        or normalized_future_groups != normalized_current_groups
-    )
-    reassessed = reassess_pipeline({
-        **params,
-        "task_id": state["task_id"],
-        "expected_revision": state["revision"],
-        "signals": ["Coordinator replaced the not-yet-started facade waves."],
-        "pipeline": full_pipeline,
-        "parallel_groups": full_groups,
-        "intent": "resequence",
-        "decision": "updated" if pipeline_or_group_change else "unchanged",
-        "reason": (
-            "Unified facade accepted an explicit future_waves replacement."
-            if pipeline_or_group_change
-            else "Unified facade confirmed that future_waves already match the active pipeline."
-        ),
-        "allow_rework": bool(params.get("allow_rework", False)),
-        "apply": pipeline_or_group_change,
-    })
-    state = reassessed["state"]
-    plan["waves"] = completed_waves + future
-    _write_orchestrate_plan(task_dir, plan)
-    return state, plan
-
-
-def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
-    task_id = safe_id(str(params.get("task_id", "")))
-    completions = params.get("completions")
-    if not isinstance(completions, list) or not completions:
-        raise ValueError("advance requires a non-empty completions array")
-    root = ledger_root(params)
-    with state_lock(root):
-        _, task_dir, state = load_state(task_id, params)
-        authorize(state, params)
-        plan = _load_orchestrate_plan(task_dir, state)
-        current_wave = _wave_for_gates(plan, active_gates(state))
-        requested_wave_id = safe_id(str(params.get("wave_id", "")))
-        if current_wave is None or current_wave.get("wave_id") != requested_wave_id:
-            prior_wave = next((wave for wave in plan.get("waves", []) if wave.get("wave_id") == requested_wave_id), None)
-            transaction_phase = str(transaction.get("phase", ""))
-            if (
-                prior_wave is None
-                or prior_wave.get("status") not in {"completed", "blocked"}
-                or transaction_phase not in {"gates_recorded", "next_wave_prepared"}
-            ):
-                raise ValueError("advance wave_id does not match the active Cortex wave")
-            # The prior call crossed the gate boundary but crashed before its
-            # transaction receipt was committed. Continue only the remaining
-            # post-gate phases; never replay its completions into the new wave.
-            if transaction_phase == "gates_recorded" and params.get("future_waves") is not None and state.get("status") == "active":
-                state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
-            if state.get("status") == "completed":
-                audited = close_audit({**params, "task_id": task_id})
-                return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"report_count": audited["report_count"]}, plan=plan)
-            if state.get("status") == "blocked":
-                return _orchestrate_response("advance", state, wave_id=requested_wave_id, plan=plan)
-            review = _hold_for_plan_approval(task_dir, state)
-            if review is not None:
-                return _orchestrate_response(
-                    "advance", state, wave_id=requested_wave_id,
-                    result={"plan_review": review}, plan=plan,
-                )
-            prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
-            _checkpoint_orchestrate_transaction(transaction_path, transaction, "next_wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
-            return _orchestrate_response(
-                "advance",
-                prepared["state"],
-                wave_id=prepared["wave_id"],
-                spawn_requests=prepared["spawn_requests"],
-                plan=plan,
-            )
-        expected_attempt_ids = set(current_wave.get("attempt_ids") or [
-            item["attempt_id"] for item in state.get("attempts", [])
-            if item.get("gate") in current_wave["gates"] and not item.get("invalidated")
-        ])
-        provided_attempt_ids = {safe_id(str(item.get("attempt_id", ""))) for item in completions if isinstance(item, dict)}
-        if len(provided_attempt_ids) != len(completions):
-            raise ValueError("advance completion attempt_ids must be unique")
-        unexpected = sorted(provided_attempt_ids - expected_attempt_ids)
-        if unexpected:
-            raise ValueError("advance contains attempts outside the active wave: " + ", ".join(unexpected))
-        missing = sorted(expected_attempt_ids - provided_attempt_ids - {
-            item["attempt_id"] for item in state.get("attempts", []) if item.get("status") in TERMINAL_ATTEMPT_STATUSES
-        })
-        if missing:
-            raise ValueError("advance is missing completions for: " + ", ".join(missing))
-        for completion in completions:
-            if not isinstance(completion, dict):
-                raise ValueError("completion entries must be objects")
-            _preflight_orchestrate_completion(task_dir, state, completion)
-        if params.get("future_waves") is not None:
-            task = _read_private_json(task_dir / "task.json", "task definition")
-            future_preview, _ = _normalize_orchestrate_waves(
-                params["future_waves"], task, plan.get("host_capabilities") or {}, str(params["project_root"])
-            )
-            prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(current_wave["gates"])
-            reintroduced = sorted(prospective_completed & {gate for wave in future_preview for gate in wave["gates"]})
-            if reintroduced and not params.get("allow_rework", False):
-                raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
-        receipts: dict[str, dict[str, Any] | None] = {}
-        for completion in completions:
-            if not isinstance(completion, dict):
-                raise ValueError("completion entries must be objects")
-            state, receipt = _complete_orchestrate_attempt(params, task_dir, state, completion)
-            receipts[safe_id(str(completion["attempt_id"]))] = receipt
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "attempts_completed", attempt_ids=sorted(provided_attempt_ids))
-        if state.get("require_delegation") and not state.get("reassessment_receipts") and "close" in current_wave["gates"]:
-            reassessed = reassess_pipeline({
-                **params,
-                "task_id": task_id,
-                "expected_revision": state["revision"],
-                "signals": ["Unified facade reached the close wave without a material pipeline change."],
-                "intent": "resequence",
-                "decision": "unchanged",
-                "reason": "No pipeline change was required before close.",
-                "apply": False,
-            })
-            state = reassessed["state"]
-        gate_outcomes = params.get("gate_outcomes") if isinstance(params.get("gate_outcomes"), dict) else {}
-        for gate in list(current_wave["gates"]):
-            if gate in state.get("completed_gates", []) or gate in state.get("skipped_gates", []):
-                continue
-            gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
-            statuses = {item.get("status") for item in gate_attempts}
-            default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
-            outcome = str(gate_outcomes.get(gate, default_outcome))
-            failure_counts = state.setdefault("orchestrate_gate_failure_counts", {})
-            failure_count_changed = False
-            if outcome == "failed":
-                failure_count = int(failure_counts.get(gate, 0)) + 1
-                failure_counts[gate] = failure_count
-                failure_count_changed = True
-                if failure_count >= MAX_ORCHESTRATE_GATE_FAILURES:
-                    outcome = "blocked"
-                    state["blocked_reason"] = (
-                        f"automatic {gate} rework budget exhausted after {failure_count} failed attempts"
-                    )
-            elif outcome == "passed":
-                failure_count_changed = failure_counts.pop(gate, None) is not None
-            if failure_count_changed:
-                save_state(
-                    task_dir,
-                    task_dir / "current.json",
-                    state,
-                    "orchestrate_gate_recovery",
-                    f"{gate}: automatic failure count {failure_counts.get(gate, 0)}",
-                )
-            if outcome == "passed":
-                passed = [item for item in gate_attempts if item.get("status") == "passed"]
-                for index, attempt in enumerate(passed):
-                    receipt = receipts.get(attempt["attempt_id"]) or _report_receipt_for_attempt(task_dir, state, attempt["attempt_id"])
-                    state = _ensure_attempt_evidence(
-                        params,
-                        task_dir,
-                        state,
-                        attempt,
-                        receipt,
-                        command=gate == "close" and index == 0,
-                    )
-            if outcome in {"blocked"} or (outcome == "passed" and gate == "close" and state.get("require_handoff")):
-                handed = _auto_handoff(params, task_dir, state, "Resume after resolving the blocker." if outcome == "blocked" else "Close the Cortex task.")
-                if handed.get("recorded") is False:
-                    raise ValueError("automatic handoff manifest reconciliation failed")
-                state = handed["state"]
-            gate_summary = f"Unified facade recorded {gate} as {outcome}."
-            if outcome == "blocked" and state.get("blocked_reason"):
-                gate_summary += " " + str(state["blocked_reason"])
-            recorded = record_gate({
-                **params,
-                "task_id": task_id,
-                "expected_revision": state["revision"],
-                "gate": gate,
-                "outcome": outcome,
-                "summary": gate_summary,
-            })
-            if recorded.get("recorded") is False:
-                raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
-            state = recorded["state"]
-        current_wave["status"] = "completed" if state.get("status") != "blocked" else "blocked"
-        _write_orchestrate_plan(task_dir, plan)
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=current_wave["gates"])
-        # A coordinator may discover a bounded defect in the final close
-        # report and explicitly reintroduce documentation/review/close. The
-        # close gate transitions the task to completed before this replacement
-        # is applied, so accepting future waves only while active silently
-        # discarded the authorized rework and produced a false terminal
-        # success. update_pipeline(allow_rework=True) intentionally reopens a
-        # completed task and invalidates every downstream receipt.
-        if params.get("future_waves") is not None and state.get("status") in {"active", "completed"}:
-            state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
-        if state.get("status") == "completed":
-            audited = close_audit({**params, "task_id": task_id})
-            return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"report_count": audited["report_count"]}, plan=plan)
-        if state.get("status") == "blocked":
-            return _orchestrate_response("advance", state, wave_id=requested_wave_id, plan=plan)
-        review = _hold_for_plan_approval(task_dir, state)
-        if review is not None:
-            return _orchestrate_response(
-                "advance", state, wave_id=requested_wave_id,
-                result={"plan_review": review}, plan=plan,
-            )
-        prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "next_wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
-        return _orchestrate_response(
-            "advance",
-            prepared["state"],
-            wave_id=prepared["wave_id"],
-            spawn_requests=prepared["spawn_requests"],
-            plan=plan,
-        )
-
-
-def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the explicit user review that follows a completed plan wave."""
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    unknown = sorted(set(payload) - {"decision", "feedback"})
-    if unknown:
-        raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
-    decision_raw = str(payload.get("decision") or "").strip().lower().replace("-", "_").replace(" ", "_")
-    decision = {"approve": "approve", "approved": "approve", "accept": "approve", "revise": "revise", "changes": "revise", "request_changes": "revise"}.get(decision_raw)
-    if not decision:
-        raise ValueError("plan_approval decision must be approve or revise")
-    feedback = redact(payload.get("feedback", ""), 2000).strip()
-    if decision == "revise" and not feedback:
-        raise ValueError("plan_approval revise requires non-empty feedback")
-
-    task_id = safe_id(str(params.get("task_id", "")))
-    root = ledger_root(params)
-    with state_lock(root):
-        _, task_dir, state = load_state(task_id, params)
-        authorize(state, params)
-        approval = _plan_approval(state)
-        if approval.get("policy") != "required":
-            raise ValueError("this task does not require post-plan approval")
-        if approval.get("status") != "awaiting_user":
-            raise ValueError("there is no pending plan approval for this task")
-        plan = _load_orchestrate_plan(task_dir, state)
-        history = approval.setdefault("history", [])
-        review = dict(approval.get("review") or {})
-
-        if decision == "approve":
-            approval.update({"status": "approved", "approved_at": now(), "feedback": None})
-            history.append({"event": "approved", "at": now(), "report_ref": approval.get("plan_report_ref")})
-            state["plan_approval"] = approval
-            save_state(task_dir, task_dir / "current.json", state, "plan_approval", "user approved the completed plan")
-            prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
-            return _orchestrate_response(
-                "plan_approval", prepared["state"], wave_id=prepared["wave_id"],
-                spawn_requests=prepared["spawn_requests"],
-                result={"decision": "approved", "plan_review": review}, plan=plan,
-            )
-
-        revised = update_pipeline({
-            **params,
-            "task_id": task_id,
-            "expected_revision": state["revision"],
-            "operations": [{"op": "rework", "gate": "plan"}],
-            "allow_rework": True,
-            "reason": "User requested changes after reviewing the completed plan.",
-        })
-        state = revised["state"]
-        approval = _plan_approval(state)
-        approval.update({"policy": "required", "status": "pending_plan", "feedback": feedback})
-        history = approval.setdefault("history", [])
-        history.append({"event": "revision_requested", "at": now(), "feedback": feedback, "report_ref": review.get("report_ref")})
-        state["plan_approval"] = approval
-        for wave in plan.get("waves", []):
-            if "plan" in wave.get("gates", []):
-                wave["status"] = "pending"
-                wave.pop("attempt_ids", None)
-        _write_orchestrate_plan(task_dir, plan)
-        save_state(task_dir, task_dir / "current.json", state, "plan_approval", "user requested planner revision")
-        prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
-        return _orchestrate_response(
-            "plan_approval", prepared["state"], wave_id=prepared["wave_id"],
-            spawn_requests=prepared["spawn_requests"],
-            result={"decision": "revise", "feedback": feedback}, plan=plan,
-        )
-
-
-def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
-    task_id = safe_id(str(params.get("task_id", "")))
-    _, task_dir, state = load_state(task_id, params)
-    authorize(state, params)
-    task = _read_private_json(task_dir / "task.json", "task definition")
-    plan = _load_orchestrate_plan(task_dir, state)
-    current_wave = _wave_for_gates(plan, active_gates(state))
-    spawn_requests = [
-        {**item["spawn_request"], "attempt_id": item["attempt_id"]}
-        for item in state.get("attempts", [])
-        if item.get("status") == AWAITING_HOST_SPAWN
-        and (current_wave is None or item.get("gate") in current_wave.get("gates", []))
-        and not item.get("invalidated")
-    ]
-    report_index = _report_index(report_bus_paths(task_dir), state["task_id"])
-    available_reports = [
-        {
-            "report_ref": item.get("report_id"),
-            "phase": item.get("gate"),
-            "profile": (item.get("producer") or {}).get("profile"),
-            "summary": item.get("summary"),
-            "report_markdown_path": str(report_markdown_path(task_dir, item.get("report_id"))),
-            "report_markdown_link": report_markdown_link(task_dir, item.get("report_id"), item.get("gate", "report")),
-        }
-        for item in report_index.get("reports", [])
-        if isinstance(item, dict)
-    ][-MAX_CONTEXT_REPORTS:]
-    context_handoff = _context_handoff(task_dir, state, task, plan)
-    return _orchestrate_response(
-        "inspect",
-        state,
-        wave_id=current_wave.get("wave_id") if current_wave else None,
-        spawn_requests=spawn_requests,
-        result={
-            "plan": [{"wave_id": wave["wave_id"], "gates": wave["gates"], "status": wave.get("status", "pending")} for wave in plan.get("waves", [])],
-            "available_reports": available_reports,
-            "pending_dispatches": context_handoff["pending_dispatches"],
-            "active_workers": context_handoff["active_workers"],
-            "stopped_workers": context_handoff["stopped_workers"],
-            "context_handoff": context_handoff,
-            **(
-                {"plan_review": dict(_plan_approval(state).get("review") or {})}
-                if _plan_approval_is_pending(state) else {}
-            ),
-        },
-        plan=plan,
-    )
-
-
-def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
-    task_id = safe_id(str(params.get("task_id", "")))
-    _, task_dir, state = load_state(task_id, params)
-    authorize(state, params)
-    resumed = resume_task({
-        **params,
-        "task_id": task_id,
-        "expected_revision": state["revision"],
-        "reason": params.get("reason") or "Unified facade resumed the blocked task.",
-    })
-    resumed_state = resumed["state"]
-    failure_counts = resumed_state.setdefault("orchestrate_gate_failure_counts", {})
-    for gate in active_gates(resumed_state):
-        failure_counts.pop(gate, None)
-    invalidated = False
-    for attempt in resumed_state.get("attempts", []):
-        if attempt.get("gate") in active_gates(resumed_state) and attempt.get("status") == "blocked" and not attempt.get("invalidated"):
-            attempt["invalidated"] = True
-            attempt["invalidated_at"] = now()
-            attempt["invalidation_reason"] = "retry_after_resume"
-            invalidated = True
-    if invalidated:
-        save_state(task_dir, task_dir / "current.json", resumed_state, "resume_invalidation", "retired blocked attempts before retry")
-    plan = _load_orchestrate_plan(task_dir, resumed_state)
-    prepared = _prepare_orchestrate_wave(params, task_dir, resumed_state, plan)
-    return _orchestrate_response("resume", prepared["state"], wave_id=prepared["wave_id"], spawn_requests=prepared["spawn_requests"], plan=plan)
-
-
-def _orchestrate_lane(params: dict[str, Any]) -> dict[str, Any]:
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    command = str(payload.get("command", "")).strip()
-    handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
-        "create": create_lane,
-        "inspect": lane_status,
-        "claim": claim_lane,
-        "release": release_lane,
-        "retire": retire_lane,
-        "bind_task": bind_task_lane,
-        "materialize": materialize_lane,
-        "reconcile": reconcile_lane,
-        "claim_resource": claim_lane_resource,
-        "release_resource": release_lane_resource,
-    }
-    if command not in handlers:
-        raise ValueError("lane payload.command is unsupported")
-    result = handlers[command]({**params, **payload})
-    state = result.get("state") or {}
-    return {
-        "schema": ORCHESTRATE_SCHEMA,
-        "ok": True,
-        "operation": "lane",
-        "transaction_id": None,
-        "task_id": state.get("task_id") or params.get("task_id"),
-        "wave_id": None,
-        "state": "completed",
-        "spawn_requests": [],
-        "diagnostics": [],
-        "result": result,
-        "next_action": "continue the lane lifecycle with orchestrate(operation=lane) when needed",
-    }
-
-
-def _orchestrate_resource(params: dict[str, Any]) -> dict[str, Any]:
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    command = str(payload.get("command", "")).strip()
-    handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
-        "claim": claim_resource,
-        "release": release_resource,
-        "acquire_lock": acquire_lock,
-        "release_lock": release_lock,
-    }
-    if command not in handlers:
-        raise ValueError("resource payload.command is unsupported")
-    task_id = safe_id(str(params.get("task_id") or payload.get("task_id") or ""))
-    _, _, state = load_state(task_id, params)
-    result = handlers[command]({**params, **payload, "task_id": task_id, "expected_revision": state["revision"]})
-    return _orchestrate_response("resource", result["state"], result=result)
-
-
-def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
-    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    command = str(payload.get("command", "ask")).strip()
-    handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
-        "ask": cortex_question,
-        "publish": publish_worker_question,
-        "list": list_worker_questions,
-        "answer": answer_worker_question,
-        "updates": get_worker_question_updates,
-    }
-    if command not in handlers:
-        raise ValueError("question payload.command is unsupported")
-    # Coordinator identity is resolved by the facade and must never be
-    # overridden by a question payload.  In particular, a model must not be
-    # able to guess task/principal/thread values until one happens to pass.
-    reserved = {
-        key: params[key]
-        for key in ("project_root", "task_id", "principal", "thread_id", "submission_id")
-        if key in params
-    }
-    result = handlers[command]({**payload, **reserved})
-    task_id = safe_id(str(params.get("task_id") or payload.get("task_id") or ""))
-    _, _, state = load_state(task_id, params)
-    return _orchestrate_response("question", state, result=result)
-
-
-def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
-    """Single public Cortex state-machine facade."""
-    operation = str(params.get("operation", "")).strip()
-    if operation not in ORCHESTRATE_OPERATIONS:
-        return _orchestrate_error(operation or "unknown", "unsupported_operation", "operation must be start, advance, inspect, resume, deactivate, lane, resource, question, or plan_approval", recoverable=True)
-    try:
-        preflight_diagnostics = _collect_orchestrate_diagnostics(params)
-        if preflight_diagnostics:
-            return _orchestrate_error(
-                operation,
-                "orchestrate_validation_failed",
-                "request failed preflight validation",
-                phase="preflight",
-                recoverable=True,
-                next_operation=operation,
-                task_id=str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None,
-                diagnostics=preflight_diagnostics,
-            )
-        select_project_root(params)
-        if operation == "inspect":
-            return _orchestrate_inspect(params)
-        mutating = operation in ORCHESTRATE_MUTATING_OPERATIONS
-        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-        if operation == "lane" and str(payload.get("command", "")) == "inspect":
-            mutating = False
-        if operation == "question" and str(payload.get("command", "ask")) in {"list", "updates"}:
-            mutating = False
-        transaction_path = None
-        transaction = None
-        if mutating:
-            if not str(params.get("submission_id", "")).strip():
-                raise ValueError(f"{operation} requires submission_id")
-            root = ledger_root(params)
-            transaction_path, transaction, replay = _begin_orchestrate_transaction(root, params)
-            if replay is not None:
-                return replay
-        if operation == "start":
-            result = _orchestrate_start(params, transaction_path, transaction)
-        elif operation == "advance":
-            result = _orchestrate_advance(params, transaction_path, transaction)
-        elif operation == "resume":
-            result = _orchestrate_resume(params)
-        elif operation == "deactivate":
-            result = {
-                "schema": ORCHESTRATE_SCHEMA,
-                "ok": True,
-                "operation": "deactivate",
-                "transaction_id": None,
-                "task_id": params.get("task_id"),
-                "wave_id": None,
-                "state": "completed",
-                "spawn_requests": [],
-                "diagnostics": [],
-                "result": deactivate_orchestration({**params, "user_command": NORMAL_COMMAND}),
-                "next_action": "Cortex orchestration is inactive for this coordinator",
-            }
-        elif operation == "lane":
-            result = _orchestrate_lane(params)
-        elif operation == "resource":
-            result = _orchestrate_resource(params)
-        elif operation == "plan_approval":
-            result = _orchestrate_plan_approval(params)
-        else:
-            result = _orchestrate_question(params)
-        if mutating:
-            nested_result = result.get("result") if isinstance(result.get("result"), dict) else {}
-            if operation == "question" and nested_result.get("status") == "elicitation_unavailable":
-                return _leave_orchestrate_transaction_retryable(transaction_path, transaction, result)
-            return _commit_orchestrate_transaction(transaction_path, transaction, result)
-        return {**result, "transaction_id": None, "idempotent": False}
-    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
-        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
-        error = _orchestrate_error(
-            operation,
-            "orchestrate_validation_failed",
-            exc,
-            phase=(transaction or {}).get("phase", "preflight") if "transaction" in locals() else "preflight",
-            recoverable=True,
-            next_operation=operation,
-            task_id=task_id,
-        )
-        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
-            transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})
-            write_json(transaction_path, transaction)
-            error["transaction_id"] = transaction.get("transaction_id")
-        return error
+    return _implementation(params, task_dir, state, next_action)
 
 
 V3_COMPLEXITY_ALIASES = {
@@ -7555,17 +6027,14 @@ def _v3_task_ref(task_id: str) -> str:
 
 
 def _operation_registry_path(root: Path) -> Path:
-    return root / "orchestration-operations.json"
+    return root / "cortex.db"
 
 
 def _operation_registry(root: Path) -> dict[str, Any]:
-    path = _operation_registry_path(root)
-    if not path.exists():
-        return {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "starts": {}, "tasks": {}, "updated_at": now()}
-    registry = _read_private_json(
-        path,
-        "orchestration operation registry",
-        max_bytes=MAX_TASK_STATE_BYTES,
+    registry = db_get_global(
+        root,
+        "operation_registry",
+        {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "starts": {}, "tasks": {}, "updated_at": now()},
     )
     if registry.get("schema") != PUBLIC_ORCHESTRATION_SCHEMA:
         raise ValueError("orchestration operation registry schema is not supported")
@@ -7583,7 +6052,7 @@ def _write_operation_registry(root: Path, registry: dict[str, Any]) -> None:
             if compact != last["response"]:
                 raise ValueError("operation registry contains a non-canonical dispatch replay")
     registry["updated_at"] = now()
-    write_json(_operation_registry_path(root), registry)
+    db_put_global(root, "operation_registry", registry)
 
 
 def _prune_timestamp(value: object) -> datetime | None:
@@ -7609,7 +6078,7 @@ def _write_or_remove_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
-    """Delete only task-scoped Cortex state older than a confirmed age floor."""
+    """Delete only completed task-scoped Cortex state older than a confirmed age floor."""
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
     unknown = sorted(set(payload) - {"confirmation", "older_than_days"})
     if unknown:
@@ -7627,44 +6096,44 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
         task_index = read_task_index(root)
         stale: dict[str, Path] = {}
         classification_ids: set[str] = set()
+        retained_classification_ids: set[str] = set()
         statuses: dict[str, str] = {}
+        retained_nonterminal_count = 0
         for raw_task_id, entry in task_index.items():
             task_id = safe_id(str(raw_task_id))
-            directory = entry.get("directory") if isinstance(entry, dict) else None
-            if not isinstance(directory, str) or Path(directory).name != directory or directory in {"", ".", ".."}:
-                raise ValueError(f"task index contains an unsafe directory for {task_id}")
-            task_dir = _contained_path(root / "tasks", root / "tasks" / directory, "prune task directory")
-            if not task_dir.exists():
-                continue
-            info = task_dir.lstat()
-            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-                raise ValueError(f"prune task target is not a real directory: {directory}")
-            state_path = task_dir / "current.json"
-            task_path = task_dir / "task.json"
-            if not state_path.is_file() or state_path.is_symlink() or not task_path.is_file() or task_path.is_symlink():
-                raise ValueError(f"prune task ledger is incomplete or unsafe: {directory}")
-            state = _read_private_json(
-                state_path,
-                "prune task state",
-                max_bytes=MAX_TASK_STATE_BYTES,
-            )
-            task = _read_private_json(task_path, "prune task definition")
+            loaded = db_load_task(root, task_id)
+            if loaded is None:
+                raise ValueError(f"SQLite task index refers to a missing task: {task_id}")
+            task, state, _, artifact_dir = loaded
+            task_dir = root / artifact_dir
+            relative = Path(artifact_dir)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"SQLite task artifact path is unsafe for {task_id}")
+            if task_dir.exists() and (task_dir.is_symlink() or not task_dir.is_dir()):
+                raise ValueError(f"prune task artifact target is unsafe: {task_id}")
             if state.get("task_id") != task_id or task.get("task_id") != task_id:
-                raise ValueError(f"prune task identity mismatch: {directory}")
+                raise ValueError(f"prune task identity mismatch: {task_id}")
             updated = (
                 _prune_timestamp(state.get("updated_at"))
                 or _prune_timestamp(task.get("created_at"))
-                or datetime.fromtimestamp(task_dir.stat().st_mtime, timezone.utc)
+                or datetime.now(timezone.utc)
             )
-            if updated > cutoff:
+            candidate_classification_ids = {
+                safe_id(str(value))
+                for value in (state.get("classification_receipt"), task.get("classification_id"))
+                if str(value or "").strip()
+            }
+            if updated > cutoff or state.get("status") != "completed":
+                retained_classification_ids.update(candidate_classification_ids)
+                if state.get("status") != "completed":
+                    retained_nonterminal_count += 1
                 continue
             stale[task_id] = task_dir
             statuses[task_id] = str(state.get("status") or "unknown")
-            for value in (state.get("classification_receipt"), task.get("classification_id")):
-                if str(value or "").strip():
-                    classification_ids.add(safe_id(str(value)))
+            classification_ids.update(candidate_classification_ids)
 
         stale_ids = set(stale)
+        classification_ids.difference_update(retained_classification_ids)
         if not stale_ids:
             return {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -7675,6 +6144,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
                 "pruned_count": 0,
                 "pruned_task_refs": [],
                 "retained_count": len(task_index),
+                "retained_nonterminal_count": retained_nonterminal_count,
                 "next_action": "No stale task-scoped Cortex state matched the age threshold.",
             }
 
@@ -7684,8 +6154,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
         }
         host_bindings["updated_at"] = now()
 
-        activations_file = activation_path(root)
-        activations = _read_private_json(activations_file, "activation registry") if activations_file.exists() else {}
+        activations = _activation_records(root)
         if not isinstance(activations, dict):
             raise ValueError("activation registry is invalid")
         activations = {
@@ -7702,8 +6171,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value, dict) or value.get("task_id") not in stale_ids
         }
 
-        claims_path = root / "resource-claims.json"
-        claims = _read_private_json(claims_path, "resource claims") if claims_path.exists() else {}
+        claims = db_get_global(root, "resource_claims", {})
         if not isinstance(claims, dict):
             raise ValueError("resource claims are invalid")
         claims = {
@@ -7716,64 +6184,37 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
         }
 
         lane_updates = 0
-        lanes_root = root / "lanes"
-        if lanes_root.exists():
-            if lanes_root.is_symlink() or not lanes_root.is_dir():
-                raise ValueError("lane registry must be a real directory")
-            for lane_dir in sorted(lanes_root.iterdir()):
-                if lane_dir.is_symlink() or not lane_dir.is_dir():
-                    raise ValueError("lane registry contains an unsafe entry")
-                lane_path = lane_dir / "current.json"
-                if not lane_path.exists():
-                    continue
-                lane = _read_private_json(lane_path, "lane state")
-                bound = lane.get("bound_tasks", [])
-                if not isinstance(bound, list):
-                    raise ValueError("lane bound_tasks is invalid")
-                filtered = [item for item in bound if item not in stale_ids]
-                if filtered != bound:
-                    lane["bound_tasks"] = filtered
-                    lane["updated_at"] = now()
-                    write_json(lane_path, lane)
-                    lane_updates += 1
+        for lane_definition, lane in db_all_lanes(root):
+            bound = lane.get("bound_tasks", [])
+            if not isinstance(bound, list):
+                raise ValueError("lane bound_tasks is invalid")
+            filtered = [item for item in bound if item not in stale_ids]
+            if filtered != bound:
+                lane["bound_tasks"] = filtered
+                lane["updated_at"] = now()
+                db_put_lane(root, lane_definition, lane, event="prune", detail=f"removed {len(bound) - len(filtered)} stale task binding(s)")
+                lane_updates += 1
 
-        operation_removals: list[Path] = []
-        operations_root = root / "operations"
-        if operations_root.exists():
-            if operations_root.is_symlink() or not operations_root.is_dir():
-                raise ValueError("operation registry must be a real directory")
-            for path in sorted(operations_root.glob("*.json")):
-                if path.is_symlink() or not path.is_file():
-                    raise ValueError("operation registry contains an unsafe entry")
-                record = _read_private_json(path, "operation record")
-                if isinstance(record, dict) and record.get("task_id") in stale_ids:
-                    operation_removals.append(path)
-
-        for task_id in stale_ids:
-            task_index.pop(task_id, None)
-        _write_or_remove_json(task_index_path(root), task_index)
-        host_bindings_path = _host_session_bindings_path(root)
         if host_bindings["tasks"]:
-            write_json(host_bindings_path, host_bindings)
-        elif host_bindings_path.exists():
-            host_bindings_path.unlink()
-        _write_or_remove_json(activations_file, activations)
-        _write_or_remove_json(claims_path, claims)
+            db_put_global(root, "host_sessions", host_bindings)
+        else:
+            db_delete_global(root, "host_sessions")
+        _write_activation_records(root, activations)
+        if claims:
+            db_put_global(root, "resource_claims", claims)
+        else:
+            db_delete_global(root, "resource_claims")
         _write_operation_registry(root, registry)
 
-        removed_classifications = 0
-        classifications_root = root / "classification-receipts"
-        for classification_id in sorted(classification_ids):
-            path = classifications_root / f"{classification_id}.json"
-            if path.exists():
-                if path.is_symlink() or not path.is_file():
-                    raise ValueError("classification receipt prune target is unsafe")
-                path.unlink()
-                removed_classifications += 1
-        for path in operation_removals:
-            path.unlink()
+        removed_snapshots = sum(db_delete_task_manifest_snapshots(root, task_id) for task_id in stale_ids)
+        removed_operations = db_delete_operations_for_tasks(root, stale_ids)
+        removed_classifications = db_delete_classifications(root, classification_ids)
+        deleted_tasks = db_delete_tasks(root, stale_ids)
+        if deleted_tasks != len(stale_ids):
+            raise ValueError("SQLite task prune did not remove every selected completed task")
         for task_dir in stale.values():
-            shutil.rmtree(task_dir)
+            if task_dir.exists():
+                shutil.rmtree(task_dir)
 
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -7784,35 +6225,29 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
             "pruned_count": len(stale_ids),
             "pruned_task_refs": [_v3_task_ref(task_id) for task_id in sorted(stale_ids)],
             "pruned_statuses": {status: list(statuses.values()).count(status) for status in sorted(set(statuses.values()))},
-            "removed_operations": len(operation_removals),
+            "removed_operations": removed_operations,
             "removed_classification_receipts": removed_classifications,
+            "removed_manifest_snapshots": removed_snapshots,
             "updated_lanes": lane_updates,
-            "retained_count": len(task_index),
-            "next_action": "Prune completed; recent Cortex tasks and all project source/documentation were preserved.",
+            "retained_count": len(task_index) - len(stale_ids),
+            "retained_nonterminal_count": retained_nonterminal_count,
+            "next_action": "Prune completed; active/blocked tasks, recent tasks, and all project source/documentation were preserved.",
         }
 
 
 def _v3_task_state(root: Path, task_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
-    indexed = read_task_index(root).get(task_id)
-    directory = indexed.get("directory") if isinstance(indexed, dict) else None
-    if not isinstance(directory, str) or Path(directory).name != directory or directory in {"", ".", ".."}:
+    loaded = db_load_task(root, task_id)
+    if loaded is None:
         return None
-    task_dir = _contained_path(root / "tasks", root / "tasks" / directory, "orchestration task directory")
-    state_path, task_path = task_dir / "current.json", task_dir / "task.json"
-    if not state_path.exists() or not task_path.exists():
-        return None
-    state = _read_private_json(
-        state_path,
-        "orchestration task state",
-        max_bytes=MAX_TASK_STATE_BYTES,
-    )
-    task = _read_private_json(task_path, "orchestration task definition")
+    task, state, plan, artifact_dir = loaded
+    artifact_relative = Path(artifact_dir)
+    if artifact_relative.is_absolute() or ".." in artifact_relative.parts:
+        raise ValueError("orchestration task artifact directory is unsafe")
+    task_dir = root / artifact_relative
     if state.get("schema") != SCHEMA or task.get("schema") != SCHEMA or state.get("task_id") != task_id or task.get("task_id") != task_id:
         raise ValueError("orchestration task lookup found an unsupported or mismatched ledger")
-    plan_path = _orchestrate_plan_path(task_dir)
-    if not plan_path.is_file() or plan_path.is_symlink():
+    if plan is None:
         return None
-    plan = _read_private_json(plan_path, "orchestrate plan")
     if plan.get("schema") != ORCHESTRATION_PLAN_SCHEMA or plan.get("task_id") != task_id:
         raise ValueError("orchestration task lookup found an unsupported plan")
     return task_dir, state, task
@@ -8103,7 +6538,7 @@ def _v3_response(
     include_result: bool = False,
     start_replayed: bool | None = None,
 ) -> dict[str, Any]:
-    """Compatibility facade for the public orchestration response adapter."""
+    """Public delegating entrypoint for the orchestration response adapter."""
     return render_v3_response(
         old,
         task_ref,
@@ -8734,6 +7169,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "plan_approval": "plan_approval", "approve_plan": "plan_approval", "plan_review": "plan_approval",
             "follow_up": "follow_up", "followup": "follow_up", "correct": "follow_up", "corrective_task": "follow_up",
             "prune": "prune", "cleanup": "prune",
+            "artifacts": "artifacts", "artifact": "artifacts", "documents": "artifacts",
         }
         intent = aliases.get(intent_raw)
         if not intent:
@@ -8759,6 +7195,8 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             return resolved
         task_dir, state, task_definition, task_ref = resolved
         resolved_task_ref = task_ref
+        if intent == "artifacts":
+            return manage_task_artifacts(params, task_dir, state, task_ref)
         if intent == "follow_up":
             follow_up = _v3_follow_up_payload(params.get("payload"))
             source_context = _v3_follow_up_context(
@@ -8856,6 +7294,7 @@ if __name__ != "cortex" and "_importlib_facade" in globals():
     _importlib_facade.__dict__.update(globals())
 from cortex_runtime.delegation_service import record_delegation as _record_delegation_service
 from cortex_runtime.context_handoff import _context_handoff as _context_handoff_service
+from cortex_runtime.artifact_transport import manage_task_artifacts
 from cortex_runtime.questions import (
     _localized_question_view,
     _normalize_question_answer,
@@ -9097,7 +7536,7 @@ TOOLS = {
     "reconcile_lane": (reconcile_lane, {"type": "object", "properties": {"lane_id": {"type": "string"}, "principal": {"type": "string"}, "run_id": {"type": "string"}}, "required": ["lane_id"]}),
 }
 
-AUTHORIZED_TOOLS = configure_legacy_schemas(TOOLS)
+AUTHORIZED_TOOLS = configure_internal_schemas(TOOLS)
 PUBLIC_TOOLS = build_public_tools(
     TOOLS,
     worker_question=worker_question,
@@ -9118,9 +7557,14 @@ def _set_mcp_openai_form(value: bool) -> None:
 
 def main() -> None:
     """Keep the executable facade thin; transport lives in cortex_runtime.mcp_api."""
+    # Load the complete runtime package before accepting requests. Installed
+    # cache directories may be renamed during plugin replacement while this
+    # already-running process still serves a host session.
+    import cortex_runtime.orchestration_engine  # noqa: F401
+
     serve_stdio(
         public_tools=PUBLIC_TOOLS,
-        legacy_tools=TOOLS,
+        internal_handlers=TOOLS,
         server_version=SERVER_VERSION,
         instructions=MCP_SERVER_INSTRUCTIONS,
         set_openai_form=_set_mcp_openai_form,

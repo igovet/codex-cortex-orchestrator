@@ -11,6 +11,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
+import cortex  # noqa: E402
 SOURCE = ROOT / "plugins/cortex"
 PROFILE_CONTRACT = json.loads((SOURCE / "profiles.json").read_text(encoding="utf-8"))
 VERSION = json.loads((SOURCE / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
@@ -150,11 +153,12 @@ def main() -> int:
         if not re.fullmatch(r"explorer_[a-z0-9_]+_01_[0-9a-f]{8}", str(dispatch["arguments"].get("task_name") or "")):
             raise SystemExit("fresh plugin probe: native worker task name is not unique and host-safe")
         confirmed = mcp_tool(server, environment, workspace, "manage_orchestration", {"intent": "inspect"})
-        task = json.loads((expected_task / "task.json").read_text(encoding="utf-8"))
-        state = json.loads((expected_task / "current.json").read_text(encoding="utf-8"))
-        plan = json.loads((expected_task / "orchestration.json").read_text(encoding="utf-8"))
+        task = cortex.load_task_definition(expected_task)
+        state = cortex.load_task_state_for_artifact(expected_task)
+        loaded = cortex.db_load_task(workspace / ".codex/cortex", str(state["task_id"]))
+        plan = loaded[2] if loaded is not None else None
         files = [path.relative_to(workspace / ".codex/cortex").as_posix() for path in (workspace / ".codex/cortex").rglob("*") if path.is_file()]
-        banned = ("v3-operations", "active-tasks", "status-receipts", "reports/grants", "metrics.json")
+        banned = ("v3-operations", "active-tasks", "status-receipts", "reports/grants", "metrics.json", "task.json", "current.json", "task-index.json", "host-sessions.json")
         retired_snapshot = any(path.endswith("-snapshot.json") for path in files)
         retired_handoff_manifest = any(
             "/handoffs/" in f"/{path}" and path.endswith("-manifest.json")
@@ -165,7 +169,9 @@ def main() -> int:
             or task.get("project_root") != str(workspace)
             or task.get("schema") != "cortex/v8"
             or state.get("schema") != "cortex/v8"
+            or not (workspace / ".codex/cortex/cortex.db").is_file()
             or "current_gate" in state
+            or not isinstance(plan, dict)
             or plan.get("schema") != "cortex/orchestration-plan/v1"
             or any(any(marker in path for marker in banned) for path in files)
             or retired_snapshot

@@ -86,7 +86,7 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
             if record.get("start", {}).get("task_ref") == current["task_ref"]
         )
         task_dir, state, _ = cortex._v3_task_state(ledger, task_id)
-        task_definition = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+        task_definition = cortex.load_task_definition(task_dir, state)
         active_attempts = [
             item for item in state["attempts"]
             if item.get("status") not in cortex.TERMINAL_ATTEMPT_STATUSES
@@ -184,12 +184,32 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
 
     for project in (sequential, parallel, blocked):
         task_dir = next((project / ".codex/cortex/tasks").iterdir())
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        state = cortex.load_task_state_for_artifact(task_dir)
         close_evidence = any(
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
         )
-        if state.get("status") != "completed" or not close_evidence or not state.get("handoff_created"):
+        snapshot_cleanup = state.get("manifest_snapshot_cleanup") or {}
+        if (
+            state.get("status") != "completed"
+            or not close_evidence
+            or not state.get("handoff_created")
+            or snapshot_cleanup.get("status") != "completed"
+            or any(
+                cortex.db_get_manifest_snapshot(
+                    cortex.ledger_root({"project_root": str(project)}), str(reference)
+                ) is not None
+                for reference in [
+                    state.get("initial_manifest_ref"),
+                    *[
+                        item.get("result_baseline_ref")
+                        for item in state.get("attempts", [])
+                        if isinstance(item, dict)
+                    ],
+                ]
+                if reference
+            )
+        ):
             raise AssertionError(f"{project.name} lacks close evidence or handoff")
     return scenarios
 
@@ -207,7 +227,8 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         )
     common = (
         "Use the Cortex MCP public tools to complete this isolated task. "
-        "You are the parent orchestrator. Preserve the task text exactly in start_orchestration task.user_request, "
+        "You are the parent orchestrator. The exact task contract is the content inside <cortex_task_contract>; "
+        "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
         "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "
         "Read every ref with read_worker_report and advance with report_ref. "
@@ -215,7 +236,17 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         f"The exact project_root is {project}. "
     )
     if scenario == "automatic_sequential":
-        return common + "Use the automatic pipeline for objective: inspect README.md and append a concise verified note to result.md."
+        return common + (
+            "<cortex_task_contract>"
+            "{\"user_request\":\"inspect README.md and append a concise verified note to result.md.\","
+            "\"acceptance_criteria\":[\"README.md is inspected and the note is grounded in its verified content.\","
+            "\"result.md has a concise note appended, preserving existing content.\","
+            "\"The final handoff identifies the changed file and includes evidence that the append was verified.\"],"
+            "\"verification\":[\"Read README.md and confirm the appended note in result.md.\","
+            "\"Inspect the resulting diff or equivalent file evidence to verify only the intended concise append was made.\"],"
+            "\"plan_approval\":\"auto\"}"
+            "</cortex_task_contract>"
+        )
     if scenario == "compact_parallel":
         return common + "Use an explicit compact first wave with parallel discovery and architecture workers, then complete objective: create result.md summarizing the fixture."
     if scenario == "planner_work_breakdown":
@@ -243,7 +274,7 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
         subprocess.run(["git", "init", "-q"], cwd=project, check=True)
         (project / "README.md").write_text("# Luna high Cortex fixture\n", encoding="utf-8")
         source_task_ref = None
-        source_snapshot: tuple[str, str] | None = None
+        source_snapshot: tuple[dict[str, object], dict[str, object]] | None = None
         if scenario == "follow_up_partial":
             source = cortex.start_orchestration({
                 "project_root": str(project),
@@ -255,8 +286,8 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             source_task_ref = str(source["task_ref"])
             source_dir = next((project / ".codex/cortex/tasks").iterdir())
             source_snapshot = (
-                (source_dir / "task.json").read_text(encoding="utf-8"),
-                (source_dir / "current.json").read_text(encoding="utf-8"),
+                cortex.load_task_definition(source_dir),
+                cortex.load_task_state_for_artifact(source_dir),
             )
         command = [
             codex, "exec", "--json", "--ephemeral", "--skip-git-repo-check",
@@ -301,10 +332,10 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
         task_dir = task_dirs[0] if len(task_dirs) == 1 else None
         if scenario == "follow_up_partial":
             task_dir = next(
-                (path for path in task_dirs if isinstance(json.loads((path / "task.json").read_text(encoding="utf-8")).get("follow_up"), dict)),
+                (path for path in task_dirs if isinstance(cortex.load_task_definition(path).get("follow_up"), dict)),
                 None,
             )
-        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8")) if task_dir else {}
+        state = cortex.load_task_state_for_artifact(task_dir) if task_dir else {}
         report_records = list((task_dir / "reports/records").glob("*.json")) if task_dir else []
         report_keys = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
         strict_reports = bool(report_records) and all(
@@ -322,11 +353,7 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
         )
-        planning_root = task_dir / "planning" if task_dir else None
-        planning_manifest = (
-            json.loads((planning_root / "manifest.json").read_text(encoding="utf-8"))
-            if planning_root and (planning_root / "manifest.json").is_file() else {}
-        )
+        planning_manifest = cortex.current_planning_manifest(task_dir) if task_dir else {}
         checks = {
             "process_ok": completed.returncode == 0,
             "used_start": "start_orchestration" in tool_names,
@@ -336,6 +363,24 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             "completed": state.get("status") == "completed",
             "close_evidence": close_evidence,
             "handoff": bool(state.get("handoff_created")),
+            "manifest_snapshots_cleaned": (
+                (state.get("manifest_snapshot_cleanup") or {}).get("status") == "completed"
+                and bool(task_dir)
+                and not any(
+                    cortex.db_get_manifest_snapshot(
+                        cortex.ledger_root({"project_root": str(project)}), str(reference)
+                    ) is not None
+                    for reference in [
+                        state.get("initial_manifest_ref"),
+                        *[
+                            item.get("result_baseline_ref")
+                            for item in state.get("attempts", [])
+                            if isinstance(item, dict)
+                        ],
+                    ]
+                    if reference
+                )
+            ),
             "strict_worker_reports": strict_reports,
             "no_failed_public_calls": not failed_public_calls,
             "one_start": completed_tool_names.count("start_orchestration") == 1,
@@ -358,10 +403,10 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
             )
         if scenario == "follow_up_partial":
             source_dir = next((path for path in task_dirs if path != task_dir), None)
-            corrective_task = json.loads((task_dir / "task.json").read_text(encoding="utf-8")) if task_dir else {}
+            corrective_task = cortex.load_task_definition(task_dir) if task_dir else {}
             source_unchanged = bool(source_dir and source_snapshot and (
-                (source_dir / "task.json").read_text(encoding="utf-8"),
-                (source_dir / "current.json").read_text(encoding="utf-8"),
+                cortex.load_task_definition(source_dir),
+                cortex.load_task_state_for_artifact(source_dir),
             ) == source_snapshot)
             checks = {
                 "process_ok": completed.returncode == 0,

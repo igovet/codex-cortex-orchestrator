@@ -24,6 +24,24 @@ except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open
     finalize_host_worker_stop_from_hook = None
 
 try:
+    # Hooks run in their own short-lived process.  Read the same SQLite
+    # ledger as the MCP server instead of keeping a second, JSON-file based
+    # view of task state.  The imports intentionally remain independent of
+    # the stdio server so an installed hook can still make the conservative
+    # decision to emit no context if the runtime is unavailable.
+    from cortex_runtime.ledger_db import (
+        artifact_path as db_task_artifact_path,
+        get_global as db_get_global,
+        load_task as db_load_task,
+        task_index as db_task_index,
+    )
+except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open.
+    db_task_artifact_path = None
+    db_get_global = None
+    db_load_task = None
+    db_task_index = None
+
+try:
     import fcntl
 except ImportError:  # pragma: no cover
     fcntl = None
@@ -66,7 +84,7 @@ WORKER_CONTEXT = (
     "immutable briefing path supplied by the native bootstrap, verify its read-only mode and SHA-256, and never list "
     "or directly read any other .codex/cortex path. Include the bootstrap's exact Dispatch briefing reviewed digest "
     "marker in report evidence. If and only if the host filesystem read cannot open that exact path, call public "
-    "read_dispatch_briefing once with the complete identity/digest tuple from the bootstrap. You may call public read_worker_report "
+    "read_dispatch_briefing with the complete identity/digest tuple from the bootstrap; if its bounded response is incomplete, continue only with its exact next_cursor. You may call public read_worker_report "
     "only for predecessor refs explicitly listed in the dispatch, public worker_question when needed, and public "
     "record_report once after all blocking questions are answered. After it succeeds, return only REPORT_RECORDED report_ref=<value> plus at most a two-sentence "
     "summary; never paste the report JSON into the parent channel. If exact report identity is absent or the tool "
@@ -137,14 +155,13 @@ def session_identity(event: dict) -> str | None:
 
 def active_task(ledger: Path, session_id: str | None) -> str | None:
     """Resolve one active task from the canonical task-to-session binding."""
-    if not session_id:
+    if not session_id or db_get_global is None or db_load_task is None:
         return None
-    path = ledger / "host-sessions.json"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = db_get_global(ledger, "host_sessions", {})
         if payload.get("schema") != HOST_SESSION_SCHEMA or not isinstance(payload.get("tasks"), dict):
             return None
-    except (OSError, json.JSONDecodeError, TypeError):
+    except (OSError, ValueError, TypeError):
         return None
     active: list[str] = []
     for raw_task_id, bound_session in payload["tasks"].items():
@@ -152,9 +169,9 @@ def active_task(ledger: Path, session_id: str | None) -> str | None:
         if not task_id or bound_session != session_id:
             continue
         try:
-            task_dir = task_directory(ledger, task_id)
-            state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            loaded = db_load_task(ledger, task_id)
+            state = loaded[1] if loaded is not None else {}
+        except (OSError, ValueError, TypeError):
             continue
         if state.get("schema") == SCHEMA and state.get("task_id") == task_id and state.get("status") in {"active", "blocked"}:
             active.append(task_id)
@@ -177,9 +194,11 @@ def pending_task_from_subagent_start(ledger: Path, event: dict) -> str | None:
     model = str(event.get("model") or "").strip()
     if not agent_type:
         return None
+    if db_task_index is None or db_load_task is None:
+        return None
     try:
-        index = json.loads((ledger / "task-index.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
+        index = db_task_index(ledger)
+    except (OSError, ValueError, TypeError):
         return None
     matches: list[str] = []
     for raw_task_id in index if isinstance(index, dict) else {}:
@@ -187,9 +206,9 @@ def pending_task_from_subagent_start(ledger: Path, event: dict) -> str | None:
         if not task_id:
             continue
         try:
-            task_dir = task_directory(ledger, task_id)
-            state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            loaded = db_load_task(ledger, task_id)
+            state = loaded[1] if loaded is not None else {}
+        except (OSError, ValueError, TypeError):
             continue
         if state.get("schema") != SCHEMA or state.get("status") not in {"active", "blocked"}:
             continue
@@ -217,16 +236,15 @@ def pending_task_from_subagent_start(ledger: Path, event: dict) -> str | None:
 
 def task_ref(ledger: Path, task_id: str) -> str | None:
     """Resolve the public opaque ref without guessing from a task id."""
-    path = reject_symlink_ancestry(ledger / "orchestration-operations.json", "orchestration operation registry")
+    if db_get_global is None:
+        return None
     try:
-        if not path.exists() or not stat.S_ISREG(path.lstat().st_mode):
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = db_get_global(ledger, "operation_registry", {})
         record = payload.get("tasks", {}).get(task_id) if isinstance(payload, dict) else None
         candidate = record.get("start", {}).get("task_ref") if isinstance(record, dict) else None
         candidate = str(candidate or "")
         return candidate if SAFE_ID_RE.fullmatch(candidate) else None
-    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+    except (OSError, ValueError, TypeError):
         return None
 
 
@@ -355,43 +373,27 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
 
 
 def task_directory(ledger: Path, task_id: str) -> Path:
-    """Resolve a canonical numbered task directory without trusting index paths."""
-    tasks = ledger / "tasks"
-    candidate: Path | None = None
+    """Resolve the registered artifact directory from SQLite, never by scan."""
+    if db_task_artifact_path is None:
+        return ledger / "tasks" / f"missing-{task_id}"
     try:
-        indexed = json.loads((ledger / "task-index.json").read_text(encoding="utf-8")).get(task_id)
-        directory = indexed.get("directory") if isinstance(indexed, dict) else None
-        if isinstance(directory, str) and Path(directory).name == directory and directory not in {"", ".", ".."}:
-            candidate = tasks / directory
-    except (OSError, json.JSONDecodeError):
+        candidate = db_task_artifact_path(ledger, task_id)
+        if candidate is not None and candidate.is_dir():
+            return reject_symlink_ancestry(candidate, "task directory")
+    except (OSError, ValueError):
         pass
-    tasks_absolute = tasks.absolute()
-    if candidate is not None:
-        try:
-            candidate.absolute().relative_to(tasks_absolute)
-            candidate = reject_symlink_ancestry(candidate, "task directory")
-            if not candidate.is_dir():
-                raise ValueError("task directory is unavailable")
-            task_file = candidate / "task.json"
-            reject_symlink_ancestry(task_file, "task file")
-            task = json.loads(task_file.read_text(encoding="utf-8"))
-            if task.get("schema") == SCHEMA and task.get("task_id") == task_id:
-                return candidate
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-    return tasks / f"missing-{task_id}"
+    return ledger / "tasks" / f"missing-{task_id}"
 
 
 def activation(ledger: Path, session_id: str | None) -> dict | None:
-    if not session_id:
+    if not session_id or db_get_global is None:
         return None
-    path = ledger / "activations.json"
     try:
-        record = json.loads(path.read_text(encoding="utf-8")).get(session_id)
+        record = db_get_global(ledger, "activations", {}).get(session_id)
         if isinstance(record, dict) and record.get("schema") == SCHEMA and record.get("coordinator") == "main" and record.get("mode") == "main-orchestrator":
             return record
         return None
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
 
 
@@ -589,13 +591,12 @@ def main() -> None:
         print("{}")
         return
     task_dir = task_directory(ledger, task_id)
-    state_file = task_dir / "current.json"
     try:
         task_dir = reject_symlink_ancestry(task_dir, "task directory")
-        state_file = reject_symlink_ancestry(state_file, "task state file")
-        if not state_file.exists():
-            raise FileNotFoundError(str(state_file))
-        state = json.loads(state_file.read_text(encoding="utf-8"))
+        if db_load_task is None:
+            raise RuntimeError("SQLite ledger runtime is unavailable")
+        loaded = db_load_task(ledger, task_id)
+        state = loaded[1] if loaded is not None else {}
         if state.get("schema") != SCHEMA or state.get("task_id") != task_id:
             raise ValueError("unsupported or mismatched task state")
         # The host-session index selects a task only when the binding is
@@ -625,7 +626,8 @@ def main() -> None:
                     event.get("model"),
                 )
                 if binding.get("bound"):
-                    state = json.loads(state_file.read_text(encoding="utf-8"))
+                    refreshed = db_load_task(ledger, task_id)
+                    state = refreshed[1] if refreshed is not None else {}
                     agent_name, display_name = worker_identity(event, state)
                 else:
                     reason = str(binding.get("reason") or "host_binding_failed")
@@ -650,7 +652,8 @@ def main() -> None:
                     session_id,
                     event.get("agent_id"),
                 )
-                state = json.loads(state_file.read_text(encoding="utf-8"))
+                refreshed = db_load_task(ledger, task_id)
+                state = refreshed[1] if refreshed is not None else {}
                 agent_name, display_name = worker_identity(event, state)
             except Exception:
                 # Lifecycle persistence is fail-open for the host. The

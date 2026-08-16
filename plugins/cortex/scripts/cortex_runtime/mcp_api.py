@@ -242,6 +242,8 @@ def build_public_schemas(
             "report_ref": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
+            "cursor": {"type": "string", "description": "Opaque cursor returned for a large scoped report. It is bound to the report digest, task, and reader scope."},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Bounded UTF-8 report-part size. The server enforces the maximum and never returns a large report body in one result."},
         },
         "required": ["project_root", "report_ref"],
     }
@@ -255,6 +257,8 @@ def build_public_schemas(
             "profile": {"type": "string", "enum": sorted(agents)},
             "dispatch_ref": {"type": "string", "minLength": 1},
             "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing; task, worker identity, dispatch and digest remain required on every call."},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Bounded UTF-8 briefing-part size. The server enforces the maximum."},
         },
         "required": [
             "project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest",
@@ -265,7 +269,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, lane, resource, question, or prune; common aliases are normalized."},
+            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, or prune; common aliases are normalized."},
             "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
             "reason": {"type": "string"},
             "payload": {
@@ -274,8 +278,9 @@ def build_public_schemas(
                     "Rare-operation payload. For intent=follow_up, use the completed source task_ref and an exact "
                     "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
                     "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
-                    "elicitation. Never add guessed identity fields. Prune requires confirmation='PRUNE' and accepts "
-                    "older_than_days (default 7). Normal wave progression never uses this field."
+                    "elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
+                    "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
+                    "and accepts older_than_days (default 7). Normal wave progression never uses this field."
                 ),
             },
         },
@@ -509,8 +514,8 @@ def v3_response(
             response["plan_review"] = review
     return response
 
-def configure_legacy_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]]) -> set[str]:
-    """Apply runtime authorization requirements to the retained legacy registry."""
+def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]]) -> set[str]:
+    """Apply authorization requirements to internal handlers before projection."""
     tools["record_delegation"][1]["properties"]["dispatch_mode"]["description"] = (
         "visible_thread creates a user-owned Luna task only when explicitly requested; it is never a fallback."
     )
@@ -558,7 +563,7 @@ def configure_legacy_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str
 
 
 def public_tools(
-    legacy_tools: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
+    internal_handlers: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
     *,
     worker_question: Callable[..., Any],
     worker_question_schema: dict[str, Any],
@@ -571,9 +576,9 @@ def public_tools(
 ) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
     """Return the only seven MCP operations exposed to hosts and workers."""
     return {
-        "start_orchestration": legacy_tools["start_orchestration"],
-        "continue_orchestration": legacy_tools["continue_orchestration"],
-        "manage_orchestration": legacy_tools["manage_orchestration"],
+        "start_orchestration": internal_handlers["start_orchestration"],
+        "continue_orchestration": internal_handlers["continue_orchestration"],
+        "manage_orchestration": internal_handlers["manage_orchestration"],
         "worker_question": (worker_question, worker_question_schema),
         "record_report": (record_report, record_report_schema),
         "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
@@ -584,7 +589,7 @@ def public_tools(
 def serve_stdio(
     *,
     public_tools: Mapping[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]],
-    legacy_tools: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
+    internal_handlers: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
     server_version: str,
     instructions: str,
     set_openai_form: Callable[[bool], None],
@@ -631,8 +636,8 @@ def serve_stdio(
             elif method == "tools/call":
                 name = request.get("params", {}).get("name")
                 if name not in public_tools:
-                    if name in legacy_tools:
-                        raise ValueError("removed_in_v3_use_start_continue_or_manage")
+                    if name in internal_handlers:
+                        raise ValueError("tool_is_internal_use_cortex_orchestration_v4")
                     raise ValueError(f"unknown tool '{name}'")
                 arguments = request.get("params", {}).get("arguments", {})
                 if not isinstance(arguments, dict):

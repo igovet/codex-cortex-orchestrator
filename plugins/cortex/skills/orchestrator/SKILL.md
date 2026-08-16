@@ -26,7 +26,7 @@ without asking for another activation.
 | `help` | `help` | Explain Cortex without writes. |
 | `harvest` | `harvest` | Incrementally synchronize knowledge docs. |
 | `harvest-refresh` | `harvest-refresh` | Fully re-audit knowledge docs. |
-| `prune` | `prune` | Remove project-local Cortex task state stale for at least seven days. |
+| `prune` | `prune` | Remove only completed project-local Cortex task state stale for at least seven days. |
 | `normal` | `normal` | Exit the active Cortex session. |
 
 Do not guess unknown arguments. Show help and ask the user to choose.
@@ -46,11 +46,13 @@ The `prune` route is maintenance, not a coding pipeline. After explicit user
 selection, call `manage_orchestration` once with exact absolute `project_root`,
 intent `prune`, no `task_ref`, and
 `payload: {"confirmation":"PRUNE","older_than_days":7}`. It removes only
-task-scoped `.codex/cortex` state last updated at least seven days ago,
-including abandoned active tasks, and reconciles task indexes, public starts,
+completed task-scoped `.codex/cortex` state last updated at least seven days
+ago, and reconciles task indexes, public starts,
 activations, operation receipts, classification receipts, task resource
-claims, and lane bindings. It preserves recent tasks, lanes, source,
-documentation, and plugin files. Never reinterpret `prune` as clear-all.
+claims, and lane bindings. It preserves every active or blocked task regardless
+of age and never removes a classification receipt referenced by a retained
+task. It also preserves recent completed tasks, lanes, source, documentation,
+and plugin files. Never reinterpret `prune` as clear-all.
 
 ## Harvest route contract
 
@@ -231,6 +233,19 @@ should use canonical phases from the returned snapshot rather than guessing.
 
 ## Relative one-call-per-wave workflow
 
+Before step 1, distinguish host transport metadata from the user task. A
+leading `<recommended_plugins>…</recommended_plugins>` block, an
+`<environment_context>…</environment_context>` block, tool-usage directions,
+and test-runner scaffolding are host metadata — never copy them into
+`task.user_request`, objectives, labels, or worker prompts. When a caller
+supplies an explicit `<cortex_task_contract>` block, its `user_request`,
+acceptance criteria, and verification list are the complete task contract;
+copy those values exactly and ignore text outside that block for task identity.
+If no such block exists, preserve only the actual user-authored request after
+removing the known host metadata wrappers. Do not retry `start_orchestration`
+to repair a malformed request: construct the complete contract first, then
+call it once.
+
 1. Copy the exact user-authored task text into `task.user_request`; never
    paraphrase, normalize, summarize, or expand it. The sole host-metadata
    exception is Desktop's injected
@@ -270,8 +285,9 @@ should use canonical phases from the returned snapshot rather than guessing.
    exact briefing path named by its bootstrap, verifies its read-only mode and
    SHA-256, and stops on a writable or mismatched artifact. If the host file
    reader alone cannot open that exact path, it calls `read_dispatch_briefing`
-   once with the complete bootstrap identity/digest tuple. If the scoped read
-   also fails, it stops with that diagnostic. This is
+   with the complete bootstrap identity/digest tuple. If its bounded response
+   is incomplete, it continues only with the returned cursor until complete.
+   If the scoped read also fails, it stops with that diagnostic. This is
    its sole direct-read exception below `.codex/cortex`; it must never list or
    inspect the ledger, mutable state, baselines, delegation packages, another
    briefing, or report files. It records the exact bootstrap-provided
@@ -499,6 +515,15 @@ itself.
 
 ## Reports, questions, and completion
 
+Cortex captures the initial and every per-attempt file manifest as an
+immutable, content-addressed `cortex.db` record.
+Task and attempt state carry only compact `manifest-<sha256>` refs. Equal
+project state deduplicates, but every dispatch performs a fresh capture so
+external changes are still detected. After terminal completion is persisted,
+Cortex removes those database manifest records;
+final receipts retain digest and changed-file proof. An explicit
+`allow_rework` reopening establishes a fresh active baseline before new work.
+
 Every persisted report contains exactly `summary`, `findings`, `questions`,
 `changed_files`, `tests`, `evidence`, `uncertainty`, and `next_action`.
 The final `questions` list is always empty: material questions use the durable
@@ -524,7 +549,7 @@ the worker to regenerate a large inline report.
 The public dispatch result is deliberately compact: it carries a
 `dispatch_ref`, immutable `briefing_path`, `briefing_digest`, and a short native
 bootstrap. The full worker prompt is absent from the MCP result and mutable
-`current.json`/delegation JSON. Workers may directly read only their issued
+coordination state. Workers may directly read only their issued
 briefing; a failed host file read has one identity-and-digest-scoped
 `read_dispatch_briefing` fallback. All reports, questions, and lifecycle state stay behind scoped Cortex
 tools. This prevents output-size truncation without granting general ledger

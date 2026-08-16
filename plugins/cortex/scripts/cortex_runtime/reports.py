@@ -1,6 +1,6 @@
 """Scoped report and immutable-briefing operations.
 
-The compatibility facade supplies durable ledger helpers while this module owns
+The public facade supplies durable ledger helpers while this module owns
 the worker-facing report transport and keeps the public v4 surface narrow.
 """
 from __future__ import annotations
@@ -28,10 +28,11 @@ from cortex import (
     _contained_path,
     _delegation_report_index,
     _open_blocking_questions,
-    _read_private_json,
     _read_private_text,
     _recover_report_receipt,
     _report_index,
+    _write_delegation_report_index,
+    _write_report_index,
     _report_markdown,
     _report_metadata,
     _v3_resolve_task,
@@ -49,6 +50,7 @@ from cortex import (
     digest_text,
     dispatch_briefing_review_marker,
     ledger_root,
+    load_task_definition,
     load_state,
     materialize_planning_artifacts,
     now,
@@ -62,7 +64,7 @@ from cortex import (
     safe_id,
     select_project_root,
     state_lock,
-    write_json,
+    store_immutable_artifact,
     write_json_exclusive,
     write_text_atomic,
     write_text_exclusive,
@@ -171,7 +173,7 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
         if params.get("_require_harvest_manifest"):
             _validate_harvest_coverage_manifest(
                 select_project_root(params),
-                _read_private_json(task_dir / "task.json", "task definition"),
+                load_task_definition(task_dir, state),
                 str(attempt.get("gate") or ""),
             )
         if raw_planning is not None:
@@ -187,23 +189,72 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
         index = _report_index(paths, state["task_id"])
         submission_key = f"{attempt_id}:{submission_id}"
         authoritative: list[dict[str, Any]] = []
-        authoritative_numbers: list[int] = []
         occupied_numbers: list[int] = []
-        for namespace in (paths["records"], paths["markdown"], paths["receipts"]):
-            for artifact_path in namespace.iterdir():
-                match = re.fullmatch(r"(?:report-)?(\d+)\.(?:json|md)", artifact_path.name)
-                if match:
-                    occupied_numbers.append(int(match.group(1)))
-        for record_path in sorted(paths["records"].glob("report-*.json")):
-            if record_path.is_symlink() or not (match := re.fullmatch(r"report-(\d+)\.json", record_path.name)):
-                raise ValueError("report record namespace contains an unsafe entry")
-            authoritative_numbers.append(int(match.group(1)))
-            authoritative.append(_read_private_json(record_path, "report record"))
+        for metadata in index.get("reports", []):
+            report_id = safe_id(str(metadata.get("report_id") or ""))
+            match = re.fullmatch(r"report-(\d+)", report_id)
+            if not report_id or match is None:
+                raise ValueError("SQLite report index contains an invalid report id")
+            record, _ = _runtime.read_immutable_json_artifact(
+                task_dir,
+                state["task_id"],
+                f"reports/records/{report_id}.json",
+                kinds={"worker_report"},
+            )
+            if record.get("task_id") != state["task_id"] or record.get("report_id") != report_id:
+                raise ValueError("SQLite report artifact crosses task scope")
+            occupied_numbers.append(int(match.group(1)))
+            authoritative.append(record)
+        # A process can fail after committing immutable content but before it
+        # updates the small mutable report index. Rebuild only that missing
+        # index entry from the task-scoped SQLite artifact catalog; filesystem
+        # exports are deliberately not consulted.
+        indexed_ids = {str(item.get("report_id") or "") for item in index.get("reports", []) if isinstance(item, dict)}
+        artifact_offset = 0
+        while True:
+            artifacts, next_offset = _runtime.db_list_artifacts(
+                root,
+                state["task_id"],
+                kind="worker_report",
+                offset=artifact_offset,
+                page_size=100,
+            )
+            for artifact in artifacts:
+                export_path = str(artifact.get("export_path") or "")
+                match = re.fullmatch(r"reports/records/(report-\d+)\.json", export_path)
+                if match is None or match.group(1) in indexed_ids:
+                    continue
+                record, _ = _runtime.read_immutable_json_artifact(
+                    task_dir,
+                    state["task_id"],
+                    export_path,
+                    kinds={"worker_report"},
+                )
+                if record.get("task_id") != state["task_id"] or record.get("report_id") != match.group(1):
+                    raise ValueError("SQLite report artifact crosses task scope")
+                authoritative.append(record)
+                occupied_numbers.append(int(match.group(1).removeprefix("report-")))
+            if next_offset is None:
+                break
+            artifact_offset = next_offset
+        authoritative.sort(key=lambda item: safe_id(str(item.get("report_id") or "")))
+        rebuilt_metadata = [_runtime._report_metadata(item) for item in authoritative]
+        rebuilt_submissions = {
+            f"{item.get('attempt_id')}:{item.get('submission_id')}": safe_id(str(item.get("report_id") or ""))
+            for item in authoritative
+        }
+        if rebuilt_metadata != index.get("reports", []) or rebuilt_submissions != index.get("submissions", {}):
+            index = {
+                "schema": REPORT_SCHEMA,
+                "task_id": state["task_id"],
+                "reports": rebuilt_metadata,
+                "submissions": rebuilt_submissions,
+                "updated_at": now(),
+            }
+            _write_report_index(paths, state["task_id"], index)
         existing = next((item for item in authoritative if f"{item.get('attempt_id')}:{item.get('submission_id')}" == submission_key), None)
         existing_id = existing.get("report_id") if existing else None
         if existing_id:
-            existing_path = _contained_path(paths["records"], paths["records"] / f"{safe_id(existing_id)}.json", "report record")
-            existing = _read_private_json(existing_path, "report record")
             if existing.get("content_digest") != content_digest:
                 raise ValueError("idempotent report submission_id was reused with different content")
             attempt = _attempt(state, safe_id(str(existing["attempt_id"])))
@@ -214,9 +265,27 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
                     sanitize_planning_payload(existing["planning"], persisted=True),
                 )
             receipt, _ = _recover_report_receipt(paths, existing, state, bool(attempt.get("invalidated")))
+            _runtime.store_immutable_artifact(
+                task_dir,
+                state["task_id"],
+                kind="report_receipt",
+                title=f"reports/receipts/{receipt['receipt_id']}.json",
+                mime_type="application/json",
+                content=json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                export_path=f"reports/receipts/{receipt['receipt_id']}.json",
+            )
             markdown_path = paths["markdown"] / f"{existing_id}.md"
             if not markdown_path.exists():
                 _runtime.write_text_exclusive(markdown_path, _report_markdown(existing))
+            _runtime.store_immutable_artifact(
+                task_dir,
+                state["task_id"],
+                kind="report_markdown",
+                title=f"reports/markdown/{existing_id}.md",
+                mime_type="text/markdown",
+                content=_report_markdown(existing),
+                export_path=f"reports/markdown/{existing_id}.md",
+            )
             return {"idempotent": True, "report": existing, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
         attempt_count = sum(1 for item in authoritative if item.get("attempt_id") == attempt_id)
         aggregate_bytes = sum(len(json.dumps(item.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8")) for item in authoritative)
@@ -233,25 +302,67 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             "report": report, "planning": planning, "result_validation": result_validation,
             "content_digest": content_digest, "created_at": now(),
         }
+        report_artifact = store_immutable_artifact(
+            task_dir,
+            state["task_id"],
+            kind="worker_report",
+            title=f"reports/records/{report_id}.json",
+            mime_type="application/json",
+            content=json.dumps(
+                # The durable database copy is the complete authoritative
+                # report record.  The materialized JSON file receives the
+                # artifact references afterwards and is an export/repair
+                # view, never the sole source for a report read.
+                record,
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ),
+            export_path=f"reports/records/{report_id}.json",
+        )
+        record["report_artifact_ref"] = report_artifact["artifact_ref"]
         receipt = {
             "schema": REPORT_SCHEMA, "receipt_id": f"report-receipt-{report_id}", "report_id": report_id,
             "task_id": state["task_id"], "gate": attempt["gate"], "attempt_id": attempt_id,
             "content_digest": content_digest, "consumed_at": None, "consumed_by_evidence_id": None,
             "invalidated": False, "created_at": now(),
         }
-        _runtime.write_json_exclusive(paths["records"] / f"{report_id}.json", record)
-        _runtime.write_text_exclusive(paths["markdown"] / f"{report_id}.md", _report_markdown(record))
-        _runtime.write_json_exclusive(paths["receipts"] / f"{receipt['receipt_id']}.json", receipt)
+        receipt_artifact = store_immutable_artifact(
+            task_dir,
+            state["task_id"],
+            kind="report_receipt",
+            title=f"reports/receipts/{receipt['receipt_id']}.json",
+            mime_type="application/json",
+            content=json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            export_path=f"reports/receipts/{receipt['receipt_id']}.json",
+        )
+        # The export name resolves the immutable receipt; do not inject a
+        # second mutable field into the materialized receipt JSON.
+        del receipt_artifact
+        markdown = _report_markdown(record)
+        markdown_artifact = store_immutable_artifact(
+            task_dir,
+            state["task_id"],
+            kind="report_markdown",
+            title=f"reports/markdown/{report_id}.md",
+            mime_type="text/markdown",
+            content=markdown,
+            export_path=f"reports/markdown/{report_id}.md",
+        )
+        record["markdown_artifact_ref"] = markdown_artifact["artifact_ref"]
+        # Every task file is a replaceable export. Reconcile from the database
+        # rather than treating an existing projection as a report collision.
+        _runtime.write_json(paths["records"] / f"{report_id}.json", record)
+        _runtime.write_text_atomic(paths["markdown"] / f"{report_id}.md", markdown)
+        _runtime.write_json(paths["receipts"] / f"{receipt['receipt_id']}.json", receipt)
         if planning is not None:
             materialize_planning_artifacts(task_dir, state, attempt, report_id, report, planning)
         index.setdefault("reports", []).append(_report_metadata(record))
         index.setdefault("submissions", {})[submission_key] = report_id
         index["updated_at"] = now()
-        _runtime.write_json(paths["index"], index)
-        delegation_path, delegation_index = _delegation_report_index(paths, state["task_id"], attempt_id)
+        _write_report_index(paths, state["task_id"], index)
+        _, delegation_index = _delegation_report_index(paths, state["task_id"], attempt_id)
         delegation_index["owned_report_ids"] = sorted(set(delegation_index.get("owned_report_ids", [])) | {report_id})
         delegation_index["updated_at"] = now()
-        _runtime.write_json(delegation_path, delegation_index)
+        _write_delegation_report_index(paths, state["task_id"], attempt_id, delegation_index)
         append_journal_best_effort(task_dir, "report", f"{attempt_id} published {report_id}")
         return {"idempotent": False, "report": record, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
 
@@ -438,12 +549,12 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
     try:
         allowed = {
             "project_root", "task_id", "attempt_id", "profile",
-            "dispatch_ref", "briefing_digest",
+            "dispatch_ref", "briefing_digest", "cursor", "max_bytes",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError("unsupported read_dispatch_briefing fields: " + ", ".join(unknown))
-        for field in allowed:
+        for field in {"project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest"}:
             if not str(params.get(field) or "").strip():
                 raise ValueError(f"{field} is required; copy the exact value from the native dispatch bootstrap")
         project = select_project_root(params)
@@ -484,7 +595,38 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
         actual_digest = hashlib.sha256(briefing.encode("utf-8")).hexdigest()
         if actual_digest != briefing_digest:
             raise ValueError("immutable dispatch briefing digest changed after dispatch")
-        return {
+        root = _runtime._task_document_root(task_dir, state["task_id"])
+        artifact_ref = str(attempt.get("briefing_artifact_ref") or "")
+        artifact = (
+            _runtime.db_get_artifact_metadata(root, state["task_id"], artifact_ref)
+            if artifact_ref else None
+        )
+        if artifact is None:
+            artifact = _runtime.db_get_artifact_for_export_path(root, state["task_id"], relative)
+        if artifact is None or artifact.get("kind") != "dispatch_briefing" or artifact.get("digest_sha256") != briefing_digest:
+            raise ValueError("dispatch briefing has no matching immutable artifact catalog entry")
+        canonical = _runtime.db_read_artifact_content(root, state["task_id"], artifact["artifact_ref"])
+        if canonical != briefing:
+            raise ValueError("dispatch briefing export differs from its immutable artifact")
+        audience = f"worker:{attempt_id}:{profile}"
+        byte_offset = 0
+        raw_cursor = params.get("cursor")
+        if raw_cursor:
+            decoded = _runtime.db_decode_artifact_cursor(root, str(raw_cursor))
+            expected = {
+                "type": "briefing_read", "task_id": state["task_id"],
+                "artifact_ref": artifact["artifact_ref"], "digest_sha256": briefing_digest, "audience": audience,
+            }
+            if any(decoded.get(key) != value for key, value in expected.items()):
+                raise ValueError("briefing cursor is not valid for this dispatch, worker identity, or content version")
+            byte_offset = decoded.get("byte_offset")
+            if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
+                raise ValueError("briefing cursor byte offset is invalid")
+        requested_max = params.get("max_bytes")
+        if requested_max is not None and (isinstance(requested_max, bool) or not isinstance(requested_max, int)):
+            raise ValueError("briefing max_bytes must be an integer")
+        chunked = bool(raw_cursor) or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
+        base = {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "briefing_read",
@@ -493,7 +635,34 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
             "profile": profile,
             "dispatch_ref": dispatch_ref,
             "briefing_digest": briefing_digest,
+            "briefing_artifact": artifact,
             "review_marker": dispatch_briefing_review_marker(briefing_digest),
+        }
+        if chunked:
+            part = _runtime.db_read_artifact_range(
+                root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset,
+                max_bytes=requested_max or 16 * 1024,
+            )
+            result = {
+                **base,
+                "content_part": part.get("content_part"), "encoding": part["encoding"],
+                "byte_offset": part["byte_offset"], "returned_bytes": part["returned_bytes"], "complete": part["complete"],
+            }
+            if part.get("content_base64") is not None:
+                result["content_base64"] = part["content_base64"]
+            if part["next_byte_offset"] is not None:
+                result["next_cursor"] = _runtime.db_encode_artifact_cursor(root, {
+                    "type": "briefing_read", "task_id": state["task_id"],
+                    "artifact_ref": artifact["artifact_ref"], "digest_sha256": briefing_digest,
+                    "byte_offset": part["next_byte_offset"], "audience": audience,
+                })
+            result["next_action"] = (
+                "If complete is false, call read_dispatch_briefing again with the same exact identity/digest tuple and next_cursor. "
+                "Do not substitute another briefing or read another Cortex path."
+            )
+            return result
+        return {
+            **base,
             "briefing": briefing,
             "next_action": (
                 "Follow this complete validated briefing. Do not read another Cortex ledger path or briefing, and "
@@ -515,6 +684,36 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
                 "the Cortex ledger, substitute another briefing, or guess task identity."
             ),
         }
+
+
+def _materialize_report_markdown_projection(
+    task_dir: Path,
+    state: dict[str, Any],
+    report_ref: str,
+) -> Path:
+    """Restore a Desktop Markdown projection from its canonical artifact.
+
+    The link returned to a coordinator must remain useful after an interrupted
+    export write or a deliberate local projection cleanup.  The immutable
+    SQLite object, not a sibling JSON record, supplies the replacement.
+    """
+    root = _runtime._task_document_root(task_dir, state["task_id"])
+    relative = f"reports/markdown/{report_ref}.md"
+    artifact = _runtime.db_get_artifact_for_export_path(root, state["task_id"], relative)
+    if artifact is None or artifact.get("kind") != "report_markdown":
+        raise ValueError("worker report Markdown artifact is unavailable")
+    content = _runtime.db_read_artifact_content(root, state["task_id"], artifact["artifact_ref"])
+    if not isinstance(content, str):
+        raise ValueError("worker report Markdown artifact is not UTF-8 text")
+    path = report_bus_paths(task_dir)["markdown"] / f"{report_ref}.md"
+    if path.exists():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("worker report Markdown projection is unsafe")
+        if path.read_text(encoding="utf-8") != content:
+            write_text_atomic(path, content)
+    else:
+        write_text_exclusive(path, content)
+    return report_markdown_path(task_dir, report_ref)
 
 
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
@@ -542,31 +741,94 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             allowed_report_refs = {safe_id(str(item)) for item in attempt.get("context_report_ids") or []}
             if report_ref not in allowed_report_refs:
                 raise ValueError("successor worker may read only predecessor report refs supplied in its dispatch")
-        paths = report_bus_paths(task_dir)
-        record_path = _contained_path(paths["records"], paths["records"] / f"{report_ref}.json", "worker report")
-        if not record_path.is_file() or record_path.is_symlink():
-            raise ValueError("report_ref is unavailable for the selected Cortex task; inspect available_reports and use only a persisted ref")
-        record = _read_private_json(record_path, "worker report")
-        if record.get("task_id") != state.get("task_id"):
-            raise ValueError("report_ref does not belong to the selected Cortex task")
+        root = _runtime._task_document_root(task_dir, state["task_id"])
+        # The export file is deliberately not consulted: report reads must
+        # stay valid after a clean-up/rebuild and must not turn a Markdown/JSON
+        # projection into a second source of truth.
+        artifact = _runtime.db_get_artifact_for_export_path(
+            root, state["task_id"], f"reports/records/{report_ref}.json",
+        )
+        if artifact is None or artifact.get("kind") not in {"worker_report", "report_record"}:
+            raise ValueError("report_ref has no immutable artifact catalog entry")
+        artifact_content = _runtime.db_read_artifact_content(root, state["task_id"], artifact["artifact_ref"])
+        if not isinstance(artifact_content, str):
+            raise ValueError("report artifact content is not UTF-8 JSON")
+        record = json.loads(artifact_content)
+        if not isinstance(record, dict) or record.get("task_id") != state.get("task_id") or record.get("report_id") != report_ref:
+            raise ValueError("report artifact does not belong to the selected Cortex task or report ref")
         phase = record.get("gate") or "report"
-        result = {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": True,
-            "task_ref": task_ref,
-            "report_ref": report_ref,
-            "phase": phase,
-            "profile": (record.get("producer") or {}).get("profile"),
-            "report": record.get("report"),
-            "result_validation": record.get("result_validation"),
-        }
+        audience = (
+            f"worker:{safe_id(raw_attempt_id)}:{canonical_profile(raw_profile)}"
+            if worker_context else "coordinator"
+        )
+        byte_offset = 0
+        raw_cursor = params.get("cursor")
+        if raw_cursor:
+            decoded = _runtime.db_decode_artifact_cursor(root, str(raw_cursor))
+            expected = {
+                "type": "report_read", "task_id": state["task_id"],
+                "artifact_ref": artifact["artifact_ref"], "digest_sha256": artifact["digest_sha256"],
+                "audience": audience,
+            }
+            if any(decoded.get(key) != value for key, value in expected.items()):
+                raise ValueError("report cursor is not valid for this report, task, reader scope, or content version")
+            byte_offset = decoded.get("byte_offset")
+            if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
+                raise ValueError("report cursor byte offset is invalid")
+        requested_max = params.get("max_bytes")
+        if requested_max is not None and (isinstance(requested_max, bool) or not isinstance(requested_max, int)):
+            raise ValueError("report max_bytes must be an integer")
+        chunked = bool(raw_cursor) or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
+        if chunked:
+            part = _runtime.db_read_artifact_range(
+                root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset,
+                max_bytes=requested_max or 16 * 1024,
+            )
+            result = {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "task_ref": task_ref,
+                "report_ref": report_ref,
+                "phase": phase,
+                "profile": (record.get("producer") or {}).get("profile"),
+                "report_artifact": artifact,
+                "content_part": part.get("content_part"),
+                "encoding": part["encoding"],
+                "byte_offset": part["byte_offset"],
+                "returned_bytes": part["returned_bytes"],
+                "complete": part["complete"],
+            }
+            if part.get("content_base64") is not None:
+                result["content_base64"] = part["content_base64"]
+            if part["next_byte_offset"] is not None:
+                result["next_cursor"] = _runtime.db_encode_artifact_cursor(root, {
+                    "type": "report_read", "task_id": state["task_id"],
+                    "artifact_ref": artifact["artifact_ref"], "digest_sha256": artifact["digest_sha256"],
+                    "byte_offset": part["next_byte_offset"], "audience": audience,
+                })
+        else:
+            report_payload = record.get("report")
+            if not isinstance(report_payload, dict):
+                raise ValueError("report artifact content is invalid")
+            result = {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "task_ref": task_ref,
+                "report_ref": report_ref,
+                "phase": phase,
+                "profile": (record.get("producer") or {}).get("profile"),
+                "report": report_payload,
+                "result_validation": record.get("result_validation"),
+                "report_artifact": artifact,
+                "complete": True,
+            }
         if worker_context:
             result["next_action"] = (
                 "Use this supplied predecessor report only as evidence context, verify consequential claims in the "
                 "current project, and include the exact generated Predecessor review acknowledgement in report.evidence."
             )
         else:
-            markdown_path = report_markdown_path(task_dir, report_ref)
+            markdown_path = _materialize_report_markdown_projection(task_dir, state, report_ref)
             result.update({
                 "report_markdown_path": str(markdown_path),
                 "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
@@ -603,7 +865,12 @@ def get_delegation_reports(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("delegation is not granted the requested report bodies: " + ", ".join(denied))
     reports = []
     for report_id in requested:
-        record = _read_private_json(_contained_path(paths["records"], paths["records"] / f"{report_id}.json", "report record"), "report record")
+        record, _ = _runtime.read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{report_id}.json",
+            kinds={"worker_report", "report_record"},
+        )
         if record.get("task_id") != state["task_id"]:
             raise ValueError("report record crosses task scope")
         # A coordinator completing the producer attempt needs the one-use
@@ -612,9 +879,11 @@ def get_delegation_reports(params: dict[str, Any]) -> dict[str, Any]:
         # validate the durable binding before exposing it.
         if record.get("attempt_id") == attempt_id:
             receipt_id = f"report-receipt-{report_id}"
-            receipt = _read_private_json(
-                _contained_path(paths["receipts"], paths["receipts"] / f"{receipt_id}.json", "report receipt"),
-                "report receipt",
+            receipt, _ = _runtime.read_immutable_json_artifact(
+                task_dir,
+                state["task_id"],
+                f"reports/receipts/{receipt_id}.json",
+                kinds={"report_receipt"},
             )
             if (
                 receipt.get("schema") != REPORT_SCHEMA

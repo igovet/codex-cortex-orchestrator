@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "6.1.3":
-        fail("plugin manifest must identify cortex at release version 6.1.3")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "6.4.0":
+        fail("plugin manifest must identify cortex at release version 6.4.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     try:
@@ -229,7 +229,7 @@ def main() -> int:
         fail("workers must receive scoped briefing/predecessor reads, question, and report operations")
     if (
         shared.get("dispatch_briefing_fallback")
-        != "one_scoped_read_dispatch_briefing_call_with_exact_identity_and_digest_only_when_host_file_read_is_unavailable"
+        != "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable"
     ):
         fail("worker briefing fallback must be exact-identity/digest scoped")
     if set(shared.get("coordinator_operations", [])) != {

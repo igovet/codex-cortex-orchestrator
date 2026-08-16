@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import json
 import os
@@ -49,6 +48,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
         requirements = requirements or []
         classified = control.classify_task({"complexity": complexity, "requirements": requirements, "principal": "owner"})
         return control.init_task({"task_id": task_id, "objective": "invariant test", "complexity": complexity, "classification_id": classified["classification_id"], "requirements": requirements, "principal": "owner", "thread_id": "owner"})
+
+    def task_state(self, task_dir: Path) -> dict:
+        return control.load_task_state_for_artifact(task_dir)
+
+    def task_definition(self, task_dir: Path) -> dict:
+        return control.load_task_definition(task_dir)
+
+    def write_task_state(self, state: dict) -> None:
+        control.db_update_task_state(self.ledger, state)
 
     def delegate(self, state, task_id, gate, agent="general"):
         observed = control.status({"task_id": task_id, "principal": "owner"})
@@ -173,6 +181,68 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(len(handed["file_manifest_receipt"]["reported_paths"]), len(complete_paths))
         self.assertNotIn("manifest_file", handed)
         self.assertFalse(any((task_dir / "handoffs").glob("*-manifest.json")))
+
+    def test_manifest_snapshots_are_deduplicated_for_unchanged_attempts(self):
+        state = self.init()["state"]
+        first = self.delegate(state, "task", "plan", agent="planner")
+        second = self.delegate(first["state"], "task", "plan", agent="planner")
+        attempts = second["state"]["attempts"]
+        task_dir = self.ledger / "tasks" / "0001-task"
+        snapshots = control.db_manifest_snapshot_refs(self.ledger)
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(attempts[0]["result_baseline_ref"], attempts[1]["result_baseline_ref"])
+        self.assertEqual(attempts[0]["result_baseline_ref"], second["state"]["initial_manifest_ref"])
+        self.assertFalse((task_dir / "baseline-manifest.json").exists())
+        self.assertFalse(any((task_dir / "delegations").glob("*.baseline.json")))
+        self.assertEqual(snapshots[0], attempts[0]["result_baseline_ref"])
+
+    def test_completed_task_removes_manifest_snapshots_and_rework_recreates_one(self):
+        created = self.init()
+        task_dir = self.ledger / "tasks" / created["task_directory"]
+        state = self.task_state(task_dir)
+        state.update({
+            "current_pipeline": ["close"],
+            "parallel_groups": [["close"]],
+            "current_gates": ["close"],
+            "require_delegation": False,
+            "require_handoff": False,
+        })
+        self.write_task_state(state)
+
+        evidence = control.record_evidence({
+            "task_id": "task",
+            "principal": "owner",
+            "expected_revision": state["revision"],
+            "gate": "close",
+            "summary": "close manifest lifecycle evidence",
+        })
+
+        closed = control.record_gate({
+            "task_id": "task",
+            "principal": "owner",
+            "expected_revision": evidence["state"]["revision"],
+            "gate": "close",
+            "outcome": "passed",
+            "summary": "close manifest lifecycle",
+        })
+        closed_state = closed["state"]
+        self.assertEqual(closed_state["status"], "completed")
+        self.assertEqual(closed_state["manifest_snapshot_cleanup"]["status"], "completed")
+        self.assertEqual(control.db_manifest_snapshot_refs(self.ledger), [])
+
+        reworked = control.update_pipeline({
+            "task_id": "task",
+            "principal": "owner",
+            "expected_revision": closed_state["revision"],
+            "operations": [{"op": "rework", "gate": "close"}],
+            "allow_rework": True,
+            "reason": "verify manifest re-baselining",
+        })
+        self.assertEqual(reworked["state"]["status"], "active")
+        ref = reworked["state"]["initial_manifest_ref"]
+        self.assertIsNotNone(control.db_get_manifest_snapshot(self.ledger, ref))
+        self.assertEqual(reworked["state"]["manifest_snapshot_cleanup"]["status"], "active")
 
     def test_c2_pipeline_requires_documentation(self):
         created = self.init(complexity="C2")
@@ -348,10 +418,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_expired_lane_resource_does_not_block_retirement(self):
         control.create_lane({"lane_id": "expired-resource", "principal": "owner"})
         control.claim_lane_resource({"lane_id": "expired-resource", "principal": "owner", "path": "port:9000", "owner": "worker", "expires_at": "2999-01-01T00:00:00+00:00"})
-        state_path = self.ledger / "lanes" / "expired-resource" / "current.json"
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        _, state = control.db_get_lane(self.ledger, "expired-resource")
         next(iter(state["resources"].values()))["expires_at"] = "2000-01-01T00:00:00+00:00"
-        state_path.write_text(json.dumps(state), encoding="utf-8")
+        definition, _ = control.db_get_lane(self.ledger, "expired-resource")
+        control.db_put_lane(self.ledger, definition, state)
         retired = control.retire_lane({"lane_id": "expired-resource", "principal": "owner", "clean": True})
         self.assertEqual(retired["state"]["status"], "retired")
 
@@ -403,14 +473,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
             'default_tools_approval_mode = "approve"\n',
             encoding="utf-8",
         )
-        retired = codex_home / "agents" / "orchestrator.toml"
-        retired.parent.mkdir()
-        retired.write_bytes(base64.b64decode("bmFtZSA9ICJvcmNoZXN0cmF0b3IiCmRlc2NyaXB0aW9uID0gIkRlbGVnYXRpb24tb25seSBjb25kdWN0b3IgZm9yIHJvdXRpbmcgd29yayB0byBzcGVjaWFsaXN0IGFnZW50cyBhbmQgbWFuYWdpbmcgb3JjaGVzdHJhdGlvbiBzdGF0ZS4iCnNhbmRib3hfbW9kZSA9ICJyZWFkLW9ubHkiCmRldmVsb3Blcl9pbnN0cnVjdGlvbnMgPSAiIiIKWW91IGFyZSB0aGUgb3JjaGVzdHJhdGlvbiBjb25kdWN0b3IsIG5vdCBhbiBpbXBsZW1lbnRhdGlvbiBvciBpbnZlc3RpZ2F0aW9uIGFnZW50LgpEbyBub3QgaW5zcGVjdCwgc2VhcmNoLCByZWFkLCB0ZXN0LCBidWlsZCwgb3IgZWRpdCB0aGUgdGFyZ2V0IHByb2plY3QgeW91cnNlbGYuClVzZSBvbmx5IG9yY2hlc3RyYXRpb24gY29udHJvbCwgYWdlbnQgZGlzcGF0Y2gsIGFnZW50IG1lc3NhZ2luZywgdGFzayBzdGF0dXMsCmdhdGUsIGV2aWRlbmNlLCBhbmQgaGFuZG9mZiBvcGVyYXRpb25zLiBDb252ZXJ0IHRoZSB1c2VyJ3MgcmVxdWVzdCBpbnRvCmJvdW5kZWQgZGVsZWdhdGlvbnMgd2l0aCBleHBsaWNpdCBvd25lcnNoaXAsIGFsbG93ZWQgcGF0aHMsIGFjY2VwdGFuY2UKY3JpdGVyaWEsIGFuZCB2ZXJpZmljYXRpb24gcmVzcG9uc2liaWxpdGllcy4gV2FpdCBmb3Igd29ya2VyIHJlcG9ydHMsIHJvdXRlCmZvbGxvdy11cCB3b3JrLCBhZHZhbmNlIGdhdGVzIGZyb20gcmVjb3JkZWQgZXZpZGVuY2UsIGFuZCBzdXJmYWNlIGJsb2NrZXJzLgpOZXZlciBjb21wZW5zYXRlIGZvciBhIG1pc3Npbmcgd29ya2VyIHJlc3VsdCBieSBleGFtaW5pbmcgb3IgY2hhbmdpbmcgdGhlCnJlcG9zaXRvcnkgeW91cnNlbGYuIFRoZSBmaW5hbCByZXNwb25zZSBtdXN0IHN1bW1hcml6ZSB3b3JrZXIgZXZpZGVuY2UgYW5kCnJlbWFpbmluZyByaXNrLCBub3QgY2xhaW0gbG9jYWxseSBwZXJmb3JtZWQgd29yay4KIiIiCg=="))
-        retired_cache = codex_home / "plugins/cache/personal/codex-orchestration-control/4.4.0"
-        (retired_cache / ".codex-plugin").mkdir(parents=True)
-        (retired_cache / "scripts").mkdir()
-        (retired_cache / ".codex-plugin/plugin.json").write_text(json.dumps({"name": "codex-orchestration-control", "version": "4.4.0"}), encoding="utf-8")
-        (retired_cache / "scripts/orchestration_control.py").write_text('SERVER_VERSION = "4.4.0"\n', encoding="utf-8")
+        unrelated_state = codex_home / "other-plugin/state.json"
+        unrelated_state.parent.mkdir(parents=True)
+        unrelated_state.write_text('{"preserve": true}\n', encoding="utf-8")
         environment = os.environ.copy()
         environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home)})
         script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
@@ -434,12 +499,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(len(cortex_hook_state), 5)
         for value in cortex_hook_state.values():
             self.assertRegex(value["trusted_hash"], r"^sha256:[0-9a-f]{64}$")
-        self.assertFalse(retired.exists())
-        self.assertFalse(retired_cache.parent.exists())
-        backup_root = codex_home / "backups/cortex-upgrade"
-        self.assertTrue(backup_root.is_dir())
-        for backup_path in [backup_root, *backup_root.rglob("*")]:
-            self.assertEqual(backup_path.stat().st_mode & 0o077, 0, backup_path)
+        self.assertEqual(unrelated_state.read_text(encoding="utf-8"), '{"preserve": true}\n')
         cache = codex_home / "plugins/cache/cortex/cortex" / control.SERVER_VERSION / "scripts/cortex.py"
         cache.write_text(cache.read_text(encoding="utf-8") + "\n# drift\n", encoding="utf-8")
         drift = subprocess.run(["bash", str(script), "--check"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
@@ -527,7 +587,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         checked = subprocess.run(["bash", str(script), "--check"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
-    def test_sync_refuses_unauthenticated_retired_cache(self):
+    def test_sync_ignores_unrelated_plugin_cache(self):
         isolated = self.base / "untrusted-cache-home"
         codex_home = isolated / ".codex"
         cache = codex_home / "plugins/cache/personal/codex-orchestration-control/4.4.0"
@@ -541,8 +601,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home)})
         script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
         completed = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("refusing unauthenticated retired plugin cache", completed.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
 
     def test_root_marketplace_validator_rejects_retired_nested_artifacts(self):
@@ -674,7 +733,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("must not inspect", context)
         self.assertIn("Remain idle while workers run", context)
 
-    def test_session_hook_accepts_legacy_thread_id_alias(self):
+    def test_session_hook_accepts_thread_id_alias(self):
         self.init(task_id="legacy-session-hook")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         completed = subprocess.run(
@@ -692,13 +751,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_compact_session_hook_reasserts_durable_recovery(self):
         self.init(task_id="compact-recovery")
         public_ref = control._v3_task_ref("compact-recovery")
-        (self.ledger / "orchestration-operations.json").write_text(
-            json.dumps({
-                "schema": "cortex/orchestration/v4",
-                "tasks": {"compact-recovery": {"start": {"task_ref": public_ref}}},
-            }),
-            encoding="utf-8",
-        )
+        control.db_put_global(self.ledger, "operation_registry", {
+            "schema": "cortex/orchestration/v4",
+            "starts": {},
+            "tasks": {"compact-recovery": {"start": {"task_ref": public_ref}}},
+        })
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         event = {"hook_event_name": "SessionStart", "session_id": "owner", "source": "compact"}
         completed = subprocess.run(
@@ -889,11 +946,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         created = self.init(task_id="schema-check")
         task_dir = self.ledger / "tasks" / created["task_directory"]
         unsupported = "cortex/" + "v" + str(5)
-        for name in ("task.json", "current.json"):
-            path = task_dir / name
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            payload["schema"] = unsupported
-            path.write_text(json.dumps(payload), encoding="utf-8")
+        task = self.task_definition(task_dir)
+        state = self.task_state(task_dir)
+        task["schema"] = unsupported
+        state["schema"] = unsupported
+        control.db_update_task_definition(self.ledger, task)
+        self.write_task_state(state)
         with self.assertRaisesRegex(ValueError, "create a new task"):
             control.status({"task_id": "schema-check", "principal": "owner"})
 
@@ -1049,7 +1107,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 "context_files": ["docs/project/index.md"],
                 "knowledge_index_files": ["docs/project/index.md"],
                 "context_report_ids": ["report-0001"],
-                "result_baseline_file": f"delegations/{gate}-01.baseline.json",
+                "result_baseline_ref": "manifest-" + "a" * 64,
                 "task_acceptance_criteria": ["The requested behavior is complete."],
                 "acceptance_criteria": ["The delegated gate outcome is complete."],
                 "task_verification": ["The final verification succeeds."],
@@ -1076,7 +1134,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 self.assertIn("Dispatch briefing reviewed: <sha256>", prompt)
                 self.assertIn("Use scoped Cortex tools for predecessor reports", prompt)
                 self.assertIn("read_dispatch_briefing", prompt)
-                self.assertIn(f"delegations/{gate}-01.baseline.json", prompt)
+                self.assertIn("Attempt baseline ref: 'manifest-", prompt)
                 self.assertIn("read_worker_report", prompt)
                 self.assertIn(f"attempt_id='{gate}-01'", prompt)
                 self.assertIn(f"profile={name!r}", prompt)
@@ -1166,7 +1224,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertEqual(
             shared["dispatch_briefing_fallback"],
-            "one_scoped_read_dispatch_briefing_call_with_exact_identity_and_digest_only_when_host_file_read_is_unavailable",
+            "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable",
         )
         self.assertEqual(
             shared["repository_intelligence"],

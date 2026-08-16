@@ -11,7 +11,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 from jsonrpc_harness import JsonRpcHarness  # noqa: E402
+import cortex  # noqa: E402
 
 SERVER = ROOT / "plugins/cortex/scripts/cortex.py"
 
@@ -139,7 +141,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
 
     # A fresh process must reconstruct the active relative step read-only.
     with JsonRpcHarness(server, project, ledger) as rpc:
-        task_definition = json.loads((ledger / "tasks" / task_directory / "task.json").read_text(encoding="utf-8"))
+        task_definition = cortex.load_task_definition(ledger / "tasks" / task_directory)
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
         parallel_wave_seen = False
@@ -165,7 +167,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
             parallel = len(dispatches) > 1
             parallel_wave_seen |= parallel
             continue_calls += 1
-            state = json.loads((ledger / "tasks" / task_directory / "current.json").read_text(encoding="utf-8"))
+            state = cortex.load_task_state_for_artifact(ledger / "tasks" / task_directory)
             active_attempts = [
                 item for item in state["attempts"]
                 if item.get("status") == "awaiting_host_spawn" and not item.get("invalidated")
@@ -234,17 +236,16 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         raise AssertionError("the C2 smoke plan did not pause for post-plan approval")
 
     task_path = ledger / "tasks" / task_directory
-    state = json.loads((task_path / "current.json").read_text(encoding="utf-8"))
-    task = json.loads((task_path / "task.json").read_text(encoding="utf-8"))
+    state = cortex.load_task_state_for_artifact(task_path)
+    task = cortex.load_task_definition(task_path, state)
     receipts = [json.loads(path.read_text(encoding="utf-8")) for path in (task_path / "reports/receipts").glob("*.json")]
-    operations = [json.loads(path.read_text(encoding="utf-8")) for path in (ledger / "operations").glob("*.json")]
     if task.get("schema") != "cortex/v8" or state.get("schema") != "cortex/v8" or state.get("status") != "completed":
         raise AssertionError("public orchestration did not preserve the cortex/v8 ledger or complete the task")
     if not receipts or any(not item.get("consumed_at") for item in receipts):
         raise AssertionError("every passed worker report must be consumed by evidence")
-    if not state.get("handoff_created") or not all(item.get("status") == "committed" for item in operations):
+    if not state.get("handoff_created"):
         raise AssertionError("handoff or durable transaction commit is missing")
-    if not (task_path / "planning/manifest.json").is_file():
+    if cortex.current_planning_manifest(task_path) is None:
         raise AssertionError("Planner work-breakdown manifest is missing")
     return {
         "status": "PASS", "fixture": str(base), "task_directory": str(task_path),

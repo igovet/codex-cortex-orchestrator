@@ -11,8 +11,9 @@ question/report transport. Coordinators use `start_orchestration` and
 persisted report, and `manage_orchestration` only for recovery or rare
 subsystems. Workers use `worker_question` and `record_report`; a worker whose
 host filesystem read cannot open its exact briefing may call
-`read_dispatch_briefing` once with the complete identity/digest tuple from its
-bootstrap. A successor worker may also use `read_worker_report` with its exact attempt/profile only
+`read_dispatch_briefing` with the complete identity/digest tuple from its
+bootstrap. If a bounded response is incomplete, it may continue only with the
+returned opaque cursor until `complete=true`. A successor worker may also use `read_worker_report` with its exact attempt/profile only
 for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
@@ -79,8 +80,9 @@ signal, never permission for the root to perform the work directly.
    `.codex/cortex`: never list or inspect the directory, mutable state,
    baselines, delegation packages, another briefing, or report files. If the
    host filesystem read says this exact path is missing or unreadable, the
-   worker may call `read_dispatch_briefing` once with the exact project root,
+   worker may call `read_dispatch_briefing` with the exact project root,
    task id, attempt id, profile, dispatch ref, and digest from the bootstrap.
+   An incomplete bounded response may continue only with its returned cursor.
    That scoped fallback returns only the same validated briefing and grants no
    directory or ledger access. If it also fails, stop with its exact diagnostic.
    After reviewing it, the worker includes the exact bootstrap-supplied `Dispatch
@@ -294,10 +296,12 @@ question as an ordinary message.
 Project maintenance uses `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` only after the user
 explicitly selects the `prune` route. It removes task-scoped Cortex ledger
-state whose last update is at least seven days old, including abandoned active
-tasks, while preserving recent tasks, lanes, plugin files, project source, and
-documentation. It is project-scoped, must omit `task_ref`, and is safe to run
-weekly; do not use an unbounded clear operation.
+state only for completed tasks whose last update is at least seven days old.
+Active and blocked tasks are preserved regardless of age, as is every
+classification receipt referenced by a retained task. Recent completed tasks,
+lanes, plugin files, project source, and documentation are also preserved. It
+is project-scoped, requires exact `PRUNE`, must omit `task_ref`, and is safe to
+run weekly; do not use an unbounded clear operation.
 
 ## Dispatch and evidence policy
 
@@ -380,3 +384,10 @@ report; narrow the dependency set with `depends_on`.
 Every call supplies its exact absolute `project_root`. Runtime state stays in
 `${project_root}/.codex/cortex` using the canonical `cortex/v8` ledger.
 `CORTEX_ROOT`, `/tmp` fallback, and symlink traversal remain forbidden.
+Initial and per-attempt project manifests are immutable, content-addressed
+SQLite records referenced from state by compact
+`manifest-<sha256>` refs. Identical state deduplicates, but every dispatch
+captures again to detect external changes. Terminal close persists completed
+state before removing database manifest records;
+final receipts retain digest/change proof. `allow_rework` reopening captures a
+fresh active baseline before replacement dispatches.

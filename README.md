@@ -4,13 +4,13 @@ Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It uses canonical task-ledger schema
 `cortex/v8`, public lifecycle schema `cortex/orchestration/v4`, and plugin
-version **6.1.3**. The public MCP surface has exactly seven tools: three coordinator
+version **6.4.0**. The public MCP surface has exactly seven tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question`, `record_report`, exact
 immutable-briefing fallback `read_dispatch_briefing`, and scoped predecessor
-reads through `read_worker_report`. Legacy v7/v3 ledgers and facades are unsupported: they are
-neither migrated nor resumed and must be recreated.
+reads through `read_worker_report`. Pre-SQLite coordination state is unsupported:
+it is neither migrated nor resumed, so a task starts from the v8 SQLite ledger.
 The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
 source for the main Cortex skill. All installable profiles, skills, hooks, MCP
 configuration, and runtime code live below `plugins/cortex/`; root-level
@@ -118,12 +118,10 @@ Run one command from this repository:
 ./scripts/sync-cortex.sh
 ```
 
-It validates the repository marketplace and plugin, removes only exact known
-managed legacy artifacts after a backup, registers the repo-local marketplace,
-reinstalls Cortex, and verifies same-version file content. Cleanup is limited
-to the known profile hash, an authenticated retired 4.4.0 cache layout, and the
-exact retired local marketplace entry. Unexpected files, symlinks, versions,
-or paths cause refusal. If `~/.codex/config.toml` already contains Cortex's
+It validates the repository marketplace and plugin, registers the repo-local
+marketplace, reinstalls Cortex, and verifies same-version file content. It does
+not scan, import, alter, or clean up prior orchestration state or unrelated
+plugin data. If `~/.codex/config.toml` already contains Cortex's
 `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
 override, the installer preserves that value across the remove/add cycle; it
 does not create the override for users who have not configured it. The same
@@ -132,7 +130,7 @@ installer atomically enforces
 different existing default it creates a private backup; comments, unrelated
 keys, and file mode are preserved. Use
 `--dry-run` to report the planned update without writing, or `--check` for a
-read-only installed-content and legacy-artifact check:
+read-only installed-content check:
 
 ```bash
 ./scripts/sync-cortex.sh --dry-run
@@ -150,13 +148,11 @@ five-hook set no longer match; a changed or untrusted `PreToolUse` or
 `PostToolUse` hook therefore cannot silently invalidate host-worker binding.
 
 For rollback, remove the new install with `codex plugin remove cortex@cortex`.
-Managed legacy artifacts removed during upgrade are copied first under
-`$CODEX_HOME/backups/cortex-upgrade/` in a collision-safe private backup slot.
-The installer enforces mode `0700` on the Cortex upgrade directory and removes
-group/world permissions recursively from each completed backup slot.
-Those backups are local operator data: they are never uploaded or included in
-the repository release archive. Restoring or deleting them is an explicit
-manual operation so unrelated user-owned configuration is never overwritten.
+When the installer changes an existing global default-subagent-model setting,
+it first creates a private backup under `$CODEX_HOME/backups/cortex-upgrade/`.
+The installer enforces mode `0700` on that directory and removes group/world
+permissions from each backup slot. Those backups are local operator data: they
+are never uploaded or included in the repository release archive.
 
 Start a **new Codex thread** after installing or updating before dispatching
 agents. Existing threads can retain absolute paths to lifecycle hooks in the
@@ -208,7 +204,7 @@ default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
 and secret-prone paths before validating the package again. Run
 `python3 scripts/verify-cortex-release.py --require-tracked` against the exact
-committed Cortex 6.1.3 candidate before any push, tag, or catalog submission;
+committed Cortex 6.4.0 candidate before any push, tag, or catalog submission;
 the command deliberately does not attest mutable working-tree changes.
 
 See [release readiness](docs/release-readiness.md) for the external gates:
@@ -387,9 +383,9 @@ evidence records, and report receipts. Cortex must not return a false completed
 result while those replacement waves remain. A completed response explicitly
 reports `close_verified` and `handoff_ready` so Luna does not start a second
 run merely to rediscover terminal proof.
-Legacy `cortex/v7` ledgers and the v3 facade are unsupported and are not
-inspected, migrated, or resumed; the legacy `orchestrate` facade is not
-published in `tools/list`.
+Pre-SQLite and pre-v4 coordination state is unsupported and is not inspected,
+migrated, or resumed; only the seven documented v4 tools are published in
+`tools/list`.
 
 Workers never call Cortex lifecycle operations. They call scoped
 `worker_question` for unresolved material user decisions, use the native
@@ -480,12 +476,13 @@ Each compact native dispatch carries a `dispatch_ref`, an immutable scoped
 `briefing_path`, and its SHA-256 digest. The bootstrap instructs the worker to
 read exactly that briefing path and no other `.codex/cortex` ledger path, then
 publish the exact `Dispatch briefing reviewed: <sha256>` marker in evidence.
-The full prompt is never stored in mutable `current.json` or delegation JSON;
-only the immutable briefing file is read directly. When the host file reader
-cannot open that exact path, `read_dispatch_briefing` provides one scoped
-fallback bound to the complete task/attempt/profile/dispatch/digest tuple; it
-cannot list the ledger or select another artifact. Predecessor reports remain
-available through scoped `read_worker_report` calls only.
+The full prompt is never stored in mutable coordination state: that state is
+kept in SQLite, while only the immutable briefing file is read directly. When the host file reader
+cannot open that exact path, `read_dispatch_briefing` provides a scoped,
+cursor-paged fallback bound to the complete task/attempt/profile/dispatch/digest
+tuple; a worker may continue only with its returned cursor, and cannot list the
+ledger or select another artifact. Predecessor reports remain available through
+scoped, bounded `read_worker_report` calls only.
 Every delegation records requested/expected model metadata separately from
 the native request override and always records reasoning effort. `explorer`
 always selects Luna; its effort is chosen by the coordinator or defaults from
@@ -641,7 +638,7 @@ not proof that the host spawned an agent.
 Report intake is bounded to 64 KiB and 100 list items per field. Ordinary JSON
 writes are bounded by `MAX_JSON_BYTES` (8 MiB) and fail before replacement with
 an actionable diagnostic; manifests use the separate `MAX_MANIFEST_BYTES` (64
-MiB) bound. Baseline manifest preflight runs before task-directory creation,
+MiB) bound. Initial manifest capture preflight runs before task-directory creation,
 and handoff/reconciliation snapshot serialization remains bounded, so oversized
 artifacts fail closed instead of surfacing only at close. Task and operation
 ledger state also has an 8 MiB file limit. A task keeps
@@ -663,6 +660,16 @@ rule or recognizable build-output marker justifies it; source directories with
 those names remain tracked otherwise. Symlinks are recorded without following
 them. This keeps final changed-file reconciliation useful without hashing
 virtual environments and package caches.
+
+Initial task and per-attempt manifests are immutable, content-addressed
+records in the project-local `cortex.db`. Task state and attempts carry only
+compact `manifest-<sha256>` references and the required comparison digests.
+Identical project state reuses one record, but every dispatch still performs a
+fresh capture so changes made outside the orchestration cannot hide behind
+deduplication. After a completed close is persisted, Cortex removes those
+manifest records; final receipts retain the digest and changed-file proof.
+Explicit `allow_rework` that reopens a completed task captures a new active
+baseline before replacement work is dispatched.
 
 ## Questions in the main chat
 
@@ -696,10 +703,12 @@ The explicit `$cortex:orchestrator prune` route calls
 `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` without a task ref.
 It removes only task-scoped `.codex/cortex` records last updated at least seven
-days ago, including abandoned active tasks, and reconciles the canonical task
+days ago when the task is already completed, and reconciles the canonical task
 index,
 activations, transaction and classification receipts, task resource claims,
-and lane bindings. It preserves recent tasks, lanes themselves, project source,
+and lane bindings. Active and blocked tasks are retained regardless of age, and
+a classification receipt referenced by any retained task is never removed. It
+also preserves recent completed tasks, lanes themselves, project source,
 documentation, and plugin files. This bounded weekly prune replaces the unsafe
 idea of clearing the whole ledger.
 
@@ -727,31 +736,15 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The current 6.1.3 source candidate passed the full 309-test Python suite, marketplace
+The 6.4.0 source candidate is verified by the current full Python suite, marketplace
 validation, Python compilation, shell syntax, the isolated fresh-plugin probe,
-and installed-content verification. It carries forward the 4.4.2 baseline of
-274 passing Python tests as historical evidence. File-size
-hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
-diagnostics, the separate 64 MiB manifest bound, early baseline preflight,
-bounded handoff/reconciliation state, and fail-closed actionable errors for
-oversized artifacts. Legacy ledgers are rejected rather than migrated; generated
-planning artifacts remain bounded by the runtime limits.
-The local plugin registration is installed and content-verified as
-`6.1.3+codex.<build>`; the installer preserved the user MCP approval
-override. Native live-model evidence includes a completed six-phase harvest
-with independent completeness review and close handoff, plus a fresh final-build
-dispatch that produced human label `Planner Pricing` and unique native key
-`planner_pricing_01_<digest>`. The tracked-release archive check remains the
-required post-commit verification before push.
-The installed `6.1.3+codex.<build>` was also live-verified end to end: an
-automatic-plan harvest completed source census, architecture, documentation,
-independent review, a bounded documentation rework after review found a broken
-anchor, repeat review, and final close. It recorded eight reports, zero
-unexplained non-excluded surfaces, `close_verified: true`, and
-`handoff_ready: true`; the exact required unittest command passed four tests.
-Historical 4.0.0 evidence includes
-241 passing tests in 15.770 seconds, installed and content-verified cachebuster
-`4.0.0+codex.20260814231427`, installer check/dry-run, cold boot, deterministic
-fixtures, the benchmark, the isolated fresh-plugin probe, and the installed
-intent-hold probe; those results do not attest 4.0.2. No commit, tag, push,
+cold-boot lifecycle, deterministic fixtures, and installed-content
+verification. File-size hardening covers the 8 MiB ordinary-JSON bound with
+fail-before-replace diagnostics, the separate 64 MiB manifest bound, bounded
+handoff/reconciliation state, and fail-closed diagnostics for oversized
+artifacts. New tasks use SQLite only: first access creates a fresh database or
+applies a checksummed SQLite-to-SQLite migration; pre-SQLite files are left
+untouched and never become task state. The installer preserves the user MCP
+approval override. The live-model and tracked-release archive checks remain
+required before push. No commit, tag, push,
 catalog publication, or public release is claimed.

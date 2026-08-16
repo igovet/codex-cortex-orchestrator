@@ -2,24 +2,33 @@
 
 ## Canonical runtime artifacts
 
-- New tasks use the `cortex/v8` ledger and public `cortex/orchestration/v4`
-  lifecycle. Legacy v7/v3 state is unsupported and is neither migrated nor
-  resumed. The runtime does not create `v3-operations.json`, active-task or
+- New tasks use the SQLite-backed `cortex/v8` ledger and public
+  `cortex/orchestration/v4` lifecycle. On the first MCP access after a plugin
+  update, numbered migrations run in one fail-closed transaction and are
+  recorded in `schema_migrations`. Pre-database filesystem state is ignored:
+  it is neither imported nor resumed. The runtime does not create
+  `v3-operations.json`, active-task or
   status-receipt files, `reports/grants`, `metrics.json`, task lock files,
   handoff-manifest snapshots, or evidence-snapshot files.
-- `baseline-manifest.json` is intentional: the task-start baseline proves
-  whole-task handoff stability, while each attempt baseline reconciles actual
-  `changed_files` and prevents read-only workers claiming writes. It works in
-  non-Git repositories and with pre-existing dirty files; Git HEAD/index alone
-  cannot provide that contract. Ignore/build policy keeps the manifest bounded.
+- New task-start and per-attempt baselines are immutable, content-addressed
+  records in `cortex.db`. State and attempts retain compact
+  `manifest-<sha256>` refs instead of copying paths or manifest bodies.
+  Identical project state deduplicates, but every dispatch still captures the
+  project again to detect external changes. These snapshots reconcile actual
+  `changed_files` and prevent read-only workers claiming writes in non-Git and
+  pre-existing-dirty repositories, where Git HEAD/index is insufficient.
+- After terminal completion is persisted, Cortex removes manifest records.
+  Final receipts retain manifest digests and change proof. If
+  `allow_rework` reopens that task, Cortex first captures a fresh active
+  baseline; stale deleted snapshots are never reused.
 
 ## Public v4 coordinator contract
 
 - Normal flow is `start_orchestration` once, then
   `continue_orchestration` once per completed relative `step`.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
-  lane/resource/durable-question work. The legacy `orchestrate` facade and v7
-  primitives below are private runtime internals. Together with worker
+  lane/resource/durable-question work. Earlier orchestration entrypoints are
+  not public runtime interfaces. Together with worker
   `worker_question`/`record_report`, identity/digest-scoped
   `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
   public surface is exactly seven tools.
@@ -89,9 +98,11 @@
   contains no dispatches, and cannot authorize a duplicate wave. A genuinely
   lost first response is recovered once through management inspect.
 - `prune` is the only cleanup route. It requires exact confirmation `PRUNE`,
-  defaults to seven days, omits `task_ref`, and removes only stale task-scoped
-  Cortex state while preserving recent tasks, lanes, source, docs, and plugin
-  files. There is no clear-all operation.
+  defaults to seven days, omits `task_ref`, and removes only completed
+  task-scoped Cortex state older than the threshold. Active and blocked tasks
+  survive regardless of age. Classification receipts referenced by any
+  retained task also survive. Recent completed tasks, lanes, source, docs, and
+  plugin files are preserved; there is no clear-all operation.
 - Human-readable language names normalize before ledger creation. Repeating a
   semantically unchanged `future_waves` assessment is valid and keeps the next
   relative step monotonic; it must not fail after committing the current gate.
@@ -413,11 +424,10 @@ and v8 ledger. They are not caller-facing request envelopes.
   `sol_escalation` and model/effort remapping contracts must not be sent.
   Profile names come from `plugins/cortex/profiles.json`; there are 21, and
   `task_formatter` is not one of them.
-- The installer removes only authenticated known legacy artifacts and backs
-  them up. Modified, symlinked, unexpected-version, or unexpected-path targets
-  are refused rather than removed. Start a fresh thread after installation so
-  the host discovers the new skills, profiles, hooks, and MCP server. During
-  the managed Cortex remove/add cycle, an existing
+- The installer does not inspect or alter prior orchestration state or
+  unrelated plugin files. Start a fresh thread after installation so the host
+  discovers the new skills, profiles, hooks, and MCP server. During the managed
+  Cortex remove/add cycle, an existing
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
   override is captured and restored; no override is created when the user did
   not configure one.
