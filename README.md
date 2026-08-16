@@ -139,6 +139,16 @@ read-only installed-content and legacy-artifact check:
 ./scripts/sync-cortex.sh --check
 ```
 
+As part of both an explicit install and `--check`, the installer queries the
+Codex `hooks/list` API for the selected project. It trusts only the exact five
+Cortex lifecycle hooks and records their current content hashes in the global
+Codex configuration. Each hook must have plugin id `cortex@cortex`, the
+installed cache's `hooks/hooks.json` source path, the installed
+`scripts/cortex_hook.py` command path, `enabled = true`, and a complete
+`sha256:` digest. `--check` fails if any of those identities, hashes, or the
+five-hook set no longer match; a changed or untrusted `PreToolUse` or
+`PostToolUse` hook therefore cannot silently invalidate host-worker binding.
+
 For rollback, remove the new install with `codex plugin remove cortex@cortex`.
 Managed legacy artifacts removed during upgrade are copied first under
 `$CODEX_HOME/backups/cortex-upgrade/` in a collision-safe private backup slot.
@@ -182,6 +192,14 @@ opaque child ID to its issued dispatch. A synchronous `PreToolUse` guard denies 
 `Agent` wait with no child target before the native call can block; the
 PostToolUse check remains a compatibility fallback. Model-visible context uses
 `hookSpecificOutput.additionalContext`.
+
+`SubagentStart` can recover a missing host-session binding only when the event
+identifies exactly one active pending dispatch: it matches the exact native
+task key when the host supplies one, or the generic `default` event together
+with the observed model. Ambiguous, missing, or already-consumed identities
+fail closed rather than guessing a worker. The hook trust check protects this
+binding logic, but installation still requires a new Codex thread so the host
+loads the updated hooks, skills, and MCP server.
 
 ## Release boundary
 
@@ -364,7 +382,11 @@ initial waves, follows the returned `pipeline` snapshot by default, and alone
 decides whether verified evidence justifies changing `future_waves`, with a
 concise reason. Planner and explorer findings are advisory. Semantically
 unchanged reassessment is accepted as unchanged and keeps subsequent relative
-steps monotonic. A completed response explicitly
+steps monotonic. When final-close evidence discovers bounded corrective work,
+an explicit same-call `future_waves` replacement with rework reopens the
+pipeline and invalidates the completed gate plus all downstream attempts,
+evidence records, and report receipts. Cortex must not return a false completed
+result while those replacement waves remain. A completed response explicitly
 reports `close_verified` and `handoff_ready` so Luna does not start a second
 run merely to rediscover terminal proof.
 Legacy `cortex/v7` ledgers and the v3 facade are unsupported and are not
@@ -556,6 +578,13 @@ a one-use attempt receipt, updates task- and delegation-scoped indexes, and
 generates an escaped Markdown view. Evidence consumption creates an
 irreversible `reports/consumptions/` tombstone; reconciliation may repair
 derived receipts and indexes but never makes a consumed receipt reusable.
+For every gate that requires executed checks, every `report.tests` item must
+record integer `exit_code: 0`; one passing command cannot mask another
+nonzero result. A negative-path check is successful only when an assertion
+harness observes the expected rejection and itself exits 0. Workers must
+preserve nonzero outcomes rather than omit, disguise, or relabel them;
+`record_report` returns `worker_verification_failed`, and the gate requires
+repair plus fresh verification or a new Cortex-authorized rework attempt.
 Worker briefings contain only the exact task and attempt identifiers required
 for that one report write and explicitly forbid using them with lifecycle or
 pipeline tools. Host spawn prompts de-duplicate the exact user request before

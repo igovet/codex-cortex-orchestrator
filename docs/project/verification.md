@@ -40,6 +40,14 @@ Recorded Cortex 6.1.0 source-candidate evidence:
   confirmed `Planner Pricing` plus a unique `planner_pricing_01_<digest>` key.
   Run the tracked-release archive check against the resulting commit before
   push.
+- Focused completion-gate regressions prove that one nonzero
+  `report.tests` entry rejects the entire completion report as
+  `worker_verification_failed`, even when another check passed, while
+  negative-path assertion harnesses remain valid only when their own exit code
+  is 0. Final-close rework coverage proves that an explicit replacement
+  reopens the pipeline and invalidates downstream attempts and receipts before
+  issuing new documentation/review/close waves instead of returning a false
+  completed result.
 - Desktop wrapper regressions verify that the exact local
   `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` host metadata is
   canonicalized before task persistence, labels, identity, and worker prompts;
@@ -374,9 +382,13 @@ is not release or publication evidence.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [probe-fresh-cortex-plugin.py](../../scripts/probe-fresh-cortex-plugin.py). `SKIP` means the Codex CLI is unavailable.
 - `python3 scripts/verify-cortex-release.py --require-tracked` — blocking tracked-release archive boundary; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [verify-cortex-release.py](../../scripts/verify-cortex-release.py).
 - `python scripts/validate-cortex-marketplace.py` — repository marketplace and plugin-contract validation; CI source: [cortex.yml](../../.github/workflows/cortex.yml), implementation: [validate-cortex-marketplace.py](../../scripts/validate-cortex-marketplace.py).
-- `python -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py` — Python syntax compilation for runtime and helper modules; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
+- `python -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/probe-fresh-cortex-plugin.py scripts/sync-cortex-hook-trust.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py` — Python syntax compilation for runtime and helper modules; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
 - `bash -n scripts/sync-cortex.sh` — shell syntax check; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `./scripts/sync-cortex.sh --check` — read-only installed-content/legacy-artifact check; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
+- `./scripts/sync-cortex.sh --check` — read-only installed-content/legacy-artifact check; also queries Codex `hooks/list` and
+  verifies the exact five enabled Cortex hook identities, installed source and
+  command paths, and current SHA-256 trust hashes; source:
+  [sync-cortex.sh](../../scripts/sync-cortex.sh) and
+  [sync-cortex-hook-trust.py](../../scripts/sync-cortex-hook-trust.py).
 - `./scripts/sync-cortex.sh --dry-run` — no-write report of the planned installation and managed legacy cleanup; source: [sync-cortex.sh](../../scripts/sync-cortex.sh).
 
 The installer performs the configured global Codex config-path safety preflight

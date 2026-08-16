@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -423,6 +424,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn('default_tools_approval_mode = "approve"', config.read_text(encoding="utf-8"))
         self.assertIn('[agents]', config.read_text(encoding="utf-8"))
         self.assertIn('default_subagent_model = "gpt-5.6-luna"', config.read_text(encoding="utf-8"))
+        hook_state = tomllib.loads(config.read_text(encoding="utf-8"))["hooks"]["state"]
+        cortex_hook_state = {
+            key: value for key, value in hook_state.items()
+            if key.startswith("cortex@cortex:hooks/hooks.json:")
+        }
+        self.assertEqual(len(cortex_hook_state), 5)
+        for value in cortex_hook_state.values():
+            self.assertRegex(value["trusted_hash"], r"^sha256:[0-9a-f]{64}$")
         self.assertFalse(retired.exists())
         self.assertFalse(retired_cache.parent.exists())
         backup_root = codex_home / "backups/cortex-upgrade"
@@ -981,6 +990,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         installer = (repository / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
         self.assertIn('plugin_source="${project_dir}/plugins/${plugin_name}"', installer)
         self.assertNotIn('plugin_source="${project_dir}"', installer)
+        self.assertIn("sync-cortex-hook-trust.py", installer)
+        hook_sync = (repository / "scripts/sync-cortex-hook-trust.py").read_text(encoding="utf-8")
+        self.assertIn("EXPECTED_KEYS", hook_sync)
+        self.assertIn("source does not match the installed cache", hook_sync)
 
     def test_all_profiles_ship_complete_professional_playbooks(self):
         import tomllib

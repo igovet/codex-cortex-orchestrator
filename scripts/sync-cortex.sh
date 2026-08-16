@@ -229,6 +229,7 @@ validate_sources() {
   [[ -f "${plugin_source}/.codex-plugin/plugin.json" ]] || { echo "error: plugin manifest is missing" >&2; return 1; }
   [[ -f "${plugin_source}/.mcp.json" ]] || { echo "error: MCP manifest is missing" >&2; return 1; }
   [[ -f "${plugin_source}/hooks/hooks.json" ]] || { echo "error: hooks manifest is missing" >&2; return 1; }
+  [[ -f "${script_dir}/sync-cortex-hook-trust.py" && ! -L "${script_dir}/sync-cortex-hook-trust.py" ]] || { echo "error: hook trust synchronizer is missing or symlinked" >&2; return 1; }
   [[ -f "${marketplace_manifest}" && ! -L "${marketplace_manifest}" ]] || { echo "error: root marketplace manifest is missing or symlinked" >&2; return 1; }
   python3 "${script_dir}/validate-cortex-marketplace.py"
   python3 - "${plugin_source}/.codex-plugin/plugin.json" "${plugin_source}/scripts/cortex.py" <<'PY'
@@ -386,17 +387,39 @@ PY
   fi
 }
 
-backup_global_config_if_replacing() {
+backup_global_config_for_update() {
   local config_path="${codex_home}/config.toml" backup_dir backup_slot
-  [[ "${global_subagent_model_state}" != "missing" ]] || return 0
-  [[ "${global_subagent_model_state}" != "gpt-5.6-luna" ]] || return 0
+  [[ -f "${config_path}" && ! -L "${config_path}" ]] || return 0
   [[ "${mode}" != "dry-run" && "${mode}" != "check" ]] || return 0
+  [[ "${global_config_backup_created}" != "true" ]] || return 0
   backup_dir="${codex_home}/backups/${plugin_name}-upgrade"
   prepare_backup_directory "${backup_dir}" || return 1
   backup_slot="$(mktemp -d "${backup_dir}/codex-config-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")"
   run cp -a -- "${config_path}" "${backup_slot}/config.toml"
   harden_backup_slot "${backup_slot}"
   global_config_backup_created="true"
+}
+
+sync_cortex_hook_trust() {
+  local expected_version installed_root config_path codex_binary
+  local -a check_argument=()
+  expected_version="$(plugin_version)"
+  installed_root="${codex_home}/plugins/cache/${marketplace_name}/${plugin_name}/${expected_version}"
+  config_path="${codex_home}/config.toml"
+  codex_binary="$(command -v codex)"
+  if [[ "${mode}" == "dry-run" ]]; then
+    echo "would trust the five exact installed Cortex lifecycle hook content hashes"
+    return 0
+  fi
+  if [[ "${mode}" == "check" ]]; then
+    check_argument=(--check)
+  fi
+  python3 "${script_dir}/sync-cortex-hook-trust.py" \
+    --codex "${codex_binary}" \
+    --cwd "${project_dir}" \
+    --installed-root "${installed_root}" \
+    --config "${config_path}" \
+    "${check_argument[@]}"
 }
 
 check_global_subagent_model() {
@@ -635,13 +658,14 @@ install_or_check() {
     [[ "${version}" == "${expected_version}" ]] || { echo "outdated ${plugin_name}@${marketplace_name}: expected ${expected_version}, found ${version:-missing}" >&2; return 1; }
     content_matches || { echo "outdated ${plugin_name}@${marketplace_name}: same-version content drift"; return 1; }
     check_global_subagent_model || return 1
+    sync_cortex_hook_trust || return 1
     echo "ok      ${plugin_name}@${marketplace_name} (${expected_version}, content verified)"; return 0
   fi
   capture_cortex_mcp_approval_override || return 1
   capture_global_subagent_model || return 1
   original_global_subagent_model_state="${global_subagent_model_state}"
   original_global_config_mode="${global_config_mode}"
-  backup_global_config_if_replacing || return 1
+  backup_global_config_for_update || return 1
   if ! run codex plugin marketplace add "${marketplace_root}" --json >/dev/null; then
     restore_cortex_mcp_approval_override || true
     return 1
@@ -657,6 +681,7 @@ install_or_check() {
   restore_cortex_mcp_approval_override || return 1
   ensure_global_subagent_model || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
+  sync_cortex_hook_trust || return 1
   echo "installed ${plugin_name}@${marketplace_name} from ${marketplace_root}"
 }
 

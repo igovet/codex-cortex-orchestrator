@@ -410,6 +410,69 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(wait_any.stdout.strip(), "{}")
 
+    def test_subagent_start_recovers_when_post_tool_session_hook_was_untrusted(self):
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "recover one exact pending native worker",
+                waves=[{"workers": [{"phase": "discover"}]}],
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        self.assertFalse((self.ledger / "host-sessions.json").exists())
+
+        launched = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({
+                "hook_event_name": "SubagentStart",
+                "session_id": "host-recovered-session",
+                "agent_id": "native.Recovered:01",
+                "agent_type": "default",
+                "model": attempt["expected_model"],
+                "cwd": str(self.project),
+            }),
+            text=True,
+            capture_output=True,
+            env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+            check=True,
+        )
+        payload = json.loads(launched.stdout)
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SubagentStart")
+        self.assertNotIn("HOST BINDING BLOCKER", payload["hookSpecificOutput"]["additionalContext"])
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["attempts"][0]["status"], "running")
+        self.assertEqual(state["attempts"][0]["host_spawn"]["agent_id"], "native.Recovered:01")
+        bindings = json.loads((self.ledger / "host-sessions.json").read_text(encoding="utf-8"))
+        self.assertEqual(bindings["tasks"][state["task_id"]], "host-recovered-session")
+
+    def test_subagent_start_recovery_fails_closed_for_ambiguous_generic_workers(self):
+        first = self.v3_start(
+            "first pending worker for ambiguity",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        second = self.v3_start(
+            "second pending worker for ambiguity",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        self.assertNotEqual(first["task_ref"], second["task_ref"])
+        states = [
+            json.loads((path / "current.json").read_text(encoding="utf-8"))
+            for path in (self.ledger / "tasks").iterdir()
+        ]
+        models = {state["attempts"][0]["expected_model"] for state in states}
+        self.assertEqual(len(models), 1)
+        recovered = cortex_hook.pending_task_from_subagent_start(self.ledger, {
+            "hook_event_name": "SubagentStart",
+            "agent_type": "default",
+            "model": next(iter(models)),
+        })
+        self.assertIsNone(recovered)
+
     def test_subagent_stop_without_report_is_durably_failed_and_not_waitable(self):
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         with mock.patch.dict(
@@ -2003,6 +2066,18 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(
             control.worker_display_name("planner", control.worker_module_label(live_request, ["."], "plan")),
             "Planner Pricing",
+        )
+
+        repository_request = (
+            "$cortex:orchestrator harvest Perform a complete source-backed harvest. "
+            "Complete every canonical phase through independent review and close verification."
+        )
+        self.assertEqual(control.worker_module_label(repository_request, ["."], "plan"), "Repository")
+        self.assertEqual(
+            control.worker_display_name(
+                "planner", control.worker_module_label(repository_request, ["."], "plan")
+            ),
+            "Planner Repository",
         )
 
     def test_native_worker_task_name_remains_unique_after_hyphen_normalization(self):
@@ -4034,6 +4109,39 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "report_validation_failed")
         self.assertIn("project files changed during read-only", rejected["diagnostics"][0]["message"])
 
+    def test_completion_report_rejects_every_nonzero_executed_check(self):
+        started = self.v3_start(
+            "reject a false-positive review completion",
+            waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
+        )
+        self.assertIn(
+            "every listed check must have integer exit_code 0",
+            self.briefing_from_response(started),
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self.v3_report("review found an unresolved defect")
+        report["tests"].append({
+            "command": "python3 verify_links.py",
+            "cwd": ".",
+            "exit_code": 1,
+            "evidence": "The link verifier found one unresolved local fragment target.",
+        })
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, report),
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["outcome"], "failed")
+        self.assertEqual(rejected["code"], "worker_verification_failed")
+        self.assertIn("report.tests index(es): 2", rejected["diagnostics"][0]["message"])
+        self.assertIn("Do not omit, disguise, or relabel", rejected["next_action"])
+        self.assertEqual(list((task_dir / "reports/records").glob("report-*.json")), [])
+
     def test_read_only_result_rejects_new_generated_or_gitignored_artifacts(self):
         (self.project / ".gitignore").write_text("coverage.tmp\n", encoding="utf-8")
         started = self.v3_start(
@@ -5016,9 +5124,64 @@ class ControlPlaneTests(unittest.TestCase):
         denied = control.continue_orchestration(common)
         self.assertFalse(denied["ok"])
         self.assertIn("allow_rework=true", denied["diagnostics"][0]["message"])
+        missing_pipeline = control.continue_orchestration({
+            "project_root": str(self.project),
+            "step": started["step"],
+            "results": common["results"],
+            "rework": True,
+            "reason": "new evidence requires rework",
+        })
+        self.assertFalse(missing_pipeline["ok"])
+        self.assertIn("requires explicit future_waves", missing_pipeline["diagnostics"][0]["message"])
         allowed = control.continue_orchestration({**common, "rework": True, "reason": "new evidence"})
         self.assertTrue(allowed["ok"])
         self.assertEqual(allowed["step"], 1)
+
+    def test_v3_final_close_rework_reopens_completed_pipeline(self):
+        current = self.v3_start("rework defects found at final close", waves=[
+            {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+            {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+            {"workers": [{"phase": "close", "profile": "build_verification"}]},
+        ])
+        task_ref = current["task_ref"]
+        for expected_next in ("review", "close"):
+            current = control.continue_orchestration({
+                "project_root": str(self.project),
+                "task_ref": task_ref,
+                "step": current["step"],
+                "results": self.v3_results(current, self.v3_report("phase completed before final review")),
+            })
+            self.assertTrue(current["ok"], current)
+            self.assertEqual(current["dispatches"][0]["phase"], expected_next)
+
+        reworked = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": task_ref,
+            "step": current["step"],
+            "results": self.v3_results(current, self.v3_report("close evidence requires bounded documentation rework")),
+            "future_waves": [
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+            "rework": True,
+            "reason": "final close evidence identified a documentation defect that must be corrected and reverified",
+        })
+        self.assertTrue(reworked["ok"], reworked)
+        self.assertEqual(reworked["outcome"], "ready_to_spawn")
+        self.assertEqual(reworked["dispatches"][0]["phase"], "documentation")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "active")
+        self.assertEqual(state["completed_gates"], [])
+        prior_close = [item for item in state["attempts"] if item["gate"] == "close"][0]
+        self.assertTrue(prior_close["invalidated"])
+        active_documentation = [
+            item for item in state["attempts"]
+            if item["gate"] == "documentation" and not item.get("invalidated")
+        ]
+        self.assertEqual(len(active_documentation), 1)
+        self.assertNotEqual(active_documentation[0]["attempt_id"], "documentation-01")
 
     def test_v3_noop_future_wave_reassessment_advances_with_monotonic_steps(self):
         started = self.v3_start("v3 no-op future", waves=[

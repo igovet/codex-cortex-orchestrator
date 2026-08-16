@@ -13,4 +13,12 @@ Validate the result, not the confidence of the worker.
 4. Check that reported files, commands, outputs, and behavior agree.
 5. Classify each criterion as passed, failed, blocked, or unverified; state the evidence and the next owner for failures.
 
+For an executed-check completion gate, every `report.tests` entry must contain
+the observed command, cwd, integer exit code, and decisive evidence, and every
+entry must have `exit_code: 0`. A negative-path check must use an assertion
+harness that observes the expected failure and exits 0. Never omit, disguise,
+or relabel a nonzero result, and never use another passing check to balance it;
+preserve the failure so `worker_verification_failed` can trigger repair or a
+fresh coordinator-authorized rework attempt.
+
 Do not convert missing evidence into a pass. Avoid style-only objections unless they conceal a behavioral, safety, or maintainability risk.

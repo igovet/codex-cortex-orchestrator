@@ -161,6 +161,60 @@ def active_task(ledger: Path, session_id: str | None) -> str | None:
     return active[0] if len(active) == 1 else None
 
 
+def pending_task_from_subagent_start(ledger: Path, event: dict) -> str | None:
+    """Recover one exact pending dispatch when the start-tool hook was skipped.
+
+    Codex treats changed Pre/PostToolUse hooks as untrusted until their content
+    hashes are approved.  SubagentStart may still be trusted and delivered. In
+    that case the native start event is stronger evidence than coordinator
+    prose: bind only when exactly one active task has an awaiting dispatch that
+    matches the native task key, or (for hosts reporting ``default``) the
+    observed model. Ambiguity fails closed.
+    """
+    if str(event.get("hook_event_name")) != "SubagentStart":
+        return None
+    agent_type = str(event.get("agent_type") or "").strip()
+    model = str(event.get("model") or "").strip()
+    if not agent_type:
+        return None
+    try:
+        index = json.loads((ledger / "task-index.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    matches: list[str] = []
+    for raw_task_id in index if isinstance(index, dict) else {}:
+        task_id = valid_task_id(raw_task_id)
+        if not task_id:
+            continue
+        try:
+            task_dir = task_directory(ledger, task_id)
+            state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            continue
+        if state.get("schema") != SCHEMA or state.get("status") not in {"active", "blocked"}:
+            continue
+        pending = [
+            attempt for attempt in state.get("attempts", [])
+            if isinstance(attempt, dict)
+            and not attempt.get("invalidated")
+            and attempt.get("status") == "awaiting_host_spawn"
+        ]
+        if agent_type == "default":
+            candidates = [
+                attempt for attempt in pending
+                if model
+                and str(attempt.get("expected_model") or attempt.get("selected_model") or "") == model
+            ]
+        else:
+            candidates = [
+                attempt for attempt in pending
+                if str((attempt.get("spawn_request") or {}).get("task_name") or "") == agent_type
+            ]
+        if len(candidates) == 1:
+            matches.append(task_id)
+    return matches[0] if len(matches) == 1 else None
+
+
 def task_ref(ledger: Path, task_id: str) -> str | None:
     """Resolve the public opaque ref without guessing from a task id."""
     path = reject_symlink_ancestry(ledger / "orchestration-operations.json", "orchestration operation registry")
@@ -521,6 +575,12 @@ def main() -> None:
         session_id = session_identity(event)
         bind_post_tool_session(event, project, session_id)
         task_id = active_task(ledger, session_id)
+        if not task_id and session_id and bind_host_session_from_hook is not None:
+            recovered_task_id = pending_task_from_subagent_start(ledger, event)
+            recovered_ref = task_ref(ledger, recovered_task_id) if recovered_task_id else None
+            if recovered_ref:
+                bind_host_session_from_hook(str(project), recovered_ref, session_id)
+                task_id = active_task(ledger, session_id)
     except Exception as exc:
         print(f"orchestration_hook warning: {type(exc).__name__}", file=sys.stderr)
         print("{}")

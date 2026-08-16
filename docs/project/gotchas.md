@@ -192,7 +192,13 @@ The remaining notes document internal invariants behind the public v4 lifecycle
 and v8 ledger. They are not caller-facing request envelopes.
 
 - Command evidence must include an explicit `exit_code`; a textual claim that
-  a command was green is not sufficient. The final C2/C3 `advance` privately
+  a command was green is not sufficient. Every `report.tests` entry for a
+  successfully completed executed-check gate must have integer `exit_code: 0`.
+  Negative-path verification must use an assertion harness that observes the
+  expected rejection and exits 0. Never omit, disguise, relabel, or balance a
+  nonzero check with another passing check: report intake returns
+  `worker_verification_failed`, and the gate must be repaired and rerun or sent
+  through fresh Cortex-authorized rework. The final C2/C3 `advance` privately
   runs the allowlisted close verification and requires its server-observed
   exit-0 receipt; coordinators must not call the private verification primitive.
 - Bearer tokens, URI credentials, quoted secrets, and secret-like environment
@@ -209,7 +215,11 @@ and v8 ledger. They are not caller-facing request envelopes.
 - Use `advance` to submit a reviewed future-wave replacement. A no-op remains
   unchanged; never claim a C2/C3 documentation or reassessment decision was
   applied without the corresponding durable operation. Replacing completed
-  work requires `allow_rework=true`.
+  work requires `allow_rework=true`. If final-close evidence supplies an
+  explicit replacement, Cortex reopens the internally completed pipeline and
+  invalidates downstream attempts, evidence records, and report receipts before
+  dispatching the replacement waves; returning terminal success while
+  those waves remain would be a false completion.
 - `start` creates the authoritative classification and initializes the task;
   callers must not synthesize lifecycle receipts. Classification provenance is
   ledger state, not a worker report or task-owned mutable input.
@@ -411,6 +421,20 @@ and v8 ledger. They are not caller-facing request envelopes.
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
   override is captured and restored; no override is created when the user did
   not configure one.
+- Hook trust is checked independently of plugin file matching. An explicit
+  sync queries Codex `hooks/list` and accepts only the five enabled
+  `cortex@cortex` hooks from the installed cache, with the installed command
+  path and a valid `sha256:` content hash. `sync-cortex.sh --check` repeats
+  this exact identity/hash check. Install refreshes stale trust only after the
+  installed plugin content matches the selected release; `--check` fails when
+  a `PreToolUse` or `PostToolUse` identity or hash drifts instead of allowing
+  silent worker-binding corruption. Start a new thread after a successful
+  update; existing threads still point at the old cachebusted paths.
+- A missing host-session binding is recoverable from `SubagentStart` only when
+  exactly one active pending dispatch matches the exact native task key, or
+  the generic `default` event plus its observed model. Ambiguous, missing, or
+  model-mismatched matches fail closed; the hook never guesses which worker to
+  bind.
 - The main orchestrator owns the full optional pipeline: `start` receives the
   complete plan and Cortex appends the mandatory `documentation` and `close`
   audit gates. During work, `advance` may replace future waves under a revision

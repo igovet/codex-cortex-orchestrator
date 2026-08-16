@@ -660,6 +660,7 @@ def worker_module_label(objective: object, allowed_paths: object, gate: object) 
         "require", "required", "actual", "final", "continue", "until", "without",
         "not", "request", "project", "index", "exists", "mapped", "explicitly", "excluded",
         "remain", "remains", "validate", "links", "paths", "independently", "before", "closing",
+        "canonical", "phase", "phases", "through", "independent", "close",
     }
     candidates: list[str] = []
     if isinstance(allowed_paths, list):
@@ -697,8 +698,11 @@ def worker_module_label(objective: object, allowed_paths: object, gate: object) 
             break
     if selected:
         return " ".join(selected)
-    fallback = re.sub(r"[^A-Za-z0-9]+", " ", str(gate or "worker")).strip().title()
-    return fallback or "Worker"
+    # A gate name describes the lifecycle phase, not the module.  Using it as
+    # the fallback produced redundant labels such as ``Planner Plan`` and
+    # ``Code Reviewer Review`` for repository-wide work.  Keep the fallback
+    # human-readable and scope-oriented when no concrete domain is present.
+    return "Repository"
 
 
 def worker_display_name(profile: str, module: str) -> str:
@@ -3536,6 +3540,7 @@ def _validate_gate_result_report(
         if not tests:
             raise ValueError(f"{gate} result requires at least one executed check or inspection result")
         successful_checks = 0
+        unsuccessful_checks: list[int] = []
         for index, check in enumerate(tests, 1):
             required_check_fields = {"command", "cwd", "exit_code", "evidence"}
             if not isinstance(check, dict) or set(check) != required_check_fields:
@@ -3566,8 +3571,17 @@ def _validate_gate_result_report(
                 raise ValueError(f"{gate} result test {index} needs a concrete observed output summary")
             if exit_code == 0:
                 successful_checks += 1
+            else:
+                unsuccessful_checks.append(index)
         if not successful_checks:
             raise ValueError(f"{gate} result requires at least one successful executed check")
+        if unsuccessful_checks:
+            raise ValueError(
+                f"{gate} result contains unsuccessful executed check(s) at report.tests index(es): "
+                + ", ".join(str(index) for index in unsuccessful_checks)
+                + "; a completion report may contain only checks that passed. Preserve the failures and return "
+                "the report-tool error so the coordinator can rework the gate"
+            )
 
     evidence_items = [item for item in report.get("evidence", []) if isinstance(item, str)]
     missing_markers: list[str] = []
@@ -4748,7 +4762,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     )
     executed_test_contract = (
         "For this gate, every report.tests item must contain exactly command, cwd, exit_code, and evidence from an "
-        "observed execution; identify at least one successful check with integer exit_code 0."
+        "observed execution, and every listed check must have integer exit_code 0. A negative-path assertion is "
+        "successful only when its harness exits 0. Never omit, disguise, or relabel a non-zero result to publish a "
+        "completion report: preserve it and return the exact report-tool error so the coordinator reworks the gate."
         if package.get("gate") in EXECUTED_CHECK_RESULT_GATES else ""
     )
     if result_contract_is_read_only(package):
@@ -5264,6 +5280,14 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             next_action = (
                 "Complete and verify the required harvest coverage manifest before retrying record_report on this "
                 "same attempt."
+            )
+        elif "unsuccessful executed check(s)" in message:
+            code = "worker_verification_failed"
+            outcome = "failed"
+            next_action = (
+                "Do not omit, disguise, or relabel the failing check. If the defect is inside this worker's allowed "
+                "write scope, correct it and rerun every affected check before retrying record_report; otherwise "
+                "return this exact error and a short blocker to the coordinator so Cortex can authorize rework."
             )
         elif any(fragment in message for fragment in (
             "unsupported record_report fields", "report must contain exactly", "report summary and next_action",
@@ -9290,7 +9314,14 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         current_wave["status"] = "completed" if state.get("status") != "blocked" else "blocked"
         _write_orchestrate_plan(task_dir, plan)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=current_wave["gates"])
-        if params.get("future_waves") is not None and state.get("status") == "active":
+        # A coordinator may discover a bounded defect in the final close
+        # report and explicitly reintroduce documentation/review/close. The
+        # close gate transitions the task to completed before this replacement
+        # is applied, so accepting future waves only while active silently
+        # discarded the authorized rework and produced a false terminal
+        # success. update_pipeline(allow_rework=True) intentionally reopens a
+        # completed task and invalidates every downstream receipt.
+        if params.get("future_waves") is not None and state.get("status") in {"active", "completed"}:
             state, plan = _replace_future_orchestrate_waves(params, task_dir, state, plan, params["future_waves"])
         if state.get("status") == "completed":
             audited = close_audit({**params, "task_id": task_id})
@@ -10742,6 +10773,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 "future_waves requires a concise reason identifying the new evidence or coordinator decision"
             )
+        if params.get("rework") and params.get("future_waves") is None:
+            raise ValueError("rework=true requires explicit future_waves; Cortex never guesses a replacement pipeline")
         future_waves = (
             _v3_compact_waves(
                 params["future_waves"],

@@ -44,6 +44,11 @@ running attempt; dynamically named workers report generic
 `agent_type=default`, not their native task key. Compaction
 recovery can therefore distinguish an unstarted dispatch from an active child
 and wait only on the exact preserved child id.
+If the host-session binding is missing, recovery is allowed only when exactly
+one active pending dispatch matches the exact native task key, or when the
+generic `default` event matches exactly one pending dispatch and its observed
+model. Missing, ambiguous, already-consumed, or model-mismatched identities
+fail closed; the hook never guesses a child or reuses a previous session.
 `SubagentStop` updates the exact child-bound attempt without persisting the
 model-authored final text: an already recorded report is exposed for
 continuation, an open durable question remains resumable, and every other stop
@@ -60,6 +65,17 @@ task should receive recovery context. Completing one of the ambiguous tasks
 rebuilds the entry when exactly one active task is left.
 
 Every registered lifecycle command checks that `${PLUGIN_ROOT}/scripts/cortex_hook.py` still exists before invoking Python. If an already-open thread retains a retired cachebusted plugin path after an update, the command fails open with exit 0 and the empty JSON object `{}`, without stderr, instead of emitting a missing-file error. That protects task completion from stale hook paths but does not load updated skills, hooks, or MCP tools; operators should still start a new thread after updating Cortex. Lifecycle telemetry remains observational and is not proof that a host spawned a worker.
+
+The installer validates this boundary separately from task telemetry. After an
+explicit sync it queries Codex `hooks/list` and accepts only the exact five
+enabled `cortex@cortex` hooks whose source is the installed cache and whose
+command invokes that cache's `cortex_hook.py`. It writes their exact SHA-256
+content hashes to the global hook-state configuration; `sync-cortex.sh
+--check` revalidates the plugin id, source path, command path, enabled state,
+hash shape, and complete five-hook set. This prevents a changed or untrusted
+`PreToolUse`/`PostToolUse` hook from silently breaking durable worker binding.
+The host still needs a new thread after installation or update to load the new
+hook paths.
 
 ## Verification
 

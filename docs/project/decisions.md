@@ -46,6 +46,15 @@ Semantically unchanged future-wave reassessment records an unchanged receipt
 and continues, while v4 future waves are internally renumbered so public
 relative steps never move backward or collide.
 
+A final close report may itself reveal bounded work that invalidates terminal
+proof. When the coordinator supplies an explicit rework `future_waves`
+replacement in that same continuation, Cortex reopens the pipeline even though
+the close transition has already marked it completed internally. The replaced
+gate and every downstream attempt, evidence record, and report receipt are
+invalidated before new dispatches are returned. This is distinct from a
+later user correction of an already returned completed task, which still uses
+a new linked follow-up task.
+
 The final advance reconciles reports and the project manifest, records the
 documentation decision, verifies close evidence observed by the server,
 creates the handoff and audit record, and completes the task. `inspect`,
@@ -180,6 +189,14 @@ evidence, no unresolved completion markers, and a textual mapping from every
 task-level acceptance and verification criterion to that evidence. A summary
 that merely asserts completion cannot close the task.
 
+Executed-check gates use a stronger report invariant: every `report.tests`
+entry in a successful completion report has integer `exit_code: 0`. Negative
+paths must be wrapped in an assertion harness that treats the expected failure
+as a successful assertion and exits 0. Any observed nonzero result is retained
+as failure evidence, rejects report publication as
+`worker_verification_failed`, and triggers repair or coordinator-authorized
+rework; a different passing entry cannot cancel it.
+
 Reworking a gate invalidates that gate and every downstream gate, including
 their prior evidence, so a later pass cannot accidentally reuse stale proof.
 
@@ -250,6 +267,16 @@ compatibility fallback, and model-visible context is emitted under
 Plugin installation and reload remain operator-owned. A fresh Codex thread is
 required after installation or update so the new hook, skill, and MCP paths are
 loaded.
+
+The installer also owns lifecycle-hook trust. During an explicit sync it calls
+Codex `hooks/list` for the project and accepts exactly the five enabled
+`cortex@cortex` hooks, requiring each `sourcePath` to be the installed
+`hooks/hooks.json`, each command to invoke the installed `cortex_hook.py`, and
+each `currentHash` to have the complete `sha256:` form. Those hashes are stored
+in the global hook-state configuration; `sync-cortex.sh --check` performs the
+same read-only validation. This makes changed or untrusted `PreToolUse` and
+`PostToolUse` definitions a visible installation failure instead of a silent
+host-binding regression. It does not replace the fresh-thread requirement.
 
 Native worker identity follows the same separation: `profile` remains
 canonical, while `display_name` is derived from the task domain in the user's
