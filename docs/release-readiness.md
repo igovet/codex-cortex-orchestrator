@@ -47,9 +47,11 @@ oversized artifacts. A copy-based registry migration and the Planner prompt
 measurements are recorded in `docs/project/verification.md`. Installation
 preserved the user MCP approval override. Live-model and tracked-release
 validation are split deliberately: native live execution completed the full
-six-phase harvest and a fresh final-build dispatch confirmed the corrected
-human/native worker identities; the tracked-release archive check runs only
-after the candidate is committed and must pass before push.
+six-phase harvest, detected and repaired a documentation defect through its
+bounded rework route, and then passed repeat review and close verification; a
+fresh final-build dispatch confirmed the corrected human/native worker
+identities. The tracked-release archive check runs only after the candidate is
+committed and must pass before push.
 Historical 4.0.0 installation and validation evidence does not attest this
 patch.
 Tag, catalog submission, approval, and public publication are not part of this

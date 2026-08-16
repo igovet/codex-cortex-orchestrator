@@ -35,9 +35,17 @@ Recorded Cortex 6.1.2 source-candidate evidence:
   the user MCP approval override.
 - Marketplace validation, Python compilation, shell syntax checks, the isolated
   fresh-plugin probe, the 309-test suite, and the cold-boot lifecycle passed.
-  Native live evidence completed the canonical six-phase harvest with
-  independent review and close verification; a fresh final-build dispatch also
-  confirmed `Planner Pricing` plus a unique `planner_pricing_01_<digest>` key.
+  The installed `6.1.2+codex.<build>` also completed a fresh live harvest with
+  automatic plan approval, eight persisted reports, a review-detected broken
+  anchor, one bounded documentation rework, repeat independent review, and
+  final `close_verified: true`/`handoff_ready: true`. Its source-backed census
+  had zero unexplained non-excluded surfaces and the required unittest command
+  passed four tests. A fresh final-build dispatch also confirmed `Planner
+  Pricing` plus a unique `planner_pricing_01_<digest>` key.
+- Recovery regression coverage binds every non-success `continue_orchestration`
+  result to the exact issued `dispatch_ref`. A duplicate result for one attempt
+  replays safely, while the same failure reason for a replacement attempt is
+  processed as fresh rework rather than replaying the earlier receipt.
   Run the tracked-release archive check against the resulting commit before
   push.
 - Focused completion-gate regressions prove that one nonzero

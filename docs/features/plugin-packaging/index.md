@@ -47,5 +47,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). Current 6.1.2 evidence is the 309-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.2+codex.<build>`, a completed native six-phase harvest, and a fresh final-build worker-identity dispatch; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push.
+Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md). Current 6.1.2 evidence is the 309-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.2+codex.<build>`, and a completed installed-plugin live harvest with eight reports, bounded documentation rework, repeat review, and close verification. A fresh final-build worker-identity dispatch also passed; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

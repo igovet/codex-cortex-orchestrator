@@ -743,6 +743,12 @@ with independent completeness review and close handoff, plus a fresh final-build
 dispatch that produced human label `Planner Pricing` and unique native key
 `planner_pricing_01_<digest>`. The tracked-release archive check remains the
 required post-commit verification before push.
+The installed `6.1.2+codex.<build>` was also live-verified end to end: an
+automatic-plan harvest completed source census, architecture, documentation,
+independent review, a bounded documentation rework after review found a broken
+anchor, repeat review, and final close. It recorded eight reports, zero
+unexplained non-excluded surfaces, `close_verified: true`, and
+`handoff_ready: true`; the exact required unittest command passed four tests.
 Historical 4.0.0 evidence includes
 241 passing tests in 15.770 seconds, installed and content-verified cachebuster
 `4.0.0+codex.20260814231427`, installer check/dry-run, cold boot, deterministic
