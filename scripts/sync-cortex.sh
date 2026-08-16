@@ -498,7 +498,13 @@ installed_version() {
 }
 
 install_or_check() {
-  command -v codex >/dev/null 2>&1 || { echo "error: codex CLI is required" >&2; return 1; }
+  # A dry run is deliberately usable in minimal CI images: it validates the
+  # source/config paths and reports every native Codex command without
+  # executing one. Real installation and read-only installed-content checks
+  # still require the CLI.
+  if [[ "${mode}" != "dry-run" ]]; then
+    command -v codex >/dev/null 2>&1 || { echo "error: codex CLI is required" >&2; return 1; }
+  fi
   local version expected_version; version="$(installed_version)"; expected_version="$(plugin_version)"
   if [[ "${mode}" == "check" ]]; then
     [[ "${version}" == "${expected_version}" ]] || { echo "outdated ${plugin_name}@${marketplace_name}: expected ${expected_version}, found ${version:-missing}" >&2; return 1; }

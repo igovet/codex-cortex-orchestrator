@@ -599,9 +599,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
         (cache / "scripts/orchestration_control.py").write_text('SERVER_VERSION = "4.4.0"\n', encoding="utf-8")
         environment = os.environ.copy()
         environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home)})
+        # This assertion must remain meaningful in GitHub Actions, whose
+        # verification image intentionally has no Codex CLI.  Dry-run checks
+        # source/config safety and planned commands only, so it must not
+        # require the executable that an actual installation/check needs.
+        environment["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), "/usr/bin", "/bin"])
         script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
         completed = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("codex CLI is required", completed.stderr)
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged\n")
 
     def test_root_marketplace_validator_rejects_retired_nested_artifacts(self):
