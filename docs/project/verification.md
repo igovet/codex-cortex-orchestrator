@@ -18,7 +18,7 @@ bash -n scripts/sync-cortex.sh
 Recorded Cortex 6.1.3 source-candidate evidence:
 
 - The full Python suite passed 309 tests.
-- The executable compatibility facade was reduced from 11,831 to 9,128 lines
+- The executable compatibility facade was reduced from 11,831 to 9,132 lines
   without changing the seven public tools. Focused bundled runtime modules now
   own identity formatting, route policy, delegation persistence, immutable
   briefings, reports, questions, compaction handoffs, and public MCP schemas,
