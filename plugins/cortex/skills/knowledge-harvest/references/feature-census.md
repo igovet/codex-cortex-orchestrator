@@ -57,6 +57,17 @@ contracts. Split it into discoverable feature pages and link shared flows.
 
 The feature index must contain a source-backed matrix with at least:
 
+It must also use these five literal Markdown section headings; prose mentions
+do not substitute for them:
+
+```text
+## Coverage matrix
+## Inventory totals
+## Unmapped surfaces
+## Exclusions
+## Known unknowns
+```
+
 Use these seven labels verbatim as the coverage table headers, in this order;
 additional columns may follow:
 

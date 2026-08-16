@@ -4640,6 +4640,10 @@ class ControlPlaneTests(unittest.TestCase):
             "`Feature`, `Runtime owner`, `Entry points`, `Source evidence`, `Documentation`, `Verification`, `Status`",
             writer_prompt,
         )
+        self.assertIn(
+            "`Coverage matrix`, `Inventory totals`, `Unmapped surfaces`, `Exclusions`, `Known unknowns`",
+            writer_prompt,
+        )
         self.assertIn("extra columns may follow only after them", writer_prompt)
         self.assertIn("status is exactly `covered`, `documented`, `verified`, or `excluded`", writer_prompt)
         task_dir = next((self.ledger / "tasks").iterdir())

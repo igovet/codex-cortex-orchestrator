@@ -3249,18 +3249,21 @@ def _validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any]
         raise ValueError("harvest coverage manifest exceeds the 512 KiB validation limit")
     raw_text = path.read_text(encoding="utf-8")
     text = raw_text.lower()
-    required = {
-        "coverage matrix": ("coverage matrix",),
-        "inventory totals": ("inventory totals",),
-        "unmapped surfaces": ("unmapped surfaces",),
-        "exclusions": ("exclusions",),
-        "known unknowns": ("known unknowns",),
-    }
     missing = []
-    for label, markers in required.items():
-        absent = [marker for marker in markers if marker not in text]
-        if absent:
-            missing.append(f"{label} ({', '.join(absent)})")
+    expected_section_labels = (
+        "Coverage matrix", "Inventory totals", "Unmapped surfaces",
+        "Exclusions", "Known unknowns",
+    )
+    headings = {
+        re.sub(r"\s+", " ", match.group(1).strip().rstrip("#").strip()).lower()
+        for line in raw_text.splitlines()
+        if (match := re.match(r"^#{2,6}\s+(.+?)\s*$", line.strip()))
+    }
+    absent_sections = [
+        label for label in expected_section_labels if label.lower() not in headings
+    ]
+    if absent_sections:
+        missing.append("sections (" + ", ".join(absent_sections) + ")")
     expected_header_labels = (
         "Feature", "Runtime owner", "Entry points", "Source evidence",
         "Documentation", "Verification", "Status",
