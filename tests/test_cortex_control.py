@@ -2102,6 +2102,18 @@ class ControlPlaneTests(unittest.TestCase):
             "Planner Repository",
         )
 
+        refresh_request = (
+            "$cortex:orchestrator harvest-refresh Refresh the repository knowledge exhaustively "
+            "from current source, tests, configuration, and existing documentation."
+        )
+        self.assertEqual(control.worker_module_label(refresh_request, ["."], "plan"), "Repository")
+        self.assertEqual(
+            control.worker_display_name(
+                "planner", control.worker_module_label(refresh_request, ["."], "plan")
+            ),
+            "Planner Repository",
+        )
+
     def test_native_worker_task_name_remains_unique_after_hyphen_normalization(self):
         dashed = control.native_worker_task_name("planner", "harvest-refresh", "plan-01")
         underscored = control.native_worker_task_name("planner", "harvest_refresh", "plan_01")
@@ -4162,6 +4174,32 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "worker_verification_failed")
         self.assertIn("report.tests index(es): 2", rejected["diagnostics"][0]["message"])
         self.assertIn("Do not omit, disguise, or relabel", rejected["next_action"])
+        self.assertEqual(list((task_dir / "reports/records").glob("report-*.json")), [])
+
+    def test_completion_report_rejects_placeholder_test_commands(self):
+        started = self.v3_start(
+            "reject unreproducible completion evidence",
+            waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
+        )
+        self.assertIn(
+            "exact reproducible invocation with no `...` placeholder",
+            self.briefing_from_response(started),
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = json.loads((task_dir / "current.json").read_text(encoding="utf-8"))
+        attempt = state["attempts"][0]
+        report = self.v3_report("review evidence must be reproducible")
+        report["tests"][0]["command"] = "python3 - <<'PY' ... assertions ... PY"
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, report),
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "report_validation_failed")
+        self.assertIn("exact reproducible invocation", rejected["diagnostics"][0]["message"])
         self.assertEqual(list((task_dir / "reports/records").glob("report-*.json")), [])
 
     def test_read_only_result_rejects_new_generated_or_gitignored_artifacts(self):

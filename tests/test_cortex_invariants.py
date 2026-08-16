@@ -1328,6 +1328,16 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "only recent commits were scanned",
         ):
             self.assertIn(marker, census)
+        for profile_name in (
+            "planner", "explorer", "architect", "technical-writer",
+            "code-reviewer", "build-verification",
+        ):
+            prompt = (repository / f"plugins/cortex/agents/{profile_name}.toml").read_text(encoding="utf-8")
+            self.assertIn("docs/features/<feature>/index.md", prompt, profile_name)
+            self.assertIn("conventions.md", prompt, profile_name)
+            self.assertIn("verification.md", prompt, profile_name)
+            self.assertIn("decisions.md", prompt, profile_name)
+            self.assertIn("gotchas.md", prompt, profile_name)
 
     def test_incremental_harvest_fixture_changes_only_evidence_justified_docs(self):
         docs = self.project / "docs/project"

@@ -668,8 +668,8 @@ def worker_module_label(objective: object, allowed_paths: object, gate: object) 
             path = str(raw_path or "").strip().replace("\\", "/")
             if path and path != ".":
                 candidates.extend(re.findall(r"[A-Za-z][A-Za-z0-9]*", path))
+    objective_text = str(objective or "")
     if not candidates:
-        objective_text = str(objective or "")
         domain_candidates = [
             match.group(1)
             for match in re.finditer(
@@ -688,6 +688,12 @@ def worker_module_label(objective: object, allowed_paths: object, gate: object) 
     for aliases, label in domain_aliases:
         if normalized_candidates & aliases:
             return label
+    # A repository-wide harvest has no narrower functional module until its
+    # source census discovers one. Do not manufacture a label from incidental
+    # request adjectives such as "exhaustively current". Explicit domain
+    # aliases and bounded allowed paths above still win for targeted harvests.
+    if re.search(r"\bharvest(?:-refresh)?\b", objective_text, re.IGNORECASE):
+        return "Repository"
     selected: list[str] = []
     for candidate in candidates:
         normalized = candidate.lower()
@@ -3599,6 +3605,10 @@ def _validate_gate_result_report(
             check_evidence = str(check.get("evidence") or "").strip()
             if len(command) < 2:
                 raise ValueError(f"{gate} result test {index} must identify the exact executed command")
+            if re.search(r"(?<!\S)\.\.\.(?!\S)", command):
+                raise ValueError(
+                    f"{gate} result test {index} command must be the exact reproducible invocation, not a placeholder with ..."
+                )
             project_root = str(task.get("project_root") or "").replace("\\", "/")
             if cwd != project_root:
                 relative_cwd = Path(cwd)
@@ -4808,7 +4818,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     )
     executed_test_contract = (
         "For this gate, every report.tests item must contain exactly command, cwd, exit_code, and evidence from an "
-        "observed execution, and every listed check must have integer exit_code 0. A negative-path assertion is "
+        "observed execution. The command must be the exact reproducible invocation with no `...` placeholder, and "
+        "every listed check must have integer exit_code 0. A negative-path assertion is "
         "successful only when its harness exits 0. Never omit, disguise, or relabel a non-zero result to publish a "
         "completion report: preserve it and return the exact report-tool error so the coordinator reworks the gate."
         if package.get("gate") in EXECUTED_CHECK_RESULT_GATES else ""
