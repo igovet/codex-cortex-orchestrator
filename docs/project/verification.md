@@ -15,9 +15,16 @@ bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --dry-run
 ```
 
-Recorded Cortex 6.1.2 source-candidate evidence:
+Recorded Cortex 6.1.3 source-candidate evidence:
 
 - The full Python suite passed 309 tests.
+- The executable compatibility facade was reduced from 11,831 to 9,128 lines
+  without changing the seven public tools. Focused bundled runtime modules now
+  own identity formatting, route policy, delegation persistence, immutable
+  briefings, reports, questions, compaction handoffs, and public MCP schemas,
+  response rendering, and stdio transport. The compatibility/importlib
+  boundary is covered by the installer and behavior-focused tests rather than
+  source-placement assertions.
 - File-size hardening passed: ordinary JSON writes use the bounded
   `MAX_JSON_BYTES=8 MiB` limit with fail-before-replace diagnostics; manifests
   use `MAX_MANIFEST_BYTES=64 MiB`; baseline preflight runs before task-directory
@@ -30,18 +37,22 @@ Recorded Cortex 6.1.2 source-candidate evidence:
   dependency/cache/runtime directories. Conditional handling keeps ambiguous
   `build`/`dist`/`target`/`bin`/`obj` source directories visible unless an
   ignore rule or recognizable build marker identifies generated output.
-- The source candidate is 6.1.2 and the local plugin registration is installed
-  and content-verified as `6.1.2+codex.<build>`; installation preserved
+- The source candidate is 6.1.3 and the local plugin registration is installed
+  and content-verified as `6.1.3+codex.<build>`; installation preserved
   the user MCP approval override.
 - Marketplace validation, Python compilation, shell syntax checks, the isolated
-  fresh-plugin probe, the 309-test suite, and the cold-boot lifecycle passed.
-  The installed `6.1.2+codex.<build>` also completed a fresh live harvest with
-  automatic plan approval, eight persisted reports, a review-detected broken
-  anchor, one bounded documentation rework, repeat independent review, and
-  final `close_verified: true`/`handoff_ready: true`. Its source-backed census
-  had zero unexplained non-excluded surfaces and the required unittest command
-  passed four tests. A fresh final-build dispatch also confirmed `Planner
-  Pricing` plus a unique `planner_pricing_01_<digest>` key.
+  fresh-plugin probe, the 309-test suite, the cold-boot lifecycle, and the
+  composite call-count benchmark passed. The installed
+  `6.1.3+codex.20260816115152` completed a real
+  `cortex-luna-high-eval.py --live --scenario automatic_sequential` run with
+  launch model `gpt-5.6-luna`, effort `high`, one start, public-only lifecycle
+  calls, strict worker reports, no failed public calls, final close evidence,
+  and handoff. The harness returned exit code 0 / `PASS`.
+- Earlier 6.1.2 live-harvest evidence remains historical: it completed a fresh
+  harvest with automatic plan approval, eight persisted reports, a
+  review-detected broken anchor, bounded documentation rework, repeat
+  independent review, and final close verification. It is not presented as
+  a 6.1.3 live-harvest result.
 - Recovery regression coverage binds every non-success `continue_orchestration`
   result to the exact issued `dispatch_ref`. A duplicate result for one attempt
   replays safely, while the same failure reason for a replacement attempt is
@@ -359,7 +370,7 @@ key. Its child snapshot records `model=gpt-5.6-luna` and
 `reasoning_effort=high`. This runtime metadata, rather than worker self-report,
 is the acceptance evidence. The worker returned to the parent and no
 user-owned visible task was created.
-This proof predates the current 6.1.2 candidate and is not a fresh-install or
+This proof predates the current 6.1.3 candidate and is not a fresh-install or
 runtime attestation for this release.
 
 `verify-cortex-release.py --require-tracked` is the blocking release boundary:

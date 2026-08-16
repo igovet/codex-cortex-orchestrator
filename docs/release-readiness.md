@@ -11,7 +11,7 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `6.1.2` (an installed build may carry a `+codex.<build>` suffix).
+  `6.1.3` (an installed build may carry a `+codex.<build>` suffix).
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
@@ -37,9 +37,9 @@ pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
 tracked-release archive validation.
 
-Current 6.1.2 source evidence includes the full 309-test suite, marketplace
+Current 6.1.3 source evidence includes the full 309-test suite, marketplace
 validation, Python compilation, shell syntax, the isolated fresh-plugin probe,
-and installed-content verification at `6.1.2+codex.<build>`. File-size hardening covers
+and installed-content verification at `6.1.3+codex.<build>`. File-size hardening covers
 the 8 MiB ordinary-JSON bound with fail-before-replace diagnostics, the
 separate 64 MiB manifest bound, early baseline preflight, bounded
 handoff/reconciliation snapshots, and actionable fail-closed errors for
@@ -59,7 +59,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 6.1.2 release commit only with explicit authorization.
+- Create the Cortex 6.1.3 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

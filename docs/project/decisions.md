@@ -95,6 +95,24 @@ suggestions. In particular, `implement` normalizes to `implementation` and
 `build_verification` to the final `close` phase, preventing retry loops caused
 by treating common phase labels as new work.
 
+## Modular executable facade
+
+`plugins/cortex/scripts/cortex.py` remains the stable executable, hook-import,
+and compatibility facade. Its runtime responsibilities are deliberately split
+into focused bundled modules: identity formatting, route policy, delegation
+persistence, immutable dispatch briefings, scoped reports and questions,
+context-compaction handoff rendering, and the public MCP schema/transport
+adapter. The public adapter owns the declarative seven-tool contract and JSON-
+RPC stdio loop; the facade passes the current business handlers into it.
+
+The facade re-exports documented compatibility symbols so installed hooks and
+external tests do not depend on a module's physical source location. Tests
+therefore assert behavior and exported contracts rather than `def` placement.
+The import bridge also supports Codex's installer validation, which loads the
+entrypoint through `importlib` without first registering a module name. This is
+runtime loading compatibility only; it neither reads nor migrates retired task
+state, which remains unsupported under the v8 ledger policy.
+
 ## Conditional indexed repository intelligence
 
 Codebase Memory is an optional worker-side accelerator, not a source of truth

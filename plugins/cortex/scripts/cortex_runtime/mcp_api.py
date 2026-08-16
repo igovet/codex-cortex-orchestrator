@@ -1,0 +1,653 @@
+"""Public MCP registry and stdio transport, independent of orchestration policy."""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from collections.abc import Callable, Mapping
+from typing import Any
+
+
+PUBLIC_TOOL_DESCRIPTIONS = {
+    "start_orchestration": "Start a Cortex task from the exact user-authored request. Cortex preserves that intent boundary, creates internal identifiers, and returns native dispatches with canonical profile, capability, access, and selection rationale.",
+    "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
+    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
+    "worker_question": "Worker-only operation: persist a material question, finish into resumable idle, then poll its answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
+    "record_report": "Worker-only operation: validate the gate contract, executed-check evidence, and claimed file delta; then persist the strict report and return a compact report_ref. Do not paste the report body into the parent channel after success.",
+    "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
+    "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
+}
+
+
+
+def build_public_schemas(
+    *,
+    agents: Mapping[str, Any],
+    report_fields: set[str],
+    max_work_packages: int,
+    question_option_schema: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Build the seven public contracts independently of internal handlers."""
+    V3_REPORT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "summary": {"type": "string", "minLength": 1},
+            "findings": {"type": "array"},
+            "questions": {"type": "array"},
+            "changed_files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Safe project-relative paths only; put prose in findings or evidence.",
+            },
+            "tests": {
+                "type": "array",
+                "description": (
+                    "For implementation, QA, specialist checks, review, documentation, and close, each item must contain "
+                    "exactly command, cwd, exit_code, and evidence from an executed check."
+                ),
+                "items": {},
+            },
+            "evidence": {
+                "type": "array",
+                "description": (
+                    "Evidence plus every exact generated Predecessor review:, Knowledge reviewed:, Gate acceptance:, "
+                    "Gate verification:, and close-level Task acceptance:/Task verification: marker from the briefing."
+                ),
+            },
+            "uncertainty": {"type": "array"},
+            "next_action": {"type": "string", "minLength": 1},
+        },
+        "required": sorted(report_fields),
+    }
+    V3_PLANNING_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "overview": {"type": "string", "minLength": 1},
+            "work_packages": {
+                "type": "array", "minItems": 1, "maxItems": max_work_packages,
+                "description": (
+                    "Planner-only task-local work breakdown. Runtime requires each package to have id, title, objective, "
+                    "and non-empty microtasks, and writes the validated artifact under .codex/cortex/tasks/<task>/planning/."
+                ),
+                "items": {"type": "object"},
+            },
+        },
+        "required": ["overview", "work_packages"],
+    }
+    V3_WORKER_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "phase": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Canonical phase: plan, discover, architecture, database_architecture, implementation, qa, "
+                    "security, performance, accessibility, ux, review, documentation, or close. Common aliases "
+                    "are normalized; build_verification/final_verification map to close. A canonical phase may "
+                    "appear in only one wave, though one wave may contain multiple workers for that phase."
+                ),
+            },
+            "profile": {
+                "type": "string",
+                "enum": sorted(agents),
+                "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
+            },
+            "objective": {"type": "string"},
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "acceptance": {"type": "array", "items": {"type": "string"}},
+            "verification": {"type": "array", "items": {"type": "string"}},
+            "context_files": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+                "description": (
+                    "Task-relevant project/feature knowledge pages selected from the repository indexes. "
+                    "Cortex also injects docs/project/index.md and docs/features/index.md when present."
+                ),
+            },
+            "depends_on": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+                "description": (
+                    "Optional exact prerequisite phases whose verified reports this worker must receive. "
+                    "Omit to receive every completed predecessor report; use an empty list only when the worker "
+                    "is intentionally independent."
+                ),
+            },
+            "model": {"type": "string", "description": "Optional expert override; luna, terra, and sol aliases are accepted."},
+            "user_requested_model": {
+                "type": "string",
+                "description": (
+                    "Model explicitly requested by the user; luna, terra, and sol aliases are accepted. "
+                    "Non-security Sol is rejected unless it is supplied through this field."
+                ),
+            },
+            "effort": {"type": "string", "description": "Optional expert reasoning-effort override."},
+            "visible": {"type": "boolean", "default": False},
+            "isolated_checkout": {"type": "boolean", "default": False},
+        },
+        "required": ["phase"],
+    }
+    V3_WAVE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"workers": {"type": "array", "minItems": 1, "maxItems": 32, "items": V3_WORKER_SCHEMA}},
+        "required": ["workers"],
+    }
+    START_ORCHESTRATION_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+            "task": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "user_request": {"type": "string", "minLength": 1, "description": "Exact user-authored task text. Do not paraphrase, normalize, or expand it."},
+                    "objective": {"type": "string", "minLength": 1, "description": "Deprecated exact mirror of user_request. Omit it; when supplied it must match user_request byte-for-byte after trimming."},
+                    "requirements": {"type": "array", "items": {"type": "string"}},
+                    "acceptance_criteria": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Required observable outcomes, except harvest routes where Cortex supplies the exhaustive census contract.",
+                    },
+                    "scope": {"type": "array", "items": {"type": "string"}},
+                    "allowed_paths": {"type": "array", "items": {"type": "string"}},
+                    "verification": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Required authoritative checks, except harvest routes where Cortex supplies the census checks.",
+                    },
+                    "budget": {"type": "string"},
+                    "pause_conditions": {"type": "array", "items": {"type": "string"}},
+                    "plan_approval": {"type": "string", "enum": ["auto", "required"], "description": "Post-plan user review policy. Defaults to required for C2/C3 and auto for C1."},
+                    "user_language": {"type": "string"},
+                    "language": {"type": "string"},
+                    "complexity": {"type": ["string", "integer"], "description": "Optional C1/C2/C3 or human alias; defaults to C2."},
+                    "replan_limit": {"type": "integer", "minimum": 0},
+                },
+                "required": ["user_request"],
+            },
+            "waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
+        },
+        "required": ["project_root", "task"],
+    }
+    CONTINUE_ORCHESTRATION_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+            "task_ref": {"type": "string", "description": "Needed only when Cortex reports several selectable tasks."},
+            "step": {"type": "integer", "minimum": 1, "description": "Relative step returned by the preceding Cortex response; enables safe idempotent replay without a wave identifier."},
+            "results": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "worker": {"type": "integer", "minimum": 1, "description": "Required only for a parallel wave."},
+                        "report_ref": {"type": "string", "minLength": 1, "description": "Compact ref returned by the worker's record_report call. Successful public continuation uses this field, never an inline report body."},
+                        "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
+                        "reason": {"type": "string", "description": "Required for a non-success result."},
+                    },
+                },
+            },
+            "future_waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
+            "rework": {"type": "boolean", "default": False},
+            "reason": {"type": "string"},
+        },
+        "required": ["project_root", "step", "results"],
+    }
+    WORKER_RECORD_REPORT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
+            "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
+            "attempt_id": {"type": "string", "minLength": 1, "description": "Exact attempt_id from this worker's Cortex briefing; never substitute a phase or profile."},
+            "profile": {"type": "string", "enum": sorted(agents), "description": "Exact canonical profile from this worker's Cortex briefing."},
+            "report": V3_REPORT_SCHEMA,
+            "planning": V3_PLANNING_SCHEMA,
+        },
+        "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
+    }
+    WORKER_QUESTION_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1},
+            "task_id": {"type": "string", "minLength": 1},
+            "attempt_id": {"type": "string", "minLength": 1},
+            "profile": {"type": "string", "enum": sorted(agents)},
+            "action": {"type": "string", "enum": ["ask", "poll"]},
+            "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
+            "question": {"type": "string", "minLength": 1, "description": "Material user decision; required for ask."},
+            "header": {"type": "string"},
+            "options": {"type": "array", "maxItems": 32, "items": question_option_schema},
+            "multiple": {"type": "boolean"},
+            "custom_label": {"type": "string"},
+            "context": {},
+        },
+        "required": ["project_root", "task_id", "attempt_id", "profile", "action"],
+    }
+    READ_WORKER_REPORT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1},
+            "task_ref": {"type": "string"},
+            "report_ref": {"type": "string", "minLength": 1},
+            "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
+            "profile": {"type": "string", "enum": sorted(agents), "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
+        },
+        "required": ["project_root", "report_ref"],
+    }
+    READ_DISPATCH_BRIEFING_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1},
+            "task_id": {"type": "string", "minLength": 1},
+            "attempt_id": {"type": "string", "minLength": 1},
+            "profile": {"type": "string", "enum": sorted(agents)},
+            "dispatch_ref": {"type": "string", "minLength": 1},
+            "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        },
+        "required": [
+            "project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest",
+        ],
+    }
+    MANAGE_ORCHESTRATION_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, lane, resource, question, or prune; common aliases are normalized."},
+            "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
+            "reason": {"type": "string"},
+            "payload": {
+                "type": "object",
+                "description": (
+                    "Rare-operation payload. For intent=follow_up, use the completed source task_ref and an exact "
+                    "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
+                    "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
+                    "elicitation. Never add guessed identity fields. Prune requires confirmation='PRUNE' and accepts "
+                    "older_than_days (default 7). Normal wave progression never uses this field."
+                ),
+            },
+        },
+        "required": ["project_root"],
+    }
+
+    return {
+        "v3_report": V3_REPORT_SCHEMA,
+        "v3_planning": V3_PLANNING_SCHEMA,
+        "v3_worker": V3_WORKER_SCHEMA,
+        "v3_wave": V3_WAVE_SCHEMA,
+        "start_orchestration": START_ORCHESTRATION_SCHEMA,
+        "continue_orchestration": CONTINUE_ORCHESTRATION_SCHEMA,
+        "manage_orchestration": MANAGE_ORCHESTRATION_SCHEMA,
+        "worker_question": WORKER_QUESTION_SCHEMA,
+        "record_report": WORKER_RECORD_REPORT_SCHEMA,
+        "read_dispatch_briefing": READ_DISPATCH_BRIEFING_SCHEMA,
+        "read_worker_report": READ_WORKER_REPORT_SCHEMA,
+    }
+
+
+
+def v3_response(
+    old: dict[str, Any],
+    task_ref: str,
+    *,
+    native_arguments: Callable[[dict[str, Any]], dict[str, Any]],
+    public_schema: str,
+    coordinator_lock: str,
+    include_result: bool = False,
+    start_replayed: bool | None = None,
+) -> dict[str, Any]:
+    wave_label = str(old.get("wave_id") or "")
+    wave_match = re.search(r"(\d+)$", wave_label)
+    step = int(wave_match.group(1)) if wave_match else None
+    if not old.get("ok"):
+        diagnostics = old.get("diagnostics") if isinstance(old.get("diagnostics"), list) else []
+        operation = str(old.get("operation") or "")
+        retry_tool = "start_orchestration" if operation == "start" else "continue_orchestration"
+        response = {
+            "schema": public_schema,
+            "ok": False,
+            "outcome": old.get("state", "needs_input"),
+            "code": old.get("code", "orchestration_failed"),
+            "step": step,
+            "diagnostics": diagnostics,
+            "dispatches": [],
+            "next_action": f"{coordinator_lock} Correct every diagnostic and retry {retry_tool} without touching the target project.",
+        }
+        if task_ref:
+            response["task_ref"] = task_ref
+        if include_result and "result" in old:
+            response["result"] = old["result"]
+        if isinstance(old.get("pipeline"), dict):
+            response["pipeline"] = old["pipeline"]
+        return response
+    requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
+    prepared_dispatches = [
+        {
+            "worker": index,
+            "dispatch_ref": request.get("dispatch_ref"),
+            "phase": request.get("phase"),
+            "profile": request.get("profile"),
+            "display_name": request.get("display_name"),
+            "capability": request.get("capability"),
+            "sandbox": request.get("sandbox"),
+            "selection_reason": request.get("selection_reason"),
+            "briefing_path": request.get("briefing_path"),
+            "briefing_digest": request.get("briefing_digest"),
+            "call": request.get("host_tool") or "spawn_agent",
+            "arguments": native_arguments(request),
+        }
+        for index, request in enumerate(requests, 1)
+    ]
+    # A replay is a lifecycle receipt, never a second host-dispatch grant. If
+    # the original response was lost before any native call was made, inspect
+    # can recover only the still-awaiting requests without making every exact
+    # duplicate start capable of spawning a duplicate worker wave.
+    dispatches = [] if start_replayed is True else prepared_dispatches
+    outcome = old.get("state")
+    if start_replayed is True:
+        next_action = (
+            f"{coordinator_lock} start_orchestration was already completed for task_ref={task_ref}. "
+            "Do not invoke or repeat any worker dispatch from this replay. If the original start response was "
+            "lost before its native dispatches were invoked, call manage_orchestration with intent inspect once "
+            "and invoke only the still-awaiting dispatches returned by that recovery call."
+        )
+    elif dispatches:
+        start_transition = (
+            f" start_orchestration is complete for task_ref={task_ref}; never call it again for this task."
+            if start_replayed is not None else ""
+        )
+        next_action = (
+            f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: call every dispatch.call once with its exact "
+            "dispatch.arguments, one call at a time in returned worker order; the children still run concurrently after "
+            "each call returns. This order lets the documented generic SubagentStart events bind to the exact issued "
+            "dispatch. A worker is dispatched only after that native call returns a child id. Never claim "
+            "it was sent or call wait without the returned child target; if the native call is unavailable or fails, "
+            "stop and report the blocker. Keep the returned child targets, then remain idle and wait only for them. Do not repeat a "
+            "completed lifecycle call while dispatching. Each worker publishes through record_report and returns only "
+            "a report_ref plus a short summary. Read every ref with read_worker_report and immediately publish its "
+            "report_markdown_link verbatim before another lifecycle call. Reassess the pipeline, then call "
+            f"continue_orchestration with task_ref={task_ref}, the report_ref values, and this step."
+        )
+    elif outcome == "awaiting_plan_approval":
+        next_action = (
+            f"{coordinator_lock} Read plan_review.report_ref, publish plan_review.report_markdown_link verbatim in "
+            "the main chat, present a concise plan summary there, and "
+            "wait for explicit user approval. Do not dispatch the next wave. Call manage_orchestration with "
+            "intent=plan_approval and payload.decision=approve, or decision=revise with the user's feedback."
+        )
+    elif outcome == "completed":
+        next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
+    elif outcome == "blocked":
+        next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
+    else:
+        next_action = (
+            f"{coordinator_lock} Wait idly for the active worker results, then call continue_orchestration "
+            f"with task_ref={task_ref} and this step."
+        )
+    if old.get("operation") == "inspect" and isinstance(old.get("result"), dict) and isinstance(old["result"].get("context_handoff"), dict):
+        handoff = old["result"]["context_handoff"]
+        active_worker_ids = [
+            str(item.get("host_agent_id") or "")
+            for item in handoff.get("active_workers", [])
+            if isinstance(item, dict) and str(item.get("host_agent_id") or "").strip()
+        ]
+        stopped_workers = [
+            item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
+        ]
+        if outcome == "waiting_workers":
+            if active_worker_ids:
+                next_action = (
+                    f"{coordinator_lock} Rehydrate from result.context_handoff. Do not restart, replay, or respawn "
+                    "the running attempts. Wait only on these exact persisted native child ids: "
+                    + ", ".join(active_worker_ids)
+                    + ". After completion, read and validate their report refs before continuing Cortex."
+                )
+            elif any(item.get("question_refs") for item in stopped_workers):
+                waiting_questions = [
+                    str(question_ref)
+                    for item in stopped_workers
+                    for question_ref in item.get("question_refs", [])
+                    if str(question_ref or "").strip()
+                ]
+                next_action = (
+                    f"{coordinator_lock} The worker is paused on a durable question, not running. Never wait on or "
+                    "respawn it. Surface the question through manage_orchestration(intent=question): "
+                    + ", ".join(waiting_questions) + "."
+                )
+            elif stopped_workers and all(item.get("report_refs") for item in stopped_workers):
+                report_refs = [
+                    str(report_ref)
+                    for item in stopped_workers
+                    for report_ref in item.get("report_refs", [])
+                    if str(report_ref or "").strip()
+                ]
+                next_action = (
+                    f"{coordinator_lock} Recovery found stopped workers with persisted reports, not running "
+                    "children. Never wait on or respawn them. Read and publish these report refs, then call "
+                    "continue_orchestration for the current step: " + ", ".join(report_refs) + "."
+                )
+            else:
+                next_action = (
+                    f"{coordinator_lock} Recovery found a running attempt without a persisted native child id. "
+                    "Fail closed: do not respawn, do not call an empty wait, and report the host-binding blocker."
+                )
+        elif stopped_workers:
+            waiting_questions = [
+                str(question_ref)
+                for item in stopped_workers
+                for question_ref in item.get("question_refs", [])
+                if str(question_ref or "").strip()
+            ]
+            if waiting_questions:
+                next_action = (
+                    f"{coordinator_lock} Never wait on or respawn the stopped worker. Surface the durable question "
+                    "through manage_orchestration(intent=question): " + ", ".join(waiting_questions) + "."
+                )
+            elif all(item.get("report_refs") for item in stopped_workers):
+                report_refs = [
+                    str(report_ref)
+                    for item in stopped_workers
+                    for report_ref in item.get("report_refs", [])
+                    if str(report_ref or "").strip()
+                ]
+                next_action = (
+                    f"{coordinator_lock} Never wait on or respawn the stopped worker. Read and publish these "
+                    "persisted report refs, then continue the current step: " + ", ".join(report_refs) + "."
+                )
+            else:
+                next_action = (
+                    f"{coordinator_lock} The native worker stopped without a report and Cortex durably marked its "
+                    "attempt failed. Never wait on or respawn it directly. Call continue_orchestration for this step "
+                    "with the matching worker slot, that stopped worker's exact dispatch_ref, status=failed, and "
+                    "reason=native_worker_stopped_without_report; "
+                    "Cortex will apply the canonical rework policy."
+                )
+        else:
+            next_action = (
+                f"{coordinator_lock} Rehydrate from result.context_handoff before continuing. "
+                "It is the durable post-compaction state and protocol snapshot; do not restart the task or replay "
+                "completed dispatches. Then " + next_action
+            )
+    response = {
+        "schema": public_schema,
+        "ok": True,
+        "outcome": outcome,
+        "task_ref": task_ref,
+        "step": step,
+        "next_action": next_action,
+        "dispatches": dispatches,
+    }
+    if start_replayed is not None:
+        response["replayed"] = start_replayed
+    if isinstance(old.get("pipeline"), dict):
+        response["pipeline"] = old["pipeline"]
+    if outcome == "completed":
+        summary = old.get("state_summary") if isinstance(old.get("state_summary"), dict) else {}
+        response["result"] = {
+            "close_verified": bool(summary.get("close_verified")),
+            "handoff_ready": bool(summary.get("handoff_created")),
+        }
+    if include_result and "result" in old:
+        response["result"] = old["result"]
+        if isinstance(old["result"], dict) and isinstance(old["result"].get("context_handoff"), dict):
+            response["context_handoff"] = old["result"]["context_handoff"]
+    if outcome == "awaiting_plan_approval":
+        review = (old.get("result") or {}).get("plan_review") if isinstance(old.get("result"), dict) else None
+        if isinstance(review, dict):
+            response["plan_review"] = review
+    return response
+
+def configure_legacy_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]]) -> set[str]:
+    """Apply runtime authorization requirements to the retained legacy registry."""
+    tools["record_delegation"][1]["properties"]["dispatch_mode"]["description"] = (
+        "visible_thread creates a user-owned Luna task only when explicitly requested; it is never a fallback."
+    )
+    tools["record_delegation"][1]["properties"]["luna_fallback"]["description"] = (
+        "An unavailable hidden Luna dispatch falls back to an explicit hidden Terra spawn_agent request."
+    )
+    tools["record_delegation"][1]["properties"]["luna_fallback"]["default"] = "terra"
+    authorized = {
+        "init_task", "get_task_status", "record_delegation", "prepare_delegation", "prepare_delegations", "confirm_host_spawn", "finalize_attempt", "complete_attempt", "record_evidence", "execute_verification_command",
+        "record_report", "cortex.question", "publish_worker_question", "list_worker_questions", "answer_worker_question", "get_worker_question_updates",
+        "list_task_reports", "get_delegation_reports", "reconcile_report_bus", "close_audit",
+        "record_gate_outcome", "commit_gate", "resume_task", "update_pipeline", "reassess_pipeline", "acquire_lock", "release_lock",
+        "create_handoff", "claim_resource", "release_resource",
+        "create_lane", "get_lane_status", "claim_lane", "release_lane", "retire_lane", "bind_task_lane",
+        "claim_lane_resource", "release_lane_resource", "materialize_lane", "reconcile_lane",
+    }
+    for name in authorized:
+        schema = tools[name][1]
+        schema.setdefault("properties", {}).setdefault("principal", {"type": "string", "minLength": 1})
+        if "principal" not in schema.setdefault("required", []):
+            schema["required"].append("principal")
+    for _, schema in tools.values():
+        schema.setdefault("properties", {}).setdefault("project_root", {
+            "type": "string",
+            "minLength": 1,
+            "description": "Absolute project workspace path. Cortex writes only to project_root/.codex/cortex.",
+        })
+    if "project_root" not in tools["activate_orchestration"][1].setdefault("required", []):
+        tools["activate_orchestration"][1]["required"].append("project_root")
+    for name, fields in {
+        "claim_resource": ["expires_at"], "claim_lane": ["expires_at"], "claim_lane_resource": ["expires_at"],
+        "create_handoff": ["completed", "next_action"], "retire_lane": ["confirm"],
+    }.items():
+        for field in fields:
+            if field not in tools[name][1]["required"]:
+                tools[name][1]["required"].append(field)
+    tools["retire_lane"][1]["properties"]["confirm"] = {"type": "boolean"}
+    tools["record_delegation"][1]["required"] = [
+        field for field in tools["record_delegation"][1]["required"]
+        if field not in {"expected_revision", "status_receipt", "gate", "agent", "task_kind", "risk", "objective", "ownership", "allowed_paths", "acceptance_criteria", "verification"}
+    ]
+    for field in ("allowed_paths", "acceptance_criteria", "verification"):
+        tools["record_delegation"][1]["properties"][field].pop("minItems", None)
+    return authorized
+
+
+def public_tools(
+    legacy_tools: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
+    *,
+    worker_question: Callable[..., Any],
+    worker_question_schema: dict[str, Any],
+    record_report: Callable[..., Any],
+    record_report_schema: dict[str, Any],
+    read_dispatch_briefing: Callable[..., Any],
+    read_dispatch_briefing_schema: dict[str, Any],
+    read_worker_report: Callable[..., Any],
+    read_worker_report_schema: dict[str, Any],
+) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
+    """Return the only seven MCP operations exposed to hosts and workers."""
+    return {
+        "start_orchestration": legacy_tools["start_orchestration"],
+        "continue_orchestration": legacy_tools["continue_orchestration"],
+        "manage_orchestration": legacy_tools["manage_orchestration"],
+        "worker_question": (worker_question, worker_question_schema),
+        "record_report": (record_report, record_report_schema),
+        "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
+        "read_worker_report": (read_worker_report, read_worker_report_schema),
+    }
+
+
+def serve_stdio(
+    *,
+    public_tools: Mapping[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]],
+    legacy_tools: Mapping[str, tuple[Callable[..., Any], dict[str, Any]]],
+    server_version: str,
+    instructions: str,
+    set_openai_form: Callable[[bool], None],
+    log_tool_error: Callable[[object, object, str, Exception], None],
+) -> None:
+    """Run the narrow JSON-RPC transport without importing orchestration internals."""
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return
+        request_id: object = None
+        request: object = None
+        try:
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError("JSON-RPC request must be an object")
+            method, request_id = request.get("method"), request.get("id")
+            if method == "initialize":
+                capabilities = request.get("params", {}).get("capabilities", {})
+                extensions = capabilities.get("extensions", {}) if isinstance(capabilities, dict) else {}
+                set_openai_form(bool(
+                    isinstance(capabilities, dict) and (
+                        capabilities.get("mcpServerOpenaiFormElicitation")
+                        or (isinstance(extensions, dict) and "openai/form" in extensions)
+                    )
+                ))
+                result: dict[str, Any] = {
+                    "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
+                    "capabilities": {"tools": {}, "resources": {"subscribe": False, "listChanged": False}},
+                    "serverInfo": {"name": "cortex", "version": server_version},
+                    "instructions": instructions,
+                }
+            elif method == "notifications/initialized":
+                continue
+            elif method == "tools/list":
+                result = {"tools": [
+                    {"name": name, "description": PUBLIC_TOOL_DESCRIPTIONS[name], "inputSchema": schema}
+                    for name, (_, schema) in public_tools.items()
+                ]}
+            elif method == "resources/list":
+                result = {"resources": []}
+            elif method == "resources/templates/list":
+                result = {"resourceTemplates": []}
+            elif method == "tools/call":
+                name = request.get("params", {}).get("name")
+                if name not in public_tools:
+                    if name in legacy_tools:
+                        raise ValueError("removed_in_v3_use_start_continue_or_manage")
+                    raise ValueError(f"unknown tool '{name}'")
+                arguments = request.get("params", {}).get("arguments", {})
+                if not isinstance(arguments, dict):
+                    raise ValueError("tool arguments must be an object")
+                value = public_tools[name][0](arguments)
+                result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
+            elif method == "ping":
+                result = {}
+            else:
+                raise ValueError(f"unsupported method '{method}'")
+            if request_id is not None:
+                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
+                sys.stdout.flush()
+        except Exception as exc:
+            log_tool_error(request, request_id, line.rstrip("\n"), exc)
+            if request_id is not None:
+                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": str(exc)}}, ensure_ascii=False) + "\n")
+                sys.stdout.flush()

@@ -14,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
 import cortex_hook
+from cortex_runtime import identity as worker_identity
+from cortex_runtime import mcp_api
 
 
 class OrchestrationInvariantTests(unittest.TestCase):
@@ -970,10 +972,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
             '"dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing"',
             (plugin / "profiles.json").read_text(encoding="utf-8"),
         )
-        self.assertIn(
-            "def bind_host_worker_from_hook(",
-            (plugin / "scripts/cortex.py").read_text(encoding="utf-8"),
-        )
+        # The executable facade is deliberately free to move implementation
+        # into cortex_runtime.  Hooks rely on this stable import/export
+        # contract, not on a particular function definition remaining in the
+        # monolithic entrypoint source file.
+        self.assertTrue(callable(control.bind_host_worker_from_hook))
+        self.assertIs(cortex_hook.bind_host_worker_from_hook, control.bind_host_worker_from_hook)
+        self.assertIs(control.worker_module_label, worker_identity.worker_module_label)
+        self.assertIs(control.PUBLIC_TOOL_DESCRIPTIONS, mcp_api.PUBLIC_TOOL_DESCRIPTIONS)
         hook = (plugin / "scripts/cortex_hook.py").read_text(encoding="utf-8")
         self.assertIn("bind_host_worker_from_hook", hook)
         self.assertIn("Dispatch briefing reviewed digest", hook)

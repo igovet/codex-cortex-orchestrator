@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 6.1.2 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 6.1.3 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -470,5 +470,5 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 6.1.2 evidence is the 309-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.2+codex.<build>`, and a completed installed-plugin live harvest with eight reports, bounded documentation rework, repeat review, and close verification. A fresh final-build worker-identity dispatch also passed; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push. Related project commands are in [verification.md](../../project/verification.md).
+Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). Current 6.1.3 evidence is the 309-test suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.1.3+codex.<build>`, and a completed installed-plugin live harvest with eight reports, bounded documentation rework, repeat review, and close verification. A fresh final-build worker-identity dispatch also passed; the installer preserves the user MCP approval override. Run tracked-release verification against the committed candidate before push. Related project commands are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->
