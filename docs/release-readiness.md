@@ -11,7 +11,12 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `6.4.1` (an installed build may carry a `+codex.<build>` suffix).
+  `6.5.0` (an installed build may carry a `+codex.<build>` suffix).
+- Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
+  executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
+  `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
+  same selection, and an invalid explicit path must not mutate Codex
+  configuration.
 - Optional public manifest fields are not added until their exact names and
   shapes are verified against the installed or official Codex schema. The
   current release work does not invent repository, homepage, license, privacy,
@@ -37,15 +42,15 @@ pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
 tracked-release archive validation.
 
-The 6.4.1 source candidate is verified by the current full test suite,
+The 6.5.0 source candidate must be verified by the full test suite,
 marketplace validation, Python compilation, shell syntax, the isolated
 fresh-plugin probe, and installed-content verification at
-`6.4.1+codex.20260816170348`. The final Luna-high automatic-sequential live
-run for that installed build passed with close evidence, handoff, and snapshot
-cleanup. File-size hardening covers the 8 MiB ordinary-JSON
+`6.5.0+codex.20260816170348`. The final Luna-high automatic-sequential live
+run for that installed build must be recorded with close evidence, handoff,
+and snapshot cleanup. File-size hardening covers the 8 MiB ordinary-JSON
 bound with fail-before-replace diagnostics, the separate 64 MiB manifest
 bound, bounded handoff/reconciliation snapshots, and fail-closed diagnostics
-for oversized artifacts. The 6.4.1 ledger starts from SQLite only: its
+for oversized artifacts. The 6.5.0 ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
 the user MCP approval override. Live-model and tracked-release validation are
@@ -56,7 +61,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 6.4.1 release commit only with explicit authorization.
+- Create the Cortex 6.5.0 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

@@ -106,15 +106,22 @@ def main() -> int:
     try:
         manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
         mcp = json.loads((plugin / ".mcp.json").read_text(encoding="utf-8"))
-        json.loads((plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
+        hooks = json.loads((plugin / "hooks/hooks.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "6.4.1":
-        fail("plugin manifest must identify cortex at release version 6.4.1")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "6.5.0":
+        fail("plugin manifest must identify cortex at release version 6.5.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
+    launcher = plugin / "scripts/cortex-launcher"
+    regular_file(launcher, "Cortex launcher")
+    if not launcher.stat().st_mode & 0o111:
+        fail("Cortex launcher must have executable permissions")
+    launcher_source = launcher.read_text(encoding="utf-8")
+    if "CORTEX_PYTHON" not in launcher_source or "exec" not in launcher_source:
+        fail("Cortex launcher must resolve CORTEX_PYTHON and exec the selected runtime")
     try:
         profile_contract = json.loads((plugin / "profiles.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -260,10 +267,26 @@ def main() -> int:
             fail(f"profile execution contract is too shallow: {name}")
     # MCP configuration supports a plugin-relative working directory.  Unlike
     # hook commands, ${PLUGIN_ROOT} is not expanded in stdio-MCP arguments by
-    # the host, so it would launch a non-existent literal path.
-    expected_server = {"command": "python3", "args": ["./scripts/cortex.py"], "cwd": "."}
+    # the host, so the executable must remain plugin-relative.
+    expected_server = {"command": "./scripts/cortex-launcher", "args": ["./scripts/cortex.py"], "cwd": "."}
     if mcp != {"mcpServers": {"cortex": expected_server}}:
         fail("MCP companion must expose only the cortex server")
+    hook_commands = [
+        hook.get("command")
+        for registrations in hooks.get("hooks", {}).values()
+        if isinstance(registrations, list)
+        for registration in registrations
+        if isinstance(registration, dict)
+        for hook in registration.get("hooks", [])
+        if isinstance(hook, dict)
+    ]
+    if len(hook_commands) != 5 or any(
+        not isinstance(command, str)
+        or '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
+        or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
+        for command in hook_commands
+    ):
+        fail("all five lifecycle hooks must invoke the bundled Cortex launcher")
     for skill_name in EXPECTED_SKILLS:
         skill = plugin / "skills" / skill_name / "SKILL.md"
         try:

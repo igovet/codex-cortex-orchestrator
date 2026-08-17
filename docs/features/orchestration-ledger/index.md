@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 6.4.1 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 6.5.0 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -13,14 +13,19 @@ briefing fallback `read_dispatch_briefing`, and scoped predecessor
 `read_worker_report`.
 Pre-SQLite ledgers and facades are unsupported and must be recreated. Cortex
 never imports or resumes filesystem coordination state. Future SQLite schema
-migrations run automatically and exactly once per project database.
+migrations run automatically and exactly once per project database in an
+explicit atomic transaction. Each migration is recorded with a content-based
+SHA-256 checksum over its version, name, and ordered normalized SQL. Legacy
+name-only checksums are accepted only after schema validation and are upgraded
+to the content checksum; inconsistent history fails closed.
 
 ## Key files and dependencies
 
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the stable executable and public facade for task, report, and lane tools.
 - [gate_transitions.py](../../../plugins/cortex/scripts/cortex_runtime/gate_transitions.py) owns active-gate resolution, evidence policy, C2/C3 completion requirements, durable transitions, and terminal manifest cleanup behind the `record_gate` facade.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns orchestration start/continue/inspect transitions, transaction checkpoints, waves, and native dispatch assembly.
-- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, migration history, artifact chunks, indexes, and signed artifact cursors without importing the MCP entrypoint.
+- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v7, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, and signed artifact cursors without importing the MCP entrypoint.
+- [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
 - [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, 13 gate briefings, and the `cortex/report/v1` field contract.
 - [test_cortex_control.py](../../../tests/test_cortex_control.py) covers report-bus scoping/reconciliation and lane lifecycle behavior.
@@ -33,14 +38,15 @@ guarantees come exclusively from the installable `plugins/cortex/` tree.
 The root ledger owns private `cortex.db` (mode `0600`) and the advisory
 `.state.lock`. SQLite is the sole mutable source for tasks, state, plans,
 operations, report/delegation indexes, questions, snapshots, classifications,
-lanes, activations, resource claims, and immutable artifact content. The
-artifact catalog stores an unrestricted SQLite `TEXT` or `BLOB` value as
-digest-checked 32 KiB chunks, with artifact id, task, kind, MIME type, title,
-byte size, creation time, immutability flag, and optional export path. Its
-indexes cover task/kind/time, task/time, digest, chunk ordering, task status,
-and task creation time. A task directory holds only materialized human-facing
-projections—exact briefings, report Markdown/JSON, planning revisions,
-handoffs, and journals—rather than another source of truth.
+lanes, activations, resource claims, findings, projection jobs, prune
+tombstones, and immutable artifact content. Schema v7 separates three durable
+identities: a digest-addressed content blob with 32 KiB verified chunks, a
+task-scoped logical artifact (kind/title/immutability), and an authorized
+filesystem export path. Historic v2 artifact tables remain migration evidence;
+new reads and writes use the normalized model. A task directory holds only
+lazy, materialized human-facing projections—exact briefings, report
+Markdown/JSON, planning revisions, handoffs, and journals—rather than another
+source of truth.
 
 Large bodies are never embedded in a lifecycle response. `manage_orchestration`
 with `intent="artifacts"` lists bounded metadata pages and reads one selected
@@ -50,8 +56,10 @@ scopes. Each opaque HMAC cursor is bound to the task, artifact ref, digest,
 reader audience, and byte offset; a caller must resend the full identity tuple
 and may advance only with the returned cursor. The server materializes a
 missing report Markdown projection from the canonical artifact before issuing
-its Desktop link. Full content is only assembled internally for state-machine
-validation, where every chunk and full digest is verified.
+its Desktop link. An export is authorized and placed in the SQLite outbox
+before a materializer claims a lease, atomically writes and fsyncs it, verifies
+the digest, and acknowledges it. Full content is only assembled internally for
+state-machine validation, where every chunk and full digest is verified.
 
 The runtime deliberately does not create `v3-operations.json`, active-task or
 status-receipt files, `reports/grants`, `metrics.json`, task lock files,
@@ -175,7 +183,7 @@ with bounded limits of 32 packages, 32 microtasks per package, and 128 total
 microtasks.
 
 The read-only Planner only proposes this durable planning catalog. Cortex
-materializes the validated artifacts under
+authorizes and queues optional projections under
 `.codex/cortex/tasks/<task>/planning/`: `manifest.json`, `overview.md`, and
 immutable revisions at `revisions/plan-<report-ref>/packages/<id>.json`.
 The SQLite task document is the current planning source of truth; the
@@ -359,15 +367,17 @@ sequential spawn order to associate the opaque child ID with the issued native
 task key and canonical profile before emitting worker context.
 
 `manage_orchestration(intent="prune")` is project-scoped maintenance and must
-omit `task_ref`. With exact `confirmation: "PRUNE"`, it removes task-scoped
-ledger state only when the task is completed and its last update is at least
+omit `task_ref`. With exact `confirmation: "PRUNE"`, it creates a durable
+tombstone only for a completed task whose last update is at least
 `older_than_days` old (default 7). Active and blocked tasks survive regardless
-of age. Under the global state lock it reconciles SQLite task, activation,
-operation, classification, resource-claim, and lane records before deleting
-task artifact directories. A
-classification receipt referenced by any retained task is preserved. Recent
-completed tasks, lane objects, project source/docs, and plugin content are preserved. Repeating
-prune is idempotent; Cortex intentionally has no clear-all route.
+of age. The task graph remains canonical until its safe artifact-tree removal
+succeeds outside the state lock; only then does one final SQLite transaction
+reconcile task, activation, operation, classification, resource-claim, and lane
+records. A failed filesystem operation leaves a retryable tombstone and intact
+canonical state. A classification receipt referenced by any retained task is
+preserved. Recent completed tasks, lane objects, project source/docs, and plugin
+content are preserved. Repeating prune is idempotent; Cortex intentionally has
+no clear-all route.
 
 Predecessor handoffs are an enforced worker contract. Omitted `depends_on`
 supplies every verified predecessor report ref, an explicit phase list selects
@@ -504,5 +514,11 @@ during retirement.
 
 ## Verification
 
-Run `python3 -m unittest discover -s tests -v`; the focused source-backed coverage is [test_cortex_control.py](../../../tests/test_cortex_control.py). The 6.4.1 candidate is verified by the current full suite, marketplace validation, Python compilation, shell syntax, cold boot, an isolated fresh-plugin probe, installed-content verification at `6.4.1+codex.<build>`, and final installed-plugin live validation recorded in [verification.md](../../project/verification.md). The installer preserves the user MCP approval override; the first MCP call creates or upgrades only the SQLite ledger. Run tracked-release verification against the committed candidate before push. Related project commands are in [verification.md](../../project/verification.md).
+The source-tree regression suite passed 388 offline tests, the cold-boot smoke
+passed, and `python3 scripts/cortex-luna-high-eval.py --live --scenario
+automatic_sequential` passed in source mode. The live command uses this checkout
+as its MCP server and does not install, reinstall, update, or verify an
+installed plugin. Installation-bound checks and tracked-release verification
+remain separate release work. Related commands and boundaries are in
+[verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

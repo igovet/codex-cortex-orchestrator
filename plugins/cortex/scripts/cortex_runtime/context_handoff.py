@@ -4,25 +4,32 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cortex import (
-    AWAITING_HOST_SPAWN,
-    MAX_CONTEXT_REPORTS,
-    _contained_path,
-    _open_blocking_questions,
-    _orchestrate_pipeline_snapshot,
-    _orchestrate_summary,
-    _plan_approval,
-    _report_index,
-    _v3_task_ref,
-    _wave_for_gates,
-    active_gates,
-    now,
-    redact,
-    report_bus_paths,
-    report_markdown_link,
-    report_markdown_path,
-    safe_id,
-    sanitize_structured,
+from cortex_runtime.core.runtime_bindings import bind_symbols
+
+
+bind_symbols(
+    "context_handoff",
+    globals(),
+    (
+        "AWAITING_HOST_SPAWN",
+        "MAX_CONTEXT_REPORTS",
+        "_contained_path",
+        "_open_blocking_questions",
+        "_orchestrate_pipeline_snapshot",
+        "_orchestrate_summary",
+        "_plan_approval",
+        "_report_index",
+        "_v3_task_ref",
+        "_wave_for_gates",
+        "active_gates",
+        "now",
+        "redact",
+        "report_bus_paths",
+        "report_markdown_link",
+        "report_markdown_path",
+        "safe_id",
+        "sanitize_structured",
+    ),
 )
 
 def _context_handoff(
@@ -47,6 +54,10 @@ def _context_handoff(
     report_handoffs: list[dict[str, Any]] = []
     changed_files: list[str] = []
     verified_facts: list[dict[str, Any]] = []
+    # Context handoff runs outside lifecycle locks.  Recreate the optional
+    # Desktop export from the canonical report object before emitting its link.
+    from cortex_runtime.reports import ensure_report_markdown_path
+
     for item in report_items:
         report_ref = safe_id(str(item.get("report_id") or ""))
         phase = redact(item.get("gate", "report"), 128) or "report"
@@ -57,15 +68,25 @@ def _context_handoff(
         for value in compact_files:
             if value and value not in changed_files:
                 changed_files.append(value)
-        report_handoffs.append({
+        report_handoff = {
             "report_ref": report_ref,
             "phase": phase,
             "profile": redact((item.get("producer") or {}).get("profile", ""), 128),
             "summary": summary,
-            "report_markdown_path": str(report_markdown_path(task_dir, report_ref)),
-            "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
             "changed_files": compact_files,
-        })
+        }
+        try:
+            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+            report_handoff.update({
+                "report_markdown_path": str(markdown_path),
+                "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
+            })
+        except (OSError, ValueError) as exc:
+            # A report reference is still readable from its canonical SQLite
+            # artifact.  Do not turn a rebuildable Desktop export into a
+            # context-recovery failure.
+            report_handoff["projection_error"] = redact(str(exc), 500)
+        report_handoffs.append(report_handoff)
         verified_facts.append({
             "source": report_ref,
             "phase": phase,

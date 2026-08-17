@@ -54,23 +54,28 @@ from cortex import (
     load_state,
     materialize_planning_artifacts,
     now,
-    preflight_journal,
     redact,
     report_bus_paths,
     report_markdown_link,
     report_markdown_path,
     sanitize_planning_payload,
     sanitize_report_payload,
+    sanitize_closure_payload,
     safe_id,
     select_project_root,
     state_lock,
     store_immutable_artifact,
-    write_json_exclusive,
-    write_text_atomic,
-    write_text_exclusive,
 )
+from cortex_runtime.projection_service import (
+    enqueue as enqueue_projection,
+    materialize_job as materialize_projection_job,
+    repair as repair_projection_job,
+    verify_job as verify_projection_job,
+)
+from cortex_runtime.ledger_db import fail_projection_job
+from cortex_runtime.record_report import build_compatibility_facade
 
-def record_report(params: dict[str, Any]) -> dict[str, Any]:
+def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -109,7 +114,6 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
                 "project_root": str(select_project_root(params)),
             })
             principal_correction = {"requested": supplied_identity, "used": state.get("principal")}
-        preflight_journal(task_dir)
         current_wave = active_gates(state)
         if not candidate_attempt_id:
             eligible = [
@@ -155,11 +159,19 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
                 "resume this same worker after the coordinator records the user answer"
             )
         report = sanitize_report_payload(params.get("report"))
+        is_closure_gate = attempt.get("gate") in {"review", "close"}
+        actor_ids = {str(params.get("principal") or "").strip(), str(params.get("profile") or "").strip()}
+        actor_ids.update(str(alias).strip() for alias in _attempt_identity_aliases(attempt))
+        closure = sanitize_closure_payload(params["closure"], actor_ids={item for item in actor_ids if item}) if params.get("closure") is not None else None
+        if closure is not None and attempt.get("gate") not in {"review", "close"}:
+            raise ValueError("closure is only valid for review and close attempts")
         result_validation = None
         if params.get("_require_gate_validation"):
             result_validation = _validate_gate_result_report(task_dir, state, attempt, report)
         if params.get("_require_close_validation"):
             _validate_close_report(task_dir, state, attempt, report)
+        if is_closure_gate and params.get("closure") is None:
+            raise ValueError("review and close reports require a top-level closure sibling")
         raw_planning = params.get("planning")
         planning = None
         if raw_planning is not None:
@@ -180,9 +192,10 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             planning = sanitize_planning_payload(raw_planning)
         elif params.get("_require_plan_artifact") and attempt.get("gate") == "plan":
             raise ValueError("planner reports require a planning artifact with overview and work_packages")
-        content_digest = digest_text(json.dumps(
-            {"report": report, "planning": planning}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ))
+        digest_payload = {"report": report, "planning": planning}
+        if closure is not None:
+            digest_payload["closure"] = closure
+        content_digest = digest_text(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         raw_submission_id = str(params.get("submission_id") or "").strip()
         submission_id = safe_id(raw_submission_id) if raw_submission_id else f"submission-{attempt_id}-report-{content_digest[:16]}"
         paths = report_bus_paths(task_dir)
@@ -265,27 +278,13 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
                     sanitize_planning_payload(existing["planning"], persisted=True),
                 )
             receipt, _ = _recover_report_receipt(paths, existing, state, bool(attempt.get("invalidated")))
-            _runtime.store_immutable_artifact(
-                task_dir,
-                state["task_id"],
-                kind="report_receipt",
-                title=f"reports/receipts/{receipt['receipt_id']}.json",
-                mime_type="application/json",
-                content=json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                export_path=f"reports/receipts/{receipt['receipt_id']}.json",
-            )
-            markdown_path = paths["markdown"] / f"{existing_id}.md"
-            if not markdown_path.exists():
-                _runtime.write_text_exclusive(markdown_path, _report_markdown(existing))
-            _runtime.store_immutable_artifact(
-                task_dir,
-                state["task_id"],
-                kind="report_markdown",
-                title=f"reports/markdown/{existing_id}.md",
-                mime_type="text/markdown",
-                content=_report_markdown(existing),
-                export_path=f"reports/markdown/{existing_id}.md",
-            )
+            # The receipt and Markdown artifacts were committed with the
+            # first submission.  Re-storing them here may create a distinct
+            # immutable artifact for an already-owned export path (for
+            # example after receipt recovery adjusts metadata).  The public
+            # use case schedules all three canonical artifacts for repair
+            # after this return, preserving retry semantics without a
+            # duplicate logical export registration.
             return {"idempotent": True, "report": existing, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
         attempt_count = sum(1 for item in authoritative if item.get("attempt_id") == attempt_id)
         aggregate_bytes = sum(len(json.dumps(item.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8")) for item in authoritative)
@@ -300,6 +299,7 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             "gate": attempt["gate"], "attempt_id": attempt_id, "submission_id": submission_id,
             "producer": {"profile": attempt["profile"], "model": attempt["selected_model"], "reasoning_effort": attempt["selected_reasoning_effort"]},
             "report": report, "planning": planning, "result_validation": result_validation,
+            **({"closure": closure} if closure is not None else {}),
             "content_digest": content_digest, "created_at": now(),
         }
         report_artifact = store_immutable_artifact(
@@ -319,6 +319,20 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             export_path=f"reports/records/{report_id}.json",
         )
         record["report_artifact_ref"] = report_artifact["artifact_ref"]
+        if closure is not None:
+            for finding in closure["findings"]:
+                _runtime.db_upsert_task_finding(root, state["task_id"], finding, source={"report_id": report_id, "attempt_id": attempt_id})
+            missing_checks = closure["verification"]["required_missing"]
+            verification_finding = {
+                "fingerprint": "verification-required-missing",
+                "severity": "P1" if missing_checks else "P3",
+                "status": "open" if missing_checks else "resolved",
+                "blocking": bool(missing_checks),
+                "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
+                "details": missing_checks,
+                "next_action": {"required": bool(missing_checks), "description": "Execute all required verification"} if missing_checks else None,
+            }
+            _runtime.db_upsert_task_finding(root, state["task_id"], verification_finding, source={"report_id": report_id, "attempt_id": attempt_id, "kind": "verification"})
         receipt = {
             "schema": REPORT_SCHEMA, "receipt_id": f"report-receipt-{report_id}", "report_id": report_id,
             "task_id": state["task_id"], "gate": attempt["gate"], "attempt_id": attempt_id,
@@ -334,9 +348,6 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
             content=json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             export_path=f"reports/receipts/{receipt['receipt_id']}.json",
         )
-        # The export name resolves the immutable receipt; do not inject a
-        # second mutable field into the materialized receipt JSON.
-        del receipt_artifact
         markdown = _report_markdown(record)
         markdown_artifact = store_immutable_artifact(
             task_dir,
@@ -350,9 +361,10 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
         record["markdown_artifact_ref"] = markdown_artifact["artifact_ref"]
         # Every task file is a replaceable export. Reconcile from the database
         # rather than treating an existing projection as a report collision.
-        _runtime.write_json(paths["records"] / f"{report_id}.json", record)
-        _runtime.write_text_atomic(paths["markdown"] / f"{report_id}.md", markdown)
-        _runtime.write_json(paths["receipts"] / f"{receipt['receipt_id']}.json", receipt)
+        projection_root = _runtime._ledger_root_for_artifact(task_dir)
+        enqueue_projection(root=projection_root, task_id=state["task_id"], artifact_id=report_artifact["artifact_ref"], projection_type="report_json", export_path=f"reports/records/{report_id}.json")
+        enqueue_projection(root=projection_root, task_id=state["task_id"], artifact_id=receipt_artifact["artifact_ref"], projection_type="report_receipt", export_path=f"reports/receipts/{receipt['receipt_id']}.json")
+        enqueue_projection(root=projection_root, task_id=state["task_id"], artifact_id=markdown_artifact["artifact_ref"], projection_type="report_markdown", export_path=f"reports/markdown/{report_id}.md")
         if planning is not None:
             materialize_planning_artifacts(task_dir, state, attempt, report_id, report, planning)
         index.setdefault("reports", []).append(_report_metadata(record))
@@ -367,6 +379,28 @@ def record_report(params: dict[str, Any]) -> dict[str, Any]:
         return {"idempotent": False, "report": record, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
 
 
+def _restore_report_projections(result: dict[str, Any], params: dict[str, Any]) -> None:
+    """Leave optional report exports in the durable outbox after commit.
+
+    Recording a report must succeed even if a workstation cannot currently
+    create a Markdown or JSON projection.  The canonical artifacts and their
+    projection intents are committed by ``_record_report_locked``; explicit
+    report reads or reconciliation can materialize them later.
+    """
+    del result, params
+
+
+# The public callable is now a vertical-slice facade.  Its adapters retain the
+# established mutation code while exposing explicit ports for its eventual
+# repository-level replacement; both public module paths keep the same result
+# protocol and object identity through this direct alias.
+_RECORD_REPORT_FACADE = build_compatibility_facade(
+    mutation=_record_report_locked,
+    restore_projections=_restore_report_projections,
+)
+record_report = _RECORD_REPORT_FACADE.record_report
+
+
 def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
     _, task_dir, state = load_state(str(params["task_id"]), params)
     authorize_principal(state, params)
@@ -377,7 +411,7 @@ def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
 def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Public worker adapter: persist a report and return only a compact receipt."""
     try:
-        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "planning"})
+        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "planning", "closure"})
         if unknown:
             raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
         for field in ("project_root", "task_id", "attempt_id", "profile"):
@@ -393,6 +427,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "principal": profile,
             "report": params.get("report"),
             "planning": params.get("planning"),
+            "closure": params.get("closure"),
             "_require_predecessor_review": True,
             "_require_knowledge_review": True,
             "_require_harvest_manifest": True,
@@ -500,6 +535,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
             "project files changed during read-only",
+            "review and close reports require a top-level closure sibling",
         )):
             code = "report_validation_failed"
             outcome = "needs_correction"
@@ -686,34 +722,59 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-def _materialize_report_markdown_projection(
+def ensure_report_markdown_path(
     task_dir: Path,
     state: dict[str, Any],
     report_ref: str,
 ) -> Path:
-    """Restore a Desktop Markdown projection from its canonical artifact.
+    """Return a verified Markdown path, materializing it only on demand.
 
-    The link returned to a coordinator must remain useful after an interrupted
-    export write or a deliberate local projection cleanup.  The immutable
-    SQLite object, not a sibling JSON record, supplies the replacement.
+    This is deliberately an outer-response operation: callers must invoke it
+    only after any state-lock or business transaction has committed.  The
+    immutable SQLite object, not a sibling JSON record, supplies a missing or
+    stale projection.  Projection failures are persisted in the outbox and
+    raised to the caller; they never invalidate the canonical report.
     """
+    report_id = safe_id(str(report_ref or ""))
+    if not report_id:
+        raise ValueError("report_ref is required")
     root = _runtime._task_document_root(task_dir, state["task_id"])
-    relative = f"reports/markdown/{report_ref}.md"
+    relative = f"reports/markdown/{report_id}.md"
     artifact = _runtime.db_get_artifact_for_export_path(root, state["task_id"], relative)
     if artifact is None or artifact.get("kind") != "report_markdown":
         raise ValueError("worker report Markdown artifact is unavailable")
-    content = _runtime.db_read_artifact_content(root, state["task_id"], artifact["artifact_ref"])
-    if not isinstance(content, str):
-        raise ValueError("worker report Markdown artifact is not UTF-8 text")
-    path = report_bus_paths(task_dir)["markdown"] / f"{report_ref}.md"
-    if path.exists():
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("worker report Markdown projection is unsafe")
-        if path.read_text(encoding="utf-8") != content:
-            write_text_atomic(path, content)
-    else:
-        write_text_exclusive(path, content)
-    return report_markdown_path(task_dir, report_ref)
+    job = enqueue_projection(
+        root=root, task_id=state["task_id"], artifact_id=artifact["artifact_ref"],
+        projection_type="report_markdown", export_path=relative,
+    )
+    try:
+        worker_id = f"report-link-{report_id}"
+        # A ready acknowledgement may describe a projection removed by local
+        # cleanup.  ``repair`` verifies it first and creates a distinct
+        # durable repair attempt only when the export is absent or stale.
+        materialized = (
+            repair_projection_job(root, job, worker_id=worker_id)
+            if job.get("status") == "ready"
+            else materialize_projection_job(root, job, worker_id=worker_id)
+        )
+        if (
+            materialized.get("status") != "ready"
+            or str(materialized.get("materialized_digest") or "") != str(artifact["digest_sha256"])
+        ):
+            raise ValueError("worker report Markdown projection is not ready")
+        verification = verify_projection_job(root, materialized)
+        if not verification.valid:
+            raise ValueError("worker report Markdown projection digest is invalid")
+    except Exception as exc:
+        # Keep the canonical report readable and leave an auditable failed
+        # outbox item for reconciliation.  This is an on-demand convenience
+        # export, never a report-publication precondition.
+        try:
+            fail_projection_job(root, str(job["projection_key"]), str(exc))
+        except (KeyError, ValueError):
+            pass
+        raise
+    return report_markdown_path(task_dir, report_id)
 
 
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
@@ -828,7 +889,7 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "current project, and include the exact generated Predecessor review acknowledgement in report.evidence."
             )
         else:
-            markdown_path = _materialize_report_markdown_projection(task_dir, state, report_ref)
+            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
             result.update({
                 "report_markdown_path": str(markdown_path),
                 "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),

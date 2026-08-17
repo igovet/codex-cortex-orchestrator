@@ -7,7 +7,7 @@ Cortex is a repository-source Codex plugin that provides an opt-in, durable `cor
 
 ## Stack and entry points
 
-- Python 3 standard library: the MCP server is [cortex.py](../../plugins/cortex/scripts/cortex.py), configured by [.mcp.json](../../plugins/cortex/.mcp.json).
+- Python 3.11+ standard library: the MCP server is [cortex.py](../../plugins/cortex/scripts/cortex.py), launched through [cortex-launcher](../../plugins/cortex/scripts/cortex-launcher) and configured by [.mcp.json](../../plugins/cortex/.mcp.json).
 - Bash: [sync-cortex.sh](../../scripts/sync-cortex.sh) installs or checks the repo-local plugin.
 - `unittest`: regression coverage is in [tests](../../tests/).
 - Lifecycle hook configuration is [hooks.json](../../plugins/cortex/hooks/hooks.json), which invokes [cortex_hook.py](../../plugins/cortex/scripts/cortex_hook.py).
@@ -21,7 +21,11 @@ Cortex is a repository-source Codex plugin that provides an opt-in, durable `cor
 
 ## Runtime requirements
 
-The server and repository validators require `python3`; installation also requires Bash, Git, and the Codex CLI. The isolated plugin probe reports `SKIP` when the CLI is unavailable; it is not registration evidence.
+The server, installer, and repository validators require an executable Python
+3.11+ with `tomllib`. Set `CORTEX_PYTHON` to an absolute path to select it;
+when unset, Cortex resolves `python3` from `PATH`. Installation also requires
+Bash, Git, and the Codex CLI. The isolated plugin probe reports `SKIP` when the
+CLI is unavailable; it is not registration evidence.
 
 ## Feature registry
 
@@ -31,3 +35,9 @@ The server and repository validators require `python3`; installation also requir
 - [Release readiness](../release-readiness.md)
 - [Knowledge-route contract](../features/knowledge-route-contract/index.md)
 <!-- GENERATED:END -->
+
+## Architecture decisions
+
+- [Storage classification ADR](storage-classification.md) — authoritative
+  SQLite data, required briefing capabilities, rebuildable projections, and
+  legacy/WAL/SHM lifecycle boundaries.

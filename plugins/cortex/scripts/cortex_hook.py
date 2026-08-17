@@ -378,7 +378,12 @@ def task_directory(ledger: Path, task_id: str) -> Path:
         return ledger / "tasks" / f"missing-{task_id}"
     try:
         candidate = db_task_artifact_path(ledger, task_id)
-        if candidate is not None and candidate.is_dir():
+        # A task's artifact directory is deliberately lazy.  SQLite owns the
+        # path before any projection exists, and a lifecycle event is one of
+        # the few operations allowed to materialize it.  Do not require the
+        # directory to exist here: that would redirect the hook to a bogus
+        # ``missing-*`` path and silently suppress telemetry for new tasks.
+        if candidate is not None:
             return reject_symlink_ancestry(candidate, "task directory")
     except (OSError, ValueError):
         pass
@@ -499,6 +504,30 @@ def stopped_worker_after_wait_context(
 
 
 def append_lifecycle_event(task_dir: Path, event: dict) -> None:
+    """Append bounded telemetry, materializing only the task-local export.
+
+    Task initialization intentionally leaves its artifact directory absent.
+    Telemetry is an optional projection, but an active lifecycle hook may
+    create the task directory and its three private files at the moment it
+    records an event.  All existing ancestry is checked without following
+    symlinks before creation; no broad layout is recreated as a side effect.
+    """
+    task_dir = reject_symlink_ancestry(task_dir, "task directory")
+    parent = reject_symlink_ancestry(task_dir.parent, "task directory parent")
+    try:
+        parent_info = parent.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError("task directory parent is unavailable") from exc
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise ValueError("task directory parent must be a real directory")
+    try:
+        task_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    task_info = task_dir.lstat()
+    if stat.S_ISLNK(task_info.st_mode) or not stat.S_ISDIR(task_info.st_mode):
+        raise ValueError("task directory must be a real directory")
+    task_dir.chmod(0o700, follow_symlinks=False)
     event_path = reject_symlink_ancestry(task_dir / "lifecycle-events.jsonl", "lifecycle event file")
     meta_path = reject_symlink_ancestry(task_dir / "lifecycle-events-meta.json", "lifecycle event metadata")
     lock_path = reject_symlink_ancestry(task_dir / ".lifecycle-events.lock", "lifecycle event lock")

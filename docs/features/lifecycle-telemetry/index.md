@@ -64,12 +64,12 @@ lookup entry until only one active task remains; the hook never guesses which
 task should receive recovery context. Completing one of the ambiguous tasks
 rebuilds the entry when exactly one active task is left.
 
-Every registered lifecycle command checks that `${PLUGIN_ROOT}/scripts/cortex_hook.py` still exists before invoking Python. If an already-open thread retains a retired cachebusted plugin path after an update, the command fails open with exit 0 and the empty JSON object `{}`, without stderr, instead of emitting a missing-file error. That protects task completion from stale hook paths but does not load updated skills, hooks, or MCP tools; operators should still start a new thread after updating Cortex. Lifecycle telemetry remains observational and is not proof that a host spawned a worker.
+Every registered lifecycle command checks that `${PLUGIN_ROOT}/scripts/cortex-launcher` and `${PLUGIN_ROOT}/scripts/cortex_hook.py` still exist before invoking the launcher. The launcher selects `CORTEX_PYTHON` (or `python3` from `PATH` when unset) and requires Python 3.11+ with `tomllib`. If an already-open thread retains a retired cachebusted plugin path after an update, the command fails open with exit 0 and the empty JSON object `{}`, without stderr, instead of emitting a missing-file error. That protects task completion from stale hook paths but does not load updated skills, hooks, or MCP tools; operators should still start a new thread after updating Cortex. Lifecycle telemetry remains observational and is not proof that a host spawned a worker.
 
 The installer validates this boundary separately from task telemetry. After an
 explicit sync it queries Codex `hooks/list` and accepts only the exact five
 enabled `cortex@cortex` hooks whose source is the installed cache and whose
-command invokes that cache's `cortex_hook.py`. It writes their exact SHA-256
+command invokes that cache's launcher and `cortex_hook.py`. It writes their exact SHA-256
 content hashes to the global hook-state configuration; `sync-cortex.sh
 --check` revalidates the plugin id, source path, command path, enabled state,
 hash shape, and complete five-hook set. This prevents a changed or untrusted

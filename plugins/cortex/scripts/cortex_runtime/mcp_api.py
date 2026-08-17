@@ -11,9 +11,9 @@ from typing import Any
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Cortex preserves that intent boundary, creates internal identifiers, and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
+    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist a material question, finish into resumable idle, then poll its answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "record_report": "Worker-only operation: validate the gate contract, executed-check evidence, and claimed file delta; then persist the strict report and return a compact report_ref. Do not paste the report body into the parent channel after success.",
+    "record_report": "Worker-only operation: validate the gate contract, executed-check evidence, and claimed file delta; then persist the strict eight-field report and, for review/close, its optional top-level closure sibling, returning a compact report_ref. Do not paste the report body into the parent channel after success.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -31,6 +31,7 @@ def build_public_schemas(
     V3_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
+        "description": "Strict cortex/report/v1 object with exactly eight fields. Review and close closure belongs beside this object, never inside it.",
         "properties": {
             "summary": {"type": "string", "minLength": 1},
             "findings": {"type": "array"},
@@ -59,6 +60,65 @@ def build_public_schemas(
             "next_action": {"type": "string", "minLength": 1},
         },
         "required": sorted(report_fields),
+    }
+    CLOSURE_FINDING_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "fingerprint": {"type": "string", "minLength": 1},
+            "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3", "info"]},
+            "status": {"type": "string", "enum": ["open", "resolved", "waived"]},
+            "blocking": {"type": "boolean"},
+            "summary": {"type": "string", "minLength": 1},
+            "details": {},
+            "next_action": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "required": {"type": "boolean"},
+                    "target_gate": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["required"],
+            },
+            "waiver_reason": {"type": "string"},
+            "waived_by": {"type": "string"},
+            "waived_at": {"type": "string"},
+            "resolved_at": {"type": "string"},
+        },
+        "required": ["fingerprint", "severity", "status", "blocking", "summary"],
+    }
+    CLOSURE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Optional top-level review/close closure; do not add closure to report.",
+        "properties": {
+            "decision": {"type": "string", "enum": ["pass", "rework", "fail"]},
+            "findings": {"type": "array", "items": CLOSURE_FINDING_SCHEMA},
+            "verification": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "executed": {"type": "array", "items": {"type": "string"}},
+                    "not_executed": {"type": "array", "items": {"type": "string"}},
+                    "required_missing": {"type": "array", "items": {"type": "string"}},
+                    "limitations": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["executed", "not_executed", "required_missing", "limitations"],
+            },
+            "workspace": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "modified": {"type": "array", "items": {"type": "string"}},
+                    "untracked": {"type": "array", "items": {"type": "string"}},
+                    "staged": {"type": "array", "items": {"type": "string"}},
+                    "committed": {"type": ["boolean", "string"], "enum": [True, False, "not_required"]},
+                },
+                "required": ["modified", "untracked", "staged", "committed"],
+            },
+        },
+        "required": ["decision", "findings", "verification", "workspace"],
     }
     V3_PLANNING_SCHEMA = {
         "type": "object",
@@ -204,12 +264,14 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
+        "description": "Worker report request. report remains exactly eight fields; closure is an optional sibling and is required by review/close runtime validation.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Exact attempt_id from this worker's Cortex briefing; never substitute a phase or profile."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Exact canonical profile from this worker's Cortex briefing."},
             "report": V3_REPORT_SCHEMA,
+            "closure": CLOSURE_SCHEMA,
             "planning": V3_PLANNING_SCHEMA,
         },
         "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
@@ -269,7 +331,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, or prune; common aliases are normalized."},
+            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, prune, legacy, or maintenance; common aliases are normalized."},
             "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
             "reason": {"type": "string"},
             "payload": {
@@ -280,7 +342,8 @@ def build_public_schemas(
                     "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
                     "elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
-                    "and accepts older_than_days (default 7). Normal wave progression never uses this field."
+                    "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
+                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup targets use only safe backup_name values. Normal wave progression never uses this field."
                 ),
             },
         },

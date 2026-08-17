@@ -32,10 +32,12 @@ persisted `available_reports`.
 ## Chunked immutable artifact transport
 
 Large coordination evidence is stored as immutable SQLite artifacts, not as a
-large JSON field returned from MCP. Each artifact has a content SHA-256,
-MIME type, exact byte size, and 32 KiB `TEXT` or `BLOB` chunks; the database
-schema does not impose a small per-field storage cap. Metadata is indexed by
-task/kind/time, task/time, digest, and chunk sequence. Public transport is
+large JSON field returned from MCP. Schema v7 separates a deduplicated content
+blob, a task-scoped logical artifact, and an authorized export path. Each blob
+has a content SHA-256, MIME type, exact byte size, and 32 KiB `TEXT` or `BLOB`
+chunks; the database schema does not impose a small per-field storage cap.
+Logical-artifact metadata is indexed by task/kind/time and task/time, while
+exports are path-authorized separately. Public transport is
 separate from storage: `manage_orchestration(intent="artifacts")` pages
 metadata and reads an artifact part, while existing briefing/report tools use
 the same bounded mechanism for their established scopes. Signed opaque cursors
@@ -43,8 +45,26 @@ bind reader, task, artifact, digest, and byte offset, so they cannot be reused
 to enumerate a ledger or switch content. Markdown and JSON task files remain
 materialized audit/Desktop projections; normal reads and report validation use
 the database copy. A missing or damaged projection may be regenerated from its
-canonical SQLite artifact, but pre-SQLite coordination files are never scanned,
-imported, or repaired.
+canonical SQLite artifact through a leased outbox job, but pre-SQLite
+coordination files are never scanned, imported, or repaired by the active
+ledger.
+
+## SQLite commits and filesystem projections
+
+SQLite is the sole atomic boundary. Canonical content, logical-artifact
+metadata, export authorization, and a projection job commit before a filesystem
+worker claims a lease. That worker atomically materializes one private regular
+file, verifies its digest, then acknowledges the job in a separate transaction.
+This makes failures retryable without treating a filesystem write as part of
+the original SQLite transaction. Required dispatch briefings are an exception
+only in capability semantics: the exact private export/digest must exist before
+the native worker starts, while the canonical content remains SQLite-owned.
+
+Review and close decisions derive from canonical structured findings and
+server-observed verification. Open P0/P1/P2 or blocking findings, and missing
+required verification, reopen the recorded gate for rework. Resolved findings
+and non-self auditable waivers remain durable records; prose cannot silently
+close them.
 
 The separate worker question operation exists because a native parent-channel
 message alone cannot enforce a pause. Every profile may persist a material
@@ -81,13 +101,16 @@ unsupported and are neither migrated nor resumed. This keeps the public
 lifecycle coupled only to the canonical v8 ledger.
 
 Project cleanup is a bounded `prune` management operation rather than clear.
-It requires explicit confirmation and an age threshold (seven days by default),
-then removes only completed task-scoped state older than that threshold and its
-unreferenced secondary records. Active and blocked tasks are preserved
-regardless of age, and classification receipts remain while any retained task
-references them. Recent completed tasks, durable lanes, and all project/plugin
-content are also preserved. Exact `PRUNE` confirmation and omission of
-`task_ref` keep this as project-scoped maintenance rather than task mutation.
+It requires explicit confirmation and an age threshold (seven days by default).
+First it commits a tombstone while retaining the canonical task graph; after
+safe filesystem projection removal outside the state lock, one final SQLite
+transaction removes completed task-scoped state and unreferenced secondary
+records. Failures retain recoverable task state and a retryable tombstone.
+Active and blocked tasks are preserved regardless of age, and classification
+receipts remain while any retained task references them. Recent completed
+tasks, durable lanes, and all project/plugin content are also preserved. Exact
+`PRUNE` confirmation and omission of `task_ref` keep this as project-scoped
+maintenance rather than task mutation.
 
 Each mutating request uses server-owned digest receipts. Identical retries
 replay safely; changed payloads and stale steps conflict before partial writes.
@@ -121,8 +144,11 @@ and public facade. Its runtime responsibilities are deliberately split
 into focused bundled modules: identity formatting, route policy, delegation
 persistence, immutable dispatch briefings, scoped reports and questions,
 gate-transition policy, orchestration state transitions, harvest validation,
-context-compaction handoff rendering, and the public MCP schema/transport
-adapter. The public adapter owns the declarative
+context-compaction handoff rendering, health/legacy maintenance, and the public
+MCP schema/transport adapter. The record-report vertical slice is separated
+into domain policy, ports, a SQLite unit-of-work adapter, projection port, and
+use case; `core/runtime_bindings.py` is the explicit composition binding, not a
+bidirectional facade import. The public adapter owns the declarative
 seven-tool contract and JSON-RPC stdio loop; the facade passes the current
 business handlers into it. Gate transitions are further separated into active-
 gate resolution, evidence/C2-C3 validation, durable state mutation, and
@@ -195,14 +221,17 @@ Harvest routes retain the internal planning phase but force `plan_approval` to
 `auto`; they never introduce a post-plan user approval hold. User tasks keep
 the normal C1/C2/C3 approval policy.
 
-## Atomic records, repairable projections, best-effort telemetry
+## Explicit maintenance, legacy lifecycle, and health
 
-Task state, evidence, gate outcomes, handoffs, and authoritative report JSON
-use locked, fsync-backed per-file atomic replacement. Report Markdown and
-indexes are projections that `reconcile_report_bus` can rebuild from validated
-records. Related files are not one crash-atomic transaction. Lifecycle hook
-telemetry and model metrics are not canonical task artifacts and must not be
-used as completion proof.
+The active SQLite ledger never imports legacy filesystem coordination state.
+The separate, explicit legacy lifecycle can inventory it, create a verified
+private archive, and delete only the archived sources after an archive-specific
+confirmation. Health inspection is read-only; checkpoint, SQLite backup,
+backup-restore verification, optimize, vacuum, and projection reconciliation
+each require an action-specific confirmation. WAL/SHM are SQLite sidecars, not
+exports, backups, evidence, or independent prune targets. Lifecycle telemetry
+and model metrics are not canonical task artifacts and must not be used as
+completion proof.
 
 ## Bounded gate recovery
 
@@ -261,14 +290,14 @@ initial baseline before replacement dispatches.
 ### SQLite migration contract
 
 `cortex.db` is the sole mutable source of truth for new tasks. The plugin keeps
-numbered, checksummed migrations in `ledger_db.py`; the first MCP call after a
-Marketplace update takes the project-ledger lock, applies every missing
-migration in order inside one SQLite transaction, and records each version in
-`schema_migrations`. Repeated calls only verify the history. A mismatched
-checksum or failed migration aborts without mutating the database. Pre-SQLite
-filesystem state is never read, imported, deleted, or resumed. Future releases
-add a new numbered SQLite migration rather than introducing a second
-file-backed runtime.
+numbered, content-checked migrations through v7 in `ledger_db.py`; the first
+MCP call with a new migration takes the project-ledger lock, applies every
+missing migration in order inside one SQLite transaction, and records each
+version in `schema_migrations`. Repeated calls verify history and schema.
+A mismatched checksum or failed migration aborts without mutating the database.
+Pre-SQLite filesystem state is never read, imported, deleted, or resumed by the
+active ledger. Future releases add a new numbered SQLite migration rather than
+introducing a second file-backed runtime.
 The manifest scope is policy-driven: Cortex honors each applicable project
 `.gitignore`, including ordered negations, and freezes the discovered rules in
 the baseline policy for the lifetime of the task. It also excludes

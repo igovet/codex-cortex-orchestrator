@@ -22,6 +22,7 @@ global_config_mode=""
 global_config_backup_created="false"
 original_global_subagent_model_state=""
 original_global_config_mode=""
+cortex_python=""
 
 usage() {
   cat <<'EOF'
@@ -50,9 +51,50 @@ run() {
   fi
 }
 
+resolve_cortex_python() {
+  local requested resolved diagnostics
+  if [[ -v CORTEX_PYTHON ]]; then
+    requested="${CORTEX_PYTHON}"
+    if [[ "${requested}" != /* ]]; then
+      echo "error: CORTEX_PYTHON must be an absolute executable path" >&2
+      return 1
+    fi
+  else
+    requested="python3"
+  fi
+  if [[ -z "${requested}" ]]; then
+    echo "error: CORTEX_PYTHON must name an executable Python path" >&2
+    return 1
+  fi
+  if [[ "${requested}" == */* ]]; then
+    resolved="${requested}"
+  else
+    resolved="$(command -v -- "${requested}" 2>/dev/null || true)"
+  fi
+  if [[ -z "${resolved}" || ! -f "${resolved}" || ! -x "${resolved}" ]]; then
+    echo "error: CORTEX_PYTHON=${requested} is not an executable file" >&2
+    return 1
+  fi
+  if ! diagnostics="$("${resolved}" -c 'import sys
+try:
+    import tomllib
+except ImportError:
+    print("tomllib is unavailable")
+    raise SystemExit(1)
+if sys.version_info < (3, 11):
+    print(f"Python {sys.version.split()[0]} is too old; Python 3.11 or newer is required")
+    raise SystemExit(1)
+print(sys.executable)' 2>&1)"; then
+    [[ -n "${diagnostics}" ]] || diagnostics="runtime validation failed"
+    echo "error: CORTEX_PYTHON=${requested} is incompatible: ${diagnostics}" >&2
+    return 1
+  fi
+  cortex_python="${resolved}"
+}
+
 validate_roots() {
   local validated
-  validated="$(python3 - "${home_root}" "${codex_home}" <<'PY'
+  validated="$("${cortex_python}" - "${home_root}" "${codex_home}" <<'PY'
 import os, stat, sys
 from pathlib import Path
 
@@ -92,7 +134,7 @@ validate_global_config_path() {
 
 validate_cleanup_target() {
   local root="$1" relative="$2" target="$3"
-  python3 - "${root}" "${relative}" "${target}" <<'PY'
+  "${cortex_python}" - "${root}" "${relative}" "${target}" <<'PY'
 import stat, sys
 from pathlib import Path
 root, relative, target = Path(sys.argv[1]).absolute(), Path(sys.argv[2]), Path(sys.argv[3]).absolute()
@@ -129,8 +171,8 @@ validate_sources() {
   [[ -f "${plugin_source}/hooks/hooks.json" ]] || { echo "error: hooks manifest is missing" >&2; return 1; }
   [[ -f "${script_dir}/sync-cortex-hook-trust.py" && ! -L "${script_dir}/sync-cortex-hook-trust.py" ]] || { echo "error: hook trust synchronizer is missing or symlinked" >&2; return 1; }
   [[ -f "${marketplace_manifest}" && ! -L "${marketplace_manifest}" ]] || { echo "error: root marketplace manifest is missing or symlinked" >&2; return 1; }
-  python3 "${script_dir}/validate-cortex-marketplace.py"
-  python3 - "${plugin_source}/.codex-plugin/plugin.json" "${plugin_source}/scripts/cortex.py" <<'PY'
+  "${cortex_python}" "${script_dir}/validate-cortex-marketplace.py"
+  "${cortex_python}" - "${plugin_source}/.codex-plugin/plugin.json" "${plugin_source}/scripts/cortex.py" <<'PY'
 import importlib.util, json, sys
 manifest, server = sys.argv[1:]
 version = json.load(open(manifest, encoding="utf-8"))["version"]
@@ -138,13 +180,13 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "6.4.1":
-    raise SystemExit("plugin/server version must match the 6.4.1 release manifest")
+if module.SERVER_VERSION != version or base_version != "6.5.0":
+    raise SystemExit("plugin/server version must match the 6.5.0 release manifest")
 PY
 }
 
 plugin_version() {
-  python3 - "${plugin_source}/.codex-plugin/plugin.json" <<'PY'
+  "${cortex_python}" - "${plugin_source}/.codex-plugin/plugin.json" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])
 PY
@@ -153,7 +195,7 @@ PY
 content_matches() {
   local installed="${codex_home}/plugins/cache/${marketplace_name}/${plugin_name}/$(plugin_version)"
   [[ -d "${installed}" ]] || return 1
-  python3 - "${plugin_source}" "${installed}" <<'PY'
+  "${cortex_python}" - "${plugin_source}" "${installed}" <<'PY'
 import hashlib, pathlib, sys
 def manifest(root):
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc", ".pyo"}}
@@ -167,7 +209,7 @@ capture_cortex_mcp_approval_override() {
   validate_global_config_path || return 1
   [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
   cortex_mcp_approval_override="$({
-    python3 - "${config_path}" <<'PY'
+    "${cortex_python}" - "${config_path}" <<'PY'
 import sys
 import tomllib
 from pathlib import Path
@@ -200,7 +242,7 @@ capture_global_subagent_model() {
   global_subagent_model_state="missing"
   validate_global_config_path || return 1
   [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
-  global_subagent_model_state="$(python3 - "${config_path}" <<'PY'
+  global_subagent_model_state="$("${cortex_python}" - "${config_path}" <<'PY'
 import sys
 import tomllib
 from pathlib import Path
@@ -224,7 +266,7 @@ PY
     global_subagent_model="${global_subagent_model_state}"
   fi
   if [[ -f "${config_path}" && ! -L "${config_path}" ]]; then
-    global_config_mode="$(python3 - "${config_path}" <<'PY'
+    global_config_mode="$("${cortex_python}" - "${config_path}" <<'PY'
 import stat, sys
 from pathlib import Path
 print(format(stat.S_IMODE(Path(sys.argv[1]).stat().st_mode), "o"))
@@ -260,7 +302,7 @@ sync_cortex_hook_trust() {
   if [[ "${mode}" == "check" ]]; then
     check_argument=(--check)
   fi
-  python3 "${script_dir}/sync-cortex-hook-trust.py" \
+  "${cortex_python}" "${script_dir}/sync-cortex-hook-trust.py" \
     --codex "${codex_binary}" \
     --cwd "${project_dir}" \
     --installed-root "${installed_root}" \
@@ -305,7 +347,7 @@ ensure_global_subagent_model() {
     echo "error: refusing to replace agents.default_subagent_model without a private pre-install backup" >&2
     return 1
   fi
-  python3 - "${config_path}" "${target_model}" "${original_global_config_mode:-${global_config_mode}}" <<'PY'
+  "${cortex_python}" - "${config_path}" "${target_model}" "${original_global_config_mode:-${global_config_mode}}" <<'PY'
 import os
 import json
 import re
@@ -404,7 +446,7 @@ restore_cortex_mcp_approval_override() {
     echo "error: Codex config disappeared or became non-regular during Cortex update: ${config_path}" >&2
     return 1
   }
-  python3 - "${config_path}" "${cortex_mcp_approval_override}" <<'PY'
+  "${cortex_python}" - "${config_path}" "${cortex_mcp_approval_override}" <<'PY'
 import os
 import re
 import stat
@@ -494,7 +536,7 @@ PY
 }
 
 installed_version() {
-  codex plugin list --json 2>/dev/null | python3 -c 'import json,sys; value=json.load(sys.stdin); rows=value.get("installed", value) if isinstance(value, dict) else value; print(next((row.get("version", "") for row in rows if row.get("pluginId") == "cortex@cortex"), ""))' 2>/dev/null || true
+  codex plugin list --json 2>/dev/null | "${cortex_python}" -c 'import json,sys; value=json.load(sys.stdin); rows=value.get("installed", value) if isinstance(value, dict) else value; print(next((row.get("version", "") for row in rows if row.get("pluginId") == "cortex@cortex"), ""))' 2>/dev/null || true
 }
 
 install_or_check() {
@@ -534,9 +576,14 @@ install_or_check() {
   ensure_global_subagent_model || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
   sync_cortex_hook_trust || return 1
-  echo "installed ${plugin_name}@${marketplace_name} from ${marketplace_root}"
+  if [[ "${mode}" == "dry-run" ]]; then
+    echo "would install ${plugin_name}@${marketplace_name} from ${marketplace_root}"
+  else
+    echo "installed ${plugin_name}@${marketplace_name} from ${marketplace_root}"
+  fi
 }
 
+resolve_cortex_python
 validate_roots
 validate_global_config_path
 validate_sources
@@ -545,6 +592,8 @@ install_or_check || status=1
 [[ "${status}" -eq 0 ]] || exit "${status}"
 if [[ "${mode}" == "check" ]]; then
   echo "Cortex is up to date."
+elif [[ "${mode}" == "dry-run" ]]; then
+  echo "Cortex dry run complete. No plugin or Codex configuration was changed."
 else
   echo "Cortex installed from this repository. Start a new Codex thread before dispatching agents so it loads the installed hook paths."
 fi

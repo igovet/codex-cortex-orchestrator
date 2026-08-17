@@ -17,6 +17,71 @@ sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 import cortex  # noqa: E402
 
 
+def workspace_summary(project: Path) -> dict[str, object]:
+    """Describe the actual fixture workspace without treating it as a blocker."""
+    completed = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        return {"modified": [], "untracked": [], "staged": [], "committed": "not_required"}
+    modified: list[str] = []
+    untracked: list[str] = []
+    staged: list[str] = []
+    for line in completed.stdout.splitlines():
+        if line.startswith("?? "):
+            untracked.append(line[3:])
+            continue
+        if len(line) < 4:
+            continue
+        index, worktree, path = line[0], line[1], line[3:]
+        if index != " ":
+            staged.append(path)
+        if worktree != " ":
+            modified.append(path)
+    has_changes = bool(modified or untracked or staged)
+    return {
+        "modified": sorted(modified),
+        "untracked": sorted(untracked),
+        "staged": sorted(staged),
+        "committed": False if has_changes else "not_required",
+    }
+
+
+def passing_closure(project: Path, gate: str) -> dict[str, object]:
+    """Build a valid no-blocker closure for deterministic fixture reports."""
+    return {
+        "decision": "pass",
+        "findings": [],
+        "verification": {
+            "executed": [f"Deterministic Luna-high fixture verification completed for the {gate} gate."],
+            "not_executed": [],
+            "required_missing": [],
+            "limitations": [],
+        },
+        "workspace": workspace_summary(project),
+    }
+
+
+def canonical_artifacts(
+    ledger: Path, task_id: str, *, kind: str | None = None
+) -> list[dict[str, object]]:
+    """List canonical SQLite artifacts without relying on local projections."""
+    artifacts: list[dict[str, object]] = []
+    offset = 0
+    while True:
+        page, next_offset = cortex.db_list_artifacts(
+            ledger, task_id, kind=kind, offset=offset, page_size=100,
+        )
+        artifacts.extend(page)
+        if next_offset is None:
+            return artifacts
+        offset = next_offset
+
+
 def report(label: str, project: Path, changed_files: list[str] | None = None) -> dict[str, object]:
     return {
         "summary": label, "findings": [], "questions": [], "changed_files": changed_files or [],
@@ -121,6 +186,8 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                 "profile": dispatch["profile"],
                 "report": worker_report,
             }
+            if attempt.get("gate") in {"review", "close"}:
+                publication["closure"] = passing_closure(project, str(attempt["gate"]))
             if attempt.get("gate") == "plan":
                 publication["planning"] = planning(label)
             published = cortex.publish_worker_report(publication)
@@ -185,6 +252,15 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     for project in (sequential, parallel, blocked):
         task_dir = next((project / ".codex/cortex/tasks").iterdir())
         state = cortex.load_task_state_for_artifact(task_dir)
+        ledger = cortex.ledger_root({"project_root": str(project)})
+        report_artifacts = canonical_artifacts(ledger, state["task_id"], kind="worker_report")
+        report_records = [
+            json.loads(cortex.db_read_artifact_content(ledger, state["task_id"], str(item["artifact_ref"])))
+            for item in report_artifacts
+        ]
+        closure_records = [
+            item for item in report_records if item.get("gate") in {"review", "close"}
+        ]
         close_evidence = any(
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
@@ -195,6 +271,17 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
             or not close_evidence
             or not state.get("handoff_created")
             or snapshot_cleanup.get("status") != "completed"
+            or not report_records
+            or any(set(item.get("report", {})) != {
+                "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action",
+            } for item in report_records)
+            or any(
+                not isinstance(item.get("closure"), dict)
+                or item["closure"].get("decision") != "pass"
+                or item["closure"].get("findings") != []
+                or item["closure"].get("verification", {}).get("required_missing") != []
+                for item in closure_records
+            )
             or any(
                 cortex.db_get_manifest_snapshot(
                     cortex.ledger_root({"project_root": str(project)}), str(reference)
@@ -231,6 +318,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
         "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "
+        "For every review or close dispatch, record_report must also include a separate top-level closure sibling: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Never place closure inside the strict eight-key report. "
         "Read every ref with read_worker_report and advance with report_ref. "
         "and finish only after close evidence and handoff. Do not ask for manual argument corrections. "
         f"The exact project_root is {project}. "
@@ -336,11 +424,24 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
                 None,
             )
         state = cortex.load_task_state_for_artifact(task_dir) if task_dir else {}
-        report_records = list((task_dir / "reports/records").glob("*.json")) if task_dir else []
+        ledger = cortex.ledger_root({"project_root": str(project)})
+        report_artifacts = canonical_artifacts(ledger, str(state.get("task_id") or ""), kind="worker_report") if task_dir else []
+        report_records = [
+            json.loads(cortex.db_read_artifact_content(ledger, str(state["task_id"]), str(item["artifact_ref"])))
+            for item in report_artifacts
+        ]
         report_keys = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
         strict_reports = bool(report_records) and all(
-            set(json.loads(path.read_text(encoding="utf-8")).get("report", {})) == report_keys
-            for path in report_records
+            set(record.get("report", {})) == report_keys
+            for record in report_records
+        )
+        closures_valid = all(
+            isinstance(record.get("closure"), dict)
+            and record["closure"].get("decision") == "pass"
+            and record["closure"].get("findings") == []
+            and record["closure"].get("verification", {}).get("required_missing") == []
+            and set(record["closure"].get("workspace", {})) == {"modified", "untracked", "staged", "committed"}
+            for record in report_records if record.get("gate") in {"review", "close"}
         )
         attempts_by_wave: dict[str, set[str]] = {}
         for attempt in state.get("attempts", []):
@@ -382,6 +483,7 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
                 )
             ),
             "strict_worker_reports": strict_reports,
+            "review_close_closures": closures_valid,
             "no_failed_public_calls": not failed_public_calls,
             "one_start": completed_tool_names.count("start_orchestration") == 1,
         }
@@ -397,7 +499,9 @@ def live_eval(base: Path, scenarios: tuple[str, ...] | None = None) -> list[dict
                 and len(package_artifacts) >= 2
                 and all(
                     isinstance(package, dict)
-                    and (task_dir / str(package.get("artifact_path") or "")).is_file()
+                    and cortex.db_get_artifact_for_export_path(
+                        ledger, str(state["task_id"]), str(package.get("artifact_path") or ""),
+                    ) is not None
                     for package in package_artifacts
                 )
             )

@@ -25,23 +25,30 @@ def command(argv: list[str], environment: dict[str, str]) -> subprocess.Complete
     return subprocess.run(argv, cwd=ROOT, env=environment, text=True, capture_output=True, timeout=30, check=False)
 
 
-def mcp_tool(server: Path, environment: dict[str, str], workspace: Path, name: str, arguments: dict[str, object]) -> dict[str, object]:
+def mcp_tool(
+    launcher: Path,
+    entrypoint: Path,
+    environment: dict[str, str],
+    workspace: Path,
+    name: str,
+    arguments: dict[str, object],
+) -> dict[str, object]:
     """Call an installed MCP entry from its configured plugin-local cwd."""
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": name, "arguments": {**arguments, "project_root": str(workspace)}},
     }
     rpc = subprocess.run(
-        [os.environ.get("PYTHON", "python3"), str(server)], input=json.dumps(payload) + "\n",
-        cwd=server.parents[1], env=environment, text=True, capture_output=True, timeout=30, check=False,
+        [str(launcher), str(entrypoint)], input=json.dumps(payload) + "\n",
+        cwd=launcher.parents[1], env=environment, text=True, capture_output=True, timeout=30, check=False,
     )
     if rpc.returncode != 0:
-        raise SystemExit(f"fresh plugin probe: cached Cortex MCP {name} failed to start: {rpc.stderr.strip()}")
+        raise SystemExit(f"fresh plugin probe: configured Cortex launcher for {name} failed to start: {rpc.stderr.strip()}")
     try:
         response = json.loads(rpc.stdout)
         return response["result"]["structuredContent"]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise SystemExit(f"fresh plugin probe: cached Cortex MCP {name} returned an invalid response: {rpc.stdout!r}") from exc
+        raise SystemExit(f"fresh plugin probe: configured Cortex launcher for {name} returned an invalid response: {rpc.stdout!r}") from exc
 
 
 def main() -> int:
@@ -101,11 +108,33 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: installed Cortex route contract is incomplete")
         if "`cortex:orchestrator`" not in cortex_skill or "`$cortex:orchestrator`" not in cortex_skill:
             raise SystemExit("fresh plugin probe: installed Cortex native invocation help is incomplete")
-        server = cache / "scripts/cortex.py"
+        mcp_manifest = json.loads((cache / ".mcp.json").read_text(encoding="utf-8"))
+        configured = mcp_manifest.get("mcpServers", {}).get("cortex", {})
+        command_path = configured.get("command")
+        configured_args = configured.get("args")
+        if command_path != "./scripts/cortex-launcher" or configured_args != ["./scripts/cortex.py"] or configured.get("cwd") != ".":
+            raise SystemExit("fresh plugin probe: installed MCP does not route through cortex-launcher")
+        launcher = cache / command_path
+        entrypoint = cache / configured_args[0]
+        if not launcher.is_file() or not launcher.stat().st_mode & 0o111:
+            raise SystemExit("fresh plugin probe: installed Cortex launcher is missing or not executable")
+        hooks_manifest = json.loads((cache / "hooks/hooks.json").read_text(encoding="utf-8"))
+        hook_commands = [
+            hook.get("command")
+            for registrations in hooks_manifest.get("hooks", {}).values()
+            for registration in registrations
+            for hook in registration.get("hooks", [])
+        ]
+        if len(hook_commands) != 5 or any(
+            '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
+            or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
+            for command in hook_commands
+        ):
+            raise SystemExit("fresh plugin probe: lifecycle hooks do not use the installed Cortex launcher")
         rpc = subprocess.run(
-            [os.environ.get("PYTHON", "python3"), str(server)],
+            [str(launcher), str(entrypoint)],
             input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n',
-            cwd=ROOT,
+            cwd=cache,
             env=environment,
             text=True,
             capture_output=True,
@@ -113,7 +142,7 @@ def main() -> int:
             check=False,
         )
         if rpc.returncode != 0:
-            raise SystemExit("fresh plugin probe: cached Cortex MCP failed to start")
+            raise SystemExit("fresh plugin probe: configured Cortex launcher failed to start")
         rows = [json.loads(line) for line in rpc.stdout.splitlines() if line.strip()]
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
         expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"}
@@ -121,7 +150,7 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: Cortex public tool set is incomplete")
         workspace = base / "workspace"
         workspace.mkdir()
-        rejected = mcp_tool(server, environment, workspace, "start_orchestration", {
+        rejected = mcp_tool(launcher, entrypoint, environment, workspace, "start_orchestration", {
             "task": {
                 "user_request": "reject an installed task without an observable result contract",
                 "complexity": "C1", "requirements": [],
@@ -130,7 +159,7 @@ def main() -> int:
         })
         if rejected.get("ok") is not False or rejected.get("outcome") != "needs_input":
             raise SystemExit("fresh plugin probe: installed MCP accepted a task without acceptance and verification")
-        created = mcp_tool(server, environment, workspace, "start_orchestration", {
+        created = mcp_tool(launcher, entrypoint, environment, workspace, "start_orchestration", {
             "task": {
                 "user_request": "verify the installed MCP pricing feature workspace binding",
                 "complexity": "C1", "requirements": [],
@@ -152,7 +181,7 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: human worker display name still contains an identity suffix")
         if not re.fullmatch(r"explorer_[a-z0-9_]+_01_[0-9a-f]{8}", str(dispatch["arguments"].get("task_name") or "")):
             raise SystemExit("fresh plugin probe: native worker task name is not unique and host-safe")
-        confirmed = mcp_tool(server, environment, workspace, "manage_orchestration", {"intent": "inspect"})
+        confirmed = mcp_tool(launcher, entrypoint, environment, workspace, "manage_orchestration", {"intent": "inspect"})
         task = cortex.load_task_definition(expected_task)
         state = cortex.load_task_state_for_artifact(expected_task)
         loaded = cortex.db_load_task(workspace / ".codex/cortex", str(state["task_id"]))

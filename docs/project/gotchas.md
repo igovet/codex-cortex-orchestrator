@@ -3,13 +3,18 @@
 ## Canonical runtime artifacts
 
 - New tasks use the SQLite-backed `cortex/v8` ledger and public
-  `cortex/orchestration/v4` lifecycle. On the first MCP access after a plugin
-  update, numbered migrations run in one fail-closed transaction and are
+  `cortex/orchestration/v4` lifecycle. On the first MCP access after a source
+  version introduces a migration, numbered migrations run in one fail-closed transaction and are
   recorded in `schema_migrations`. Pre-database filesystem state is ignored:
   it is neither imported nor resumed. The runtime does not create
   `v3-operations.json`, active-task or
   status-receipt files, `reports/grants`, `metrics.json`, task lock files,
   handoff-manifest snapshots, or evidence-snapshot files.
+- Migration checksums are content-based SHA-256 digests of each migration's
+  version, name, and ordered normalized SQL statements. A legacy name-only
+  checksum is upgraded only after the corresponding schema is validated;
+  tampered history, missing objects, changed statements, and inconsistent
+  `user_version` state fail closed.
 - New task-start and per-attempt baselines are immutable, content-addressed
   records in `cortex.db`. State and attempts retain compact
   `manifest-<sha256>` refs instead of copying paths or manifest bodies.
@@ -21,6 +26,23 @@
   Final receipts retain manifest digests and change proof. If
   `allow_rework` reopens that task, Cortex first captures a fresh active
   baseline; stale deleted snapshots are never reused.
+- Schema v7 does not use one artifact identity for everything. A content blob
+  may be shared by digest, a logical artifact is task-scoped, and an export
+  path is separately authorized. Do not use a filesystem path as canonical
+  evidence or infer a blob's lifecycle from an optional projection.
+- Projection jobs are durable outbox rows, not background hints. A caller must
+  not write an export directly or acknowledge a job without its lease and
+  digest verification. Required briefing projections are capabilities; all
+  other projection files remain rebuildable.
+- Review and close must publish the top-level structured `closure` sibling,
+  not a ninth member of the strict report. An unresolved P0/P1/P2 or blocking
+  finding, or a missing required check, takes the recorded gate back through
+  rework. A waiver needs reason, actor, and timestamp and cannot be self-issued.
+- Prune is deliberately two-phase: a tombstone commits before filesystem work;
+  canonical rows remain until that work succeeds. Never remove task records,
+  WAL, or SHM directly to "help" a failed prune. Use explicit legacy
+  archive/delete maintenance for pre-SQLite files and SQLite-aware maintenance
+  for health, backup, checkpoint, or projection repair.
 
 ## Public v4 coordinator contract
 

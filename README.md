@@ -4,7 +4,7 @@ Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It uses canonical task-ledger schema
 `cortex/v8`, public lifecycle schema `cortex/orchestration/v4`, and plugin
-version **6.4.1**. The public MCP surface has exactly seven tools: three coordinator
+version **6.5.0**. The public MCP surface has exactly seven tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question`, `record_report`, exact
@@ -118,7 +118,29 @@ Run one command from this repository:
 ./scripts/sync-cortex.sh
 ```
 
-It validates the repository marketplace and plugin, registers the repo-local
+### Select the Python runtime
+
+Cortex uses `python3` from `PATH` when `CORTEX_PYTHON` is unset. To select a
+specific interpreter, set one absolute executable path in the environment before
+installing or checking the plugin:
+
+```bash
+export CORTEX_PYTHON=/absolute/path/to/python3.11
+./scripts/sync-cortex.sh --dry-run
+```
+
+Add the export to `~/.bashrc` for shell-launched Codex sessions, then open a
+new shell and restart Codex so the installer, MCP server, and lifecycle hooks
+inherit it. A GUI-launched Codex process may not read `~/.bashrc`; provide
+`CORTEX_PYTHON` in the environment used to launch the GUI instead. The selected
+interpreter must be executable, provide `tomllib`, and be Python 3.11 or newer.
+When the variable is unset, the same checks apply to the `python3` resolved from
+`PATH`; a Python 3.10 runtime stops with a diagnostic naming the minimum version.
+An explicit invalid path stops with a diagnostic before Codex configuration is
+changed; Cortex does not silently fall back to `python3`. Paths containing
+spaces are supported. This setting does not modify Ubuntu's `/usr/bin/python3`.
+
+The sync command validates the repository marketplace and plugin, registers the repo-local
 marketplace, reinstalls Cortex, and verifies same-version file content. It does
 not scan, import, alter, or clean up prior orchestration state or unrelated
 plugin data. If `~/.codex/config.toml` already contains Cortex's
@@ -131,6 +153,9 @@ different existing default it creates a private backup; comments, unrelated
 keys, and file mode are preserved. Use
 `--dry-run` to report the planned update without writing, or `--check` for a
 read-only installed-content check:
+
+`--dry-run` explicitly reports that it changed no plugin or Codex
+configuration. It is not required for source-mode live validation.
 
 ```bash
 ./scripts/sync-cortex.sh --dry-run
@@ -204,7 +229,7 @@ default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
 and secret-prone paths before validating the package again. Run
 `python3 scripts/verify-cortex-release.py --require-tracked` against the exact
-committed Cortex 6.4.1 candidate before any push, tag, or catalog submission;
+committed Cortex 6.5.0 candidate before any push, tag, or catalog submission;
 the command deliberately does not attest mutable working-tree changes.
 
 See [release readiness](docs/release-readiness.md) for the external gates:
@@ -728,6 +753,7 @@ reaches zero.
 python3 -m unittest discover -s tests -v
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/cortex-luna-high-eval.py
+python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 python3 scripts/probe-fresh-cortex-plugin.py
 python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
 python3 scripts/validate-cortex-marketplace.py
@@ -736,10 +762,13 @@ python3 scripts/verify-cortex-release.py --require-tracked  # requires a committ
 bash -n scripts/sync-cortex.sh
 ```
 
-The 6.4.1 source candidate is verified by the current full Python suite, marketplace
-validation, Python compilation, shell syntax, the isolated fresh-plugin probe,
-cold-boot lifecycle, deterministic fixtures, and installed-content
-verification. File-size hardening covers the 8 MiB ordinary-JSON bound with
+The source-tree live command starts an isolated temporary project with its MCP
+server pointed at this checkout. It does not install, reinstall, update, or
+verify an installed plugin. The source candidate's resolver and launcher
+contract is covered by focused invariant tests, marketplace validation, shell
+syntax, the isolated fresh-plugin probe, and installed-content verification.
+The full regression, cold-boot lifecycle, and tracked-release archive checks
+remain required before publication. File-size hardening covers the 8 MiB ordinary-JSON bound with
 fail-before-replace diagnostics, the separate 64 MiB manifest bound, bounded
 handoff/reconciliation state, and fail-closed diagnostics for oversized
 artifacts. New tasks use SQLite only: first access creates a fresh database or

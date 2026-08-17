@@ -24,6 +24,7 @@ import sqlite3
 import stat
 import threading
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 2
+DATABASE_SCHEMA_VERSION = 7
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
@@ -217,97 +218,55 @@ def _connection(root: Path, *, write: bool = False) -> Iterator[sqlite3.Connecti
         connection.close()
 
 
-def _apply_base_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at TEXT NOT NULL,
-            checksum TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS ledger_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS tasks (
-            task_id TEXT PRIMARY KEY,
-            task_number INTEGER NOT NULL UNIQUE,
-            artifact_dir TEXT NOT NULL UNIQUE,
-            definition_json TEXT NOT NULL,
-            state_json TEXT NOT NULL,
-            plan_json TEXT,
-            status TEXT NOT NULL,
-            revision INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS tasks_status_updated_idx ON tasks(status, updated_at);
-        CREATE TABLE IF NOT EXISTS lanes (
-            lane_id TEXT PRIMARY KEY,
-            definition_json TEXT NOT NULL,
-            state_json TEXT NOT NULL,
-            status TEXT NOT NULL,
-            revision INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS classifications (
-            classification_id TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            consumed_by TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS manifest_snapshots (
-            snapshot_ref TEXT PRIMARY KEY,
-            digest TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS global_documents (
-            name TEXT PRIMARY KEY,
-            payload_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS operations (
-            submission_id TEXT PRIMARY KEY,
-            -- A start receipt is allocated before its task row exists, so this
-            -- association is an indexed audit link rather than a foreign key.
-            task_id TEXT,
-            payload_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS operations_task_idx ON operations(task_id);
-        CREATE TABLE IF NOT EXISTS ledger_events (
-            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE,
-            lane_id TEXT REFERENCES lanes(lane_id) ON DELETE CASCADE,
-            event TEXT NOT NULL,
-            detail TEXT NOT NULL,
-            revision INTEGER,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS task_documents (
-            task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-            document_key TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(task_id, document_key)
-        );
-        CREATE INDEX IF NOT EXISTS task_documents_updated_idx
-            ON task_documents(task_id, updated_at);
-        """
-    )
+@dataclass(frozen=True)
+class _Migration:
+    version: int
+    name: str
+    statements: tuple[str, ...]
 
 
-def _migration_checksum(name: str) -> str:
-    return hashlib.sha256(name.encode("utf-8")).hexdigest()
+def _normalize_sql(statement: str) -> str:
+    return " ".join(statement.split())
 
 
-def _record_migration(connection: sqlite3.Connection, version: int, name: str) -> None:
+def _migration_checksum(migration: _Migration | str, statements: tuple[str, ...] = ()) -> str:
+    """Hash the migration identity and ordered normalized content.
+
+    The string form is retained solely to recognize databases written by the
+    pre-atomic implementation, whose checksum covered only the migration
+    name.
+    """
+    if isinstance(migration, str):
+        return hashlib.sha256(migration.encode("utf-8")).hexdigest()
+    payload = {
+        "algorithm": "sha256",
+        "version": migration.version,
+        "name": migration.name,
+        "statements": [_normalize_sql(item) for item in migration.statements],
+    }
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _execute_migration_statements(connection: sqlite3.Connection, statements: tuple[str, ...]) -> None:
+    """Execute exactly the immutable, checksummed statements in order.
+
+    ``<runtime-token>`` is a stable source placeholder.  Its generated value
+    is deliberately substituted only at execution time, so it cannot change
+    the migration checksum while still allowing each installation its own
+    cursor signing key.
+    """
+    for statement in statements:
+        if not statement.strip():
+            continue
+        if "'<runtime-token>'" in statement:
+            statement = statement.replace("'<runtime-token>'", repr(secrets.token_hex(32)))
+        connection.execute(statement)
+
+
+def _record_migration(connection: sqlite3.Connection, migration: _Migration) -> None:
     connection.execute(
         "INSERT INTO schema_migrations(version, name, applied_at, checksum) VALUES (?, ?, ?, ?)",
-        (version, name, _now(), _migration_checksum(name)),
+        (migration.version, migration.name, _now(), _migration_checksum(migration)),
     )
 
 
@@ -349,8 +308,27 @@ def _text_chunk_boundaries(data: bytes) -> list[bytes]:
     return chunks
 
 
-def _artifact_ref(task_id: str, kind: str, digest: str) -> str:
-    return "artifact-" + hashlib.sha256(f"{task_id}\0{kind}\0{digest}".encode("utf-8")).hexdigest()[:32]
+def _artifact_ref(task_id: str, kind: str, title: str, digest: str) -> str:
+    """Return an id for a *logical* artifact, not for its bytes alone.
+
+    The v2 catalog used ``task/kind/digest`` as its identity.  That made two
+    equally-sized reports with identical contents indistinguishable, even
+    where they intentionally had different titles or export destinations.
+    New ids include the logical title.  Existing v2 ids are retained verbatim
+    by the v7 backfill.
+    """
+    return "artifact-" + hashlib.sha256(
+        f"{task_id}\0{kind}\0{title}\0{digest}".encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def _blob_ref(digest: str, mime_type: str, byte_size: int) -> str:
+    """Return the content-addressed identifier for one canonical blob."""
+    # Keep this exactly representable by the append-only SQLite migration,
+    # which uses ``lower(hex(mime_type))`` to backfill pre-v7 rows without a
+    # Python callback.  The actual identity remains the unique
+    # digest/mime/size tuple, while this is its deterministic key.
+    return f"blob-{digest}-{mime_type.encode('utf-8').hex()}-{byte_size}"
 
 
 def _store_artifact_with_connection(
@@ -365,18 +343,20 @@ def _store_artifact_with_connection(
     export_path: str | None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
-    """Persist immutable content and transport-sized chunks in one transaction."""
+    """Persist one logical artifact and its shared canonical blob atomically."""
     _validate_artifact_identity(task_id, kind, title, export_path)
     if not mime_type or len(mime_type) > 160:
         raise ValueError("SQLite artifact MIME type is invalid")
     is_text = isinstance(content, str)
     raw = content.encode("utf-8") if is_text else bytes(content)
     digest = hashlib.sha256(raw).hexdigest()
-    artifact_id = _artifact_ref(task_id, kind, digest)
+    artifact_id = _artifact_ref(task_id, kind, title, digest)
+    blob_id = _blob_ref(digest, mime_type, len(raw))
     existing = connection.execute(
-        "SELECT artifact_id, mime_type, byte_size, chunk_count, immutable, export_path, title, created_at "
-        "FROM artifacts WHERE task_id = ? AND kind = ? AND digest_sha256 = ?",
-        (task_id, kind, digest),
+        "SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, "
+        "immutable, export_path, created_at FROM logical_artifacts "
+        "WHERE task_id = ? AND kind = ? AND title = ? AND digest_sha256 = ?",
+        (task_id, kind, title, digest),
     ).fetchone()
     if existing is not None:
         if (
@@ -385,28 +365,45 @@ def _store_artifact_with_connection(
             or bool(existing["immutable"]) != bool(immutable)
         ):
             raise ValueError("SQLite immutable artifact identity already has conflicting metadata")
-        return {
-            "artifact_ref": str(existing["artifact_id"]), "task_id": task_id, "kind": kind,
-            "title": str(existing["title"]), "mime_type": mime_type, "digest_sha256": digest,
-            "byte_size": int(existing["byte_size"]), "chunk_count": int(existing["chunk_count"]),
-            "immutable": bool(existing["immutable"]), "export_path": existing["export_path"],
-            "created_at": str(existing["created_at"]),
-        }
+        if export_path:
+            _register_artifact_export_with_connection(connection, task_id, str(existing["artifact_id"]), export_path)
+        return _artifact_metadata_row(existing)
     chunks = _text_chunk_boundaries(raw) if is_text else [raw[offset:offset + ARTIFACT_STORAGE_CHUNK_BYTES] for offset in range(0, len(raw), ARTIFACT_STORAGE_CHUNK_BYTES)] or [b""]
     created = created_at or _now()
     connection.execute(
-        """INSERT INTO artifacts(artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (artifact_id, task_id, kind, title, mime_type, digest, len(raw), len(chunks), int(bool(immutable)), export_path, created),
+        """INSERT INTO artifact_blobs(blob_id, digest_sha256, mime_type, byte_size, chunk_count, encoding, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(digest_sha256, mime_type, byte_size) DO NOTHING""",
+        (blob_id, digest, mime_type, len(raw), len(chunks), "utf-8" if is_text else "binary", created),
     )
-    for chunk_no, chunk in enumerate(chunks):
-        text_content = chunk.decode("utf-8") if is_text else None
-        blob_content = None if is_text else sqlite3.Binary(chunk)
-        connection.execute(
-            """INSERT INTO artifact_chunks(artifact_id, chunk_no, text_content, blob_content, byte_size, digest_sha256)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (artifact_id, chunk_no, text_content, blob_content, len(chunk), hashlib.sha256(chunk).hexdigest()),
-        )
+    blob = connection.execute(
+        "SELECT blob_id, chunk_count, encoding FROM artifact_blobs WHERE digest_sha256 = ? AND mime_type = ? AND byte_size = ?",
+        (digest, mime_type, len(raw)),
+    ).fetchone()
+    if blob is None or str(blob["blob_id"]) != blob_id:
+        raise ValueError("SQLite canonical artifact blob identity is inconsistent")
+    if int(blob["chunk_count"]) != len(chunks) or str(blob["encoding"]) != ("utf-8" if is_text else "binary"):
+        raise ValueError("SQLite canonical artifact blob metadata is inconsistent")
+    existing_chunks = connection.execute(
+        "SELECT COUNT(*) FROM artifact_blob_chunks WHERE blob_id = ?", (blob_id,)
+    ).fetchone()[0]
+    if existing_chunks == 0:
+        for chunk_no, chunk in enumerate(chunks):
+            text_content = chunk.decode("utf-8") if is_text else None
+            blob_content = None if is_text else sqlite3.Binary(chunk)
+            connection.execute(
+                """INSERT INTO artifact_blob_chunks(blob_id, chunk_no, text_content, blob_content, byte_size, digest_sha256)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (blob_id, chunk_no, text_content, blob_content, len(chunk), hashlib.sha256(chunk).hexdigest()),
+            )
+    elif int(existing_chunks) != len(chunks):
+        raise ValueError("SQLite canonical artifact blob chunks are inconsistent")
+    connection.execute(
+        """INSERT INTO logical_artifacts(artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, blob_id, export_path, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (artifact_id, task_id, kind, title, mime_type, digest, len(raw), len(chunks), int(bool(immutable)), blob_id, export_path, created),
+    )
+    if export_path:
+        _register_artifact_export_with_connection(connection, task_id, artifact_id, export_path, created_at=created)
     return {
         "artifact_ref": artifact_id, "task_id": task_id, "kind": kind, "title": title,
         "mime_type": mime_type, "digest_sha256": digest, "byte_size": len(raw),
@@ -415,44 +412,153 @@ def _store_artifact_with_connection(
     }
 
 
-def _create_artifact_catalog(connection: sqlite3.Connection) -> None:
-    """Create the immutable artifact tables for the SQLite-native ledger."""
-    connection.execute(
-        """CREATE TABLE IF NOT EXISTS artifacts (
-            artifact_id TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-            kind TEXT NOT NULL,
-            title TEXT NOT NULL,
-            mime_type TEXT NOT NULL,
-            digest_sha256 TEXT NOT NULL,
-            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
-            chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1),
-            immutable INTEGER NOT NULL CHECK(immutable IN (0, 1)),
-            export_path TEXT,
-            created_at TEXT NOT NULL,
-            UNIQUE(task_id, kind, digest_sha256)
-        )"""
+_BASE_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL, checksum TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS ledger_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS tasks(task_id TEXT PRIMARY KEY, task_number INTEGER NOT NULL UNIQUE, artifact_dir TEXT NOT NULL UNIQUE, definition_json TEXT NOT NULL, state_json TEXT NOT NULL, plan_json TEXT, status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS tasks_status_updated_idx ON tasks(status, updated_at)",
+    "CREATE TABLE IF NOT EXISTS lanes(lane_id TEXT PRIMARY KEY, definition_json TEXT NOT NULL, state_json TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS classifications(classification_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, consumed_by TEXT REFERENCES tasks(task_id) ON DELETE SET NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS manifest_snapshots(snapshot_ref TEXT PRIMARY KEY, digest TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS global_documents(name TEXT PRIMARY KEY, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS operations(submission_id TEXT PRIMARY KEY, task_id TEXT, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS operations_task_idx ON operations(task_id)",
+    "CREATE TABLE IF NOT EXISTS ledger_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE, lane_id TEXT REFERENCES lanes(lane_id) ON DELETE CASCADE, event TEXT NOT NULL, detail TEXT NOT NULL, revision INTEGER, created_at TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS task_documents(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, document_key TEXT NOT NULL, payload_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(task_id, document_key))",
+    "CREATE INDEX IF NOT EXISTS task_documents_updated_idx ON task_documents(task_id, updated_at)",
+)
+_ARTIFACT_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS artifacts(artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, kind TEXT NOT NULL, title TEXT NOT NULL, mime_type TEXT NOT NULL, digest_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), immutable INTEGER NOT NULL CHECK(immutable IN (0, 1)), export_path TEXT, created_at TEXT NOT NULL, UNIQUE(task_id, kind, digest_sha256))",
+    "CREATE TABLE IF NOT EXISTS artifact_chunks(artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE CASCADE, chunk_no INTEGER NOT NULL CHECK(chunk_no >= 0), text_content TEXT, blob_content BLOB, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), digest_sha256 TEXT NOT NULL, PRIMARY KEY(artifact_id, chunk_no), CHECK((text_content IS NOT NULL AND blob_content IS NULL) OR (text_content IS NULL AND blob_content IS NOT NULL)))",
+    "CREATE INDEX IF NOT EXISTS tasks_created_at_idx ON tasks(created_at)",
+    "CREATE INDEX IF NOT EXISTS artifacts_task_kind_created_idx ON artifacts(task_id, kind, created_at DESC, artifact_id)",
+    "CREATE INDEX IF NOT EXISTS artifacts_task_created_idx ON artifacts(task_id, created_at DESC, artifact_id)",
+    "CREATE INDEX IF NOT EXISTS artifacts_digest_idx ON artifacts(digest_sha256)",
+    "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('artifact_cursor_hmac_key', '<runtime-token>')",
+)
+_CLOSURE_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS task_findings(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, fingerprint TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL, blocking INTEGER NOT NULL CHECK(blocking IN (0, 1)), summary TEXT NOT NULL, details TEXT, next_action_json TEXT, source_evidence_json TEXT NOT NULL, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(task_id, fingerprint))",
+    "CREATE INDEX IF NOT EXISTS task_findings_task_status_idx ON task_findings(task_id, status, severity, blocking)",
+)
+_FINDING_METADATA_SCHEMA_STATEMENTS = (
+    "ALTER TABLE task_findings ADD COLUMN waiver_reason TEXT",
+    "ALTER TABLE task_findings ADD COLUMN waived_by TEXT",
+    "ALTER TABLE task_findings ADD COLUMN waived_at TEXT",
+    "ALTER TABLE task_findings ADD COLUMN resolved_at TEXT",
+)
+
+# These definitions are intentionally append-only.  Projection state is an
+# outbox: it is committed with canonical state, and filesystem materializers
+# acknowledge it later in a short, independent transaction.
+_PROJECTION_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS projection_jobs(projection_key TEXT PRIMARY KEY, task_id TEXT, artifact_id TEXT, projection_type TEXT NOT NULL, export_path TEXT, required INTEGER NOT NULL DEFAULT 0 CHECK(required IN (0, 1)), status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'materializing', 'ready', 'failed', 'deleting', 'deleted')), attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0), expected_digest TEXT NOT NULL, materialized_digest TEXT, last_error TEXT, lease_owner TEXT, lease_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, materialized_at TEXT)",
+    "CREATE INDEX IF NOT EXISTS projection_jobs_status_idx ON projection_jobs(status, lease_expires_at, updated_at)",
+    "CREATE INDEX IF NOT EXISTS projection_jobs_task_idx ON projection_jobs(task_id, projection_type)",
+)
+_PRUNE_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS prune_tombstones(tombstone_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, artifact_dir TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned', 'claimed', 'filesystem_removed', 'finalized', 'failed')), lease_owner TEXT, lease_expires_at TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, filesystem_removed_at TEXT, finalized_at TEXT)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS prune_tombstones_active_task_idx ON prune_tombstones(task_id) WHERE status != 'finalized'",
+    "CREATE INDEX IF NOT EXISTS prune_tombstones_status_idx ON prune_tombstones(status, lease_expires_at, updated_at)",
+)
+
+# v7 deliberately leaves the v2 ``artifacts`` and ``artifact_chunks`` tables
+# intact.  They are migration evidence and preserve every historic artifact id
+# while this migration backfills an explicitly split logical/blob model.  New
+# writes and all reads use the tables below; a later, separately-versioned
+# retention migration may reclaim legacy duplicate chunks only after it has a
+# safe export/projection retention policy.
+_ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS artifact_blobs(blob_id TEXT PRIMARY KEY, digest_sha256 TEXT NOT NULL, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), encoding TEXT NOT NULL CHECK(encoding IN ('utf-8', 'binary')), created_at TEXT NOT NULL, UNIQUE(digest_sha256, mime_type, byte_size))",
+    "CREATE TABLE IF NOT EXISTS artifact_blob_chunks(blob_id TEXT NOT NULL REFERENCES artifact_blobs(blob_id) ON DELETE CASCADE, chunk_no INTEGER NOT NULL CHECK(chunk_no >= 0), text_content TEXT, blob_content BLOB, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), digest_sha256 TEXT NOT NULL, PRIMARY KEY(blob_id, chunk_no), CHECK((text_content IS NOT NULL AND blob_content IS NULL) OR (text_content IS NULL AND blob_content IS NOT NULL)))",
+    "CREATE TABLE IF NOT EXISTS logical_artifacts(artifact_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, kind TEXT NOT NULL, title TEXT NOT NULL, mime_type TEXT NOT NULL, digest_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), immutable INTEGER NOT NULL CHECK(immutable IN (0, 1)), blob_id TEXT NOT NULL REFERENCES artifact_blobs(blob_id), export_path TEXT, created_at TEXT NOT NULL, UNIQUE(task_id, kind, title, digest_sha256))",
+    "CREATE TABLE IF NOT EXISTS artifact_exports(artifact_id TEXT NOT NULL REFERENCES logical_artifacts(artifact_id) ON DELETE CASCADE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, export_path TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(artifact_id, export_path), UNIQUE(task_id, export_path))",
+    "CREATE INDEX IF NOT EXISTS logical_artifacts_task_kind_created_idx ON logical_artifacts(task_id, kind, created_at DESC, artifact_id)",
+    "CREATE INDEX IF NOT EXISTS logical_artifacts_task_created_idx ON logical_artifacts(task_id, created_at DESC, artifact_id)",
+    "CREATE INDEX IF NOT EXISTS logical_artifacts_blob_idx ON logical_artifacts(blob_id)",
+    "CREATE INDEX IF NOT EXISTS artifact_exports_task_path_idx ON artifact_exports(task_id, export_path)",
+    "INSERT OR IGNORE INTO artifact_blobs(blob_id, digest_sha256, mime_type, byte_size, chunk_count, encoding, created_at) SELECT 'blob-' || digest_sha256 || '-' || lower(hex(mime_type)) || '-' || CAST(byte_size AS TEXT), digest_sha256, mime_type, byte_size, chunk_count, CASE WHEN EXISTS(SELECT 1 FROM artifact_chunks c WHERE c.artifact_id = artifacts.artifact_id AND c.text_content IS NOT NULL) THEN 'utf-8' ELSE 'binary' END, created_at FROM artifacts",
+    "INSERT OR IGNORE INTO artifact_blob_chunks(blob_id, chunk_no, text_content, blob_content, byte_size, digest_sha256) SELECT 'blob-' || a.digest_sha256 || '-' || lower(hex(a.mime_type)) || '-' || CAST(a.byte_size AS TEXT), c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256 FROM artifacts a JOIN artifact_chunks c ON c.artifact_id = a.artifact_id WHERE a.artifact_id = (SELECT MIN(source.artifact_id) FROM artifacts source WHERE source.digest_sha256 = a.digest_sha256 AND source.mime_type = a.mime_type AND source.byte_size = a.byte_size)",
+    "INSERT OR IGNORE INTO logical_artifacts(artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, blob_id, export_path, created_at) SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, 'blob-' || digest_sha256 || '-' || lower(hex(mime_type)) || '-' || CAST(byte_size AS TEXT), export_path, created_at FROM artifacts",
+    "INSERT OR IGNORE INTO artifact_exports(artifact_id, task_id, export_path, created_at) SELECT artifact_id, task_id, export_path, created_at FROM artifacts WHERE export_path IS NOT NULL",
+)
+
+
+def _migration_plan() -> tuple[_Migration, ...]:
+    return (
+        _Migration(1, "sqlite-ledger-base", _BASE_SCHEMA_STATEMENTS),
+        _Migration(2, "immutable-artifact-catalog-and-chunks", _ARTIFACT_SCHEMA_STATEMENTS),
+        _Migration(3, "canonical-task-findings", _CLOSURE_SCHEMA_STATEMENTS),
+        _Migration(4, "finding-waiver-and-resolution-metadata", _FINDING_METADATA_SCHEMA_STATEMENTS),
+        _Migration(5, "projection-jobs", _PROJECTION_SCHEMA_STATEMENTS),
+        _Migration(6, "crash-safe-prune-tombstones", _PRUNE_SCHEMA_STATEMENTS),
+        _Migration(7, "canonical-content-blobs-and-logical-artifacts", _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS),
     )
-    connection.execute(
-        """CREATE TABLE IF NOT EXISTS artifact_chunks (
-            artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id) ON DELETE CASCADE,
-            chunk_no INTEGER NOT NULL CHECK(chunk_no >= 0),
-            text_content TEXT,
-            blob_content BLOB,
-            byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
-            digest_sha256 TEXT NOT NULL,
-            PRIMARY KEY(artifact_id, chunk_no),
-            CHECK((text_content IS NOT NULL AND blob_content IS NULL) OR (text_content IS NULL AND blob_content IS NOT NULL))
-        )"""
-    )
-    connection.execute("CREATE INDEX IF NOT EXISTS tasks_created_at_idx ON tasks(created_at)")
-    connection.execute("CREATE INDEX IF NOT EXISTS artifacts_task_kind_created_idx ON artifacts(task_id, kind, created_at DESC, artifact_id)")
-    connection.execute("CREATE INDEX IF NOT EXISTS artifacts_task_created_idx ON artifacts(task_id, created_at DESC, artifact_id)")
-    connection.execute("CREATE INDEX IF NOT EXISTS artifacts_digest_idx ON artifacts(digest_sha256)")
-    connection.execute(
-        "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES (?, ?)",
-        ("artifact_cursor_hmac_key", secrets.token_hex(32)),
-    )
+
+
+def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> None:
+    required = {
+        1: {
+            "schema_migrations", "ledger_meta", "tasks", "lanes", "classifications",
+            "manifest_snapshots", "global_documents", "operations", "ledger_events",
+            "task_documents",
+        },
+        2: {"artifacts", "artifact_chunks"},
+        3: {"task_findings"},
+        4: {"task_findings"},
+        5: {"projection_jobs", "projection_jobs_status_idx", "projection_jobs_task_idx"},
+        6: {"prune_tombstones", "prune_tombstones_active_task_idx", "prune_tombstones_status_idx"},
+        7: {
+            "artifact_blobs", "artifact_blob_chunks", "logical_artifacts", "artifact_exports",
+            "logical_artifacts_task_kind_created_idx", "logical_artifacts_task_created_idx",
+            "logical_artifacts_blob_idx", "artifact_exports_task_path_idx",
+        },
+    }
+    present = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+        )
+    }
+    if not required.get(version, set()).issubset(present):
+        raise ValueError("Cortex database schema is inconsistent with migration history")
+    column_requirements: dict[int, dict[str, set[str]]] = {
+        1: {
+            "schema_migrations": {"version", "name", "applied_at", "checksum"},
+            "ledger_meta": {"key", "value"},
+            "tasks": {"task_id", "task_number", "artifact_dir", "definition_json", "state_json", "plan_json", "status", "revision", "created_at", "updated_at"},
+            "lanes": {"lane_id", "definition_json", "state_json", "status", "revision", "created_at", "updated_at"},
+            "classifications": {"classification_id", "payload_json", "consumed_by", "created_at"},
+            "manifest_snapshots": {"snapshot_ref", "digest", "payload_json", "created_at"},
+            "global_documents": {"name", "payload_json", "updated_at"},
+            "operations": {"submission_id", "task_id", "payload_json", "updated_at"},
+            "ledger_events": {"event_id", "task_id", "lane_id", "event", "detail", "revision", "created_at"},
+            "task_documents": {"task_id", "document_key", "payload_json", "updated_at"},
+        },
+        2: {
+            "artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "export_path", "created_at"},
+            "artifact_chunks": {"artifact_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
+        },
+        3: {
+            "task_findings": {"task_id", "fingerprint", "severity", "status", "blocking", "summary", "details", "next_action_json", "source_evidence_json", "first_seen_at", "updated_at"},
+        },
+        4: {"task_findings": {"waiver_reason", "waived_by", "waived_at", "resolved_at"}},
+        5: {
+            "projection_jobs": {"projection_key", "task_id", "artifact_id", "projection_type", "export_path", "required", "status", "attempts", "expected_digest", "materialized_digest", "last_error", "lease_owner", "lease_expires_at", "created_at", "updated_at", "materialized_at"},
+        },
+        6: {
+            "prune_tombstones": {"tombstone_id", "task_id", "artifact_dir", "status", "lease_owner", "lease_expires_at", "error", "created_at", "updated_at", "filesystem_removed_at", "finalized_at"},
+        },
+        7: {
+            "artifact_blobs": {"blob_id", "digest_sha256", "mime_type", "byte_size", "chunk_count", "encoding", "created_at"},
+            "artifact_blob_chunks": {"blob_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
+            "logical_artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "blob_id", "export_path", "created_at"},
+            "artifact_exports": {"artifact_id", "task_id", "export_path", "created_at"},
+        },
+    }
+    for table, expected_columns in column_requirements.get(version, {}).items():
+        columns = {str(row[0]) for row in connection.execute("SELECT name FROM pragma_table_info(?)", (table,))}
+        if not expected_columns.issubset(columns):
+            raise ValueError("Cortex database schema is inconsistent with migration history")
 
 
 
@@ -461,13 +567,6 @@ def _applied_migrations(connection: sqlite3.Connection) -> dict[int, tuple[str, 
         int(row["version"]): (str(row["name"]), str(row["checksum"]))
         for row in connection.execute("SELECT version, name, checksum FROM schema_migrations")
     }
-
-
-def _migration_plan() -> tuple[tuple[int, str], ...]:
-    return (
-        (1, "sqlite-ledger-base"),
-        (2, "immutable-artifact-catalog-and-chunks"),
-    )
 
 
 def _assert_current_migration_history(connection: sqlite3.Connection) -> None:
@@ -482,10 +581,10 @@ def _assert_current_migration_history(connection: sqlite3.Connection) -> None:
         applied = _applied_migrations(connection)
     except sqlite3.OperationalError as exc:
         raise ValueError("Cortex database schema is unavailable inside an active transaction") from exc
-    for version, name in _migration_plan():
-        known = applied.get(version)
-        checksum = _migration_checksum(name)
-        if known != (name, checksum):
+    for migration in _migration_plan():
+        known = applied.get(migration.version)
+        checksum = _migration_checksum(migration)
+        if known != (migration.name, checksum):
             raise ValueError("Cortex database requires migration before this nested operation")
 
 
@@ -496,19 +595,49 @@ def ensure_database(root: Path) -> None:
         return
     with _migration_lock(root):
         with _connection(root, write=True) as connection:
-            _apply_base_schema(connection)
-            applied = _applied_migrations(connection)
-            for version, name in _migration_plan():
-                known = applied.get(version)
-                checksum = _migration_checksum(name)
+            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            migrations = _migration_plan()
+            has_history = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone() is not None
+            applied = _applied_migrations(connection) if has_history else {}
+            expected_versions = {migration.version for migration in migrations}
+            if any(version not in expected_versions for version in applied):
+                raise ValueError("Cortex database migration history is inconsistent")
+            ordered_versions = sorted(applied)
+            if ordered_versions != list(range(1, len(ordered_versions) + 1)):
+                raise ValueError("Cortex database migration history is inconsistent")
+            if user_version != max(applied, default=0):
+                raise ValueError("Cortex database user_version is inconsistent")
+            for version in applied:
+                _assert_migration_schema(connection, version)
+            for migration in migrations:
+                known = applied.get(migration.version)
+                checksum = _migration_checksum(migration)
                 if known is not None:
-                    if known != (name, checksum):
-                        raise ValueError("Cortex database migration history is inconsistent")
-                    continue
-                if version == 2:
-                    _create_artifact_catalog(connection)
-                _record_migration(connection, version, name)
-            connection.execute(f"PRAGMA user_version = {DATABASE_SCHEMA_VERSION}")
+                    if known == (migration.name, checksum):
+                        continue
+                    # Databases from the pre-atomic release used a legacy
+                    # name-only checksum. Upgrade it only after confirming
+                    # the migration's known schema is actually present.
+                    if known == (migration.name, _migration_checksum(migration.name)):
+                        _assert_migration_schema(connection, migration.version)
+                        connection.execute(
+                            "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+                            (checksum, migration.version),
+                        )
+                        continue
+                    raise ValueError("Cortex database migration history is inconsistent")
+                if migration.version != (max(applied, default=0) + 1):
+                    raise ValueError("Cortex database migration history is inconsistent")
+                _execute_migration_statements(connection, migration.statements)
+                _record_migration(connection, migration)
+                applied[migration.version] = (migration.name, checksum)
+            # Keep SQLite's schema marker coupled to the immutable plan that
+            # was actually validated/applied.  This matters both for an
+            # interrupted upgrade and for deterministic migration tests that
+            # intentionally stop at an earlier released plan.
+            connection.execute(f"PRAGMA user_version = {migrations[-1].version if migrations else 0}")
 
 
 def migration_history(root: Path) -> list[dict[str, Any]]:
@@ -517,6 +646,51 @@ def migration_history(root: Path) -> list[dict[str, Any]]:
         return [dict(row) for row in connection.execute(
             "SELECT version, name, applied_at, checksum FROM schema_migrations ORDER BY version"
         )]
+
+
+def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge one closure finding, keyed by task and stable fingerprint."""
+    ensure_database(root)
+    fingerprint = str(finding["fingerprint"])
+    source = source or {}
+    with _connection(root, write=True) as connection:
+        row = connection.execute("SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?", (task_id, fingerprint)).fetchone()
+        now = _now()
+        evidence = []
+        if row:
+            try: evidence = json.loads(str(row["source_evidence_json"]))
+            except json.JSONDecodeError: evidence = []
+        if source and source not in evidence: evidence.append(source)
+        if row:
+            # A later closure may resolve/waive a finding; preserve the most
+            # conservative severity/blocking state until explicitly resolved.
+            status = str(finding["status"])
+            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (finding["severity"], status, int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), _canonical_json(finding.get("next_action")) if finding.get("next_action") is not None else None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
+        else:
+            connection.execute("INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), _canonical_json(finding.get("next_action")) if finding.get("next_action") is not None else None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, now))
+    return finding | {"task_id": task_id, "source_evidence": evidence}
+
+
+def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = True) -> list[dict[str, Any]]:
+    ensure_database(root)
+    query = "SELECT * FROM task_findings WHERE task_id=?" + ("" if include_resolved else " AND status != 'resolved'") + " ORDER BY fingerprint"
+    with _connection(root) as connection:
+        rows = connection.execute(query, (task_id,)).fetchall()
+    result = []
+    for row in rows:
+        item = {"task_id": task_id, "fingerprint": row["fingerprint"], "severity": row["severity"], "status": row["status"], "blocking": bool(row["blocking"]), "summary": row["summary"], "details": row["details"]}
+        for field in ("waiver_reason", "waived_by", "waived_at", "resolved_at"):
+            if field in row.keys() and row[field] is not None:
+                item[field] = row[field]
+        item["next_action"] = json.loads(row["next_action_json"]) if row["next_action_json"] else None
+        item["source_evidence"] = json.loads(row["source_evidence_json"])
+        item["first_seen_at"] = row["first_seen_at"]; item["updated_at"] = row["updated_at"]
+        result.append(item)
+    return result
+
+
+def task_findings_blockers(root: Path, task_id: str) -> list[dict[str, Any]]:
+    return [item for item in list_task_findings(root, task_id, include_resolved=True) if item.get("status") == "open" and (item["severity"] in {"P0", "P1", "P2"} or item["blocking"] or (item.get("next_action") or {}).get("required") is True)]
 
 
 def task_index(root: Path) -> dict[str, dict[str, Any]]:
@@ -731,12 +905,84 @@ def _artifact_metadata_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _register_artifact_export_with_connection(
+    connection: sqlite3.Connection,
+    task_id: str,
+    artifact_ref: str,
+    export_path: str,
+    *,
+    created_at: str | None = None,
+) -> None:
+    _validate_artifact_identity(task_id, "artifact", "export", export_path)
+    artifact = connection.execute(
+        "SELECT task_id FROM logical_artifacts WHERE artifact_id = ?", (artifact_ref,)
+    ).fetchone()
+    if artifact is None or str(artifact["task_id"]) != task_id:
+        raise ValueError("SQLite artifact is unavailable for the selected task")
+    conflict = connection.execute(
+        "SELECT artifact_id FROM artifact_exports WHERE task_id = ? AND export_path = ?",
+        (task_id, export_path),
+    ).fetchone()
+    if conflict is not None and str(conflict["artifact_id"]) != artifact_ref:
+        raise ValueError("SQLite artifact export path already belongs to another logical artifact")
+    connection.execute(
+        "INSERT OR IGNORE INTO artifact_exports(artifact_id, task_id, export_path, created_at) VALUES (?, ?, ?, ?)",
+        (artifact_ref, task_id, export_path, created_at or _now()),
+    )
+
+
+def register_artifact_export(root: Path, task_id: str, artifact_ref: str, export_path: str) -> dict[str, Any]:
+    """Register another filesystem projection for one immutable artifact.
+
+    This changes only logical projection metadata; a projection worker must
+    still materialize and acknowledge the requested path through the outbox.
+    """
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        _register_artifact_export_with_connection(connection, task_id, artifact_ref, export_path)
+    metadata = get_artifact_metadata(root, task_id, artifact_ref)
+    if metadata is None:  # Defensive: the transaction above validated it.
+        raise ValueError("SQLite artifact is unavailable for the selected task")
+    return metadata
+
+
+def list_artifact_exports(root: Path, task_id: str, artifact_ref: str) -> list[dict[str, str]]:
+    """List stable logical export records for later projection scheduling."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            "SELECT export_path, created_at FROM artifact_exports WHERE task_id = ? AND artifact_id = ? ORDER BY export_path",
+            (task_id, artifact_ref),
+        ).fetchall()
+    return [{"export_path": str(row["export_path"]), "created_at": str(row["created_at"])} for row in rows]
+
+
+def get_artifact_blob_metadata(root: Path, task_id: str, artifact_ref: str) -> dict[str, Any] | None:
+    """Return the canonical blob identity behind a logical artifact."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute(
+            """SELECT b.blob_id, b.digest_sha256, b.mime_type, b.byte_size, b.chunk_count, b.encoding, b.created_at
+               FROM logical_artifacts a JOIN artifact_blobs b ON b.blob_id = a.blob_id
+               WHERE a.task_id = ? AND a.artifact_id = ?""",
+            (task_id, artifact_ref),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "blob_ref": str(row["blob_id"]), "digest_sha256": str(row["digest_sha256"]),
+        "mime_type": str(row["mime_type"]), "byte_size": int(row["byte_size"]),
+        "chunk_count": int(row["chunk_count"]), "encoding": str(row["encoding"]),
+        "created_at": str(row["created_at"]),
+    }
+
+
 def get_artifact_metadata(root: Path, task_id: str, artifact_ref: str) -> dict[str, Any] | None:
     ensure_database(root)
     with _connection(root) as connection:
         row = connection.execute(
             "SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at "
-            "FROM artifacts WHERE task_id = ? AND artifact_id = ?",
+            "FROM logical_artifacts WHERE task_id = ? AND artifact_id = ?",
             (task_id, artifact_ref),
         ).fetchone()
     return None if row is None else _artifact_metadata_row(row)
@@ -746,8 +992,9 @@ def get_artifact_for_export_path(root: Path, task_id: str, export_path: str) -> 
     ensure_database(root)
     with _connection(root) as connection:
         row = connection.execute(
-            "SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at "
-            "FROM artifacts WHERE task_id = ? AND export_path = ? ORDER BY created_at DESC, artifact_id DESC LIMIT 1",
+            "SELECT a.artifact_id, a.task_id, a.kind, a.title, a.mime_type, a.digest_sha256, a.byte_size, a.chunk_count, a.immutable, e.export_path, a.created_at "
+            "FROM artifact_exports e JOIN logical_artifacts a ON a.artifact_id = e.artifact_id "
+            "WHERE e.task_id = ? AND e.export_path = ? ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1",
             (task_id, export_path),
         ).fetchone()
     return None if row is None else _artifact_metadata_row(row)
@@ -767,7 +1014,7 @@ def list_artifacts(
     values: list[Any] = [task_id]
     query = (
         "SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at "
-        "FROM artifacts WHERE task_id = ?"
+        "FROM logical_artifacts WHERE task_id = ?"
     )
     if kind:
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", kind):
@@ -805,9 +1052,10 @@ def read_artifact_range(
     is_text: bool | None = None
     with _connection(root) as connection:
         rows = connection.execute(
-            "SELECT chunk_no, text_content, blob_content, byte_size, digest_sha256 "
-            "FROM artifact_chunks WHERE artifact_id = ? ORDER BY chunk_no",
-            (artifact_ref,),
+            """SELECT c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256
+               FROM logical_artifacts a JOIN artifact_blob_chunks c ON c.blob_id = a.blob_id
+               WHERE a.task_id = ? AND a.artifact_id = ? ORDER BY c.chunk_no""",
+            (task_id, artifact_ref),
         ).fetchall()
     for row in rows:
         size = int(row["byte_size"])
@@ -893,9 +1141,10 @@ def read_artifact_content(root: Path, task_id: str, artifact_ref: str) -> str | 
         raise ValueError("SQLite artifact is unavailable for the selected task")
     with _connection(root) as connection:
         rows = connection.execute(
-            "SELECT chunk_no, text_content, blob_content, byte_size, digest_sha256 "
-            "FROM artifact_chunks WHERE artifact_id = ? ORDER BY chunk_no",
-            (artifact_ref,),
+            """SELECT c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256
+               FROM logical_artifacts a JOIN artifact_blob_chunks c ON c.blob_id = a.blob_id
+               WHERE a.task_id = ? AND a.artifact_id = ? ORDER BY c.chunk_no""",
+            (task_id, artifact_ref),
         ).fetchall()
     if len(rows) != metadata["chunk_count"]:
         raise ValueError("SQLite artifact chunk count is invalid")
@@ -1109,3 +1358,394 @@ def delete_operations_for_tasks(root: Path, task_ids: set[str]) -> int:
     with _connection(root, write=True) as connection:
         cursor = connection.execute(f"DELETE FROM operations WHERE task_id IN ({placeholders})", tuple(sorted(task_ids)))
     return int(cursor.rowcount)
+
+
+# ---------------------------------------------------------------------------
+# Projection outbox and crash-safe prune state machines
+
+def _lease_until(seconds: int) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(seconds=max(1, int(seconds)))).isoformat()
+
+
+def _projection_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def enqueue_projection_job(
+    root: Path, *, task_id: str | None, projection_type: str, expected_digest: str,
+    export_path: str | None = None, artifact_id: str | None = None,
+    required: bool = False, projection_key: str | None = None,
+) -> dict[str, Any]:
+    """Insert or return one deterministic outbox entry (filesystem-free)."""
+    if not projection_type or not expected_digest:
+        raise ValueError("projection type and expected digest are required")
+    key = projection_key or hashlib.sha256(_canonical_json({
+        "task_id": task_id, "projection_type": projection_type,
+        "export_path": export_path, "artifact_id": artifact_id,
+    }).encode()).hexdigest()
+    now = _now()
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        connection.execute(
+            "INSERT INTO projection_jobs(projection_key,task_id,artifact_id,projection_type,export_path,required,expected_digest,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(projection_key) DO NOTHING",
+            (key, task_id, artifact_id, projection_type, export_path, int(required), expected_digest, now, now),
+        )
+        row = connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (key,)).fetchone()
+        if row is None or str(row["expected_digest"]) != expected_digest:
+            raise ValueError("projection key already has conflicting content")
+        return _projection_row(row)
+
+
+def get_projection_job(root: Path, projection_key: str) -> dict[str, Any] | None:
+    ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (projection_key,)).fetchone()
+    return None if row is None else _projection_row(row)
+
+
+def list_projection_jobs(root: Path, *, task_id: str | None = None, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    ensure_database(root)
+    if not 1 <= limit <= 1000: raise ValueError("projection page size is invalid")
+    clauses, values = [], []
+    if task_id is not None: clauses.append("task_id=?"); values.append(task_id)
+    if status is not None: clauses.append("status=?"); values.append(status)
+    query = "SELECT * FROM projection_jobs" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY created_at, projection_key LIMIT ?"
+    values.append(limit)
+    with _connection(root) as connection: rows = connection.execute(query, values).fetchall()
+    return [_projection_row(row) for row in rows]
+
+
+def claim_projection_jobs(root: Path, worker_id: str, *, limit: int = 1, lease_seconds: int = 300) -> list[dict[str, Any]]:
+    ensure_database(root)
+    now, expiry = _now(), _lease_until(lease_seconds)
+    with _connection(root, write=True) as connection:
+        rows = connection.execute("SELECT projection_key FROM projection_jobs WHERE (status IN ('pending','failed') OR (status='materializing' AND (lease_expires_at IS NULL OR lease_expires_at < ?))) ORDER BY created_at, projection_key LIMIT ?", (now, limit)).fetchall()
+        result = []
+        for row in rows:
+            connection.execute("UPDATE projection_jobs SET status='materializing', lease_owner=?, lease_expires_at=?, attempts=attempts+1, updated_at=? WHERE projection_key=?", (worker_id, expiry, now, row[0]))
+            current = connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (row[0],)).fetchone()
+            result.append(_projection_row(current))
+    return result
+
+
+def claim_projection_job(
+    root: Path,
+    projection_key: str,
+    worker_id: str,
+    *,
+    lease_seconds: int = 300,
+) -> dict[str, Any] | None:
+    """Atomically lease exactly one pending, failed, or expired job.
+
+    This is intentionally separate from :func:`claim_projection_jobs`.
+    On-demand materialization must never lease unrelated outbox work merely
+    because it happens to be pending in the same database transaction.
+    """
+    if not str(projection_key).strip() or not str(worker_id).strip():
+        raise ValueError("projection key and worker id are required")
+    ensure_database(root)
+    now, expiry = _now(), _lease_until(lease_seconds)
+    with _connection(root, write=True) as connection:
+        cursor = connection.execute(
+            "UPDATE projection_jobs SET status='materializing', lease_owner=?, "
+            "lease_expires_at=?, attempts=attempts+1, updated_at=? "
+            "WHERE projection_key=? AND (status IN ('pending','failed') "
+            "OR (status='materializing' AND (lease_expires_at IS NULL OR lease_expires_at < ?)))",
+            (worker_id, expiry, now, projection_key, now),
+        )
+        if cursor.rowcount != 1:
+            return None
+        row = connection.execute(
+            "SELECT * FROM projection_jobs WHERE projection_key=?", (projection_key,)
+        ).fetchone()
+    return None if row is None else _projection_row(row)
+
+
+def ack_projection_job(
+    root: Path,
+    projection_key: str,
+    *,
+    expected_digest: str,
+    lease_owner: str,
+    materialized_digest: str | None = None,
+) -> dict[str, Any]:
+    """Mark a projection ready only for its current, live lease holder.
+
+    A materializer can finish after a competing worker has reclaimed an
+    expired lease.  Checking the owner and expiry in the same write
+    transaction makes that stale worker unable to acknowledge its bytes.
+    """
+    if not str(lease_owner).strip():
+        raise ValueError("projection acknowledgement requires a lease owner")
+    ensure_database(root)
+    digest = materialized_digest or expected_digest
+    with _connection(root, write=True) as connection:
+        row = connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (projection_key,)).fetchone()
+        if row is None: raise ValueError("projection job is unavailable")
+        if str(row["expected_digest"]) != expected_digest or digest != expected_digest: raise ValueError("projection digest mismatch")
+        if row["status"] == "ready": return _projection_row(row)
+        lease_expires_at = str(row["lease_expires_at"] or "")
+        if (
+            row["status"] != "materializing"
+            or str(row["lease_owner"] or "") != str(lease_owner)
+            or not lease_expires_at
+            or lease_expires_at <= _now()
+        ):
+            raise ValueError("projection acknowledgement requires the caller's non-expired lease")
+        cursor = connection.execute(
+            "UPDATE projection_jobs SET status='ready', materialized_digest=?, materialized_at=?, "
+            "lease_owner=NULL, lease_expires_at=NULL, last_error=NULL, updated_at=? "
+            "WHERE projection_key=? AND status='materializing' AND lease_owner=? AND lease_expires_at > ?",
+            (digest, _now(), _now(), projection_key, str(lease_owner), _now()),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("projection acknowledgement lost its lease")
+        return _projection_row(connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (projection_key,)).fetchone())
+
+
+def fail_projection_job(root: Path, projection_key: str, error: str) -> dict[str, Any]:
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        cur = connection.execute("UPDATE projection_jobs SET status='failed', last_error=?, lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE projection_key=? AND status != 'ready'", (str(error)[:2000], _now(), projection_key))
+        if not cur.rowcount: raise ValueError("projection job is unavailable or already ready")
+        return _projection_row(connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (projection_key,)).fetchone())
+
+
+def retry_projection_job(root: Path, projection_key: str) -> dict[str, Any]:
+    return _projection_retry(root, projection_key)
+
+
+def _projection_retry(root: Path, key: str) -> dict[str, Any]:
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        connection.execute("UPDATE projection_jobs SET status='pending', lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE projection_key=? AND status IN ('failed','materializing')", (_now(), key))
+        row = connection.execute("SELECT * FROM projection_jobs WHERE projection_key=?", (key,)).fetchone()
+    if row is None: raise ValueError("projection job is unavailable")
+    return _projection_row(row)
+
+
+def reclaim_projection_jobs(root: Path) -> int:
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        cur = connection.execute("UPDATE projection_jobs SET status='pending', lease_owner=NULL, lease_expires_at=NULL, updated_at=? WHERE status='materializing' AND lease_expires_at < ?", (_now(), _now()))
+    return cur.rowcount
+
+
+def plan_prune(root: Path, task_ids: set[str] | list[str]) -> list[dict[str, Any]]:
+    ensure_database(root)
+    result = []
+    with _connection(root, write=True) as connection:
+        for task_id in sorted(set(task_ids)):
+            row = connection.execute("SELECT artifact_dir FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None: continue
+            tombstone_id = "prune-" + hashlib.sha256(task_id.encode()).hexdigest()[:32]
+            now = _now()
+            connection.execute("INSERT INTO prune_tombstones(tombstone_id,task_id,artifact_dir,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(tombstone_id) DO NOTHING", (tombstone_id, task_id, row[0], now, now))
+            result.append(dict(connection.execute("SELECT * FROM prune_tombstones WHERE tombstone_id=?", (tombstone_id,)).fetchone()))
+    return result
+
+
+def list_prune_tombstones(root: Path, *, status: str | None = None, task_id: str | None = None) -> list[dict[str, Any]]:
+    ensure_database(root)
+    clauses, values = [], []
+    if status is not None: clauses.append("status=?"); values.append(status)
+    if task_id is not None: clauses.append("task_id=?"); values.append(task_id)
+    query = "SELECT * FROM prune_tombstones" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY created_at, tombstone_id"
+    with _connection(root) as connection: rows = connection.execute(query, values).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_prune_tombstone(
+    root: Path,
+    worker_id: str,
+    *,
+    tombstone_id: str | None = None,
+    lease_seconds: int = 300,
+) -> dict[str, Any] | None:
+    """Claim one planned or failed prune tombstone for filesystem work."""
+    ensure_database(root)
+    now, expiry = _now(), _lease_until(lease_seconds)
+    with _connection(root, write=True) as connection:
+        clauses = ["(status IN ('planned','failed') OR (status='claimed' AND (lease_expires_at IS NULL OR lease_expires_at < ?)))"]
+        values: list[Any] = [now]
+        if tombstone_id is not None:
+            clauses.append("tombstone_id=?")
+            values.append(tombstone_id)
+        row = connection.execute(
+            "SELECT tombstone_id FROM prune_tombstones WHERE " + " AND ".join(clauses) + " ORDER BY created_at LIMIT 1",
+            tuple(values),
+        ).fetchone()
+        if row is None:
+            return None
+        connection.execute(
+            "UPDATE prune_tombstones SET status='claimed',lease_owner=?,lease_expires_at=?,error=NULL,updated_at=? WHERE tombstone_id=?",
+            (worker_id, expiry, now, row[0]),
+        )
+        return dict(connection.execute("SELECT * FROM prune_tombstones WHERE tombstone_id=?", (row[0],)).fetchone())
+
+
+def mark_prune_filesystem_removed(root: Path, tombstone_id: str, *, lease_owner: str) -> dict[str, Any]:
+    """Acknowledge filesystem deletion for the exact live tombstone lease."""
+    if not str(lease_owner).strip():
+        raise ValueError("prune filesystem acknowledgement requires a lease owner")
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        stamp = _now()
+        cursor = connection.execute(
+            "UPDATE prune_tombstones SET status='filesystem_removed',filesystem_removed_at=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? "
+            "WHERE tombstone_id=? AND status='claimed' AND lease_owner=? AND lease_expires_at > ?",
+            (stamp, stamp, tombstone_id, lease_owner, stamp),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("prune filesystem acknowledgement lost its lease")
+        row = connection.execute("SELECT * FROM prune_tombstones WHERE tombstone_id=?", (tombstone_id,)).fetchone()
+    return dict(row)
+
+
+def _task_prune_references(connection: sqlite3.Connection, task_ids: set[str]) -> tuple[set[str], set[str]]:
+    """Collect snapshot/classification references owned by the selected tasks."""
+    snapshots: set[str] = set()
+    classifications: set[str] = set()
+    if not task_ids:
+        return snapshots, classifications
+    placeholders = ",".join("?" for _ in task_ids)
+    for row in connection.execute(
+        f"SELECT definition_json, state_json FROM tasks WHERE task_id IN ({placeholders})", tuple(sorted(task_ids))
+    ):
+        definition = _decode_json(str(row["definition_json"]), "task definition")
+        state = _decode_json(str(row["state_json"]), "task state")
+        snapshots.add(str(state.get("initial_manifest_ref") or ""))
+        snapshots.update(
+            str(item.get("result_baseline_ref") or "")
+            for item in state.get("attempts", []) if isinstance(item, dict)
+        )
+        classifications.update({
+            str(definition.get("classification_id") or ""),
+            str(state.get("classification_receipt") or ""),
+        })
+    snapshots.discard("")
+    classifications.discard("")
+    return snapshots, classifications
+
+
+def finalize_prunes(
+    root: Path,
+    tombstone_ids: set[str] | list[str],
+    *,
+    global_updates: dict[str, dict[str, Any] | None],
+    lane_updates: list[tuple[dict[str, Any], dict[str, Any], str, str]],
+) -> dict[str, Any]:
+    """Atomically remove canonical task metadata after acknowledged deletion.
+
+    The caller performs filesystem deletion without the process state lock,
+    acknowledges each tombstone, then reacquires that lock to derive the
+    current global and lane documents passed here.  This transaction is the
+    only point at which canonical task rows and their associated metadata are
+    removed.
+    """
+    ids = sorted({str(value) for value in tombstone_ids if str(value)})
+    if not ids:
+        return {"finalized": [], "removed_operations": 0, "removed_classifications": 0, "removed_manifest_snapshots": 0}
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        placeholders = ",".join("?" for _ in ids)
+        rows = connection.execute(
+            f"SELECT * FROM prune_tombstones WHERE tombstone_id IN ({placeholders}) ORDER BY tombstone_id", tuple(ids)
+        ).fetchall()
+        if len(rows) != len(ids):
+            raise ValueError("prune tombstone is unavailable")
+        unfinished = [row for row in rows if row["status"] not in ("filesystem_removed", "finalized")]
+        if unfinished:
+            raise ValueError("filesystem removal must be acknowledged before finalize")
+        active = [row for row in rows if row["status"] == "filesystem_removed"]
+        task_ids = {str(row["task_id"]) for row in active}
+        snapshots, classifications = _task_prune_references(connection, task_ids)
+
+        # Preserve evidence shared by any task not in this atomic batch.
+        remaining_snapshots, remaining_classifications = _task_prune_references(
+            connection,
+            {
+                str(row["task_id"])
+                for row in connection.execute("SELECT task_id FROM tasks")
+                if str(row["task_id"]) not in task_ids
+            },
+        )
+        removable_snapshots = sorted(snapshots - remaining_snapshots)
+        removable_classifications = sorted(classifications - remaining_classifications)
+        if task_ids:
+            task_placeholders = ",".join("?" for _ in task_ids)
+            removed_operations = connection.execute(
+                f"DELETE FROM operations WHERE task_id IN ({task_placeholders})", tuple(sorted(task_ids))
+            ).rowcount
+            connection.execute(f"DELETE FROM projection_jobs WHERE task_id IN ({task_placeholders})", tuple(sorted(task_ids)))
+        else:
+            removed_operations = 0
+        if removable_snapshots:
+            snapshot_placeholders = ",".join("?" for _ in removable_snapshots)
+            removed_snapshots = connection.execute(
+                f"DELETE FROM manifest_snapshots WHERE snapshot_ref IN ({snapshot_placeholders})", tuple(removable_snapshots)
+            ).rowcount
+        else:
+            removed_snapshots = 0
+        if removable_classifications:
+            classification_placeholders = ",".join("?" for _ in removable_classifications)
+            removed_classifications = connection.execute(
+                f"DELETE FROM classifications WHERE classification_id IN ({classification_placeholders})", tuple(removable_classifications)
+            ).rowcount
+        else:
+            removed_classifications = 0
+        for name, value in global_updates.items():
+            if value is None:
+                connection.execute("DELETE FROM global_documents WHERE name=?", (name,))
+            else:
+                connection.execute(
+                    "INSERT INTO global_documents(name, payload_json, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+                    (name, _canonical_json(value), _now()),
+                )
+        for definition, state, event, detail in lane_updates:
+            lane_id = str(state.get("lane_id") or definition.get("lane_id") or "")
+            if not lane_id:
+                raise ValueError("lane has no lane_id")
+            connection.execute(
+                "UPDATE lanes SET definition_json=?,state_json=?,status=?,revision=?,updated_at=? WHERE lane_id=?",
+                (_canonical_json(definition), _canonical_json(state), str(state.get("status") or "active"),
+                 int(state.get("revision") or 0), str(state.get("updated_at") or _now()), lane_id),
+            )
+            connection.execute(
+                "INSERT INTO ledger_events(task_id,lane_id,event,detail,revision,created_at) VALUES(NULL,?,?,?,?,?)",
+                (lane_id, event, detail, int(state.get("revision") or 0), _now()),
+            )
+        if task_ids:
+            connection.execute(f"DELETE FROM tasks WHERE task_id IN ({task_placeholders})", tuple(sorted(task_ids)))
+        stamp = _now()
+        connection.execute(
+            f"UPDATE prune_tombstones SET status='finalized',finalized_at=?,updated_at=? "
+            f"WHERE tombstone_id IN ({placeholders}) AND status='filesystem_removed'",
+            (stamp, stamp, *ids),
+        )
+        finalized = [dict(row) for row in connection.execute(
+            f"SELECT * FROM prune_tombstones WHERE tombstone_id IN ({placeholders}) ORDER BY tombstone_id", tuple(ids)
+        )]
+    return {
+        "finalized": finalized,
+        "removed_operations": int(removed_operations),
+        "removed_classifications": int(removed_classifications),
+        "removed_manifest_snapshots": int(removed_snapshots),
+    }
+
+
+def finalize_prune(root: Path, tombstone_id: str) -> dict[str, Any]:
+    """Compatibility wrapper for a metadata-free one-tombstone finalization."""
+    result = finalize_prunes(root, [tombstone_id], global_updates={}, lane_updates=[])
+    return result["finalized"][0]
+
+
+def fail_prune(root: Path, tombstone_id: str, error: str) -> dict[str, Any]:
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        connection.execute("UPDATE prune_tombstones SET status='failed',error=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE tombstone_id=? AND status != 'finalized'", (str(error)[:2000], _now(), tombstone_id))
+        row = connection.execute("SELECT * FROM prune_tombstones WHERE tombstone_id=?", (tombstone_id,)).fetchone()
+    if row is None: raise ValueError("prune tombstone is unavailable")
+    return dict(row)

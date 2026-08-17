@@ -3,38 +3,44 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 from typing import Any
 
-import cortex as _runtime
-from cortex import (
-    AGENTS,
-    AWAITING_HOST_SPAWN,
-    MAX_QUESTIONS_PER_ATTEMPT,
-    MAX_QUESTIONS_PER_TASK,
-    PUBLIC_ORCHESTRATION_SCHEMA,
-    QUESTION_SCHEMA,
-    _attempt,
-    _question_config,
-    _question_options,
-    _question_payload,
-    _question_records,
-    _question_sequence,
-    _write_question_record,
-    append_journal_best_effort,
-    authorize,
-    authorize_principal,
-    canonical_profile,
-    digest_text,
-    ledger_root,
-    load_state,
-    now,
-    preflight_journal,
-    question_bus_paths,
-    redact,
-    respond,
-    safe_id,
-    sanitize_structured,
-    state_lock,
+from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
+
+
+bind_symbols(
+    "questions",
+    globals(),
+    (
+        "AGENTS",
+        "AWAITING_HOST_SPAWN",
+        "MAX_QUESTIONS_PER_ATTEMPT",
+        "MAX_QUESTIONS_PER_TASK",
+        "PUBLIC_ORCHESTRATION_SCHEMA",
+        "QUESTION_SCHEMA",
+        "_attempt",
+        "_question_config",
+        "_question_options",
+        "_question_payload",
+        "_question_records",
+        "_question_sequence",
+        "_write_question_record",
+        "append_journal_best_effort",
+        "authorize",
+        "authorize_principal",
+        "canonical_profile",
+        "digest_text",
+        "ledger_root",
+        "load_state",
+        "now",
+        "question_bus_paths",
+        "redact",
+        "respond",
+        "safe_id",
+        "sanitize_structured",
+        "state_lock",
+    ),
 )
 
 def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
@@ -50,7 +56,6 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             })
         else:
             authorize(state, params)
-        preflight_journal(task_dir)
         attempt_id = safe_id(str(params.get("attempt_id", "")))
         attempt = _attempt(state, attempt_id)
         allowed_statuses = {AWAITING_HOST_SPAWN, "running"} if facade_worker else {"running"}
@@ -245,7 +250,6 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
-        preflight_journal(task_dir)
         question_id = safe_id(str(params.get("question_id", "")))
         submission_id = safe_id(str(params.get("submission_id", "")))
         answer, answer_text = _normalize_question_answer(params.get("answer"))
@@ -320,13 +324,13 @@ def _request_mcp_elicitation(message: str, requested_schema: dict[str, Any], *, 
             # as attachment-capable free-form input). Use it only when the
             # connected host advertised the extension; otherwise remain
             # standards-compliant with MCP form mode.
-            "mode": "openai/form" if _runtime.MCP_OPENAI_FORM else "form",
+            "mode": "openai/form" if bound_symbol("questions", "MCP_OPENAI_FORM") else "form",
             "requestedSchema": requested_schema,
             "_meta": {"cortex": {"schema": QUESTION_SCHEMA, "thread_id": thread_id, "turn_id": turn_id or None}},
         },
     })
     while True:
-        line = _runtime.sys.stdin.readline()
+        line = sys.stdin.readline()
         if not line:
             raise RuntimeError("MCP client closed before answering cortex.question")
         try:
@@ -462,9 +466,10 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
             "durable": durable,
         }
     try:
-        # Resolve through the facade so host integrations and tests can replace
-        # only this narrow compatibility seam without patching module internals.
-        action, content, elicitation_id = _runtime._request_mcp_elicitation(
+        # The composition binding resolves this narrow host seam at call time,
+        # allowing integrations and tests to replace it without a runtime
+        # dependency on the executable facade.
+        action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
             question,
             _question_form_schema(config),
             thread_id=str(params.get("thread_id") or ""),
