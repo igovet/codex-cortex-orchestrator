@@ -3202,8 +3202,7 @@ class ControlPlaneTests(unittest.TestCase):
             re.compile(r"^tasks/[^/]+/delegations/[^/]+\.briefing\.md$"),
             re.compile(r"^tasks/[^/]+/reports/(records|receipts|consumptions)/[^/]+\.json$"),
             re.compile(r"^tasks/[^/]+/reports/markdown/[^/]+\.md$"),
-            re.compile(r"^tasks/[^/]+/planning/overview\.md$"),
-            re.compile(r"^tasks/[^/]+/planning/revisions/[^/]+/(manifest\.json|packages/[^/]+\.json)$"),
+            re.compile(r"^tasks/[^/]+/planning/revisions/[^/]+/(manifest\.json|overview\.md|packages/[^/]+\.json)$"),
             re.compile(r"^tasks/[^/]+/handoffs/(?:manifests/)?[^/]+\.json$"),
             re.compile(r"^tasks/[^/]+/(?:\.lifecycle-events\.lock|lifecycle-events-meta\.json|lifecycle-events\.jsonl)$"),
             re.compile(r"^lanes/[^/]+/journal\.md$"),
@@ -5410,7 +5409,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse((task_dir / "planning").exists())
         from cortex_runtime.projection_service import reconcile as reconcile_projections
         reconcile_projections(self.ledger, worker_id="planning-test")
-        self.assertTrue((task_dir / "planning/overview.md").is_file())
+        self.assertTrue((task_dir / "planning/revisions/plan-report-0001/overview.md").is_file())
         self.assertTrue((task_dir / "planning/revisions/plan-report-0001/packages/api.json").is_file())
         self.assertTrue((task_dir / "planning/revisions/plan-report-0001/packages/ui.json").is_file())
 
@@ -5421,6 +5420,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(held["outcome"], "awaiting_plan_approval")
         artifacts = held["plan_review"]["planning_artifacts"]
         self.assertEqual(artifacts["manifest_ref"], "sqlite:task_documents/planning_current")
+        self.assertEqual(artifacts["overview_path"], "planning/revisions/plan-report-0001/overview.md")
         self.assertEqual([package["id"] for package in artifacts["work_packages"]], ["api", "ui"])
 
         approved = control.manage_orchestration({
@@ -5478,6 +5478,77 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertIn("planner reports require", missing["diagnostics"][0]["message"])
         self.assertTrue(started["ok"])
+
+    def test_planner_microtasks_allow_cross_package_dependencies_but_keep_one_global_dag(self):
+        planning = self.v3_planning()
+        planning["work_packages"].append({
+            "id": "integration",
+            "title": "Integration",
+            "objective": "Verify the core delivery through the public boundary.",
+            "depends_on": ["core"],
+            "allowed_paths": ["tests"],
+            "microtasks": [{
+                "id": "integration_test",
+                "title": "Exercise the integration",
+                "objective": "Verify the core microtask from another package.",
+                "profile": "qa_engineer",
+                "allowed_paths": ["tests"],
+                "depends_on": ["core_change"],
+                "acceptance_criteria": ["The integration observes the core behavior."],
+                "verification": ["Run the focused integration test."],
+            }],
+        })
+        sanitized = control.sanitize_planning_payload(planning)
+        self.assertEqual(
+            sanitized["work_packages"][1]["microtasks"][0]["depends_on"],
+            ["core_change"],
+        )
+
+        sanitized["work_packages"][0]["microtasks"][0]["depends_on"] = ["integration_test"]
+        with self.assertRaisesRegex(ValueError, "planning microtask dependencies must be acyclic"):
+            control.sanitize_planning_payload({
+                "overview": sanitized["overview"],
+                "work_packages": sanitized["work_packages"],
+            }, persisted=True)
+
+        planning["work_packages"][1]["microtasks"][0]["depends_on"] = ["missing_microtask"]
+        with self.assertRaisesRegex(ValueError, "depends on unknown item"):
+            control.sanitize_planning_payload(planning)
+
+    def test_gate_report_accepts_concise_observed_check_output(self):
+        started = self.v3_start(
+            "accept concise deterministic QA evidence",
+            waves=[{"workers": [{"phase": "qa", "profile": "qa_engineer"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        report = self._report_with_briefing(attempt, self.v3_report("QA completed"))
+        report["tests"][0]["evidence"] = "No whitespace errors reported."
+        published = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertTrue(published["ok"], published)
+
+    def test_gate_report_still_rejects_empty_check_output(self):
+        started = self.v3_start(
+            "reject missing QA evidence",
+            waves=[{"workers": [{"phase": "qa", "profile": "qa_engineer"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        report = self._report_with_briefing(attempt, self.v3_report("QA completed"))
+        report["tests"][0]["evidence"] = ""
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("concrete observed output summary", rejected["diagnostics"][0]["message"])
 
     def test_planner_scope_owns_the_strict_scoping_artifact(self):
         started = self.v3_start(
@@ -6638,7 +6709,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(replayed["transaction_id"], started["transaction_id"])
         self.assertEqual(len(started["spawn_requests"]), 1)
         briefing = self.briefing_from_request(started["spawn_requests"][0])
-        self.assertIn("call the public `record_report` tool exactly once", briefing)
+        self.assertIn("call the public `get_report_template` tool", briefing)
+        self.assertIn("submit the complete payload to `validate_report_draft`", briefing)
+        self.assertIn("call record_report once", briefing)
+        self.assertIn("consume no worker attempt", briefing)
         self.assertIn("do not paste or reproduce that JSON", briefing)
 
         discovery = control.orchestrate({
@@ -6796,6 +6870,103 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertFalse(mismatch["ok"])
         self.assertIn("model", mismatch["diagnostics"][0]["message"].lower())
+
+    def test_report_draft_pipeline_allows_unbounded_read_only_corrections_then_one_atomic_record(self):
+        waves = [{"wave_id": "discover", "delegations": [{"gate": "discover", "agent": "explorer"}]}]
+        started = self.facade_start("facade-report-corrections", waves)
+        request = started["spawn_requests"][0]
+        task_dir, state, _ = control._v3_task_state(self.ledger, "facade-report-corrections")
+        attempt = control._attempt(state, request["attempt_id"])
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+
+        template = control.get_report_template(identity)
+        self.assertTrue(template["ok"], template)
+        self.assertEqual(template["outcome"], "report_template_ready")
+        self.assertEqual(template["template"]["report"]["questions"], [])
+        self.assertIn("Dispatch briefing reviewed:", template["template"]["report"]["evidence"][0])
+        self.assertFalse(template["persisted"])
+
+        hidden_mode = control.publish_worker_report({
+            **identity,
+            "report": self._report_with_briefing(attempt, self.v3_report("hidden mode must stay private")),
+            "_validate_only": True,
+        })
+        self.assertFalse(hidden_mode["ok"])
+        self.assertEqual(hidden_mode["code"], "report_validation_failed")
+        self.assertIn("unsupported record_report fields", hidden_mode["diagnostics"][0]["message"])
+
+        invalid_reports = []
+        for index in range(4):
+            report = self._report_with_briefing(
+                attempt,
+                self.v3_report(f"caller-correctable report validation {index + 1}"),
+            )
+            report["next_action"] = f"unsupported report field {index + 1}"
+            invalid_reports.append(report)
+
+        for report in invalid_reports:
+            rejected = control.validate_report_draft({**identity, "report": report})
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["outcome"], "report_draft_invalid")
+            self.assertEqual(rejected["code"], "report_validation_failed")
+            self.assertTrue(rejected["retryable"])
+            self.assertFalse(rejected["attempt_budget_consumed"])
+            self.assertEqual(rejected["diagnostics"][0]["path"], "report.next_action")
+            self.assertTrue(rejected["diagnostics"][0]["fix"])
+
+        current = control.orchestrate({
+            "operation": "inspect", "task_id": "facade-report-corrections", "principal": "thread-a",
+        })
+        self.assertEqual(len(current["state_summary"]["attempts"]), 1)
+        self.assertEqual(current["state_summary"]["attempts"][0]["attempt_id"], attempt["attempt_id"])
+        self.assertEqual(
+            control.list_task_reports({
+                "project_root": str(self.project), "task_id": state["task_id"], "principal": "thread-a",
+            })["reports"],
+            [],
+        )
+
+        valid_report = self._report_with_briefing(
+            attempt, self.v3_report("report accepted after four draft corrections")
+        )
+        validated = control.validate_report_draft({**identity, "report": valid_report})
+        self.assertTrue(validated["ok"], validated)
+        self.assertTrue(validated["draft_valid"])
+        self.assertFalse(validated["persisted"])
+        self.assertRegex(validated["validation_digest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            control.list_task_reports({
+                "project_root": str(self.project), "task_id": state["task_id"], "principal": "thread-a",
+            })["reports"],
+            [],
+        )
+
+        changed_report = {**valid_report, "summary": "changed after draft validation"}
+        stale = control.publish_worker_report({
+            **identity,
+            "report": changed_report,
+            "validation_digest": validated["validation_digest"],
+        })
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["code"], "report_validation_failed")
+        self.assertFalse(stale["attempt_budget_consumed"])
+
+        accepted = control.publish_worker_report({
+            **identity,
+            "report": valid_report,
+            "validation_digest": validated["validation_digest"],
+        })
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertRegex(accepted["report_ref"], r"^report-[0-9]{4}$")
+        reports = control.list_task_reports({
+            "project_root": str(self.project), "task_id": state["task_id"], "principal": "thread-a",
+        })["reports"]
+        self.assertEqual([item["report_id"] for item in reports], [accepted["report_ref"]])
 
     def test_orchestrate_future_wave_rework_requires_opt_in_and_restarts_gate(self):
         waves = [
@@ -7111,6 +7282,58 @@ class ControlPlaneTests(unittest.TestCase):
         self.reconcile_projections(worker_id="stranded-report-repair-test")
         self.assertEqual((task_dir / "records/report-0001.json").read_bytes(), original)
         self.assertEqual(len(control.list_task_reports({"task_id": "crash", "principal": "thread-a"})["reports"]), 2)
+
+    def test_revised_planner_reports_use_unique_overview_artifacts(self):
+        self.v3_start(
+            "preserve every revised planning artifact",
+            waves=[{"workers": [{"phase": "plan", "profile": "planner"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        first = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report("first plan revision")),
+            "planning": self.v3_planning(),
+        })
+        revised = self.v3_planning()
+        revised["overview"] = "Revise the plan while preserving the first immutable revision."
+        second = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report("second plan revision")),
+            "planning": revised,
+        })
+
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(first["report_ref"], "report-0001")
+        self.assertEqual(second["report_ref"], "report-0002")
+        current = control.current_planning_manifest(task_dir)
+        self.assertEqual(current["source_report_ref"], "report-0002")
+        self.assertEqual(
+            current["overview_artifact_path"],
+            "planning/revisions/plan-report-0002/overview.md",
+        )
+        overview_artifacts, _ = control.db_list_artifacts(
+            self.ledger,
+            state["task_id"],
+            kind="planning_overview",
+            offset=0,
+            page_size=10,
+        )
+        self.assertEqual(
+            {item["export_path"] for item in overview_artifacts},
+            {
+                "planning/revisions/plan-report-0001/overview.md",
+                "planning/revisions/plan-report-0002/overview.md",
+            },
+        )
+        self.reconcile_projections(worker_id="revised-plan-artifacts-test")
+        self.assertTrue((task_dir / "planning/revisions/plan-report-0001/overview.md").is_file())
+        self.assertTrue((task_dir / "planning/revisions/plan-report-0002/overview.md").is_file())
+        self.assertFalse((task_dir / "planning/overview.md").exists())
 
     def test_reconcile_ignores_manual_receipt_projection_edits(self):
         state = self.init(task_id="receipt-boundary", complexity="C2")["state"]
@@ -7457,15 +7680,19 @@ class ControlPlaneTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"})
+        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "validate_report_draft", "record_report", "read_dispatch_briefing", "read_worker_report"})
         self.assertNotIn("orchestrate", names)
-        self.assertEqual(len(tools), 7)
+        self.assertEqual(len(tools), 9)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
         by_name = {item["name"]: item for item in tools}
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["required"], ["project_root", "task"])
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["properties"]["task"]["required"], ["user_request"])
         self.assertEqual(by_name["continue_orchestration"]["inputSchema"]["required"], ["project_root", "step", "results"])
         self.assertEqual(by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
+        self.assertEqual(by_name["get_report_template"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile"])
+        self.assertEqual(by_name["validate_report_draft"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "report"])
+        self.assertNotIn("additionalProperties", by_name["validate_report_draft"]["inputSchema"]["properties"]["report"])
+        self.assertIn("validation_digest", by_name["record_report"]["inputSchema"]["properties"])
         forbidden = {"operation", "submission_id", "task_id", "wave_id", "attempt_id", "host_tool", "host_model", "host_reasoning_effort"}
         for name in ("start_orchestration", "continue_orchestration"):
             self.assertFalse(forbidden & set(by_name[name]["inputSchema"]["properties"]))
@@ -7708,7 +7935,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "8.0.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "8.1.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

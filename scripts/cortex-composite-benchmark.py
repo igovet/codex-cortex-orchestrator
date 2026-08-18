@@ -13,10 +13,12 @@ def counts(workers: int, waves: int) -> tuple[int, int]:
     # status, delegation, confirmation, report, finalization, evidence, gate,
     # reconciliation, handoff, close, and final status round-trips.
     baseline = 4 + workers * 4 + waves * 2 + 4
-    # Public Cortex needs one start, one continue per wave, one durable report
-    # publish per worker, and one coordinator report read per worker. Native
-    # spawn_agent calls are deliberately outside this MCP-call budget.
-    facade = 1 + waves + workers * 2
+    # Public Cortex needs one start, one continue per wave, and per worker one
+    # template read, one successful draft validation, one atomic report write,
+    # and one coordinator report read. Corrective draft validation calls are
+    # measured separately because they are data-dependent and read-only.
+    # Native spawn_agent calls are deliberately outside this MCP-call budget.
+    facade = 1 + waves + workers * 4
     return baseline, facade
 
 
@@ -33,9 +35,9 @@ def main() -> int:
         "baseline_mcp_calls": baseline,
         "relative_v3_mcp_calls": facade,
         "reduction": round(reduction, 4),
-        "target_met": facade == 1 + args.waves + args.workers * 2 and facade < baseline,
-        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"],
-        "normal_operations": ["start_orchestration", "record_report", "read_worker_report", "continue_orchestration"],
+        "target_met": facade == 1 + args.waves + args.workers * 4 and facade < baseline,
+        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "validate_report_draft", "record_report", "read_dispatch_briefing", "read_worker_report"],
+        "normal_operations": ["start_orchestration", "get_report_template", "validate_report_draft", "record_report", "read_worker_report", "continue_orchestration"],
         "note": "Call-count contract benchmark; durable worker report writes and coordinator reads are included, native host spawn calls are excluded.",
     }
     print(json.dumps(result, sort_keys=True))

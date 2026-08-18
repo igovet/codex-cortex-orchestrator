@@ -155,8 +155,10 @@ facts. Preserve text outside generated blocks and do not overwrite a manual
 ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
-Every Cortex worker records the strict seven-field report through
-`record_report`, acknowledges all supplied predecessor handoffs, and identifies
+Every Cortex worker builds the strict seven-field report from
+`get_report_template`, repeats `validate_report_draft` until valid, then records
+the exact unchanged payload once through `record_report` with its validation
+digest, acknowledges all supplied predecessor handoffs, and identifies
 its inventory counts, mapped surfaces, exclusions, unknowns, evidence, and
 coverage gaps. It must also review only the exact immutable briefing
 issued by its compact dispatch bootstrap, verify the supplied SHA-256, and add

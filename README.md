@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-8.0.0-7c3aed" alt="Cortex 8.0.0" />
+        <img src="https://img.shields.io/badge/Cortex-8.1.0-7c3aed" alt="Cortex 8.1.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -605,8 +605,9 @@ plugins/cortex/
 
 The public MCP surface is deliberately small. The coordinator uses
 `start_orchestration`, `continue_orchestration`, `manage_orchestration`, and
-`read_worker_report`. Workers use `read_dispatch_briefing`, `worker_question`,
-`record_report`, and scoped reads of authorized predecessor reports.
+reads predecessor reports with `read_worker_report`. Workers use
+`read_dispatch_briefing`, `worker_question`, `get_report_template`,
+`validate_report_draft`, and `record_report`.
 
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
@@ -619,7 +620,10 @@ unrelated `.codex/cortex` coordination data. Canonical state is stored in the
 local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
 tasks without that field resume their persisted pipeline unchanged.
 
-The seven public MCP tools remain the v4 surface. Tool-side questions and
+The nine public MCP tools remain the v4 surface. Workers build from
+`get_report_template`, repeat side-effect-free `validate_report_draft` until
+valid, then send the exact unchanged payload and returned
+`validation_digest` in one atomic `record_report` call. Tool-side questions and
 approval prompts are projected into the original user language by the root
 coordinator; worker protocol messages and durable reports remain English.
 Sensitive MCP exceptions are appended to

@@ -1,6 +1,6 @@
 """SQLite-native orchestration state machine behind the public facade.
 
-The seven public MCP handlers stay composed by :mod:`cortex`. This module owns
+The nine public MCP handlers stay composed by :mod:`cortex`. This module owns
 orchestration transactions, waves, recovery and management operations, and is
 loaded lazily by the facade after the entrypoint has completed initialization.
 """
@@ -1101,7 +1101,10 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
     if manifest and manifest.get("source_report_ref") == report_ref:
         artifact_summary = {
             "manifest_ref": "sqlite:task_documents/planning_current",
-            "overview_path": "planning/overview.md",
+            # Active tasks created by the immediately preceding release retain
+            # their already-authorized legacy overview projection. New plans
+            # always persist an explicit immutable revision-scoped path.
+            "overview_path": manifest.get("overview_artifact_path") or "planning/overview.md",
             "revision": manifest.get("revision"),
             "work_packages": [
                 {

@@ -196,7 +196,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
     with JsonRpcHarness(server, project, ledger) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"]:
+        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "validate_report_draft", "record_report", "read_dispatch_briefing", "read_worker_report"]:
             raise AssertionError(f"unexpected Cortex public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
@@ -280,6 +280,17 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                     publication["closure"] = passing_closure(project, str(attempt["gate"]))
                 if dispatch.get("phase") == "plan":
                     publication["planning"] = planning(index, int(current["step"]))
+                template = rpc.tool("get_report_template", {
+                    "task_id": state["task_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "profile": dispatch["profile"],
+                })
+                if not template.get("ok") or template.get("persisted") is not False:
+                    raise AssertionError(f"get_report_template failed: {template}")
+                validated = rpc.tool("validate_report_draft", publication)
+                if not validated.get("draft_valid") or validated.get("persisted") is not False:
+                    raise AssertionError(f"validate_report_draft failed: {validated}")
+                publication["validation_digest"] = validated["validation_digest"]
                 published = rpc.tool("record_report", publication)
                 if not published.get("ok"):
                     raise AssertionError(f"record_report failed: {published}")

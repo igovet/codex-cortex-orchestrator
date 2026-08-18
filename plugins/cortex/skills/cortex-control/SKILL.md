@@ -5,11 +5,12 @@ description: Use this skill when coordinating a non-trivial task across Codex ag
 
 # Cortex Control
 
-The public Cortex API exposes three coordinator lifecycle operations plus scoped worker
-question/report transport. Coordinators use `start_orchestration` and
+The public Cortex API exposes exactly nine tools: three coordinator lifecycle
+operations plus scoped worker question/report transport. Coordinators use `start_orchestration` and
 `continue_orchestration` for normal work, `read_worker_report` to evaluate a
 persisted report, and `manage_orchestration` only for recovery or rare
-subsystems. Workers use `worker_question` and `record_report`; a worker whose
+subsystems. Workers use `worker_question`, `get_report_template`,
+`validate_report_draft`, and `record_report`; a worker whose
 host filesystem read cannot open its exact briefing may call
 `read_dispatch_briefing` with the complete identity/digest tuple from its
 bootstrap. If a bounded response is incomplete, it may continue only with the
@@ -125,8 +126,13 @@ signal, never permission for the root to perform the work directly.
    resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
    continuing. Never replace the worker or advance the wave for a question.
-   After work completes, the worker publishes one strict `cortex/report/v1`
-   through `record_report` and returns only
+   After work completes, the worker gets its exact gate-specific skeleton from
+   `get_report_template`, replaces every placeholder, and repeats
+   `validate_report_draft` until `draft_valid=true`. Draft validation persists
+   nothing and consumes no worker attempt; only failed worker attempts count
+   toward the three-attempt recovery budget. It then publishes the exact
+   unchanged strict `cortex/report/v1` once through `record_report` with the
+   returned `validation_digest` and returns only
    `REPORT_RECORDED report_ref=<value>` plus at most a
    two-sentence summary. They must never paste the report JSON into the parent
    channel. When predecessor handoffs are supplied, they review all of them and
@@ -146,6 +152,15 @@ signal, never permission for the root to perform the work directly.
    and every other gate. The older top-level `closure` sibling is retained only
    as a temporary compatibility alias for review/close and must not be placed
    inside the strict seven-field report; when both are supplied they must agree.
+   For C2/C3 close attempts, each executed test or verification result also
+   requires a non-empty concrete summary of observed output or behavior. Concise
+   summaries are valid; no arbitrary word count applies, and completion
+   assertions without observed output or behavior are rejected.
+   Every invalid draft returns field paths and fixes. Correct every named field
+   and validate the complete payload again on the same task and attempt. A
+   changed payload invalidates the prior digest; `record_report` atomically
+   revalidates before persistence. Stop only for a non-retryable error or when
+   exact report identity is unavailable.
    `followup_task` resumes the same addressable native worker for an answered
    durable question or an explicit active steer. Active steer is recorded as a
    new task revision and delivered to the existing `host_agent_id`; it does
@@ -234,13 +249,16 @@ non-empty microtasks; `profile` is forbidden at package level. Each microtask
 requires `id`, `title`, `objective`, non-empty `acceptance_criteria`, and
 non-empty `verification`, with optional `profile`, `allowed_paths`, and
 `depends_on`.
-Cortex validates package and per-package microtask dependency
-DAGs and enforces 32 packages, 32 microtasks per package, and 128 total
-microtasks. The Planner remains read-only; Cortex materializes
-`.codex/cortex/tasks/<task>/planning/manifest.json`, `overview.md`, and
-immutable `revisions/plan-<report-ref>/packages/<id>.json` artifacts. The
-manifest is the current pointer/source of truth and revisions preserve past
-approved or revised plans. `plan_review` exposes compact
+Cortex requires microtask IDs to be globally unique across the plan, allows
+`depends_on` to reference microtasks in another work package, rejects unknown
+references, and validates the combined microtask dependency graph as acyclic.
+It enforces 32 packages, 32 microtasks per package, and 128 total microtasks.
+The Planner remains read-only; Cortex materializes immutable, revision-scoped
+`.codex/cortex/tasks/<task>/planning/revisions/plan-<report-ref>/overview.md`
+and `packages/<id>.json` artifacts. The SQLite task document
+`planning_current` is the sole current-plan pointer; there are no
+`planning/manifest.json` or `planning/overview.md` latest aliases.
+`plan_review` exposes compact
 `planning_artifacts` for approval. Treat this as a durable catalog for
 ownership/dependency-aware scheduling within the canonical phase/wave safety
 model, not as an unconstrained auto-executor.
