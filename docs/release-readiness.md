@@ -52,11 +52,15 @@ installation source is available; no guessed package-source command is a
 release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
 for the safe same-user sequence and the bounded stopped-worker recovery.
 
-The 7.1.2 source candidate has passed the focused regression set, marketplace
-validation, AST and shell checks, cold boot on Python 3.11/3.12, deterministic
-fixtures, benchmark, and an isolated fresh-plugin probe. Full unit suites and
-source-mode live validation remain pending; a skipped live run is not evidence
-of a pass. The installed user plugin remains 6.6.0 and is out of scope; no
+The 7.1.2 source candidate has passed 476-test full discovery on both Python
+3.11 and 3.12, focused `ResourceWarning` enforcement, marketplace validation,
+AST and shell checks, cold boot on Python 3.11/3.12, deterministic fixtures,
+benchmark, and an isolated fresh-plugin probe. Source-mode live
+`automatic_sequential`, `compact_parallel`, and `blocked_resume` passed. The
+planner live lifecycle completed, but its exact two-package evaluator
+assertion has not been rerun after making that fixture deterministic; a full
+four-scenario live PASS is therefore not claimed. The installed user plugin
+remains 6.6.0 and is out of scope; no
 installation or `~/.codex` mutation is part of this candidate. File-size
 hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
 diagnostics, the separate 64 MiB manifest bound, bounded handoff/reconciliation

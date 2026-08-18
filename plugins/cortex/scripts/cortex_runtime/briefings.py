@@ -175,8 +175,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "marker as one report.evidence item; a missing marker, writable file, or digest mismatch fails closed."
     )
     planning_contract = (
-        "\n## Planner work-breakdown artifact\n"
-        "planning={overview,work_packages}. Package: id/title/objective/microtasks; optional "
+        "\nREQUIRED top-level planning sibling={overview,work_packages}. Package: id/title/objective/microtasks; optional "
         "allowed_paths/depends_on; never profile. Microtask: id/title/objective/acceptance_criteria/verification; "
         "optional profile/allowed_paths/depends_on. Lowercase DAG ids; read-only."
         if package.get("gate") == "plan" else ""

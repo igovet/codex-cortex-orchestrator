@@ -82,7 +82,7 @@ class VerificationFixtureContractTests(unittest.TestCase):
     def test_blocked_resume_live_prompt_forces_one_valid_future_wave_reassessment(self) -> None:
         prompt = LUNA_EVAL.live_prompt("blocked_resume", Path("/workspace/cortex-live"))
         self.assertIn("deterministic future-wave reassessment", prompt)
-        self.assertIn('"complexity":"C1"', prompt)
+        self.assertIn('"complexity":"C2"', prompt)
         self.assertIn('these exact initial waves: [{"workers":[{"phase":"discover"}]}', prompt)
         self.assertIn(
             'future_waves exactly [{"workers":[{"phase":"implementation"}]}',
@@ -93,6 +93,18 @@ class VerificationFixtureContractTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("Do not set rework", prompt)
+
+    def test_planner_live_prompt_uses_exact_schema_safe_work_breakdown(self) -> None:
+        prompt = LUNA_EVAL.live_prompt("planner_work_breakdown", Path("/workspace/cortex-live"))
+        self.assertIn('"plan_approval":"required"', prompt)
+        self.assertIn('waves exactly [{"workers":[{"phase":"plan"}]}', prompt)
+        self.assertIn('"id":"inspect_source"', prompt)
+        self.assertIn('"id":"deliver_result"', prompt)
+        self.assertIn('"depends_on":["inspect_source"]', prompt)
+        self.assertIn("Do not add, remove, rename, or reorder packages or microtasks", prompt)
+        self.assertIn("decision=approve", prompt)
+        self.assertIn("Only after it returns outcome=awaiting_plan_approval", prompt)
+        self.assertIn("never call approval before that continue", prompt)
 
 
 if __name__ == "__main__":

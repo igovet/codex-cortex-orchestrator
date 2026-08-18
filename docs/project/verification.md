@@ -29,21 +29,32 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The focused 25-test regression set passed with `ResourceWarning` treated as
-  an error. The full Python 3.11 discovery run executed 469 tests; two new
-  documentation/version invariant tests failed because the candidate docs had
-  not yet been synchronized. The full Python 3.12 result is pending.
+- Full discovery passed on Python 3.11 and 3.12: 476 tests on each interpreter.
+  The 20 focused JSON-RPC lifecycle and host-preflight tests also passed on
+  Python 3.11 with `ResourceWarning` promoted to an error.
 - Cold boot passed on Python 3.11 and 3.12 (8 reports and 7 continuation calls).
-- Marketplace validation, AST parsing of 57 Python files, Bash syntax, and
+- Marketplace validation, Python AST parsing, Bash syntax, and
   `git diff --check` passed. Deterministic evaluator fixtures for
   `automatic_sequential`, `compact_parallel`, and `blocked_resume` completed.
 - The composite benchmark passed (22 calls versus a 50-call baseline,
   reduction `0.56`, `target_met=true`). The isolated fresh-plugin probe passed
   for `7.1.2+codex.20260818103113` in temporary `HOME`/`CODEX_HOME`.
-- Source-mode live validation is pending; a skipped live run is not evidence of
-  a pass. When run, it uses this workspace's source tree in an isolated
+- Source-mode live `automatic_sequential`, `compact_parallel`, and
+  `blocked_resume` passed, including strict reports, native child cleanup,
+  continuation, terminal close evidence, handoff, and manifest-snapshot
+  cleanup. `compact_parallel` exercised a real parallel wave and
+  `blocked_resume` exercised one future-wave reassessment. The
+  `planner_work_breakdown` run completed its plan approval and all terminal
+  lifecycle checks, but the evaluator rejected its non-deterministic package
+  graph. The fixture now supplies an exact two-package DAG and has terminal
+  persistence regression coverage; that scenario has not been rerun live, so
+  a complete four-scenario live PASS is not claimed.
+- Live source-mode evidence uses this workspace's source tree in an isolated
   temporary project and does **not** install, reinstall, update, or otherwise
-  verify a user's installed Cortex plugin.
+  verify a user's installed Cortex plugin. A skipped run is never pass evidence.
+- Read-only host preflight remains `BLOCKED` because the same user has Cortex
+  6.6.0 installed rather than this 7.1.2 candidate. No installation or
+  `~/.codex` mutation was performed.
 - The reportless-stop recovery coverage includes terminal failed-stop handling,
   exact failed receipts, mixed-wave slot preservation, bounded retry failure,
   and the ordering-sensitive PostToolUse case where an earlier reportless

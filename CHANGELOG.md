@@ -16,11 +16,13 @@ same base version.
 - Restore complete Python 3.11/3.12 discovery and offline release gates in CI,
   including marketplace, AST, shell, cold-boot, deterministic fixtures,
   benchmark, conditional fresh-plugin, and tracked-archive checks.
-- Source/package evidence for `7.1.2+codex.20260818103113` includes focused
-  regression tests, cold boot on both supported Python versions, deterministic
-  fixtures, benchmark, and an isolated fresh-plugin probe. Full unit suites
-  and source-mode live validation remain pending; a skipped live run is not a
-  pass. The installed user plugin remains 6.6.0 and was not changed.
+- Source/package evidence for `7.1.2+codex.20260818103113` includes 476-test
+  full discovery on Python 3.11 and 3.12, focused `ResourceWarning` coverage,
+  cold boot on both supported versions, deterministic fixtures, benchmark, and
+  an isolated fresh-plugin probe. Three source-mode live scenarios passed; the
+  planner lifecycle completed but its deterministic two-package live rerun is
+  still pending, so a complete live PASS is not claimed. The installed user
+  plugin remains 6.6.0 and was not changed.
 
 ## [1.0.6] - 2026-08-14
 

@@ -586,6 +586,21 @@ class OrchestrationInvariantTests(unittest.TestCase):
         close_prompt = control.host_spawn_prompt("build_verification", package)
         self.assertIn("needs matching top-level `gate_result` and `closure`", close_prompt)
 
+    def test_planner_briefing_requires_top_level_planning_sibling(self):
+        package = {
+            "task_id": "task", "gate": "plan", "attempt_id": "plan-01", "dispatch_ref": "dispatch-plan-000000000000",
+            "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
+            "task_user_request": "Plan the fixture.", "task_objective": "Plan the fixture.", "objective": "Plan.",
+            "ownership": "Own planning", "allowed_paths": ["."], "acceptance_criteria": ["Plan complete"],
+            "verification": ["Verify plan"], "task_acceptance_criteria": [], "task_verification": [],
+            "context_files": [], "knowledge_index_files": [], "context_report_ids": [],
+            "result_baseline_ref": "manifest-" + "a" * 64, "task_requirements": [], "task_scope": [],
+            "pause_conditions": [], "budget": "none", "plan_feedback": None,
+            "intent_clarification_required": False, "intent_clarification_reason": None,
+        }
+        prompt = control.host_spawn_prompt("planner", package)
+        self.assertIn("REQUIRED top-level planning sibling={overview,work_packages}", prompt)
+
     def test_installable_orchestrator_releases_completed_native_agent_slots(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("Before every new native", skill)

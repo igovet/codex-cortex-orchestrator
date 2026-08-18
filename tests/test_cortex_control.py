@@ -5072,6 +5072,36 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(artifacts["manifest_ref"], "sqlite:task_documents/planning_current")
         self.assertEqual([package["id"] for package in artifacts["work_packages"]], ["api", "ui"])
 
+        approved = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "plan_approval",
+            "payload": {"decision": "approve"},
+        })
+        self.assertEqual(approved["outcome"], "ready_to_spawn")
+        completed = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": approved["step"],
+            "results": self.v3_results(approved, self.v3_report("implementation completed")),
+        })
+        for _ in range(4):
+            if completed["outcome"] != "ready_to_spawn":
+                break
+            completed = control.continue_orchestration({
+                "project_root": str(self.project), "task_ref": started["task_ref"],
+                "step": completed["step"],
+                "results": self.v3_results(completed, self.v3_report("terminal gate completed")),
+            })
+        self.assertEqual(completed["outcome"], "completed")
+        terminal_manifest = control.current_planning_manifest(task_dir)
+        self.assertEqual(terminal_manifest, manifest)
+        self.assertTrue(all(
+            control.db_get_artifact_for_export_path(
+                self.ledger, state["task_id"], package["artifact_path"],
+            ) is not None
+            for package in terminal_manifest["work_packages"]
+        ))
+
     def test_planner_work_packages_reject_cycles_and_missing_artifact(self):
         started = self.v3_start("validate work breakdown artifacts", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
