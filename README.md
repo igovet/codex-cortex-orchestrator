@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-7.1.2-7c3aed" alt="Cortex 7.1.2" />
+        <img src="https://img.shields.io/badge/Cortex-8.0.0-7c3aed" alt="Cortex 8.0.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -53,7 +53,7 @@
 | Codex | Desktop or CLI with Plugins and multi-agent v2 support | Loads the plugin, skills, MCP server, and internal agents |
 | Python | **3.11+**, with the standard-library `tomllib` module | Runs the local Cortex MCP server, hooks, and validators |
 | Git | A current version | Fetches and refreshes the GitHub Marketplace source |
-| Bash | **4.2+** | Used by the Cortex runtime launcher; the macOS system Bash 3.2 is too old |
+| Bash | **3.2+** | The launcher is compatible with the Bash shipped by macOS; no Bash 4.2+ install is required |
 | Operating system | macOS or Linux; WSL is recommended on Windows | The current runtime launcher is Bash-based |
 
 No additional Python packages are required through `pip`: the Cortex runtime
@@ -82,9 +82,10 @@ started from the graphical shell may not read `~/.bashrc`; in that case, set
 The Plugins Marketplace workflow is the same on macOS, but the local runtime
 requires additional preparation:
 
-- macOS does not guarantee a suitable Python 3.11+ installation.
-- macOS ships `/bin/bash` 3.2. The Cortex runtime launcher uses Bash features
-  introduced in 4.2, so the system Bash is not sufficient.
+- macOS does not guarantee a suitable Python 3.11+ installation. Python 3.11+
+  remains the only runtime prerequisite that may need to be provided separately.
+- macOS ships `/bin/bash` 3.2, which the Cortex launcher supports directly.
+  Bash 4.2+, GNU coreutils, and third-party shell libraries are not required.
 - Homebrew uses `/opt/homebrew` on Apple Silicon and `/usr/local` on Intel.
   Use `brew --prefix` instead of hard-coding either location.
 - Apps opened from Finder or the Dock do not necessarily inherit shell startup
@@ -96,16 +97,15 @@ Install the prerequisites with [Homebrew](https://brew.sh/):
 # Install Apple's command-line tools first if they are not already present.
 xcode-select --install
 
-brew install python@3.11 bash git
+brew install python@3.11 git
 ```
 
 Resolve and verify the installed runtimes:
 
 ```bash
-export CORTEX_BASH="$(brew --prefix bash)/bin/bash"
 export CORTEX_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
 
-"$CORTEX_BASH" --version
+"/bin/bash" --version
 "$CORTEX_PYTHON" --version
 "$CORTEX_PYTHON" -c 'import tomllib; print("tomllib: ok")'
 ```
@@ -120,13 +120,11 @@ export CORTEX_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
 codex
 ```
 
-For Codex Desktop, the application process must receive both the Homebrew
-`PATH`—so `/usr/bin/env bash` resolves Bash 4.2+—and `CORTEX_PYTHON`. If the app
-is launched from Finder or the Dock, set them for the current macOS login
+For Codex Desktop, the application process must receive `CORTEX_PYTHON`. If the
+app is launched from Finder or the Dock, set it for the current macOS login
 session before opening Codex:
 
 ```bash
-launchctl setenv PATH "$(brew --prefix)/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 launchctl setenv CORTEX_PYTHON "$(brew --prefix python@3.11)/bin/python3.11"
 ```
 
@@ -483,9 +481,16 @@ After installation:
 3. Confirm that the project is resolved by its **exact absolute root**.
 
 Internal Cortex workers use Codebase Memory; the coordination-only root does
-not. The `planner`, `explorer`, `architect`, and `database_architect` profiles
-may perform one bounded refresh when the exact index is missing or stale.
-Other profiles do not loop on MCP setup and use the safe fallback instead.
+not. Every immutable worker briefing includes a project key precomputed from
+the canonical root with Codebase Memory's current path-key algorithm: safe
+ASCII is preserved, separators and other unsafe ASCII become collapsed dashes,
+non-ASCII UTF-8 bytes become lowercase hex, and overlong keys receive the
+same bounded FNV-1a suffix. Workers use this key directly and call
+`list_projects` at most once only after a real lookup failure, ambiguity, or
+key drift/collision; any fallback must match the exact canonical root. The
+`planner`, `explorer`, `architect`, and `database_architect` profiles may
+perform one bounded refresh when the exact index is missing or stale. Other
+profiles do not loop on MCP setup and use the safe fallback instead.
 
 ---
 
@@ -498,7 +503,11 @@ transitions.
 ```mermaid
 flowchart LR
     U["User goal"] --> R["Root coordinator"]
-    R --> P["Plan and waves"]
+    R --> S["Scope (C3 / harvest)"]
+    S --> D["Discover"]
+    R --> D
+    D --> A["Design gates"]
+    A --> P["Final Planner"]
     P --> W1["Specialist 1"]
     P --> W2["Specialist 2"]
     P --> W3["Specialist N"]
@@ -518,26 +527,44 @@ flowchart LR
 
 1. **Explicit activation.** Cortex preserves the exact user request,
    acceptance criteria, and task boundaries.
-2. **Complexity and risk classification.** The coordinator builds the required
-   canonical waves: discovery, planning, architecture, implementation, QA,
-   review, documentation, and final verification—only where the task needs them.
-3. **Precise dispatch.** Every worker receives a profile, model, reasoning
+2. **Evidence-first scoping and planning.** C2 starts with Explorer discovery.
+   C3 and knowledge harvest start with a read-only Planner **scope** phase that
+   publishes a discovery brief and up to eight non-overlapping domains. The
+   final Planner **plan** phase runs after discovery and all design gates, and
+   consumes their predecessor reports before publishing the decision-complete
+   `planning` artifact. `scope` gathers evidence but never closes a user-intent
+   question; material decisions still use the worker-question flow.
+3. **Canonical ordering.** C1 is `discover → implementation → review → close`.
+   C2 is `discover → design gates → plan → implementation → qa → review →
+   documentation → close`. C3 is `scope → discover → design gates → plan →
+   implementation → qa → review → documentation → close`. Harvest is `scope →
+   discover → architecture → plan → documentation → review → close`.
+   Architecture, database architecture, and UX gates precede plan; security,
+   performance, and accessibility remain post-implementation audits before
+   review.
+4. **Precise dispatch.** Every worker receives a profile, model, reasoning
    effort, allowed paths, ownership, acceptance criteria, and verification
    responsibilities.
-4. **Isolated execution.** The root remains a coordinator and does not mix its
+5. **Isolated execution.** The root remains a coordinator and does not mix its
    own project changes with worker work. Independent read-only tasks run in
    parallel, while overlapping writes are serialized.
-5. **Reports instead of trust.** Every worker publishes a structured
-   `cortex/report/v1` containing findings, changed files, checks, evidence,
-   uncertainty, and the recommended next action.
-6. **Gates and adaptation.** The coordinator evaluates each report against the
-   contract. New evidence may change future waves, but verified work is not
-   repeated without reason.
-7. **Automatic documentation sync.** When completed work changes durable
+6. **Reports instead of trust.** Every worker publishes the unchanged strict
+   seven-field `cortex/report/v1` contract. Planner Scope may additionally
+   publish the top-level `scoping` sibling (`overview`, `context_files`, and
+   up to eight validated discovery domains); Planner Plan may publish
+   `planning`. These siblings do not alter the seven report fields.
+7. **Fresh approvals and adaptive replanning.** Required approval is available
+   only after the final plan. The review records the plan revision, planner
+   report reference, verified-predecessor digest, and semantic future-pipeline
+   digest. A material future-wave change or plan rework preserves history,
+   resets approval to `pending_plan`, and requires a replacement Planner plus a
+   new approval. No-op and transport-only changes do not invalidate approval;
+   stale basis digests block dispatch with recoverable reapproval guidance.
+8. **Automatic documentation sync.** When completed work changes durable
    behavior, interfaces, architecture, commands, decisions, or ownership,
    Cortex dispatches a technical writer to update the affected project and
    feature documentation before closing the task.
-8. **Verified close.** A task completes only after the required gates are
+9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
 ### Why this is more reliable than ordinary multi-agent work
@@ -582,10 +609,22 @@ The public MCP surface is deliberately small. The coordinator uses
 `record_report`, and scoped reads of authorized predecessor reports.
 
 The complete worker assignment is stored in an immutable briefing protected by
-a SHA-256 digest. A worker reads only its assigned briefing, verifies the digest,
-and never browses unrelated `.codex/cortex` coordination data. Canonical state
-is stored in the local SQLite `cortex/v8` ledger. Unsupported pre-SQLite state is
-not migrated or resumed.
+a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
+exact `dispatch_ref`, briefing path, and digest; the worker reads and verifies
+that briefing before project work. The briefing carries the phase/profile,
+selection rationale, objective, ownership, paths, dependencies, context files,
+acceptance criteria, verification, and predecessor handoffs, so scheduler data
+cannot silently disappear from the worker prompt. A worker never browses
+unrelated `.codex/cortex` coordination data. Canonical state is stored in the
+local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
+tasks without that field resume their persisted pipeline unchanged.
+
+The seven public MCP tools remain the v4 surface. Tool-side questions and
+approval prompts are projected into the original user language by the root
+coordinator; worker protocol messages and durable reports remain English.
+Sensitive MCP exceptions are appended to
+`~/.codex/logs/cortex-tool-errors.jsonl`; the writer retains complete newest
+records and caps the file at 10 MiB by dropping oldest records first.
 
 ---
 
@@ -627,6 +666,14 @@ minimum effort: low/moderate → `medium`, high → `high`, and critical → `xh
 If Luna is unavailable on the host, Cortex may use a hidden Terra fallback, but
 it never labels Terra as Luna and never creates a visible sidebar task without
 an explicit request.
+
+Adaptive routing is separate from adaptive replanning. The profiles and risk
+policy choose the worker model and effort at dispatch time; evidence-driven
+replanning changes only the not-yet-started semantic pipeline. The coordinator
+must record the evidence and reason for a material change, while Cortex keeps
+the prior plan, approval, and basis digests in history. This makes a changed
+specialist, dependency, path, acceptance criterion, or verification step
+auditable without silently reinterpreting a completed wave.
 
 The root coordinator model is an operator choice separate from worker routing.
 Luna `xhigh` is the practical default for multi-wave orchestration. Terra is a

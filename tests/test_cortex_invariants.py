@@ -462,7 +462,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         second_report = self.report("task", second["attempt_id"], "second")
         second_evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": second["state"]["revision"], "gate": "plan", "attempt_id": second["attempt_id"], "report_receipt": second_report["receipt"]["receipt_id"], "summary": "replacement plan"})
         repassed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": second_evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
-        self.assertEqual(repassed["state"]["current_gates"], ["discover"])
+        self.assertEqual(repassed["state"]["current_gates"], ["implementation"])
 
     def test_stop_reassessment_requires_current_handoff(self):
         state = self.init(complexity="C2")["state"]
@@ -1350,6 +1350,28 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_runtime_contract_is_plugin_bundled_and_does_not_depend_on_root_agents(self):
         repository = Path(__file__).parents[1]
         plugin = repository / "plugins/cortex"
+        root_policy = (repository / "AGENTS.md").read_text(encoding="utf-8")
+        control_skill = (plugin / "skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
+        orchestrator_skill = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("This file governs work in this source checkout only", root_policy)
+        self.assertIn("No project-local `AGENTS.md` is part of the installed contract", orchestrator_skill)
+        self.assertIn("`../cortex-control/SKILL.md`", orchestrator_skill)
+        for runtime_only in (
+            "Every native dispatch carries only a compact bootstrap",
+            "Call `start_orchestration` once per task contract",
+            "The explicit `prune` route calls",
+            "## Cortex MCP tool-error log",
+        ):
+            self.assertNotIn(runtime_only, root_policy)
+        for bundled_contract in (
+            "Assign exactly one writer to an overlapping code or documentation area",
+            "Report every unrun required check, environmental limitation",
+            "## Private tool-error diagnostics",
+            "at or below 10 MiB",
+            "Expected public validation and recovery responses with `ok: false`",
+            "never put secrets in tool inputs",
+        ):
+            self.assertIn(bundled_contract, control_skill)
         manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertTrue((plugin / "hooks/hooks.json").is_file())
@@ -1402,10 +1424,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertNotIn("gpt-", prompt.lower())
         planner = prompts["planner"]
         for marker in (
-            "Ground in the environment before planning",
+            "Ground in the environment",
             "Separate unknowns",
             "Close the implementation contract",
-            "another engineer can execute without making design decisions",
+            "executable without downstream design decisions",
         ):
             self.assertIn(marker, planner)
 
@@ -1466,6 +1488,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 self.assertIn("read_worker_report", prompt)
                 self.assertIn(f"attempt_id='{gate}-01'", prompt)
                 self.assertIn(f"profile={name!r}", prompt)
+                self.assertIn("use project key 'workspace-prompt-audit' directly", prompt)
+                self.assertIn("do not call `list_projects` before the first indexed query", prompt)
+                self.assertIn("`mcp__codebase_memory__list_projects` at most once", prompt)
                 self.assertIn("worker_question", prompt)
                 self.assertIn("record_report", prompt)
                 self.assertIn("Gate acceptance 1: PASS - ", prompt)
@@ -1562,6 +1587,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(
             shared["repository_intelligence"],
             "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
+        )
+        self.assertEqual(
+            shared["codebase_memory_project_resolution"],
+            "derive_canonical_path_key_then_single_exact_root_list_fallback",
+        )
+        self.assertEqual(
+            shared["codebase_memory_project_key_algorithm"],
+            "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200",
         )
         self.assertEqual(
             set(shared["codebase_memory_refresh_profiles"]),
@@ -1678,7 +1711,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "7.1.2")
+        self.assertEqual(base_version, "8.0.0")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
@@ -1691,6 +1724,23 @@ class OrchestrationInvariantTests(unittest.TestCase):
         }
         for relative, marker in expected_markers.items():
             self.assertIn(marker, (repository / relative).read_text(encoding="utf-8"), relative)
+
+    def test_launcher_and_installer_remain_compatible_with_stock_macos_bash(self):
+        repository = Path(__file__).parents[1]
+        launcher = (repository / "plugins/cortex/scripts/cortex-launcher").read_text(encoding="utf-8")
+        installer = (repository / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
+        for path, source in (("cortex-launcher", launcher), ("sync-cortex.sh", installer)):
+            self.assertNotIn("[[ -v ", source, path)
+            self.assertNotIn("declare -A", source, path)
+            self.assertNotIn("local -n", source, path)
+            self.assertNotIn("mapfile", source, path)
+        completed = subprocess.run(
+            ["bash", "-n", "plugins/cortex/scripts/cortex-launcher", "scripts/sync-cortex.sh"],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_current_contract_sources_reject_stale_report_and_tool_counts(self):
         repository = Path(__file__).parents[1]

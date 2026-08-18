@@ -21,6 +21,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/cortex-luna-high-eval.py"
+FAILURE_FIXTURE_API_KEY = "TEST_ONLY_FAILURE_METADATA_API_KEY"
 
 
 def load_harness():
@@ -728,6 +729,11 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         bin_dir = self.fake_codex()
         environment = os.environ.copy()
         environment["PATH"] = f"{bin_dir}{os.pathsep}{environment.get('PATH', '')}"
+        # This fixture exercises failure-metadata handling with a fake Codex
+        # binary, not evaluator authentication. Give the isolated runtime an
+        # explicit test-only credential so a clean CI runner does not depend
+        # on a developer's ~/.codex/auth.json.
+        environment["CODEX_API_KEY"] = FAILURE_FIXTURE_API_KEY
         with mock.patch.dict(os.environ, environment, clear=True):
             return self.harness.live_eval(
                 base,
@@ -754,8 +760,10 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         result = results[0]
         self.assertEqual(result["failure_metadata"], "not_retained")
         self.assertNotIn("failure_artifacts", result)
-        self.assertNotIn("SECRET_PROMPT", json.dumps(result, sort_keys=True))
-        self.assertNotIn("SECRET_REPORT", json.dumps(result, sort_keys=True))
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn("SECRET_PROMPT", serialized)
+        self.assertNotIn("SECRET_REPORT", serialized)
+        self.assertNotIn(FAILURE_FIXTURE_API_KEY, serialized)
 
     def test_live_failure_metadata_requires_opt_in_and_is_sanitized(self) -> None:
         retention_dir = self.root / "retained-failure"
@@ -778,6 +786,7 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         serialized = json.dumps(progress, sort_keys=True)
         self.assertNotIn("SECRET_PROMPT", serialized)
         self.assertNotIn("SECRET_REPORT", serialized)
+        self.assertNotIn(FAILURE_FIXTURE_API_KEY, serialized)
         self.assertLessEqual(len(progress["events"]), 100)
         self.assertEqual(progress["events"][0]["tool"], "record_report")
         self.assertEqual(progress["events"][0]["ok"], False)

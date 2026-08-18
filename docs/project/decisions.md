@@ -167,9 +167,12 @@ migrates pre-SQLite task state, which remains unsupported under the v8 policy.
 ## Conditional indexed repository intelligence
 
 Codebase Memory is an optional worker-side accelerator, not a source of truth
-and never a root-coordinator inspection path. A worker uses it only when the
-tools are available and `list_projects` returns an entry whose root exactly
-matches the task project. Graph, architecture, and trace operations are
+and never a root-coordinator inspection path. Cortex mirrors upstream
+`cbm_project_name_from_path` and places the canonical-root-derived project key
+in every worker briefing. Workers query that key directly; `list_projects` is
+limited to one fallback after direct not-found, ambiguity, or apparent
+drift/collision, and its result must match the exact canonical root. Graph,
+architecture, and trace operations are
 preferred for initial discovery and impact analysis, but consequential facts
 must be confirmed in current source and tests. If the service, matching index,
 or result is unavailable or stale, `planner`, `explorer`, `architect`, and
@@ -209,7 +212,7 @@ executable configuration.
 Repository knowledge is maintained as a source-backed feature census rather
 than a recent-change summary. `docs/features/index.md` is the coverage manifest,
 and incremental harvest is allowed only after it proves a zero-gap baseline.
-Otherwise Cortex runs planning, domain-partitioned discovery, architecture
+Otherwise Cortex runs Planner Scope, domain-partitioned discovery, architecture
 synthesis, documentation, independent completeness review, and close. A large
 repository uses 2–8 bounded explorers and non-overlapping documentation owners.
 Completion requires behavior-complete feature pages, evidence-backed

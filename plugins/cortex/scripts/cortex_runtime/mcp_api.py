@@ -13,7 +13,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
     "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "record_report": "Worker-only operation: validate and persist the strict seven-field report. Every report.tests item has exactly command, cwd, exit_code, and evidence. Planner planning packages allow id/title/objective/microtasks plus optional allowed_paths/depends_on; profile and the required acceptance_criteria/verification belong on each microtask. Optional gate_result is top-level; review/close require gate_result or compatible closure. Do not paste the report body into the parent channel after success.",
+    "record_report": "Worker-only operation: validate and persist the strict seven-field report. Planner Scope requires a top-level scoping discovery brief. Planner Plan requires a top-level planning work breakdown; profile and the required acceptance_criteria/verification belong on each microtask. Every report.tests item has exactly command, cwd, exit_code, and evidence. Optional gate_result is top-level; review/close require gate_result or compatible closure. Do not paste the report body into the parent channel after success.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -27,6 +27,7 @@ def build_public_schemas(
     max_report_items: int,
     max_work_packages: int,
     max_microtasks_per_package: int,
+    max_discovery_domains: int,
     question_option_schema: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     """Build the seven public contracts independently of internal handlers."""
@@ -227,6 +228,40 @@ def build_public_schemas(
         },
         "required": ["overview", "work_packages"],
     }
+    SCOPING_DOMAIN_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 500},
+            "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "paths": PLANNING_PATHS_SCHEMA,
+            "context": PLANNING_STRING_LIST_SCHEMA,
+            "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
+            "acceptance_criteria": PLANNING_STRING_LIST_SCHEMA,
+            "verification": PLANNING_STRING_LIST_SCHEMA,
+        },
+        "required": [
+            "id", "title", "objective", "paths", "context", "depends_on",
+            "acceptance_criteria", "verification",
+        ],
+    }
+    V3_SCOPING_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "overview": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "context_files": {
+                "type": "array", "maxItems": 50, "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "discovery_domains": {
+                "type": "array", "minItems": 1, "maxItems": max_discovery_domains,
+                "items": SCOPING_DOMAIN_SCHEMA,
+            },
+        },
+        "required": ["overview", "context_files", "discovery_domains"],
+    }
     V3_WORKER_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -235,7 +270,7 @@ def build_public_schemas(
                 "type": "string",
                 "minLength": 1,
                 "description": (
-                    "Canonical phase: plan, discover, architecture, database_architecture, implementation, qa, "
+                    "Canonical phase: scope, plan, discover, architecture, database_architecture, implementation, qa, "
                     "security, performance, accessibility, ux, review, documentation, or close. Common aliases "
                     "are normalized; build_verification/final_verification map to close. A canonical phase may "
                     "appear in only one wave, though one wave may contain multiple workers for that phase."
@@ -379,6 +414,7 @@ def build_public_schemas(
             "report": V3_REPORT_SCHEMA,
             "gate_result": GATE_RESULT_SCHEMA,
             "closure": CLOSURE_SCHEMA,
+            "scoping": V3_SCOPING_SCHEMA,
             "planning": V3_PLANNING_SCHEMA,
         },
         "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
@@ -486,6 +522,7 @@ def build_public_schemas(
 
     return {
         "v3_report": V3_REPORT_SCHEMA,
+        "v3_scoping": V3_SCOPING_SCHEMA,
         "v3_planning": V3_PLANNING_SCHEMA,
         "v3_worker": V3_WORKER_SCHEMA,
         "v3_wave": V3_WAVE_SCHEMA,
@@ -525,8 +562,12 @@ def v3_response(
             "step": step,
             "diagnostics": diagnostics,
             "dispatches": [],
+            "recoverable": bool(old.get("recoverable", True)),
             "next_action": f"{coordinator_lock} Correct every diagnostic and retry {retry_tool} without touching the target project.",
         }
+        if old.get("code") == "plan_reapproval_required":
+            response["outcome"] = "plan_reapproval_required"
+            response["next_action"] = f"{coordinator_lock} {old.get('next_action')}"
         if task_ref:
             response["task_ref"] = task_ref
         if include_result and "result" in old:

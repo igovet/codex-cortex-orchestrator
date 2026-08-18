@@ -24,7 +24,8 @@ Cortex is a repository-source Codex plugin that provides an opt-in, durable `cor
 The server, installer, and repository validators require an executable Python
 3.11+ with `tomllib`. Set `CORTEX_PYTHON` to an absolute path to select it;
 when unset, Cortex resolves `python3` from `PATH`. Installation also requires
-Bash, Git, and the Codex CLI. The isolated plugin probe reports `SKIP` when the
+Bash 3.2+, Git, and the Codex CLI. The launcher works with stock macOS Bash;
+no Bash 4.2+ or GNU shell package is required. The isolated plugin probe reports `SKIP` when the
 CLI is unavailable; it is not registration evidence.
 
 ## Feature registry

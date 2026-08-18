@@ -186,7 +186,7 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertEqual(pending["outcome"], "awaiting_translation")
         self.assertEqual(elicitation.call_count, 3)
         self.assertEqual([call.args[0] for call in elicitation.call_args_list], [
-            "Question 1 of 3", "Question 2 of 3", "Question 3 of 3",
+            "1 / 3", "2 / 3", "3 / 3",
         ])
         form = elicitation.call_args_list[0].args[1]
         self.assertEqual(set(form["properties"]), {"database_strategy"})

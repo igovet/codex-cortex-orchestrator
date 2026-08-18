@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "7.1.2":
-        fail("plugin manifest must identify cortex at release version 7.1.2")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.0.0":
+        fail("plugin manifest must identify cortex at release version 8.0.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -209,7 +209,7 @@ def main() -> int:
     ):
         fail("model routing must define unique Terra trigger task kinds")
     expected_gates = {
-        "plan", "discover", "architecture", "database_architecture", "implementation",
+        "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
         "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",
     }
     gate_briefings = profile_contract.get("gate_briefings")
@@ -251,7 +251,9 @@ def main() -> int:
         shared.get("repository_intelligence")
         != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
         or shared.get("codebase_memory_project_resolution")
-        != "list_projects_exact_project_root_match_never_guess"
+        != "derive_canonical_path_key_then_single_exact_root_list_fallback"
+        or shared.get("codebase_memory_project_key_algorithm")
+        != "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200"
         or set(shared.get("codebase_memory_refresh_profiles", []))
         != {"planner", "explorer", "architect", "database_architect"}
         or shared.get("codebase_memory_fallback")

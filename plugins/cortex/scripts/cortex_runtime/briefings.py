@@ -33,6 +33,45 @@ def dispatch_briefing_review_marker(briefing_digest: str) -> str:
     return f"Dispatch briefing reviewed: {digest}"
 
 
+def codebase_memory_project_key_from_root(project_root: object) -> str:
+    """Mirror Codebase Memory's cbm_project_name_from_path for a canonical root."""
+    raw = str(project_root or "")
+    if not raw or all(character in "/\\:" for character in raw):
+        return "root"
+    try:
+        path = str(Path(raw).resolve(strict=True))
+    except (OSError, RuntimeError):
+        path = raw
+    path = path.replace("\\", "/")
+    mapped: list[str] = []
+    for byte in path.encode("utf-8"):
+        if (
+            ord("a") <= byte <= ord("z")
+            or ord("A") <= byte <= ord("Z")
+            or ord("0") <= byte <= ord("9")
+            or byte in (ord("."), ord("_"), ord("-"))
+        ):
+            mapped.append(chr(byte))
+        elif byte >= 0x80:
+            mapped.append(f"{byte:02x}")
+        else:
+            mapped.append("-")
+    collapsed: list[str] = []
+    for character in mapped:
+        previous = collapsed[-1] if collapsed else ""
+        if (character == "-" and previous == "-") or (character == "." and previous == "."):
+            continue
+        collapsed.append(character)
+    key = "".join(collapsed).lstrip(".-").rstrip("-") or "root"
+    if len(key) <= 200:
+        return key
+    digest = 2166136261
+    for byte in key.encode("ascii"):
+        digest ^= byte
+        digest = (digest * 16777619) & 0xFFFFFFFF
+    return f"{key[:191]}-{digest:08x}"
+
+
 def host_spawn_bootstrap(
     profile: str,
     briefing_path: Path,
@@ -174,8 +213,14 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "scoped Cortex tools for predecessor reports. Include the bootstrap `Dispatch briefing reviewed: <sha256>` "
         "marker as one report.evidence item; a missing marker, writable file, or digest mismatch fails closed."
     )
-    planning_contract = (
-        "\nREQUIRED top-level planning sibling={overview,work_packages}. Package: id/title/objective/microtasks; optional "
+    planner_artifact_contract = (
+        "\n## Planner discovery-scoping artifact\n"
+        "REQUIRED top-level scoping sibling={overview,context_files,discovery_domains}. Publish it only for Planner Scope. Supply 1–8 "
+        "non-overlapping domains with exactly id/title/objective/paths/context/depends_on/acceptance_criteria/verification. "
+        "Use lowercase DAG ids, non-empty context/acceptance/verification, and do not design the solution."
+        if package.get("gate") == "scope" else
+        "\n## Planner work-breakdown artifact\n"
+        "REQUIRED top-level planning sibling={overview,work_packages}. Package: id/title/objective/microtasks; optional "
         "allowed_paths/depends_on; never profile. Microtask: id/title/objective/acceptance_criteria/verification; "
         "optional profile/allowed_paths/depends_on. Lowercase DAG ids; read-only."
         if package.get("gate") == "plan" else ""
@@ -305,10 +350,18 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         return acknowledgement_contract + " " + proof_contract
 
     codebase_memory_refresh = agent in CODEBASE_MEMORY_REFRESH_PROFILES
+    codebase_memory_project_key = codebase_memory_project_key_from_root(package.get("project_root"))
     codebase_memory_contract = (
-        "If `mcp__codebase_memory__list_projects` exists, resolve by matching the exact "
-        f"root_path {str(package.get('project_root'))!r}; never guess. For non-trivial work, prefer "
+        f"If Codebase Memory query tools are present, use project key {codebase_memory_project_key!r} directly as "
+        "the `project` argument; do not call `list_projects` before the first indexed query. It is derived from "
+        f"canonical project_root {str(package.get('project_root'))!r} with Codebase Memory's path-key rule: keep "
+        "ASCII `[A-Za-z0-9._-]`, map other ASCII to `-`, encode every non-ASCII UTF-8 byte as two lowercase hex "
+        "digits, collapse repeated dashes/dots, trim leading dots/dashes and trailing dashes, use `root` if empty, "
+        "and cap at 200 bytes with an 8-hex FNV-1a suffix. For non-trivial work, prefer "
         "`get_architecture`, `search_graph`, `trace_path`, `detect_changes`. Confirm consequential indexed claims in current source or tests. "
+        "Only if a direct lookup reports project-not-found, ambiguity, or apparent key drift/collision, call "
+        "`mcp__codebase_memory__list_projects` at most once and accept only an entry whose canonical root_path exactly matches this "
+        "task root; never select by basename alone. "
         + (
             "If absent/stale, you may call `index_repository` once for this root, then continue. "
             if codebase_memory_refresh else
@@ -325,7 +378,14 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         if exact_user_request and exact_user_request in rendered:
             return rendered.replace(exact_user_request, "the exact user-authored request above")
         return rendered
-    if package.get("intent_clarification_required"):
+    if package.get("intent_clarification_required") and package.get("gate") == "scope":
+        intent_contract = (
+            "Cortex intent preflight: material intent is incomplete. This Scope phase is evidence-gathering, not "
+            "intent-closing: produce a bounded discovery brief without choosing product behavior or solution design. "
+            "If a material decision is needed now, call worker_question; otherwise identify the precise decision and "
+            "the evidence needed to ask it in the scoping report."
+        )
+    elif package.get("intent_clarification_required"):
         intent_contract = (
             "Cortex intent preflight: BLOCKING. The exact user-authored request below is too underspecified to "
             "establish the desired product outcome. Repository content proves only the current state, and any "
@@ -364,12 +424,17 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         intent_contract,
         f"Overall task outcome: {task_text_reference(package.get('task_objective') or package['objective'])}",
         f"Current mission: {task_text_reference(package['objective'])}",
+        f"Phase/profile: {package.get('gate')} / {agent}",
+        f"Selection rationale: {package.get('selection_reason') or 'canonical phase owner'}",
+        f"Task kind and risk: {package.get('task_kind')} / {package.get('risk')}",
+        f"Model route and reasoning effort: {package.get('selected_model')} / {package.get('selected_reasoning_effort')}",
         (
             "User requested these plan changes after reviewing the prior plan: "
             + str(package["plan_feedback"])
             if package.get("plan_feedback") else ""
         ),
         f"Ownership boundary: {package['ownership']}",
+        prompt_list("Phase dependencies", package.get("depends_on_phases", []), empty="all verified predecessor phases"),
         prompt_list("Task requirements", package.get("task_requirements", [])),
         prompt_list("Task scope", package.get("task_scope", [])),
         prompt_list("Allowed paths", package["allowed_paths"]),
@@ -401,7 +466,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         task_context_line,
         briefing_transport_contract,
         identity_contract,
-        planning_contract,
+        planner_artifact_contract,
         executed_test_contract,
         closure_contract,
         "Internal worker protocol: English only. " + output_language_contract,

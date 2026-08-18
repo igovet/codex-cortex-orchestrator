@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 7.1.2 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 8.0.0 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -27,11 +27,13 @@ to the content checksum; inconsistent history fails closed.
 - [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v8, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
-- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, 13 gate briefings, and the `cortex/report/v1` field contract.
+- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, scope/plan gate briefings, and the `cortex/report/v1` field contract.
 - [test_cortex_control.py](../../../tests/test_cortex_control.py) covers report-bus scoping/reconciliation and lane lifecycle behavior.
 
 Repository-root `AGENTS.md` is development-only and is not installed. Runtime
-guarantees come exclusively from the installable `plugins/cortex/` tree.
+guarantees come exclusively from the installable `plugins/cortex/` tree; the
+bundled orchestrator explicitly loads `cortex-control` for root isolation,
+dispatch, ownership, verification, recovery, and private diagnostics.
 
 ## Canonical artifact layout
 
@@ -196,7 +198,11 @@ and waits for an explicit decision. It resumes with
 which surfaces the host-native **Approve/Cancel** UI. Approve returns a
 localized plan-approved notice and authorizes dispatch of the next wave;
 Cancel returns no user-facing notice, leaves the plan in `awaiting_user`, and
-waits silently for the next user message. A revision uses
+waits silently for the next user message. A material future-wave replacement
+or plan rework preserves the previous plan and approval in history, resets the
+status to `pending_plan`, and requires a singleton replacement Planner followed
+by another approval. No-op and transport-only replacements keep approval valid.
+A revision uses
 `payload={"decision":"revise", "feedback":"..."}` with non-empty feedback
 and reruns the Planner before another approval hold. This is distinct from
 the worker-question lifecycle: material questions are still resolved through
@@ -213,6 +219,14 @@ microtask requires `id`, `title`, `objective`, non-empty
 Package and per-package microtask dependencies are validated as acyclic DAGs,
 with bounded limits of 32 packages, 32 microtasks per package, and 128 total
 microtasks.
+
+Only Planner Scope may publish the additive top-level `scoping` sibling. It
+contains exactly `overview`, `context_files`, and `discovery_domains`. Each
+domain has a unique id and title, objective, project-relative paths, context,
+dependencies, non-empty acceptance criteria, and non-empty verification. The
+server rejects duplicate domain ids, dependency cycles, unsafe paths, more than
+eight domains, or incomplete criteria. Scope is read-only and evidence-
+gathering; it does not close intent questions.
 
 The read-only Planner only proposes this durable planning catalog. Cortex
 authorizes and queues optional projections under
@@ -474,10 +488,13 @@ Ref-based handoffs remain bounded and fail closed rather than silently dropping
 older reports.
 
 Codebase Memory is conditional worker tooling rather than a ledger dependency.
-When the tools are available, the worker resolves the task project by exact
-root through `list_projects`, prefers graph, architecture, and trace operations
-for discovery and impact analysis, and confirms consequential findings in
-source and tests. `planner`, `explorer`, `architect`, and `database_architect`
+Cortex precomputes the current upstream path-derived project key from canonical
+task root and embeds it in every worker briefing. The worker uses that key
+directly; only direct not-found, ambiguity, or apparent drift/collision permits
+one `list_projects` fallback, and its entry must match the exact canonical root.
+Workers prefer graph, architecture, and trace operations for discovery and
+impact analysis and confirm consequential findings in source and tests.
+`planner`, `explorer`, `architect`, and `database_architect`
 may refresh one missing or stale index; other profiles fall back to ordinary
 repository tools after one failed attempt. No profile loops on setup, and the
 main/root coordinator must not use Codebase Memory to inspect the project.
@@ -494,8 +511,11 @@ missing index acknowledgement. Explicit context paths must be existing
 project-relative regular files; absolute, traversing, missing, and symlink
 paths are rejected.
 
-Knowledge-harvest objectives force the canonical `plan`, `discover`,
-`architecture`, `documentation`, `review`, and `close` pipeline. Incremental
+Knowledge-harvest objectives force the canonical `scope`, `discover`,
+`architecture`, `plan`, `documentation`, `review`, and `close` pipeline. The
+Planner Scope report publishes a discovery brief, context files, and up to
+eight non-overlapping domains; the final Planner consumes all predecessor
+reports. Incremental
 harvest is valid only after a current source-backed coverage manifest proves a
 zero-gap baseline. Otherwise the coordinator runs a full feature census, uses
 2–8 non-overlapping domain explorers for a large repository, synthesizes stable
@@ -548,7 +568,7 @@ results, they do not enter the exception log. Exceptions raised at the MCP
 boundary remain redacted and logged. Host model/tool/effort values
 are selected routing metadata; v4 does not claim actual host attestation
 unless the host supplies observable evidence.
-Profiles and all 13 gate briefings are preloaded and validated at MCP startup;
+Profiles and all scope/plan-aware gate briefings are preloaded and validated at MCP startup;
 invariant coverage checks that all 21 playbooks contain the required
 professional sections and that every gate briefing has non-generic acceptance
 and verification lists. Runtime validation also checks complete routing

@@ -7,7 +7,7 @@ requested=""
 resolved=""
 diagnostics=""
 
-if [[ -v CORTEX_PYTHON ]]; then
+if [[ ${CORTEX_PYTHON+x} == x ]]; then
   requested="${CORTEX_PYTHON}"
   if [[ "${requested}" != /* ]]; then
     echo "Cortex launcher error: CORTEX_PYTHON must be an absolute executable path" >&2

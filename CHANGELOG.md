@@ -4,6 +4,31 @@ All notable public changes to Cortex are recorded here. Release entries use
 semantic versions; the plugin manifest adds a unique Codex cachebuster to the
 same base version.
 
+## [8.0.0] - 2026-08-18
+
+- Separate evidence-first `scope` from the final `plan`; C2 starts with
+  Explorer discovery, while C3 and harvest start with structured Planner
+  scoping. Architecture, database architecture, and UX precede the final
+  Planner; security, performance, and accessibility remain post-implementation
+  audits.
+- Bind required plan approval to the plan revision, planner report, verified
+  predecessor digest, and semantic future-pipeline digest. Material replanning
+  preserves approval history and requires fresh approval; no-op and
+  transport-only changes do not invalidate approval.
+- Keep the strict seven-field `cortex/report/v1`, v4 public surface, and
+  SQLite v8 ledger while adding pipeline contract v2 with v1 resume behavior.
+- Make the launcher compatible with stock macOS Bash 3.2, cap sensitive tool
+  error logs at 10 MiB with tail-preserving rotation, and require root UI
+  questions to use the user's language.
+- Precompute Codebase Memory project keys from canonical project roots in every
+  worker briefing; routine queries no longer spend a call on `list_projects`,
+  which remains a single exact-root fallback for lookup drift or collisions.
+- Move runtime-only coordination, ownership, verification, and private-log
+  handling rules into the bundled orchestrator/control skills; root
+  `AGENTS.md` now contains repository-development policy only.
+- This source candidate has not installed or updated a user plugin and has not
+  been published, committed, or tagged.
+
 ## [7.1.2] - 2026-08-18
 
 - Align the worker report contract across runtime prompts, validators, and
