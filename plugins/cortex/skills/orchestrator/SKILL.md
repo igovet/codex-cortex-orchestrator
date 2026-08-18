@@ -650,9 +650,12 @@ or cache to infer a different payload. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
 same `batch_ref` with `action="poll_batch"`; the host renders one question per
 native step and durably checkpoints each accepted answer before showing the
-next. Cancellation preserves completed steps and resumes at the next unanswered
-item. A task revision supersedes an unresolved batch rather than resuming stale
-user intent. A `follow_up` task inherits the
+next. For a non-English batch, `localized_questions` is an ordered UI
+projection only: do not invent or recreate canonical `question_key` or
+`option_id` values. Cortex maps an exactly preserved complete key set by key;
+otherwise it maps projections and options by canonical position and ignores
+display IDs. A task revision supersedes an unresolved batch rather than
+resuming stale user intent. A `follow_up` task inherits the
 completed source task's user language while preserving this English-only
 worker boundary.
 

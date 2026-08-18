@@ -205,7 +205,10 @@ brief, context files, and at most eight validated domains.
   original value/language and require canonical `answer_en` for localized free
   text. `ask_batch` accepts 1–32 stable questions but the native UI renders
   only one step at a time under one durable `batch_ref`; each accepted step is
-  checkpointed, and cancellation resumes at the next unanswered question.
+  checkpointed, and cancellation resumes at the next unanswered question. A
+  localized batch is an ordered projection: an exact complete canonical key
+  set is used when supplied, otherwise question and option display data maps
+  by canonical position and any model-supplied display IDs are ignored.
   `poll_batch` returns canonical English answers; an active task revision
   supersedes an unresolved batch so stale intent cannot resume a worker.
 - Fixture Luna-high evaluation covers sequential, compact parallel, and
