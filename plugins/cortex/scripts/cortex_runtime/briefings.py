@@ -369,6 +369,13 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
 
     codebase_memory_refresh = agent in CODEBASE_MEMORY_REFRESH_PROFILES
     codebase_memory_project_key = codebase_memory_project_key_from_root(package.get("project_root"))
+    read_discipline_contract = (
+        "Turn-local read discipline: keep an evidence index of every fully read skill, file, report, and source range. "
+        "Read each exact path once per worker turn and reuse that evidence; never reopen an unchanged skill, briefing, "
+        "context page, source file, or report merely because a later step needs attention. A second read is allowed only "
+        "after explicit truncation/pagination, a post-read edit, or for a distinct unread range. Search before opening a "
+        "large file and read only the needed range. This rule applies to every internal worker profile; do not subdelegate."
+    )
     codebase_memory_contract = (
         f"If Codebase Memory query tools are present, use project key {codebase_memory_project_key!r} directly as "
         "the `project` argument; do not call `list_projects` before the first indexed query. It is derived from "
@@ -471,6 +478,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         f"Budget or operating limit: {package.get('budget') or 'none supplied'}",
         "",
         "## Repository intelligence",
+        read_discipline_contract,
         knowledge_consumption_contract(package.get("knowledge_index_files", [])),
         codebase_memory_contract,
         "",

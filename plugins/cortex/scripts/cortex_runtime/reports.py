@@ -1616,7 +1616,7 @@ def _worker_report_error_path(message: str) -> str:
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Read one active-task report by compact ref for a coordinator or successor worker."""
     try:
-        resolved = _v3_resolve_task(params)
+        resolved = _v3_resolve_task(params, require_task_ref=True)
         if isinstance(resolved, dict):
             return resolved
         task_dir, state, _, task_ref = resolved

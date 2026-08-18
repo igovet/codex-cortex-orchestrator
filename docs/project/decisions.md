@@ -153,10 +153,11 @@ coordinator preserves it on every later lifecycle and report-read call so
 different task contracts can run concurrently below one project root without
 cross-session ambiguity. A byte-identical active start replays the same task;
 the replay returns no native dispatches and therefore cannot launch a duplicate
-wave. If the original response was lost before dispatch, management inspect
-recovers only still-awaiting requests. Changed task or wave content creates a distinct task. If a ref is omitted while
-several tasks are selectable, Cortex returns `needs_selection` with bounded
-objective/ref candidates instead of relying on a process-wide "active task."
+wave. If the original **successful** response was lost before dispatch,
+management inspect recovers only still-awaiting requests using that exact ref.
+Changed task or wave content creates a distinct task. An omitted ref always
+returns `task_ref_required` rather than relying on a process-wide "active
+task." A failed start without a ref created no task to recover.
 
 Human-readable complexity, phase, profile, status, and common language aliases
 are normalized before task-state creation. This keeps the public schema small

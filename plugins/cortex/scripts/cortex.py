@@ -172,10 +172,11 @@ MCP_OPENAI_FORM = False
 MCP_INTERACTIVE = False
 _STATE_LOCK_LOCAL = threading.local()
 MCP_SERVER_INSTRUCTIONS = (
-    "Cortex opt-in. Root preserves task_ref, follows exact responses/dispatches, and publishes every read_worker_report "
+    "Cortex opt-in. Root preserves task_ref, follows exact responses, and publishes every read_worker_report "
     "report_markdown_link. Internal workers emit English only. For all public tools use bundled skills, schemas and "
-    "responses; never inspect plugin source/cache/.codex. Bind starts by exact task_name/dispatch identity. After resume, "
-    "clear, or compaction inspect once: spawn pending dispatches, wait child ids, use context_handoff, never restart."
+    "responses; never inspect plugin source/cache/.codex. Lifecycle requires task_ref; no unscoped recovery. Read "
+    "once/turn unless changed/partial. Bind starts by task_name/dispatch. After resume, clear, or compaction inspect once "
+    "with task_ref: spawn, wait ids, use context_handoff, never restart."
 )
 
 try:
@@ -6569,8 +6570,46 @@ def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candi
     return result
 
 
+def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
+    """Return a terminal start result when no task was safely created.
+
+    A registry incompatibility happens before Cortex can reserve a task or
+    return an opaque task reference.  Treating it as ordinary caller input led
+    coordinators to call unscoped recovery, which could select an unrelated
+    active task under the same project root.
+    """
+    result = _v3_error("start_state_incompatible", message, outcome="blocked")
+    result["retryable"] = False
+    result["task_created"] = False
+    result["recovery"] = "user_authorized_ledger_maintenance_required"
+    result["next_action"] = (
+        f"{COORDINATOR_LOCK} Cortex did not create a task and returned no task_ref. Do not call "
+        "manage_orchestration, continue_orchestration, read_worker_report, inspect, select another task, or "
+        "dispatch a worker. Stop and report that the project ledger requires user-authorized maintenance."
+    )
+    return result
+
+
+def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
+    """Refuse project-wide fallback selection for task-scoped public calls."""
+    result = _v3_error(
+        "task_ref_required",
+        f"{operation} requires the exact task_ref returned by a successful Cortex lifecycle response.",
+    )
+    result["next_action"] = (
+        f"{COORDINATOR_LOCK} Do not inspect, list, infer, or select another task from this project root. "
+        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, stop and report "
+        "the blocker."
+    )
+    return result
+
+
 def _v3_task_ref(task_id: str) -> str:
     return "task-" + digest_text(task_id)[:12]
+
+
+class OperationRegistryError(ValueError):
+    """The project-wide replay registry cannot safely serve lifecycle calls."""
 
 
 def _operation_registry_path(root: Path) -> Path:
@@ -6584,9 +6623,9 @@ def _operation_registry(root: Path) -> dict[str, Any]:
         {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "starts": {}, "tasks": {}, "updated_at": now()},
     )
     if registry.get("schema") != PUBLIC_ORCHESTRATION_SCHEMA:
-        raise ValueError("orchestration operation registry schema is not supported")
+        raise OperationRegistryError("orchestration operation registry schema is not supported")
     if not isinstance(registry.get("starts"), dict) or not isinstance(registry.get("tasks"), dict):
-        raise ValueError("orchestration operation registry is invalid")
+        raise OperationRegistryError("orchestration operation registry is invalid")
     return registry
 
 
@@ -6969,10 +7008,17 @@ def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = Fal
     return candidates
 
 
-def _v3_resolve_task(params: dict[str, Any], *, include_completed: bool = False) -> tuple[Path, dict[str, Any], dict[str, Any], str] | dict[str, Any]:
+def _v3_resolve_task(
+    params: dict[str, Any],
+    *,
+    include_completed: bool = False,
+    require_task_ref: bool = False,
+) -> tuple[Path, dict[str, Any], dict[str, Any], str] | dict[str, Any]:
     root = ledger_root(params)
     candidates = _v3_task_candidates(params, include_completed=include_completed)
     requested = str(params.get("task_ref") or "").strip()
+    if require_task_ref and not requested:
+        return _v3_task_ref_required_error("task-scoped Cortex call")
     if requested:
         selected = next((item for item in candidates if item["task_ref"] == requested), None)
         if selected is None:
@@ -7413,6 +7459,8 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "host_capabilities": _v3_host_capabilities(),
         })
         return _v3_response(old, task_ref, start_replayed=replayed)
+    except OperationRegistryError as exc:
+        return _v3_start_state_blocked_error(exc)
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         return _v3_error("start_validation_failed", exc)
 
@@ -7490,6 +7538,11 @@ def _v3_continue_context(
 ) -> tuple[dict[str, Any], list[str], str, str, dict[str, Any] | None]:
     root = ledger_root(params)
     request_digest = _orchestrate_request_digest({key: value for key, value in params.items() if key != "task_ref"})
+    stable_input_digest = _orchestrate_request_digest({
+        key: value
+        for key, value in params.items()
+        if key not in {"task_ref", "future_waves", "reason", "rework"}
+    })
     with state_lock(root):
         registry = _operation_registry(root)
         task_record = registry["tasks"].setdefault(state["task_id"], {})
@@ -7499,7 +7552,20 @@ def _v3_continue_context(
         inflight = task_record.get("inflight_continue")
         if isinstance(inflight, dict):
             if inflight.get("digest") != request_digest:
-                raise ValueError("A different continue payload is already recovering this active wave; retry the original payload first.")
+                old_params = inflight.get("old_params") if isinstance(inflight.get("old_params"), dict) else {}
+                receipt = db_get_operation(root, safe_id(str(old_params.get("submission_id") or "")))
+                can_correct_future = (
+                    inflight.get("stable_input_digest") == stable_input_digest
+                    and isinstance(receipt, dict)
+                    and receipt.get("operation") == "advance"
+                    and receipt.get("status") == "failed"
+                    and receipt.get("phase") == "gates_recorded"
+                )
+                if not can_correct_future:
+                    raise ValueError("A different continue payload is already recovering this active wave; retry the original payload first.")
+                inflight["digest"] = request_digest
+                inflight["corrected_at"] = now()
+                _write_operation_registry(root, registry)
             return dict(inflight["old_params"]), list(inflight["attempt_ids"]), str(inflight["wave_id"]), request_digest, None
         wave, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
         submission_id = safe_id("orchestration-continue-" + digest_text(state["task_id"] + ":" + str(wave["wave_id"]) + ":" + request_digest)[:20])
@@ -7518,6 +7584,7 @@ def _v3_continue_context(
             "attempt_ids": attempt_ids,
             "old_params": old_params,
             "task_ref": task_ref,
+            "stable_input_digest": stable_input_digest,
             "created_at": now(),
         }
         _write_operation_registry(root, registry)
@@ -7574,13 +7641,15 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError("unsupported continue fields: " + ", ".join(unknown))
+        if not resolved_task_ref:
+            return _v3_task_ref_required_error("continue_orchestration")
         results = params.get("results")
         if not isinstance(results, list) or not results:
             raise ValueError("results must be a non-empty array")
         completed_replay = _v3_completed_replay(params)
         if completed_replay is not None:
             return completed_replay
-        resolved = _v3_resolve_task(params)
+        resolved = _v3_resolve_task(params, require_task_ref=True)
         if isinstance(resolved, dict):
             return resolved
         task_dir, state, task, task_ref = resolved
@@ -7717,7 +7786,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         return response
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         try:
-            resolved = _v3_resolve_task(params)
+            resolved = _v3_resolve_task(params, require_task_ref=True)
             if not isinstance(resolved, dict):
                 _, state, _, _ = resolved
                 root = ledger_root(params)
@@ -8307,9 +8376,12 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             if nested_ref:
                 params = {**params, "task_ref": nested_ref}
                 resolved_task_ref = nested_ref
+        if not str(params.get("task_ref") or "").strip():
+            return _v3_task_ref_required_error(f"manage_orchestration intent '{intent}'")
         resolved = _v3_resolve_task(
             params,
             include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "deactivate", "follow_up"},
+            require_task_ref=True,
         )
         if isinstance(resolved, dict):
             return resolved

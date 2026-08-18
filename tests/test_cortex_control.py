@@ -3445,6 +3445,40 @@ class ControlPlaneTests(unittest.TestCase):
         tasks = self.ledger / "tasks"
         self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
+    def test_v3_incompatible_registry_blocks_start_without_selecting_an_existing_task(self):
+        existing = self.v3_start("existing task must remain isolated")
+        self.assertTrue(existing["ok"])
+
+        unscoped = control.manage_orchestration({
+            "project_root": str(self.project), "intent": "inspect",
+        })
+        self.assertFalse(unscoped["ok"])
+        self.assertEqual(unscoped["code"], "task_ref_required")
+        self.assertNotIn("task_ref", unscoped)
+        self.assertIn("Do not inspect, list, infer, or select another task", unscoped["next_action"])
+
+        control.db_put_global(
+            self.ledger,
+            "operation_registry",
+            {"schema": "cortex/orchestration/v0", "starts": {}, "tasks": {}},
+        )
+        blocked = self.v3_start("new task must never attach to the existing task")
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["outcome"], "blocked")
+        self.assertEqual(blocked["code"], "start_state_incompatible")
+        self.assertFalse(blocked["retryable"])
+        self.assertFalse(blocked["task_created"])
+        self.assertNotIn("task_ref", blocked)
+        self.assertIn("Cortex did not create a task", blocked["next_action"])
+        self.assertIn("Do not call manage_orchestration", blocked["next_action"])
+
+        recovery = control.manage_orchestration({
+            "project_root": str(self.project), "intent": "inspect",
+        })
+        self.assertFalse(recovery["ok"])
+        self.assertEqual(recovery["code"], "task_ref_required")
+        self.assertNotIn("task_ref", recovery)
+
     def test_planner_rejects_microtasks_without_acceptance_and_verification(self):
         started = self.v3_start("plan a bounded change", waves=[{"workers": [{"phase": "plan"}]}])
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -4333,7 +4367,7 @@ class ControlPlaneTests(unittest.TestCase):
             "results": [{"report_ref": "report-not-selected"}],
         })
         self.assertFalse(ambiguous["ok"])
-        self.assertEqual(ambiguous["code"], "task_selection_required")
+        self.assertEqual(ambiguous["code"], "task_ref_required")
         advanced = control.continue_orchestration({
             "project_root": str(self.project),
             "task_ref": starts[0]["task_ref"],
@@ -4645,13 +4679,13 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_single_and_parallel_worker_slots_are_relative_and_atomic(self):
         sequential = self.v3_start("single slot", waves=[{"workers": [{"phase": "discover"}]}])
         advanced = control.continue_orchestration({
-            "project_root": str(self.project), "step": sequential["step"],
+            "project_root": str(self.project), "task_ref": sequential["task_ref"], "step": sequential["step"],
             "results": self.v3_results(sequential),
         })
         self.assertTrue(advanced["ok"])
         while advanced["outcome"] != "completed":
             advanced = control.continue_orchestration({
-                "project_root": str(self.project), "step": advanced["step"],
+                "project_root": str(self.project), "task_ref": advanced["task_ref"], "step": advanced["step"],
                 "results": self.v3_results(advanced),
             })
             self.assertTrue(advanced["ok"])
@@ -4668,7 +4702,7 @@ class ControlPlaneTests(unittest.TestCase):
         task_dir = max((self.ledger / "tasks").iterdir())
         before = json.dumps(self.task_state(task_dir), sort_keys=True)
         rejected = control.continue_orchestration({
-            "project_root": str(self.project), "step": started["step"],
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
             "results": [
                 {"worker": 1, "report_ref": "report-one"},
                 {"worker": 1, "report_ref": "report-duplicate"},
@@ -4679,7 +4713,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse("inflight_continue" in control._operation_registry(self.ledger))
         accepted_results = self.v3_results(started, [self.v3_report("one"), self.v3_report("two")])
         accepted = control.continue_orchestration({
-            "project_root": str(self.project), "step": started["step"],
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
             "results": [accepted_results[1], accepted_results[0]],
         })
         self.assertTrue(accepted["ok"])
@@ -4690,7 +4724,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"workers": [{"phase": "qa"}]},
         ])
         payload = {
-            "project_root": str(self.project), "step": started["step"],
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
             "results": self.v3_results(started, self.v3_report("same report")),
         }
         first = control.continue_orchestration(payload)
@@ -4705,7 +4739,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(task_record["last_continue"]["response"]["replayed"])
         self.assertEqual(first["step"], 2)
         second = control.continue_orchestration({
-            "project_root": str(self.project),
+            "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": first["step"],
             "results": self.v3_results(first, self.v3_report("same report")),
         })
@@ -4744,6 +4778,7 @@ class ControlPlaneTests(unittest.TestCase):
 
         read = control.read_worker_report({
             "project_root": str(self.project),
+            "task_ref": started["task_ref"],
             "report_ref": published["report_ref"],
         })
         self.assertEqual(read["report"], report)
@@ -4758,7 +4793,7 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertIn("Publish report_markdown_link verbatim", read["next_action"])
         advanced = control.continue_orchestration({
-            "project_root": str(self.project),
+            "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"],
             "results": [{"report_ref": published["report_ref"]}],
         })
@@ -6290,8 +6325,7 @@ class ControlPlaneTests(unittest.TestCase):
             ),
         })
         advanced = control.continue_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
+            "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"],
             "results": [{"report_ref": first["report_ref"]}],
         })
@@ -6753,6 +6787,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         inspected = control.manage_orchestration({
             "project_root": str(self.project),
+            "task_ref": started["task_ref"],
             "intent": "inspect",
         })
         self.assertTrue(inspected["ok"])
@@ -6778,6 +6813,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("manage_orchestration", inspected["context_handoff"]["next_action"])
         advanced = control.continue_orchestration({
             "project_root": str(self.project),
+            "task_ref": started["task_ref"],
             "step": inspected["step"],
             "results": [{"report_ref": published["report_ref"]}],
         })
@@ -6892,7 +6928,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_failed_worker_is_retired_before_a_successful_relative_retry(self):
         started = self.v3_start("worker retry", waves=[{"workers": [{"phase": "discover"}]}])
         failed = control.continue_orchestration({
-            "project_root": str(self.project), "step": started["step"],
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
             "results": [{
                 "status": "failed",
                 "reason": "transient worker failure",
@@ -6903,7 +6939,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(failed["step"], started["step"])
         self.assertEqual(len(failed["dispatches"]), 1)
         retried = control.continue_orchestration({
-            "project_root": str(self.project), "step": failed["step"],
+            "project_root": str(self.project), "task_ref": failed["task_ref"], "step": failed["step"],
             "results": self.v3_results(failed, self.v3_report("retry succeeded")),
         })
         self.assertTrue(retried["ok"])
@@ -6990,7 +7026,7 @@ class ControlPlaneTests(unittest.TestCase):
         payload = None
         while current["outcome"] != "completed":
             payload = {
-                "project_root": str(self.project), "step": current["step"],
+                "project_root": str(self.project), "task_ref": current["task_ref"], "step": current["step"],
                 "results": self.v3_results(current, self.v3_report(f"completed step {current['step']}")),
             }
             current = control.continue_orchestration(payload)
@@ -7005,25 +7041,49 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(replay["dispatches"], [])
         self.assertEqual(replay["result"], completed["result"])
 
-    def test_v3_ambiguous_active_tasks_require_an_opaque_task_ref(self):
-        for objective in ("first active", "second active"):
-            self.v3_start(objective, waves=[{"workers": [{"phase": "discover"}]}])
-        ambiguous = control.manage_orchestration({"project_root": str(self.project)})
-        self.assertEqual(ambiguous["outcome"], "needs_selection")
-        self.assertEqual({item["objective"] for item in ambiguous["candidates"]}, {"first active", "second active"})
+    def test_v3_management_never_implicitly_selects_an_active_task(self):
+        started = self.v3_start("active task requires an opaque reference", waves=[{"workers": [{"phase": "discover"}]}])
+        unscoped = control.manage_orchestration({"project_root": str(self.project)})
+        self.assertFalse(unscoped["ok"])
+        self.assertEqual(unscoped["code"], "task_ref_required")
+        self.assertNotIn("candidates", unscoped)
         selected = control.manage_orchestration({
             "project_root": str(self.project), "intent": "inspect",
-            "task_ref": ambiguous["candidates"][0]["task_ref"],
+            "task_ref": started["task_ref"],
         })
         self.assertTrue(selected["ok"])
         self.assertNotIn("task_id", selected)
+
+    def test_v3_task_scoped_public_calls_require_task_ref(self):
+        started = self.v3_start("every public task call is explicitly scoped")
+        empty_continuation = control.continue_orchestration({
+            "project_root": str(self.project),
+        })
+        self.assertFalse(empty_continuation["ok"])
+        self.assertEqual(empty_continuation["code"], "task_ref_required")
+        continuation = control.continue_orchestration({
+            "project_root": str(self.project),
+            "step": started["step"],
+            "results": [{
+                "status": "failed",
+                "reason": "exercise task_ref guard",
+                "dispatch_ref": started["dispatches"][0]["dispatch_ref"],
+            }],
+        })
+        self.assertFalse(continuation["ok"])
+        self.assertEqual(continuation["code"], "task_ref_required")
+        report_read = control.read_worker_report({
+            "project_root": str(self.project), "report_ref": "report-0001",
+        })
+        self.assertFalse(report_read["ok"])
+        self.assertEqual(report_read["code"], "task_ref_required")
 
     def test_public_api_ignores_private_task_without_canonical_plan(self):
         created = self.init(task_id="unplanned-private-task", complexity="C1")
         self.delegate(created["state"], "unplanned-private-task", "discover", "explorer")
         inspected = control.manage_orchestration({"project_root": str(self.project), "intent": "inspect"})
         self.assertFalse(inspected["ok"])
-        self.assertEqual(inspected["code"], "no_active_task")
+        self.assertEqual(inspected["code"], "task_ref_required")
 
     def test_v3_future_wave_rework_requires_explicit_opt_in(self):
         started = self.v3_start("v3 future rework", waves=[
@@ -7031,7 +7091,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"workers": [{"phase": "implementation"}]},
         ])
         common = {
-            "project_root": str(self.project), "step": started["step"],
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
             "results": self.v3_results(started, self.v3_report("discovery complete")),
             "future_waves": [{"workers": [{"phase": "discover"}, {"phase": "implementation"}]}],
             "reason": "new evidence requires discovery rework",
@@ -7040,7 +7100,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(denied["ok"])
         self.assertIn("allow_rework=true", denied["diagnostics"][0]["message"])
         missing_pipeline = control.continue_orchestration({
-            "project_root": str(self.project),
+            "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"],
             "results": common["results"],
             "rework": True,
@@ -7104,7 +7164,7 @@ class ControlPlaneTests(unittest.TestCase):
             {"workers": [{"phase": "implementation"}]},
         ])
         advanced = control.continue_orchestration({
-            "project_root": str(self.project), "step": started["step"],
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
             "results": self.v3_results(started, self.v3_report("discovery complete")),
             "future_waves": [{"workers": [{"phase": "implementation"}]}],
             "reason": "confirm the coordinator-selected implementation route",
@@ -7116,6 +7176,68 @@ class ControlPlaneTests(unittest.TestCase):
         plan = control.db_load_task(self.ledger, self.task_state(task_dir)["task_id"])[2]
         wave_ids = [wave["wave_id"] for wave in plan["waves"]]
         self.assertEqual(wave_ids, sorted(set(wave_ids)))
+
+    def test_v3_final_planner_automatically_receives_verified_scope_basis(self):
+        started = self.v3_start("planner keeps every verified scope report", waves=[
+            {"workers": [{"phase": "scope", "profile": "planner"}]},
+        ])
+        scope_results = self.v3_results(started, self.v3_report("scope evidence"))
+        advanced = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": scope_results,
+            "future_waves": [
+                {"workers": [{"phase": "plan", "profile": "planner"}]},
+                {"workers": [{"phase": "architecture", "profile": "architect"}]},
+                {"workers": [{"phase": "implementation", "profile": "backend_dev"}]},
+                {"workers": [{"phase": "qa", "profile": "qa_engineer"}]},
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+            "reason": "scope evidence requires a complete final planning basis",
+        })
+        self.assertTrue(advanced["ok"], advanced)
+        self.assertEqual(advanced["dispatches"][0]["phase"], "plan")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        planner = next(item for item in state["attempts"] if item["gate"] == "plan" and not item.get("invalidated"))
+        self.assertIn(scope_results[0]["report_ref"], planner["context_report_ids"])
+
+    def test_v3_corrected_future_retry_resumes_a_failed_gates_recorded_transaction(self):
+        started = self.v3_start("correct a future wave without a stale lock", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        payload = {
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("discovery evidence")),
+            "future_waves": [{"workers": [{"phase": "implementation"}]}],
+            "reason": "initial future-wave contract",
+        }
+        with mock.patch.object(
+            orchestration_engine,
+            "_prepare_orchestrate_wave",
+            side_effect=ValueError("future-wave contract needs correction"),
+        ):
+            rejected = control.continue_orchestration(payload)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "orchestrate_validation_failed")
+        self.assertEqual(rejected["diagnostics"][0]["phase"], "gates_recorded")
+
+        corrected = control.continue_orchestration({
+            **payload,
+            "reason": "corrected future-wave contract after the returned diagnostic",
+        })
+        self.assertTrue(corrected["ok"], corrected)
+        self.assertEqual(corrected["outcome"], "ready_to_spawn")
+        self.assertEqual(corrected["dispatches"][0]["phase"], "implementation")
+        registry = control._operation_registry(self.ledger)
+        task_id = next(iter(registry["tasks"]))
+        self.assertNotIn("inflight_continue", registry["tasks"][task_id])
 
     def test_orchestrate_start_replays_and_advance_returns_parallel_then_dependent_wave(self):
         waves = [
@@ -7576,7 +7698,7 @@ class ControlPlaneTests(unittest.TestCase):
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {"extensions": {"openai/form": {}}}}})
             self.assertEqual(initialized["result"]["serverInfo"]["name"], "cortex")
-            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "manage_orchestration", "arguments": {"intent": "question", "project_root": str(self.project), "payload": {"command": "ask", "question": "Continue?"}}}}) + "\n")
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "manage_orchestration", "arguments": {"intent": "question", "project_root": str(self.project), "task_ref": started["task_ref"], "payload": {"command": "ask", "question": "Continue?"}}}}) + "\n")
             proc.stdin.flush()
             elicitation = json.loads(proc.stdout.readline())
             self.assertEqual(elicitation["method"], "elicitation/create")
@@ -8462,7 +8584,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.0.2")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.0.3")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

@@ -10,13 +10,13 @@ from typing import Any
 
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. For intent=question pass payload.question_ref and optional localized UI labels. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
+    "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker report body.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response; never inspect, list, infer, or select a task after a start response without task_ref. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. For intent=question pass payload.question_ref and optional localized UI labels. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
-    "read_worker_report": "Read one persisted worker report by report_ref. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
+    "read_worker_report": "Read one persisted worker report by report_ref and the exact task_ref from the successful lifecycle response. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
 
 
@@ -380,7 +380,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "task_ref": {"type": "string", "description": "Needed only when Cortex reports several selectable tasks."},
+            "task_ref": {"type": "string", "description": "Exact opaque task reference returned by start_orchestration; required for every continuation."},
             "step": {"type": "integer", "minimum": 1, "description": "Relative step returned by the preceding Cortex response; enables safe idempotent replay without a wave identifier."},
             "results": {
                 "type": "array",
@@ -494,7 +494,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1},
-            "task_ref": {"type": "string"},
+            "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every report read."},
             "report_ref": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
@@ -526,7 +526,7 @@ def build_public_schemas(
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
             "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, prune, legacy, or maintenance; common aliases are normalized."},
-            "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
+            "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune, legacy, and maintenance omit it."},
             "reason": {"type": "string"},
             "payload": {
                 "type": "object",

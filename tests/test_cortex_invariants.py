@@ -1477,6 +1477,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
             with self.subTest(profile=name, gate=gate):
                 self.assertLess(len(prompt.encode("utf-8")), 16_000, name)
                 self.assertIn(f"You are the internal Cortex worker with profile `{name}`.", prompt)
+                self.assertIn("Turn-local read discipline:", prompt)
+                self.assertIn("Read each exact path once per worker turn", prompt)
                 self.assertIn("## Profile file and artifact contract", prompt)
                 self.assertIn(f"Required inputs: {execution['inputs']}", prompt)
                 self.assertIn(f"Project artifacts: {execution['project_artifacts']}", prompt)
@@ -1718,7 +1720,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.0.2")
+        self.assertEqual(base_version, "9.0.3")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
