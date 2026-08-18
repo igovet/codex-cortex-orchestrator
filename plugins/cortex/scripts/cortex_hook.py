@@ -33,13 +33,21 @@ try:
         artifact_path as db_task_artifact_path,
         get_global as db_get_global,
         load_task as db_load_task,
+        find_successful_tool_observation as db_find_successful_tool_observation,
+        mark_tool_observation_duplicate as db_mark_tool_observation_duplicate,
+        record_tool_observation as db_record_tool_observation,
         task_index as db_task_index,
+        tool_context_epoch as db_tool_context_epoch,
     )
 except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open.
     db_task_artifact_path = None
     db_get_global = None
     db_load_task = None
+    db_find_successful_tool_observation = None
+    db_mark_tool_observation_duplicate = None
+    db_record_tool_observation = None
     db_task_index = None
+    db_tool_context_epoch = None
 
 try:
     import fcntl
@@ -66,8 +74,11 @@ TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 MAX_LIFECYCLE_EVENTS = 1000
 MAX_LIFECYCLE_BYTES = 256 * 1024
 MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
+MAX_CACHEABLE_READ_BYTES = 64 * 1024
 CORTEX_START_TOOLS = {"mcp__cortex__start_orchestration", "mcp__cortex__manage_orchestration"}
 CORTEX_REPORT_TOOL = "mcp__cortex__read_worker_report"
+READ_ONLY_FILE_TOOLS = {"Read", "Grep", "Glob"}
+CACHEABLE_FILE_READ_TOOLS = {"Read"}
 WORKER_CONTEXT = (
     "You are an internal worker, never user-facing. Stay within delegated ownership and allowed paths; "
     "All internal worker communication, progress updates, Cortex tool arguments, reports, questions, findings, handoffs, and native final responses must be in English. "
@@ -257,6 +268,218 @@ def is_context_recovery(event: dict) -> bool:
     return False
 
 
+def _bounded_digest(value: object) -> str | None:
+    """Hash a serializable value without retaining its potentially private text."""
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    if len(encoded) > MAX_TOOL_RESPONSE_BYTES:
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _event_tool_input(event: dict) -> dict:
+    value = event.get("tool_input")
+    return value if isinstance(value, dict) else {}
+
+
+def _normalised_file_path(project: Path, value: object) -> tuple[Path, str] | None:
+    """Return an in-workspace regular path and its privacy-preserving identity."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 4096 or "\x00" in raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = project / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        relative = resolved.relative_to(project.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        info = resolved.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return resolved, relative.as_posix()
+
+
+def _safe_range_descriptor(tool_input: dict) -> tuple[dict, bool]:
+    """Keep numeric ranges useful while hashing opaque cursors and values."""
+    values: dict[str, object] = {}
+    has_range = False
+    for key in ("offset", "limit", "start", "end", "line_start", "line_end", "range", "cursor"):
+        if key not in tool_input:
+            continue
+        has_range = True
+        value = tool_input.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            values[key] = value
+        else:
+            digest = _bounded_digest(value)
+            if digest:
+                values[f"{key}_digest"] = digest
+    return values, has_range
+
+
+def tool_observation(event: dict, project: Path, task_id: str, attempt_id: str, context_epoch: int) -> dict | None:
+    """Create bounded, non-secret metadata for one safe file tool invocation.
+
+    The raw path and search text influence the fingerprint but never leave this
+    process.  The durable observation stores only hashes plus numeric ranges.
+    """
+    tool_name = str(event.get("tool_name") or "")
+    if tool_name not in READ_ONLY_FILE_TOOLS:
+        return None
+    tool_input = _event_tool_input(event)
+    raw_path = next((tool_input.get(key) for key in ("file_path", "path", "filename") if tool_input.get(key)), None)
+    path_info = _normalised_file_path(project, raw_path)
+    normalised_path = path_info[1] if path_info else ""
+    ranges, has_range = _safe_range_descriptor(tool_input)
+    raw_query = next((tool_input.get(key) for key in ("query", "pattern", "search_query") if tool_input.get(key) is not None), None)
+    query_digest = _bounded_digest(raw_query) if raw_query is not None else None
+    path_digest = hashlib.sha256(normalised_path.encode("utf-8")).hexdigest()
+    file_digest = None
+    workspace_generation = "unavailable"
+    cacheable = False
+    if tool_name in CACHEABLE_FILE_READ_TOOLS and path_info and not has_range:
+        try:
+            file_path = path_info[0]
+            size = file_path.stat().st_size
+            if 0 <= size <= MAX_CACHEABLE_READ_BYTES:
+                file_digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+                supplied_generation = event.get("workspace_generation", event.get("workspaceGeneration"))
+                generation_digest = _bounded_digest(supplied_generation) if supplied_generation is not None else None
+                workspace_generation = f"host:{generation_digest}" if generation_digest else f"file:{file_digest}"
+                cacheable = True
+        except OSError:
+            pass
+    if not cacheable:
+        supplied_generation = event.get("workspace_generation", event.get("workspaceGeneration"))
+        generation_digest = _bounded_digest(supplied_generation) if supplied_generation is not None else None
+        workspace_generation = f"host:{generation_digest}" if generation_digest else "unavailable"
+    normalized_arguments = {
+        "path_digest": path_digest,
+        "query_digest": query_digest,
+        "range": ranges,
+    }
+    fingerprint_input = {
+        "tool_name": tool_name,
+        "path": normalised_path,
+        "query": str(raw_query or ""),
+        "range": ranges,
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "context_epoch": context_epoch,
+        "workspace_generation": workspace_generation,
+        "file_digest": file_digest,
+    }
+    fingerprint = _bounded_digest(fingerprint_input)
+    if not fingerprint:
+        return None
+    return {
+        "fingerprint": fingerprint,
+        "tool_name": tool_name,
+        "normalized_arguments": json.dumps(normalized_arguments, sort_keys=True, separators=(",", ":")),
+        "workspace_generation": workspace_generation,
+        "coverage": "full" if cacheable else "noncacheable",
+        "cacheable": cacheable,
+    }
+
+
+def tool_call_failed(event: dict) -> bool:
+    """Treat missing or explicitly error-shaped post-tool results as failures."""
+    response = event.get("tool_response")
+    if response is None:
+        return True
+    if isinstance(response, dict):
+        return bool(response.get("is_error") or response.get("isError") or response.get("error"))
+    return False
+
+
+def attempt_for_tool_observation(event: dict, state: dict) -> str:
+    """Bind observations to an exact worker attempt, or the coordinator lane."""
+    candidates = {
+        str(event.get("agent_id") or "").strip(),
+        str(event.get("agent_type") or "").strip(),
+    }
+    candidates.discard("")
+    for attempt in state.get("attempts", []):
+        if not isinstance(attempt, dict):
+            continue
+        spawn_request = attempt.get("spawn_request") or {}
+        host_spawn = attempt.get("host_spawn") or {}
+        aliases = {
+            str(attempt.get("attempt_id") or "").strip(),
+            str(spawn_request.get("task_name") or "").strip(),
+            str(host_spawn.get("agent_id") or "").strip(),
+            str(host_spawn.get("task_name") or "").strip(),
+        }
+        if aliases.intersection(candidates):
+            attempt_id = str(attempt.get("attempt_id") or "").strip()
+            if attempt_id:
+                return attempt_id
+    return "coordinator"
+
+
+def context_epoch_for_tool_observation(ledger: Path, task_id: str, event: dict) -> int:
+    """Use a durable epoch, rolling it on an explicitly reported compaction."""
+    if db_tool_context_epoch is None:
+        return 0
+    try:
+        supplied = event.get("context_epoch", event.get("contextEpoch"))
+        if isinstance(supplied, int) and not isinstance(supplied, bool) and supplied >= 0:
+            return supplied
+        return int(db_tool_context_epoch(ledger, task_id, bump=is_context_recovery(event)))
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def apply_tool_deduplication(
+    event: dict, project: Path, ledger: Path, task_id: str, state: dict,
+) -> dict | None:
+    """Persist observations and deny only proven duplicate small full reads."""
+    if db_record_tool_observation is None:
+        return None
+    attempt_id = attempt_for_tool_observation(event, state)
+    epoch = context_epoch_for_tool_observation(ledger, task_id, event)
+    observation = tool_observation(event, project, task_id, attempt_id, epoch)
+    if observation is None:
+        return None
+    hook_name = str(event.get("hook_event_name") or "")
+    if hook_name == "PreToolUse" and observation["cacheable"]:
+        try:
+            already_read = db_find_successful_tool_observation(
+                ledger, task_id, attempt_id, epoch, observation["fingerprint"], observation["workspace_generation"],
+            )
+            if already_read:
+                db_mark_tool_observation_duplicate(ledger, task_id, attempt_id, epoch, observation["fingerprint"])
+                return {"duplicate": True, "tool_name": observation["tool_name"]}
+        except (OSError, ValueError, TypeError):
+            return None
+    elif hook_name == "PostToolUse":
+        result_digest = _bounded_digest(event.get("tool_response"))
+        try:
+            db_record_tool_observation(
+                ledger,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                context_epoch=epoch,
+                fingerprint=observation["fingerprint"],
+                tool_name=observation["tool_name"],
+                normalized_arguments=observation["normalized_arguments"],
+                workspace_generation=observation["workspace_generation"],
+                result_digest=result_digest,
+                coverage=observation["coverage"],
+                status="failed" if tool_call_failed(event) else "success",
+            )
+        except (OSError, ValueError, TypeError):
+            return None
+    return None
+
+
 def structured_tool_result(event: dict) -> dict | None:
     """Extract one bounded public Cortex result from an MCP call envelope."""
     response = event.get("tool_response")
@@ -378,7 +601,12 @@ def task_directory(ledger: Path, task_id: str) -> Path:
         return ledger / "tasks" / f"missing-{task_id}"
     try:
         candidate = db_task_artifact_path(ledger, task_id)
-        if candidate is not None and candidate.is_dir():
+        # A task's artifact directory is deliberately lazy.  SQLite owns the
+        # path before any projection exists, and a lifecycle event is one of
+        # the few operations allowed to materialize it.  Do not require the
+        # directory to exist here: that would redirect the hook to a bogus
+        # ``missing-*`` path and silently suppress telemetry for new tasks.
+        if candidate is not None:
             return reject_symlink_ancestry(candidate, "task directory")
     except (OSError, ValueError):
         pass
@@ -467,7 +695,7 @@ def stopped_worker_after_wait_context(
     state: dict,
     public_task_ref: str | None,
 ) -> str | None:
-    """Reassert failed-stop recovery when control returns from a host wait."""
+    """Reassert exact-worker resume recovery after a native stop."""
     if (
         str(event.get("hook_event_name")) != "PostToolUse"
         or str(event.get("tool_name")) not in {"Agent", "wait"}
@@ -480,25 +708,51 @@ def stopped_worker_after_wait_context(
     if not attempts:
         return None
     latest = attempts[-1]
-    if (
-        latest.get("status") != "failed"
-        or latest.get("host_stop_outcome") != "native_worker_stopped_without_report"
-    ):
+    if latest.get("host_stop_outcome") != "native_worker_stopped_recoverable":
         return None
     attempt_id = str(latest.get("attempt_id") or "unknown")
+    host_spawn = latest.get("host_spawn") or {}
+    host_agent_id = str(host_spawn.get("agent_id") or "").strip()
+    host_task_name = str(host_spawn.get("task_name") or (latest.get("spawn_request") or {}).get("task_name") or "").strip()
+    if not host_agent_id or not host_task_name:
+        return None
     inspect = (
         f"Call manage_orchestration(intent='inspect', task_ref={public_task_ref!r}) once"
         if public_task_ref
         else "Call manage_orchestration(intent='inspect') once with the preserved task_ref"
     )
     return (
-        f"CORTEX WAIT RECOVERY: latest attempt {attempt_id!r} is durably failed without a report. "
-        "Do not call followup_task, wait on, or respawn this stopped child, even when its native final text is a report-tool error. "
-        f"{inspect}; submit the exact failed result so Cortex can authorize canonical rework."
+        f"CORTEX WAIT RECOVERY: latest attempt {attempt_id!r} stopped without a report but remains resumable on its exact "
+        f"native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). Do not respawn it or substitute another worker. "
+        f"{inspect}; then resume this exact worker with followup_task and request its durable report."
     )
 
 
 def append_lifecycle_event(task_dir: Path, event: dict) -> None:
+    """Append bounded telemetry, materializing only the task-local export.
+
+    Task initialization intentionally leaves its artifact directory absent.
+    Telemetry is an optional projection, but an active lifecycle hook may
+    create the task directory and its three private files at the moment it
+    records an event.  All existing ancestry is checked without following
+    symlinks before creation; no broad layout is recreated as a side effect.
+    """
+    task_dir = reject_symlink_ancestry(task_dir, "task directory")
+    parent = reject_symlink_ancestry(task_dir.parent, "task directory parent")
+    try:
+        parent_info = parent.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError("task directory parent is unavailable") from exc
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise ValueError("task directory parent must be a real directory")
+    try:
+        task_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    task_info = task_dir.lstat()
+    if stat.S_ISLNK(task_info.st_mode) or not stat.S_ISDIR(task_info.st_mode):
+        raise ValueError("task directory must be a real directory")
+    task_dir.chmod(0o700, follow_symlinks=False)
     event_path = reject_symlink_ancestry(task_dir / "lifecycle-events.jsonl", "lifecycle event file")
     meta_path = reject_symlink_ancestry(task_dir / "lifecycle-events-meta.json", "lifecycle event metadata")
     lock_path = reject_symlink_ancestry(task_dir / ".lifecycle-events.lock", "lifecycle event lock")
@@ -599,6 +853,14 @@ def main() -> None:
         state = loaded[1] if loaded is not None else {}
         if state.get("schema") != SCHEMA or state.get("task_id") != task_id:
             raise ValueError("unsupported or mismatched task state")
+        if (
+            str(event.get("hook_event_name")) == "SessionStart"
+            and is_context_recovery(event)
+            and db_tool_context_epoch is not None
+        ):
+            # A host-reported compact/clear is a hard cache boundary even if
+            # it does not carry a numeric context epoch itself.
+            db_tool_context_epoch(ledger, task_id, bump=True)
         # The host-session index selects a task only when the binding is
         # unambiguous. Authorization still uses the task's unique
         # principal, so multiple tasks in one host session cannot cross-read
@@ -673,6 +935,19 @@ def main() -> None:
             "tool_name": str(event.get("tool_name")) if TOOL_NAME_RE.fullmatch(str(event.get("tool_name", ""))) else None,
         }
         append_lifecycle_event(task_dir, safe)
+        dedupe = apply_tool_deduplication(event, project, ledger, task_id, state)
+        if dedupe and dedupe.get("duplicate") and safe["hook"] == "PreToolUse":
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "CORTEX TOOL DEDUPLICATION: an unchanged small full-file read already succeeded in this "
+                        "context epoch. Reuse the prior result; do not retry this read."
+                    ),
+                }
+            }, ensure_ascii=False))
+            return
         stop_context = stopped_worker_after_wait_context(event, state, task_ref(ledger, task_id))
         if stop_context:
             print(json.dumps(hook_context("PostToolUse", stop_context), ensure_ascii=False))

@@ -6,111 +6,118 @@ loaded lazily by the facade after the entrypoint has completed initialization.
 """
 from __future__ import annotations
 
-# The facade is intentionally the only composition root. Lazy import prevents a
-# second executable instance when Codex validates the entrypoint through
-# importlib while keeping this domain independently reviewable.
-import cortex as _runtime
+import json
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
-from cortex import (
-    ACTIVATION_COMMAND,
-    AGENTS,
-    AVAILABLE_GATES,
-    AWAITING_HOST_SPAWN,
-    Any,
-    Callable,
-    MAX_CONTEXT_REPORTS,
-    MAX_ORCHESTRATE_GATE_FAILURES,
-    MAX_WORK_PACKAGES,
-    NORMAL_COMMAND,
-    ORCHESTRATE_MUTATING_OPERATIONS,
-    ORCHESTRATE_OPERATIONS,
-    ORCHESTRATE_SCHEMA,
-    ORCHESTRATION_PLAN_SCHEMA,
-    ORCHESTRATION_TRANSACTION_SCHEMA,
-    Path,
-    REPORT_SCHEMA,
-    SUPPORTED_MODELS,
-    TERMINAL_ATTEMPT_STATUSES,
-    _attempt,
-    _collect_orchestrate_diagnostics,
-    _context_handoff_service,
-    _delegation_package,
-    _ledger_root_for_artifact,
-    _open_blocking_questions,
-    _plan_approval,
-    _plan_approval_is_pending,
-    _report_index,
-    _validate_report_decision_closure,
-    _write_delegation_package,
-    acquire_lock,
-    activate_orchestration,
-    active_gates,
-    answer_worker_question,
-    authorize,
-    authorize_principal,
-    bind_task_lane,
-    canonical_pipeline_gate,
-    capture_project_manifest,
-    claim_lane,
-    claim_lane_resource,
-    claim_resource,
-    classify,
-    classify_task,
-    close_audit,
-    compare_manifests,
-    cortex_question,
-    create_lane,
-    current_planning_manifest,
-    db_get_classification,
-    db_get_operation,
-    db_load_task,
-    db_put_operation,
-    db_update_task_plan,
-    deactivate_orchestration,
-    digest_text,
-    execute_verification,
-    finalize_attempt,
-    get_worker_question_updates,
-    init_task,
-    json,
-    lane_status,
-    ledger_root,
-    list_worker_questions,
-    load_state,
-    load_task_definition,
-    materialize_lane,
-    normalize_parallel_groups,
-    now,
-    primary_gate,
-    publish_worker_question,
-    read_immutable_json_artifact,
-    reassess_pipeline,
-    reconcile_lane,
-    record_delegation,
-    record_evidence,
-    record_gate,
-    redact,
-    release_lane,
-    release_lane_resource,
-    release_lock,
-    release_resource,
-    render_gate_briefing,
-    report_bus_paths,
-    report_markdown_link,
-    report_markdown_path,
-    resolve_dispatch_route,
-    resume_task,
-    retire_lane,
-    safe_id,
-    sanitize_report_payload,
-    sanitize_structured,
-    save_state,
-    select_project_root,
-    state_lock,
-    status,
-    task_manifest_baseline,
-    task_paths,
-    update_pipeline,
+from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
+
+
+# The executable facade is the composition root.  It supplies this explicitly
+# declared port set after it has finished initialization; this module never
+# imports the facade and therefore cannot form a reverse import cycle.
+bind_symbols(
+    "orchestration_engine",
+    globals(),
+    (
+        "ACTIVATION_COMMAND",
+        "AGENTS",
+        "AVAILABLE_GATES",
+        "AWAITING_HOST_SPAWN",
+        "MAX_CONTEXT_REPORTS",
+        "MAX_ORCHESTRATE_GATE_FAILURES",
+        "MAX_WORK_PACKAGES",
+        "NORMAL_COMMAND",
+        "ORCHESTRATE_MUTATING_OPERATIONS",
+        "ORCHESTRATE_OPERATIONS",
+        "ORCHESTRATE_SCHEMA",
+        "ORCHESTRATION_PLAN_SCHEMA",
+        "ORCHESTRATION_TRANSACTION_SCHEMA",
+        "REPORT_SCHEMA",
+        "SUPPORTED_MODELS",
+        "TERMINAL_ATTEMPT_STATUSES",
+        "_attempt",
+        "_collect_orchestrate_diagnostics",
+        "_context_handoff_service",
+        "_delegation_package",
+        "_ledger_root_for_artifact",
+        "_open_blocking_questions",
+        "_plan_approval",
+        "_plan_approval_is_pending",
+        "_report_index",
+        "_validate_report_decision_closure",
+        "_write_delegation_package",
+        "acquire_lock",
+        "activate_orchestration",
+        "active_gates",
+        "answer_worker_question",
+        "authorize",
+        "authorize_principal",
+        "bind_task_lane",
+        "canonical_pipeline_gate",
+        "capture_project_manifest",
+        "claim_lane",
+        "claim_lane_resource",
+        "claim_resource",
+        "classify",
+        "classify_task",
+        "close_audit",
+        "compare_manifests",
+        "cortex_question",
+        "create_lane",
+        "current_planning_manifest",
+        "db_get_classification",
+        "db_get_operation",
+        "db_load_task",
+        "db_put_operation",
+        "db_update_task_plan",
+        "deactivate_orchestration",
+        "digest_text",
+        "execute_verification",
+        "finalize_attempt",
+        "get_worker_question_updates",
+        "handoff",
+        "init_task",
+        "lane_status",
+        "ledger_root",
+        "list_worker_questions",
+        "load_state",
+        "load_task_definition",
+        "materialize_lane",
+        "normalize_parallel_groups",
+        "now",
+        "primary_gate",
+        "publish_worker_question",
+        "read_immutable_json_artifact",
+        "reassess_pipeline",
+        "reconcile_lane",
+        "record_delegation",
+        "record_evidence",
+        "record_gate",
+        "redact",
+        "release_lane",
+        "release_lane_resource",
+        "release_lock",
+        "release_resource",
+        "render_gate_briefing",
+        "report_bus_paths",
+        "report_markdown_link",
+        "report_markdown_path",
+        "resolve_dispatch_route",
+        "resume_task",
+        "retire_lane",
+        "safe_id",
+        "sanitize_report_payload",
+        "sanitize_structured",
+        "save_state",
+        "select_project_root",
+        "state_lock",
+        "status",
+        "task_manifest_baseline",
+        "task_paths",
+        "update_pipeline",
+    ),
 )
 
 def _orchestrate_error(
@@ -656,6 +663,13 @@ def _orchestrate_response(
         "diagnostics": diagnostics or [],
         "next_action": next_action,
     }
+    if facade_state == "waiting_workers":
+        response.update({
+            "output_policy": "silent",
+            "allowed_visible_events": [
+                "user_message", "worker_question", "worker_completed", "worker_failed", "blocking_error",
+            ],
+        })
     if isinstance(plan, dict):
         response["pipeline"] = _orchestrate_pipeline_snapshot(state, plan)
     if result is not None:
@@ -821,8 +835,10 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any
         }
     return {
         "report_ref": report_ref,
-        "report_markdown_path": str(report_markdown_path(task_dir, report_ref)),
-        "report_markdown_link": report_markdown_link(task_dir, report_ref, planner_attempt.get("gate", "plan")),
+        # This payload is persisted while the orchestration transaction is
+        # held.  Keep it wholly canonical: a Markdown projection is optional
+        # filesystem output and is resolved only once the transaction commits.
+        "report_phase": planner_attempt.get("gate", "plan"),
         "summary": redact(report["summary"], 2400),
         "findings": [redact(item, 1000) for item in report.get("findings", [])][:12],
         "uncertainty": [redact(item, 1000) for item in report.get("uncertainty", [])][:12],
@@ -830,6 +846,31 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any
         "remaining_phases": list(active_gates(state)),
         **({"planning_artifacts": artifact_summary} if artifact_summary else {}),
     }
+
+
+def _materialize_response_report_links(params: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    """Add Desktop Markdown links only after the business transaction commits."""
+    result = response.get("result")
+    review = result.get("plan_review") if isinstance(result, dict) else None
+    if not isinstance(review, dict) or "report_markdown_path" in review:
+        return response
+    report_ref = safe_id(str(review.get("report_ref") or ""))
+    if not report_ref:
+        return response
+    task_id = safe_id(str(response.get("task_id") or params.get("task_id") or ""))
+    if not task_id:
+        return response
+    _, task_dir, state = load_state(task_id, params)
+    from cortex_runtime.reports import ensure_report_markdown_path
+
+    markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+    review["report_markdown_path"] = str(markdown_path)
+    review["report_markdown_link"] = report_markdown_link(
+        task_dir,
+        report_ref,
+        review.get("report_phase", "plan"),
+    )
+    return response
 
 
 def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any]) -> dict[str, Any] | None:
@@ -962,9 +1003,16 @@ def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any],
         f"{gate}: {state.get('gates', {}).get(gate, {}).get('summary') or state.get('gates', {}).get(gate, {}).get('outcome', 'completed')}"
         for gate in state.get("completed_gates", [])
     ] or [f"Prepared handoff for {primary_gate(state)}"]
-    return _runtime.handoff({
+    # A v3 caller has no task principal: it owns only the opaque task_ref.
+    # Reconstruct the durable task identity here instead of forwarding a
+    # coordinator/session alias into the authorization boundary.  Resolve the
+    # public handoff seam at call time so host integrations (and compatibility
+    # tests) can replace that facade adapter without re-importing this engine.
+    return bound_symbol("orchestration_engine", "handoff")({
         **params,
         "task_id": state["task_id"],
+        "principal": state.get("principal"),
+        "thread_id": state.get("thread_id"),
         "expected_revision": state["revision"],
         "name": f"orchestrate-{primary_gate(state)}-{state['revision'] + 1}",
         "completed": completed,
@@ -1105,6 +1153,29 @@ def _ensure_attempt_evidence(
     if result.get("recorded") is False:
         raise ValueError(str(result.get("reason") or "attempt evidence was not recorded"))
     return result["state"]
+
+
+def _canonical_gate_decision(task_dir: Path, state: dict[str, Any], gate: str) -> str | None:
+    """Read the strongest canonical decision published by passed gate attempts."""
+    priority = {"pass": 0, "rework": 1, "fail": 2, "blocked": 3}
+    decisions: list[str] = []
+    for attempt in state.get("attempts", []):
+        if attempt.get("gate") != gate or attempt.get("invalidated") or attempt.get("status") != "passed":
+            continue
+        for report_ref in attempt.get("report_ids", []):
+            record, _ = read_immutable_json_artifact(
+                task_dir,
+                state["task_id"],
+                f"reports/records/{safe_id(str(report_ref))}.json",
+                kinds={"worker_report", "report_record"},
+            )
+            envelope = record.get("gate_result") or record.get("closure")
+            if not isinstance(envelope, dict):
+                continue
+            decision = str(envelope.get("decision") or "").strip().lower()
+            if decision in priority:
+                decisions.append(decision)
+    return max(decisions, key=priority.__getitem__) if decisions else None
 
 
 def _replace_future_orchestrate_waves(
@@ -1281,6 +1352,15 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
             statuses = {item.get("status") for item in gate_attempts}
             default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
+            gate_decision = _canonical_gate_decision(task_dir, state, gate)
+            if gate_decision == "blocked":
+                default_outcome = "blocked"
+            elif gate_decision == "fail":
+                default_outcome = "failed"
+            elif gate_decision == "rework":
+                # record_gate consults canonical blockers and performs the
+                # fail-back transition instead of completing this gate.
+                default_outcome = "passed"
             outcome = str(gate_outcomes.get(gate, default_outcome))
             failure_counts = state.setdefault("orchestrate_gate_failure_counts", {})
             failure_count_changed = False
@@ -1330,6 +1410,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 "gate": gate,
                 "outcome": outcome,
                 "summary": gate_summary,
+                "enforce_canonical_findings": gate_decision in {"rework", "fail"},
             })
             if recorded.get("recorded") is False:
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
@@ -1451,18 +1532,34 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
         and not item.get("invalidated")
     ]
     report_index = _report_index(report_bus_paths(task_dir), state["task_id"])
-    available_reports = [
-        {
-            "report_ref": item.get("report_id"),
+    from cortex_runtime.reports import ensure_report_markdown_path
+
+    available_reports = []
+    for item in report_index.get("reports", []):
+        if not isinstance(item, dict):
+            continue
+        report_ref = safe_id(str(item.get("report_id") or ""))
+        if not report_ref:
+            continue
+        report_view = {
+            "report_ref": report_ref,
             "phase": item.get("gate"),
             "profile": (item.get("producer") or {}).get("profile"),
             "summary": item.get("summary"),
-            "report_markdown_path": str(report_markdown_path(task_dir, item.get("report_id"))),
-            "report_markdown_link": report_markdown_link(task_dir, item.get("report_id"), item.get("gate", "report")),
         }
-        for item in report_index.get("reports", [])
-        if isinstance(item, dict)
-    ][-MAX_CONTEXT_REPORTS:]
+        try:
+            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+            report_view.update({
+                "report_markdown_path": str(markdown_path),
+                "report_markdown_link": report_markdown_link(task_dir, report_ref, item.get("gate", "report")),
+            })
+        except (OSError, ValueError) as exc:
+            # Report content remains canonical in SQLite.  An optional lazy
+            # Markdown projection may be temporarily leased or unavailable,
+            # but that must not make durable state inspection unrecoverable.
+            report_view["projection_error"] = redact(str(exc), 500)
+        available_reports.append(report_view)
+    available_reports = available_reports[-MAX_CONTEXT_REPORTS:]
     context_handoff = _context_handoff(task_dir, state, task, plan)
     return _orchestrate_response(
         "inspect",
@@ -1625,7 +1722,7 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             root = ledger_root(params)
             transaction_path, transaction, replay = _begin_orchestrate_transaction(root, params)
             if replay is not None:
-                return replay
+                return _materialize_response_report_links(params, replay)
         if operation == "start":
             result = _orchestrate_start(params, transaction_path, transaction)
         elif operation == "advance":
@@ -1658,8 +1755,12 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             nested_result = result.get("result") if isinstance(result.get("result"), dict) else {}
             if operation == "question" and nested_result.get("status") == "elicitation_unavailable":
                 return _leave_orchestrate_transaction_retryable(transaction_path, transaction, result)
-            return _commit_orchestrate_transaction(transaction_path, transaction, result)
-        return {**result, "transaction_id": None, "idempotent": False}
+            committed = _commit_orchestrate_transaction(transaction_path, transaction, result)
+            return _materialize_response_report_links(params, committed)
+        return _materialize_response_report_links(
+            params,
+            {**result, "transaction_id": None, "idempotent": False},
+        )
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
         error = _orchestrate_error(

@@ -58,6 +58,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIsNotNone(document)
         return document
 
+    def reconcile_projections(self, *, worker_id="control-plane-test"):
+        """Explicitly materialize optional exports before filesystem assertions."""
+        from cortex_runtime.projection_service import reconcile
+        return reconcile(self.ledger, worker_id=worker_id)
+
     @staticmethod
     def briefing_from_request(request):
         path = Path(request["briefing_path"])
@@ -166,9 +171,30 @@ class ControlPlaneTests(unittest.TestCase):
             "profile": attempt["profile"],
             "report": report,
         }
+        if attempt["gate"] in {"review", "close"}:
+            payload["closure"] = {
+                "decision": "pass",
+                "findings": [],
+                "verification": {"executed": ["focused regression"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            }
         if attempt["gate"] == "plan":
             payload["planning"] = self.v3_planning()
         published = control.publish_worker_report(payload)
+        self.assertTrue(published["ok"], published)
+        return published["report_ref"]
+
+    def _publish_closure_report(self, task_dir, state, attempt, closure, report=None, submission_id=None):
+        """Publish a review/close report with an explicit closure sibling."""
+        report = self._report_with_briefing(attempt, report or self.v3_report(f"{attempt['gate']} completed"))
+        published = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+            "closure": closure,
+        })
         self.assertTrue(published["ok"], published)
         return published["report_ref"]
 
@@ -512,7 +538,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertIsNone(recovered)
 
-    def test_subagent_stop_without_report_is_durably_failed_and_not_waitable(self):
+    def test_subagent_stop_without_report_remains_exactly_resumable(self):
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         with mock.patch.dict(
             os.environ,
@@ -550,8 +576,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(stopped.stdout.strip(), "{}", stopped.stderr)
         state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
-        self.assertEqual(attempt["status"], "failed")
-        self.assertEqual(attempt["finalization_reason"], "native_worker_stopped_without_report")
+        self.assertEqual(attempt["status"], "running")
+        self.assertEqual(attempt["host_stop_outcome"], "native_worker_stopped_recoverable")
+        self.assertTrue(attempt["host_resumable"])
         waited = subprocess.run(
             [sys.executable, str(hook)],
             input=json.dumps({
@@ -570,26 +597,29 @@ class ControlPlaneTests(unittest.TestCase):
         wait_output = json.loads(waited.stdout)
         wait_context = wait_output["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(wait_output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        self.assertIn("durably failed without a report", wait_context)
-        self.assertIn("Do not call followup_task", wait_context)
+        self.assertIn("stopped without a report but remains resumable", wait_context)
+        self.assertIn("followup_task", wait_context)
+        self.assertIn("native.Stop:01", wait_context)
         self.assertIn(started["task_ref"], wait_context)
         inspected = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
         })
         self.assertEqual(inspected["context_handoff"]["active_workers"], [])
         self.assertEqual(inspected["context_handoff"]["stopped_workers"][0]["host_agent_id"], "native.Stop:01")
-        self.assertIn("status=failed", inspected["next_action"])
+        self.assertIn("followup_task", inspected["next_action"])
+        self.assertIn("native.Stop:01", inspected["next_action"])
         self.assertNotIn("Wait only on", inspected["next_action"])
 
     def test_post_wait_stop_context_ignores_passed_and_running_attempts(self):
         event = {"hook_event_name": "PostToolUse", "tool_name": "wait"}
-        failed = {"attempts": [{
+        resumable = {"attempts": [{
             "attempt_id": "close-01",
-            "status": "failed",
-            "host_stop_outcome": "native_worker_stopped_without_report",
+            "status": "running",
+            "host_stop_outcome": "native_worker_stopped_recoverable",
+            "host_spawn": {"agent_id": "native.Close:01", "task_name": "close_01_abcd1234"},
         }]}
-        context = cortex_hook.stopped_worker_after_wait_context(event, failed, "task-test")
-        self.assertIn("Do not call followup_task", context)
+        context = cortex_hook.stopped_worker_after_wait_context(event, resumable, "task-test")
+        self.assertIn("followup_task", context)
         self.assertIn("manage_orchestration(intent='inspect'", context)
 
         for status, outcome in (("passed", "report_recorded"), ("running", None)):
@@ -843,7 +873,7 @@ class ControlPlaneTests(unittest.TestCase):
                 created = self._handlers["init_task"]({"task_id": "plugin-cwd", "objective": "workspace binding", "complexity": "C1", "classification_id": classified["classification_id"], "principal": "thread-a", **arguments})
                 self.assertEqual(created["ledger_root"], str(root / ".codex/cortex"))
                 self.assertTrue((root / ".codex/cortex/cortex.db").is_file())
-                self.assertTrue((root / ".codex/cortex/tasks" / created["task_directory"]).is_dir())
+                self.assertFalse((root / ".codex/cortex/tasks" / created["task_directory"]).exists())
                 observed = self._handlers["status"]({"task_id": "plugin-cwd", "principal": "thread-a", **arguments})
                 self.assertEqual(observed["task"]["project_root"], project)
                 self.assertEqual(observed["ledger_root"], str(root / ".codex/cortex"))
@@ -858,8 +888,10 @@ class ControlPlaneTests(unittest.TestCase):
         root = self.ledger
         self.assertEqual(first["task_number"], 1)
         self.assertEqual(second["task_number"], 2)
-        self.assertTrue((root / "tasks" / "0001-first-task").is_dir())
-        self.assertTrue((root / "tasks" / "0002-second-task").is_dir())
+        self.assertEqual(control.db_task_artifact_path(root, "first-task"), root / "tasks" / "0001-first-task")
+        self.assertEqual(control.db_task_artifact_path(root, "second-task"), root / "tasks" / "0002-second-task")
+        self.assertFalse((root / "tasks" / "0001-first-task").exists())
+        self.assertFalse((root / "tasks" / "0002-second-task").exists())
         self.assertEqual(control.status({"task_id": "first-task", "principal": "thread-a"})["task"]["task_number"], 1)
 
     def test_activation_persists_until_main_chat_returns_to_normal(self):
@@ -1787,7 +1819,13 @@ class ControlPlaneTests(unittest.TestCase):
             "task_id": "evidence-reconciliation", "principal": "thread-a",
             "expected_revision": state["revision"], "gate": "discover", "summary": "Observed repository evidence.",
         })
-        path = self.ledger / "tasks/0001-evidence-reconciliation/evidence/evidence-0001.json"
+        task_dir = self.ledger / "tasks/0001-evidence-reconciliation"
+        canonical = control.db_get_artifact_for_export_path(
+            self.ledger, "evidence-reconciliation", "evidence/evidence-0001.json",
+        )
+        self.assertIsNotNone(canonical)
+        self.reconcile_projections(worker_id="evidence-projection-test")
+        path = task_dir / "evidence/evidence-0001.json"
         record = json.loads(path.read_text(encoding="utf-8"))
         record["summary"] = "tampered"
         path.write_text(json.dumps(record), encoding="utf-8")
@@ -2053,7 +2091,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("internal Cortex worker with profile `general`", self.briefing_from_request(delegation["spawn_request"]))
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
 
-    def test_delegation_skips_orphan_briefing_ordinals_after_a_partial_write(self):
+    def test_delegation_ignores_orphan_briefing_export_when_allocating_attempt(self):
         state = self.init(task_id="orphan-briefing-recovery")["state"]
         task_dir = control.db_task_artifact_path(self.ledger, "orphan-briefing-recovery")
         delegations = task_dir / "delegations"
@@ -2062,7 +2100,9 @@ class ControlPlaneTests(unittest.TestCase):
             "orphaned immutable briefing\n", encoding="utf-8"
         )
         delegation = self.delegate(state, "orphan-briefing-recovery", "discover", "explorer")
-        self.assertEqual(delegation["attempt_id"], "discover-08")
+        self.assertEqual(delegation["attempt_id"], "discover-01")
+        self.assertNotEqual(Path(delegation["spawn_request"]["briefing_path"]), delegations / "discover-07.dispatch-orphan123.briefing.md")
+        self.assertEqual(self.task_state(task_dir)["attempts"][0]["attempt_id"], "discover-01")
 
     def test_native_worker_task_name_compacts_long_request_derived_task_ids(self):
         long_task_id = "cortex-orchestrator-local-plugin-cache-ca-bd8a9ad4"
@@ -2521,7 +2561,10 @@ class ControlPlaneTests(unittest.TestCase):
         pending = control.cortex_question({
             "task_id": "question-ui", "principal": "thread-a", "attempt_id": delegated["attempt_id"],
             "submission_id": "explorer-question-1", "question": "Which paths should be changed?",
-            "options": [{"label": "src", "description": "Update source files"}, {"label": "tests", "description": "Update tests"}],
+            "options": [
+                {"option_id": "source_paths", "label": "src", "description": "Update source files"},
+                {"option_id": "test_paths", "label": "tests", "description": "Update tests"},
+            ],
             "multiple": True, "custom_label": "Additional direction", "context": {"reason": "scope"},
         })
         self.assertEqual(pending["status"], "pending_user_input")
@@ -2531,14 +2574,14 @@ class ControlPlaneTests(unittest.TestCase):
         question = listed["questions"][0]
         self.assertEqual(question["options"][0]["label"], "src")
         self.assertTrue(question["multiple"])
-        with mock.patch.object(control, "_request_mcp_elicitation", return_value=("accept", {"selections": ["src", "tests"], "custom_response": {"image": {"path": "/tmp/shot.png"}}}, "elicitation-1")):
+        with mock.patch.object(control, "_request_mcp_elicitation", return_value=("accept", {"selections": ["source_paths", "test_paths"], "custom_response": {"image": {"path": "/tmp/shot.png"}}}, "elicitation-1")):
             answered = control.cortex_question({"task_id": "question-ui", "principal": "thread-a", "question_id": question_id})
         self.assertEqual(answered["status"], "answered")
-        self.assertEqual(answered["answer"]["selections"], ["src", "tests"])
+        self.assertEqual(answered["answer"]["option_ids"], ["source_paths", "test_paths"])
         self.assertEqual(answered["answer"]["custom_response"]["image"]["path"], "/tmp/shot.png")
         updates = control.get_worker_question_updates({"task_id": "question-ui", "principal": "thread-a", "attempt_id": delegated["attempt_id"]})
         self.assertEqual(updates["updates"][-1]["kind"], "question_answered")
-        self.assertEqual(updates["updates"][-1]["answer"]["selections"], ["src", "tests"])
+        self.assertEqual(updates["updates"][-1]["answer_option_ids"], ["source_paths", "test_paths"])
 
     def test_cortex_question_form_always_puts_custom_field_last(self):
         single = control._question_form_schema(control._question_config({"header": "Pick one", "options": ["A", "B"]}))
@@ -3113,6 +3156,7 @@ class ControlPlaneTests(unittest.TestCase):
         accepted_report = self._report_with_briefing(attempt, accepted_report)
         accepted = control.publish_worker_report({**identity, "report": accepted_report})
         self.assertTrue(accepted["ok"])
+        self.reconcile_projections(worker_id="result-validation-test")
         record = json.loads(
             (task_dir / "reports/records" / f"{accepted['report_ref']}.json").read_text(encoding="utf-8")
         )
@@ -3695,6 +3739,54 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(replay["pruned_count"], 0)
 
+    def test_v3_prune_failure_preserves_canonical_metadata_until_retry(self):
+        started = self.v3_start("prune retry must retain canonical state", waves=[{"workers": [{"phase": "discover"}]}])
+        index = control.read_task_index(self.ledger)
+        task_id = next(task_id for task_id in index if control._v3_task_ref(task_id) == started["task_ref"])
+        task_dir = self.ledger / "tasks" / index[task_id]["directory"]
+        state = self.task_state(task_dir)
+        state["status"] = "completed"
+        state["updated_at"] = "2000-01-01T00:00:00+00:00"
+        self.write_task_state(state)
+        task = control.load_task_definition(task_dir)
+        control.db_put_global(self.ledger, "resource_claims", {
+            "task-claim": {"scope_kind": "task", "scope_id": task_id},
+        })
+        before_registry = control._operation_registry(self.ledger)
+
+        with mock.patch.object(control, "_remove_prune_directory", side_effect=OSError("simulated filesystem outage")):
+            failed = control.manage_orchestration({
+                "project_root": str(self.project),
+                "intent": "prune",
+                "payload": {"confirmation": "PRUNE", "older_than_days": 7},
+            })
+        self.assertFalse(failed["ok"])
+        self.assertTrue(task_dir.exists())
+        self.assertIn(task_id, control.read_task_index(self.ledger))
+        self.assertEqual(control._operation_registry(self.ledger), before_registry)
+        self.assertEqual(control.db_get_global(self.ledger, "resource_claims", {}), {
+            "task-claim": {"scope_kind": "task", "scope_id": task_id},
+        })
+        self.assertIsNotNone(control.db_get_classification(self.ledger, task["classification_id"]))
+        tombstones = control.db_list_prune_tombstones(self.ledger, task_id=task_id)
+        self.assertEqual([row["status"] for row in tombstones], ["failed"])
+
+        retried = control.manage_orchestration({
+            "project_root": str(self.project),
+            "intent": "prune",
+            "payload": {"confirmation": "PRUNE", "older_than_days": 7},
+        })
+        self.assertTrue(retried["ok"])
+        self.assertFalse(task_dir.exists())
+        self.assertNotIn(task_id, control.read_task_index(self.ledger))
+        self.assertNotIn(task_id, control._operation_registry(self.ledger)["tasks"])
+        self.assertEqual(control.db_get_global(self.ledger, "resource_claims", {}), {})
+        self.assertIsNone(control.db_get_classification(self.ledger, task["classification_id"]))
+        self.assertEqual(
+            [row["status"] for row in control.db_list_prune_tombstones(self.ledger, task_id=task_id)],
+            ["finalized"],
+        )
+
     def test_v3_prune_retains_old_active_task_and_shared_classification_receipt(self):
         active = self.v3_start("long-running task must survive prune", waves=[{"workers": [{"phase": "discover"}]}])
         completed = self.v3_start("completed task can be pruned", waves=[{"workers": [{"phase": "discover"}]}])
@@ -4072,9 +4164,9 @@ class ControlPlaneTests(unittest.TestCase):
             "results": self.v3_results(first, self.v3_report("same report")),
         })
         self.assertTrue(second["ok"])
-        reports = list((next((self.ledger / "tasks").iterdir()) / "reports/records").glob("*.json"))
-        self.assertEqual(len(reports), 2)
         state = self.task_state(next((self.ledger / "tasks").iterdir()))
+        reports = control.list_task_reports({"task_id": state["task_id"], "principal": state["principal"]})["reports"]
+        self.assertEqual(len(reports), 2)
         completed_attempts = [item for item in state["attempts"] if item["status"] == "passed"]
         self.assertEqual(completed_attempts[0]["dispatch_correlation"], "worker_report_received")
         self.assertNotIn("host_spawn", completed_attempts[0])
@@ -4159,8 +4251,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("only predecessor report refs", ungranted["diagnostics"][0]["message"])
         self.assertIn("mcp__codebase_memory__list_projects", prompt)
         self.assertIn("If no exact usable index exists, do not create or refresh one in this gate.", prompt)
-        records = list((task_dir / "reports/records").glob("*.json"))
-        self.assertEqual(len(records), 1)
+        self.assertFalse((task_dir / "reports/records").exists())
+        report_artifacts, _ = control.db_list_artifacts(
+            self.ledger, state["task_id"], kind="worker_report", offset=0, page_size=10,
+        )
+        self.assertEqual(len(report_artifacts), 1)
         state = control.load_task_state_for_artifact(task_dir)
         completed = next(item for item in state["attempts"] if item["gate"] == "discover")
         self.assertEqual(completed["report_ids"], [published["report_ref"]])
@@ -4268,6 +4363,196 @@ class ControlPlaneTests(unittest.TestCase):
         report["summary"] = "Close remains blocked on an unresolved dependency."
         with self.assertRaisesRegex(ValueError, "unresolved completion markers: blocked"):
             control._validate_close_report(task_dir, state, attempt, report)
+
+    def test_closure_finding_is_canonical_across_review_close_and_resolved_rework(self):
+        started = self.v3_start(
+            "canonical closure finding rework",
+            waves=[
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        review = state["attempts"][0]
+        finding = {
+            "fingerprint": "docs-link-001", "severity": "P2", "status": "open", "blocking": True,
+            "summary": "Documentation link is stale",
+            "next_action": {"required": True, "target_gate": "documentation", "description": "Refresh the link"},
+        }
+        closure = {
+            "decision": "pass", "findings": [finding],
+            "verification": {"executed": ["focused closure regression"], "not_executed": [], "required_missing": [], "limitations": []},
+            "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+        }
+        review_ref = self._publish_closure_report(task_dir, state, review, closure)
+        rework = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": review_ref}],
+        })
+        self.assertTrue(rework["ok"], rework)
+        self.assertEqual(rework["outcome"], "ready_to_spawn")
+        self.assertEqual(rework["dispatches"][0]["phase"], "documentation")
+        findings = control.db_list_task_findings(self.ledger, state["task_id"], include_resolved=False)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["source_evidence"], [{"report_id": "report-0001", "attempt_id": review["attempt_id"]}])
+        after_rework = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(after_rework["status"], "active")
+        self.assertEqual(after_rework["closure_rework"]["review"]["target_gate"], "documentation")
+        self.assertEqual(after_rework["closure_rework"]["review"]["rerun_gates"], ["review", "close"])
+        self.assertTrue(next(item for item in after_rework["attempts"] if item["attempt_id"] == review["attempt_id"])["invalidated"])
+
+        rerun_review = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": rework["step"],
+            "results": self.v3_results(rework, self.v3_report("documentation correction completed")),
+        })
+        self.assertTrue(rerun_review["ok"], rerun_review)
+        self.assertEqual(rerun_review["dispatches"][0]["phase"], "review")
+
+        current = control.load_task_state_for_artifact(task_dir)
+        replacement_review = next(
+            item for item in current["attempts"]
+            if item["gate"] == "review" and not item.get("invalidated")
+        )
+        resolved = dict(finding, status="resolved", blocking=False, resolved_at="2026-08-17T12:00:00Z", next_action={"required": False})
+        resolved_closure = dict(closure, findings=[resolved])
+        resolved_report, _ = self._report_for_attempt(
+            task_dir,
+            replacement_review,
+            self.v3_report("review confirmed the documentation correction"),
+        )
+        resolved_ref = self._publish_closure_report(
+            task_dir,
+            current,
+            replacement_review,
+            resolved_closure,
+            report=resolved_report,
+        )
+        close = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": rerun_review["step"],
+            "results": [{"report_ref": resolved_ref}],
+        })
+        self.assertTrue(close["ok"], close)
+        self.assertEqual(close["dispatches"][0]["phase"], "close")
+        self.assertEqual(control.db_list_task_findings(self.ledger, state["task_id"])[0]["status"], "resolved")
+
+        completed = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": close["step"],
+            "results": self.v3_results(close, self.v3_report("fresh close passed after the corrective review")),
+        })
+        self.assertTrue(completed["ok"], completed)
+        self.assertEqual(completed["outcome"], "completed")
+
+    def test_open_canonical_p2_blocks_a_textually_passing_close_and_reopens_rework(self):
+        started = self.v3_start(
+            "close cannot override canonical closure debt",
+            waves=[
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        )
+        reviewed = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("review textually passed")),
+        })
+        documented = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": reviewed["step"],
+            "results": self.v3_results(reviewed, self.v3_report("documentation textually passed")),
+        })
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        close_attempt = next(item for item in state["attempts"] if item["gate"] == "close" and not item.get("invalidated"))
+        control.db_upsert_task_finding(
+            self.ledger,
+            state["task_id"],
+            {
+                "fingerprint": "late-p2-001", "severity": "P2", "status": "open", "blocking": False,
+                "summary": "A canonical P2 remains open",
+                "next_action": {"required": True, "target_gate": "documentation", "description": "Correct the documented defect"},
+            },
+            source={"report_id": "report-0001", "attempt_id": state["attempts"][0]["attempt_id"]},
+        )
+        rework = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": documented["step"],
+            "results": self.v3_results(documented, self.v3_report("close textually passed despite P2")),
+        })
+        self.assertTrue(rework["ok"], rework)
+        self.assertEqual(rework["outcome"], "ready_to_spawn")
+        self.assertEqual(rework["dispatches"][0]["phase"], "documentation")
+        after = control.load_task_state_for_artifact(task_dir)
+        self.assertTrue(next(item for item in after["attempts"] if item["attempt_id"] == close_attempt["attempt_id"])["invalidated"])
+        self.assertNotEqual(after["status"], "completed")
+
+    def test_required_verification_missing_blocks_review_and_dispatches_rework(self):
+        started = self.v3_start(
+            "required verification cannot be overridden",
+            waves=[
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        review = state["attempts"][0]
+        closure = {
+            "decision": "pass", "findings": [],
+            "verification": {
+                "executed": [], "not_executed": [],
+                "required_missing": ["Run the required package verification."],
+                "limitations": [],
+            },
+            "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+        }
+        review_ref = self._publish_closure_report(task_dir, state, review, closure)
+        rework = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": review_ref}],
+        })
+        self.assertTrue(rework["ok"], rework)
+        self.assertEqual(rework["dispatches"][0]["phase"], "documentation")
+        finding = next(
+            item for item in control.db_list_task_findings(self.ledger, state["task_id"])
+            if item["fingerprint"] == "verification-required-missing"
+        )
+        self.assertEqual(finding["severity"], "P1")
+        self.assertEqual(finding["status"], "open")
+
+    def test_review_report_requires_top_level_closure(self):
+        started = self.v3_start("closure is mandatory", waves=[{"workers": [{"phase": "review"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        rejected = control.publish_worker_report({
+                "project_root": str(self.project), "task_id": state["task_id"], "attempt_id": attempt["attempt_id"],
+                "profile": attempt["profile"], "report": self._report_with_briefing(attempt, self.v3_report("missing closure")),
+            })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("review and close reports require a top-level closure sibling", rejected["diagnostics"][0]["message"])
+
+    def test_waived_p2_with_auditable_metadata_does_not_block_close(self):
+        started = self.v3_start("waived closure finding", waves=[{"workers": [{"phase": "review"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        closure = {
+            "decision": "pass", "findings": [{
+                "fingerprint": "accepted-risk-002", "severity": "P2", "status": "waived", "blocking": True,
+                "summary": "Known documentation gap", "waiver_reason": "Tracked for next release",
+                "waived_by": "release-owner", "waived_at": "2026-08-17T12:00:00Z",
+            }],
+            "verification": {"executed": ["focused closure regression"], "not_executed": [], "required_missing": [], "limitations": []},
+            "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+        }
+        report_ref = self._publish_closure_report(task_dir, state, attempt, closure)
+        close_step = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": report_ref}],
+        })
+        self.assertEqual(close_step["outcome"], "ready_to_spawn")
+        self.assertEqual(control.db_list_task_findings(self.ledger, state["task_id"])[0]["status"], "waived")
 
     def test_read_only_result_rejects_new_generated_or_gitignored_artifacts(self):
         (self.project / ".gitignore").write_text("coverage.tmp\n", encoding="utf-8")
@@ -4511,6 +4796,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(manifest["schema"], control.PLANNING_SCHEMA)
         self.assertEqual(manifest["source_report_ref"], published["report_ref"])
         self.assertEqual([package["id"] for package in manifest["work_packages"]], ["api", "ui"])
+        self.assertFalse((task_dir / "planning").exists())
+        from cortex_runtime.projection_service import reconcile as reconcile_projections
+        reconcile_projections(self.ledger, worker_id="planning-test")
         self.assertTrue((task_dir / "planning/overview.md").is_file())
         self.assertTrue((task_dir / "planning/revisions/plan-report-0001/packages/api.json").is_file())
         self.assertTrue((task_dir / "planning/revisions/plan-report-0001/packages/ui.json").is_file())
@@ -5937,6 +6225,16 @@ class ControlPlaneTests(unittest.TestCase):
         replay = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
         self.assertTrue(replay["idempotent"])
         task_dir = self.ledger / "tasks" / "0001-reports"
+        canonical = control.db_get_artifact_for_export_path(
+            self.ledger, "reports", "reports/records/report-0001.json",
+        )
+        self.assertIsNotNone(canonical)
+        self.assertFalse((task_dir / "reports").exists())
+        from cortex_runtime.ledger_db import list_projection_jobs
+        scheduled = list_projection_jobs(self.ledger, task_id="reports", limit=10)
+        report_jobs = [job for job in scheduled if str(job.get("export_path") or "").startswith("reports/")]
+        self.assertEqual({job["status"] for job in report_jobs}, {"pending"})
+        self.reconcile_projections(worker_id="report-projection-test")
         artifacts = "\n".join(path.read_text(encoding="utf-8") for path in (task_dir / "reports").rglob("*") if path.is_file())
         self.assertNotIn("canary", artifacts)
         self.assertIn("&lt;script&gt;", (task_dir / "reports/markdown/report-0001.md").read_text(encoding="utf-8"))
@@ -5944,8 +6242,8 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "consumed"):
             control.record_evidence({"task_id": "reports", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "receipt replay"})
         (task_dir / "reports/markdown/report-0001.md").unlink()
-        reconciled = control.reconcile_report_bus({"task_id": "reports", "principal": "thread-a"})
-        self.assertEqual(reconciled["report_count"], 1)
+        repaired = self.reconcile_projections(worker_id="report-projection-repair-test")
+        self.assertTrue(repaired)
         self.assertTrue((task_dir / "reports/markdown/report-0001.md").exists())
 
     def test_report_context_is_explicit_and_report_shape_is_strict(self):
@@ -6010,32 +6308,37 @@ class ControlPlaneTests(unittest.TestCase):
         delegation = self.delegate(state, "crash", "plan", "planner")
         first = self.report("crash", delegation["attempt_id"], submission_id="first")
         task_dir = self.ledger / "tasks/0001-crash/reports"
+        self.reconcile_projections(worker_id="stranded-report-test")
         original = (task_dir / "records/report-0001.json").read_bytes()
-        (task_dir / "index.json").write_text(json.dumps({"schema": control.REPORT_SCHEMA, "task_id": "crash", "reports": [], "submissions": {}, "updated_at": control.now()}), encoding="utf-8")
+        (task_dir / "records/report-0001.json").unlink()
         (task_dir / "markdown/report-0001.md").unlink()
         (task_dir / "receipts/report-receipt-report-0001.json").unlink()
         replay = self.report("crash", delegation["attempt_id"], submission_id="first")
         self.assertTrue(replay["idempotent"])
         second = self.report("crash", delegation["attempt_id"], submission_id="second")
         self.assertEqual(second["report"]["report_id"], "report-0002")
+        self.reconcile_projections(worker_id="stranded-report-repair-test")
         self.assertEqual((task_dir / "records/report-0001.json").read_bytes(), original)
-        reconciled = control.reconcile_report_bus({"task_id": "crash", "principal": "thread-a"})
-        self.assertEqual(reconciled["report_count"], 2)
+        self.assertEqual(len(control.list_task_reports({"task_id": "crash", "principal": "thread-a"})["reports"]), 2)
 
     def test_reconcile_ignores_manual_receipt_projection_edits(self):
         state = self.init(task_id="receipt-boundary", complexity="C2")["state"]
         delegation = self.delegate(state, "receipt-boundary", "plan", "planner")
         report = self.report("receipt-boundary", delegation["attempt_id"])
+        self.reconcile_projections(worker_id="receipt-boundary-test")
         receipt_path = self.ledger / "tasks/0001-receipt-boundary/reports/receipts/report-receipt-report-0001.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["consumed_at"] = control.now()
         receipt["consumed_by_evidence_id"] = "evidence-0001"
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
-        reconciled = control.reconcile_report_bus({"task_id": "receipt-boundary", "principal": "thread-a"})
-        repaired = json.loads(receipt_path.read_text(encoding="utf-8"))
-        self.assertIn("receipts/report-receipt-report-0001.json", reconciled["repaired"])
-        self.assertIsNone(repaired["consumed_at"])
-        self.assertIsNone(repaired["consumed_by_evidence_id"])
+        reconciled = self.reconcile_projections(worker_id="receipt-boundary-repair-test")
+        self.assertIn("failed", {item["status"] for item in reconciled})
+        canonical_receipt, _ = control.read_immutable_json_artifact(
+            self.ledger / "tasks/0001-receipt-boundary", "receipt-boundary",
+            "reports/receipts/report-receipt-report-0001.json", kinds={"report_receipt"},
+        )
+        self.assertIsNone(canonical_receipt["consumed_at"])
+        self.assertIsNone(canonical_receipt["consumed_by_evidence_id"])
         evidence = control.record_evidence({"task_id": "receipt-boundary", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "recovered"})
         self.assertEqual(evidence["evidence"]["report_id"], "report-0001")
 
@@ -6044,12 +6347,16 @@ class ControlPlaneTests(unittest.TestCase):
         delegation = self.delegate(state, "receipt-replay", "plan", "planner")
         report = self.report("receipt-replay", delegation["attempt_id"], submission_id="stable")
         evidence = control.record_evidence({"task_id": "receipt-replay", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "consumed"})
+        self.reconcile_projections(worker_id="receipt-replay-test")
         receipt_path = self.ledger / "tasks/0001-receipt-replay/reports/receipts/report-receipt-report-0001.json"
         receipt_path.unlink()
         replay = self.report("receipt-replay", delegation["attempt_id"], submission_id="stable")
         self.assertTrue(replay["idempotent"])
         self.assertIsNotNone(replay["receipt"]["consumed_at"])
         self.assertEqual(replay["receipt"]["consumed_by_evidence_id"], "evidence-0001")
+        self.reconcile_projections(worker_id="receipt-replay-repair-test")
+        rebuilt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertIsNone(rebuilt["consumed_by_evidence_id"])
         with self.assertRaisesRegex(ValueError, "consumed"):
             control.record_evidence({"task_id": "receipt-replay", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "replay"})
 
@@ -6062,6 +6369,7 @@ class ControlPlaneTests(unittest.TestCase):
                 target = self.base / f"sentinel-{child}"
                 target.mkdir()
                 bus_child = task_dir / "reports" / child
+                bus_child.mkdir(parents=True)
                 bus_child.rmdir()
                 bus_child.symlink_to(target, target_is_directory=True)
                 with self.assertRaisesRegex(ValueError, "symlink|real directory"):
@@ -6108,7 +6416,9 @@ class ControlPlaneTests(unittest.TestCase):
         state = self.init(task_id="orphan-markdown", complexity="C2")["state"]
         delegation = self.delegate(state, "orphan-markdown", "plan", "planner")
         task_dir = self.ledger / "tasks/0001-orphan-markdown"
-        (task_dir / "reports/markdown/report-0001.md").write_text("orphan\n", encoding="utf-8")
+        orphan = task_dir / "reports/markdown/report-0001.md"
+        orphan.parent.mkdir(parents=True)
+        orphan.write_text("orphan\n", encoding="utf-8")
         recorded = self.report("orphan-markdown", delegation["attempt_id"])
         self.assertEqual(recorded["report"]["report_id"], "report-0001")
 
@@ -6143,14 +6453,14 @@ class ControlPlaneTests(unittest.TestCase):
         task_dir = self.ledger / "tasks/0001-journal"
         sentinel = self.base / "sentinel"
         sentinel.write_text("unchanged", encoding="utf-8")
-        (task_dir / "journal.md").unlink()
+        task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "journal.md").symlink_to(sentinel)
         resumed = control.resume_task({"task_id": "journal", "principal": "thread-a", "expected_revision": state["revision"]})
         self.assertEqual(resumed["state"]["status"], "active")
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
         lane = control.create_lane({"lane_id": "journal-lane", "principal": "thread-a"})
         lane_dir = self.ledger / "lanes/journal-lane"
-        (lane_dir / "journal.md").unlink()
+        lane_dir.mkdir(parents=True, exist_ok=True)
         (lane_dir / "journal.md").symlink_to(sentinel)
         claimed = control.claim_lane({"lane_id": "journal-lane", "principal": "thread-a", "expires_at": "2999-01-01T00:00:00+00:00"})
         self.assertIsNotNone(claimed["state"]["lease"])
@@ -6553,7 +6863,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.4.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.6.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

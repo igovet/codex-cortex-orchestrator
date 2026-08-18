@@ -4,25 +4,32 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cortex import (
-    AWAITING_HOST_SPAWN,
-    MAX_CONTEXT_REPORTS,
-    _contained_path,
-    _open_blocking_questions,
-    _orchestrate_pipeline_snapshot,
-    _orchestrate_summary,
-    _plan_approval,
-    _report_index,
-    _v3_task_ref,
-    _wave_for_gates,
-    active_gates,
-    now,
-    redact,
-    report_bus_paths,
-    report_markdown_link,
-    report_markdown_path,
-    safe_id,
-    sanitize_structured,
+from cortex_runtime.core.runtime_bindings import bind_symbols
+
+
+bind_symbols(
+    "context_handoff",
+    globals(),
+    (
+        "AWAITING_HOST_SPAWN",
+        "MAX_CONTEXT_REPORTS",
+        "_contained_path",
+        "_open_blocking_questions",
+        "_orchestrate_pipeline_snapshot",
+        "_orchestrate_summary",
+        "_plan_approval",
+        "_report_index",
+        "_v3_task_ref",
+        "_wave_for_gates",
+        "active_gates",
+        "now",
+        "redact",
+        "report_bus_paths",
+        "report_markdown_link",
+        "report_markdown_path",
+        "safe_id",
+        "sanitize_structured",
+    ),
 )
 
 def _context_handoff(
@@ -47,6 +54,10 @@ def _context_handoff(
     report_handoffs: list[dict[str, Any]] = []
     changed_files: list[str] = []
     verified_facts: list[dict[str, Any]] = []
+    # Context handoff runs outside lifecycle locks.  Recreate the optional
+    # Desktop export from the canonical report object before emitting its link.
+    from cortex_runtime.reports import ensure_report_markdown_path
+
     for item in report_items:
         report_ref = safe_id(str(item.get("report_id") or ""))
         phase = redact(item.get("gate", "report"), 128) or "report"
@@ -57,15 +68,25 @@ def _context_handoff(
         for value in compact_files:
             if value and value not in changed_files:
                 changed_files.append(value)
-        report_handoffs.append({
+        report_handoff = {
             "report_ref": report_ref,
             "phase": phase,
             "profile": redact((item.get("producer") or {}).get("profile", ""), 128),
             "summary": summary,
-            "report_markdown_path": str(report_markdown_path(task_dir, report_ref)),
-            "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
             "changed_files": compact_files,
-        })
+        }
+        try:
+            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+            report_handoff.update({
+                "report_markdown_path": str(markdown_path),
+                "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
+            })
+        except (OSError, ValueError) as exc:
+            # A report reference is still readable from its canonical SQLite
+            # artifact.  Do not turn a rebuildable Desktop export into a
+            # context-recovery failure.
+            report_handoff["projection_error"] = redact(str(exc), 500)
+        report_handoffs.append(report_handoff)
         verified_facts.append({
             "source": report_ref,
             "phase": phase,
@@ -177,6 +198,11 @@ def _context_handoff(
                 ],
                 "reason": redact(attempt.get("finalization_reason", ""), 1000) or None,
                 "host_agent_id": redact((attempt.get("host_spawn") or {}).get("agent_id", ""), 256),
+                "host_task_name": redact((attempt.get("host_spawn") or {}).get("task_name", ""), 128),
+                "resumable": bool(
+                    attempt.get("host_resumable")
+                    or attempt.get("host_stop_outcome") in {"awaiting_user", "native_worker_stopped_recoverable"}
+                ),
                 "stopped_at": attempt.get("host_stopped_at"),
             })
         elif attempt.get("status") == "running":
@@ -205,9 +231,18 @@ def _context_handoff(
             + "."
         )
     if stopped_workers:
+        resumable_ids = [
+            item["host_agent_id"] for item in stopped_workers
+            if item.get("resumable") and item.get("host_agent_id")
+        ]
+        if resumable_ids:
+            recovery_actions.append(
+                "Do not respawn stopped resumable workers; resume only their exact persisted child ids with "
+                "followup_task when the returned action authorizes it: " + ", ".join(resumable_ids) + "."
+            )
         recovery_actions.append(
-            "Never wait on or respawn stopped_workers. Consume their recorded report refs, surface their durable "
-            "questions, or submit their exact non-success result to continue_orchestration as indicated."
+            "For stopped workers with reports, consume the report refs. For durable questions, surface and answer "
+            "the question before resuming the same worker."
         )
     next_action = (
         f"Call manage_orchestration(intent=inspect, task_ref={task_ref}) once after context compaction; "
@@ -241,7 +276,7 @@ def _context_handoff(
             "worker_language": "Worker-authored commentary, tool arguments, reports, questions, and native final output are English-only.",
             "hidden_dispatch": "Hidden spawn_agent requests retain fork_turns=none so the coordinator transcript is not inherited.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",
-            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn; active_workers are waitable exact child ids, while stopped_workers must never be waited on or respawned.",
+            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn. Active workers are waitable exact child ids. A stopped resumable worker is never respawned; it may be resumed only through followup_task to its persisted host_agent_id when the returned action authorizes that resume.",
             "report_publication": "Read each report_ref, then publish the returned report_markdown_link verbatim in the main chat before any other lifecycle call or report read.",
             "instruction_source": "cortex:orchestrator and cortex-control skills; this handoff restores state and invariants, not a replacement skill source.",
         },

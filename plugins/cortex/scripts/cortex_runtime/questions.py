@@ -3,39 +3,207 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 from typing import Any
 
-import cortex as _runtime
-from cortex import (
-    AGENTS,
-    AWAITING_HOST_SPAWN,
-    MAX_QUESTIONS_PER_ATTEMPT,
-    MAX_QUESTIONS_PER_TASK,
-    PUBLIC_ORCHESTRATION_SCHEMA,
-    QUESTION_SCHEMA,
-    _attempt,
-    _question_config,
-    _question_options,
-    _question_payload,
-    _question_records,
-    _question_sequence,
-    _write_question_record,
-    append_journal_best_effort,
-    authorize,
-    authorize_principal,
-    canonical_profile,
-    digest_text,
-    ledger_root,
-    load_state,
-    now,
-    preflight_journal,
-    question_bus_paths,
-    redact,
-    respond,
-    safe_id,
-    sanitize_structured,
-    state_lock,
+from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
+
+
+bind_symbols(
+    "questions",
+    globals(),
+    (
+        "AGENTS",
+        "AWAITING_HOST_SPAWN",
+        "MAX_QUESTIONS_PER_ATTEMPT",
+        "MAX_QUESTIONS_PER_TASK",
+        "PUBLIC_ORCHESTRATION_SCHEMA",
+        "QUESTION_SCHEMA",
+        "_attempt",
+        "_question_config",
+        "_question_options",
+        "_question_payload",
+        "_question_records",
+        "_question_sequence",
+        "_write_question_record",
+        "_task_document_root",
+        "append_journal_best_effort",
+        "authorize",
+        "authorize_principal",
+        "canonical_profile",
+        "db_get_task_document",
+        "db_list_task_documents",
+        "db_put_task_document",
+        "digest_text",
+        "ledger_root",
+        "load_state",
+        "now",
+        "question_bus_paths",
+        "redact",
+        "require_internal_english",
+        "respond",
+        "safe_id",
+        "sanitize_structured",
+        "state_lock",
+    ),
 )
+
+
+BATCH_QUESTION_SCHEMA = "cortex/question-batch/v1"
+_BATCH_DOCUMENT_PREFIX = "question_batch:"
+_BATCH_OPEN_STATUSES = {"open", "awaiting_translation"}
+_BATCH_QUESTION_TYPES = {"single_select", "multi_select", "text"}
+
+
+def _batch_document_key(batch_id: str) -> str:
+    return _BATCH_DOCUMENT_PREFIX + safe_id(batch_id)
+
+
+def _batch_records(task_dir: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read validated batch records from their SQLite task-document projection.
+
+    Batch records deliberately share the existing task-document store.  Every
+    caller mutates them while holding ``state_lock``, whose transaction is the
+    atomic boundary for the complete batch (including supersession and every
+    answer), rather than committing one question at a time.
+    """
+    root = _task_document_root(task_dir, str(state["task_id"]))
+    records: list[dict[str, Any]] = []
+    for document_key, record in db_list_task_documents(root, str(state["task_id"]), _BATCH_DOCUMENT_PREFIX):
+        batch_id = str(record.get("batch_id") or "")
+        if (
+            record.get("schema") != BATCH_QUESTION_SCHEMA
+            or record.get("task_id") != state["task_id"]
+            or document_key != _batch_document_key(batch_id)
+            or record.get("status") not in {"open", "awaiting_translation", "answered", "superseded"}
+        ):
+            raise ValueError("question batch record failed validation")
+        _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        records.append(record)
+    return records
+
+
+def _batch_record(task_dir: Any, state: dict[str, Any], batch_id: str) -> dict[str, Any] | None:
+    root = _task_document_root(task_dir, str(state["task_id"]))
+    record = db_get_task_document(root, str(state["task_id"]), _batch_document_key(batch_id))
+    if record is None:
+        return None
+    if (
+        record.get("schema") != BATCH_QUESTION_SCHEMA
+        or record.get("task_id") != state["task_id"]
+        or record.get("batch_id") != batch_id
+    ):
+        raise ValueError("question batch record failed validation")
+    return record
+
+
+def _write_batch_record(task_dir: Any, state: dict[str, Any], record: dict[str, Any]) -> None:
+    batch_id = safe_id(str(record.get("batch_id") or ""))
+    if record.get("task_id") != state.get("task_id"):
+        raise ValueError("question batch task identity is invalid")
+    root = _task_document_root(task_dir, str(state["task_id"]))
+    db_put_task_document(root, str(state["task_id"]), _batch_document_key(batch_id), record)
+
+
+def _batch_id(task_id: str, attempt_id: str, batch_key: str) -> str:
+    return "batch-" + digest_text("\0".join((task_id, attempt_id, batch_key)))[:24]
+
+
+def _batch_revision(state: dict[str, Any]) -> int:
+    return int(state.get("task_revision") or 1)
+
+
+def _batch_is_stale(record: dict[str, Any], state: dict[str, Any]) -> bool:
+    return int(record.get("task_revision") or 1) < _batch_revision(state)
+
+
+def _supersede_batch(
+    task_dir: Any,
+    state: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    reason: str,
+    superseded_by: str | None = None,
+) -> dict[str, Any]:
+    """Persist a terminal non-resumable outcome for a stale open batch."""
+    if record.get("status") in _BATCH_OPEN_STATUSES:
+        record["status"] = "superseded"
+        record["superseded_at"] = now()
+        record["superseded_reason"] = redact(reason, 400)
+        if superseded_by:
+            record["superseded_by"] = safe_id(superseded_by)
+        _write_batch_record(task_dir, state, record)
+    return record
+
+
+def _batch_question_config(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("batch question must be an object")
+    question_key = safe_id(str(value.get("question_key") or ""))
+    question = redact(str(value.get("question") or "").strip(), 4000)
+    question_type = str(value.get("type") or "").strip().lower()
+    if not question_key or not question:
+        raise ValueError("batch questions require stable question_key and question")
+    if question_type not in _BATCH_QUESTION_TYPES:
+        raise ValueError("batch question type must be single_select, multi_select, or text")
+    header = redact(str(value.get("header") or question).strip(), 200) or question
+    custom_label = redact(str(value.get("custom_label") or "Your answer").strip(), 160) or "Your answer"
+    options = _question_options(value.get("options"))
+    if question_type == "text" and options:
+        raise ValueError("text batch questions must not define options")
+    if question_type != "text" and not options:
+        raise ValueError("selection batch questions require options")
+    require_internal_english(question, "batch worker question")
+    require_internal_english(header, "batch worker question header")
+    require_internal_english(custom_label, "batch worker question custom_label")
+    require_internal_english(options, "batch worker question options")
+    return {
+        "question_key": question_key,
+        "question_type": question_type,
+        "canonical_question": question,
+        "localized_question": question,
+        "header": header,
+        "localized_header": header,
+        "options": options,
+        "custom_label": custom_label,
+        "localized_custom_label": custom_label,
+    }
+
+
+def _batch_payload(params: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    raw_batch = params.get("batch")
+    if not isinstance(raw_batch, dict):
+        raise ValueError("ask_batch requires batch")
+    unknown = sorted(set(raw_batch) - {"batch_key", "questions"})
+    if unknown:
+        raise ValueError("batch contains unsupported fields: " + ", ".join(unknown))
+    batch_key = safe_id(str(raw_batch.get("batch_key") or ""))
+    raw_questions = raw_batch.get("questions")
+    if not batch_key or not isinstance(raw_questions, list) or not raw_questions or len(raw_questions) > 32:
+        raise ValueError("batch requires batch_key and 1..32 questions")
+    questions = [_batch_question_config(item) for item in raw_questions]
+    keys = [item["question_key"] for item in questions]
+    if len(keys) != len(set(keys)):
+        raise ValueError("batch question_key values must be unique")
+    batch = {"batch_key": batch_key, "questions": questions}
+    content_digest = digest_text(json.dumps(batch, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    return batch, content_digest
+
+
+def _batch_answer_view(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return only canonical English values to a worker polling a batch."""
+    answers = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in record.get("questions") or []:
+        question_key = str(item.get("question_key") or "")
+        answer = answers.get(question_key) if isinstance(answers, dict) else None
+        if not isinstance(answer, dict) or not str(answer.get("answer_en") or "").strip():
+            raise ValueError("answered batch has no canonical answer")
+        result[question_key] = {
+            "answer_en": str(answer["answer_en"]),
+            "answer_option_ids": list(answer.get("answer_option_ids") or []),
+        }
+    return result
 
 def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
@@ -50,7 +218,6 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             })
         else:
             authorize(state, params)
-        preflight_journal(task_dir)
         attempt_id = safe_id(str(params.get("attempt_id", "")))
         attempt = _attempt(state, attempt_id)
         allowed_statuses = {AWAITING_HOST_SPAWN, "running"} if facade_worker else {"running"}
@@ -111,11 +278,125 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         return {"idempotent": False, "question": record, "cursor": sequence}
 
 
+def _publish_worker_question_batch(
+    params: dict[str, Any],
+    task_dir: Any,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+) -> dict[str, Any]:
+    """Create one durable batch while the caller holds the state transaction."""
+    batch, content_digest = _batch_payload(params)
+    attempt_id = str(attempt["attempt_id"])
+    batch_key = batch["batch_key"]
+    records = _batch_records(task_dir, state)
+    existing = next(
+        (
+            item for item in records
+            if item.get("attempt_id") == attempt_id and item.get("batch_key") == batch_key
+        ),
+        None,
+    )
+    if existing is not None:
+        if existing.get("content_digest") != content_digest:
+            raise ValueError("stable batch_key was reused with different batch content")
+        return {"idempotent": True, "batch": existing}
+
+    batch_id = _batch_id(str(state["task_id"]), attempt_id, batch_key)
+    # A single attempt has at most one unresolved batch.  Replacing it makes
+    # the old ref explicitly non-resumable instead of allowing two competing
+    # user decisions to wake the same native worker.
+    for previous in records:
+        if previous.get("attempt_id") == attempt_id and previous.get("status") in _BATCH_OPEN_STATUSES:
+            _supersede_batch(
+                task_dir,
+                state,
+                previous,
+                reason="replaced by a newer batch for the same worker attempt",
+                superseded_by=batch_id,
+            )
+    timestamp = now()
+    record = {
+        "schema": BATCH_QUESTION_SCHEMA,
+        "batch_id": batch_id,
+        "batch_key": batch_key,
+        "task_id": state["task_id"],
+        "gate": attempt["gate"],
+        "attempt_id": attempt_id,
+        "profile": attempt["profile"],
+        "task_revision": _batch_revision(state),
+        "language": "en",
+        "status": "open",
+        "questions": batch["questions"],
+        "answers": {},
+        "content_digest": content_digest,
+        "created_at": timestamp,
+        "answered_at": None,
+        "superseded_at": None,
+    }
+    _write_batch_record(task_dir, state, record)
+    append_journal_best_effort(task_dir, "worker_question_batch", f"{attempt_id} published {batch_id}")
+    return {"idempotent": False, "batch": record}
+
+
+def _poll_worker_question_batch(
+    task_dir: Any,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    profile: str,
+    batch_ref: str,
+) -> dict[str, Any]:
+    record = _batch_record(task_dir, state, batch_ref)
+    if record is None or record.get("attempt_id") != attempt.get("attempt_id") or record.get("profile") != profile:
+        raise ValueError("batch_ref does not belong to this worker attempt")
+    if _batch_is_stale(record, state):
+        _supersede_batch(
+            task_dir,
+            state,
+            record,
+            reason="task revision superseded this unresolved batch",
+        )
+    if attempt.get("invalidated"):
+        _supersede_batch(
+            task_dir,
+            state,
+            record,
+            reason="worker attempt was superseded before its batch was answered",
+        )
+    if record.get("status") == "superseded":
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "batch_superseded",
+            "batch_ref": batch_ref,
+            "status": "superseded",
+            "resume": False,
+            "next_action": "Do not resume this worker from the superseded batch; wait for a replacement dispatch or current revision guidance.",
+        }
+    if record.get("status") != "answered":
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "awaiting_user",
+            "batch_ref": batch_ref,
+            "status": record.get("status"),
+            "next_action": "Remain available; the parent coordinator must complete this same durable batch.",
+        }
+    return {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": True,
+        "outcome": "batch_answered",
+        "batch_ref": batch_ref,
+        "status": "answered",
+        "answers": _batch_answer_view(record),
+        "next_action": "Resume this same worker attempt with the canonical English batch answers; record the report only after the mission is complete.",
+    }
+
+
 def worker_question(params: dict[str, Any]) -> dict[str, Any]:
     """Public facade adapter for durable ask/poll on one exact worker attempt."""
     action = str(params.get("action") or "").strip().lower()
-    if action not in {"ask", "poll"}:
-        raise ValueError("worker question action must be ask or poll")
+    if action not in {"ask", "poll", "ask_batch", "poll_batch"}:
+        raise ValueError("worker question action must be ask, poll, ask_batch, or poll_batch")
     profile = canonical_profile(params.get("profile") or "")
     if profile not in AGENTS:
         raise ValueError("profile must be an exact Cortex worker profile")
@@ -124,13 +405,46 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
         _, task_dir, state = load_state(str(params.get("task_id") or ""), params)
         attempt_id = safe_id(str(params.get("attempt_id") or ""))
         attempt = _attempt(state, attempt_id)
+        if not attempt.get("facade_managed") or attempt.get("profile") != profile:
+            raise ValueError("worker question identity does not match an active facade-managed attempt")
+        if action == "poll_batch":
+            if any(params.get(field) not in (None, "", [], {}) for field in (
+                "question_ref", "question", "header", "options", "multiple", "custom_label", "context", "batch"
+            )):
+                raise ValueError("poll_batch accepts only batch_ref and worker identity fields")
+            batch_ref = safe_id(str(params.get("batch_ref") or ""))
+            if not batch_ref:
+                raise ValueError("poll_batch requires batch_ref")
+            return _poll_worker_question_batch(task_dir, state, attempt, profile, batch_ref)
         if (
-            not attempt.get("facade_managed")
-            or attempt.get("profile") != profile
-            or attempt.get("invalidated")
+            attempt.get("invalidated")
             or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running"}
         ):
             raise ValueError("worker question identity does not match an active facade-managed attempt")
+        if action == "ask_batch":
+            if str(params.get("question_ref") or "").strip() or str(params.get("batch_ref") or "").strip():
+                raise ValueError("ask_batch must omit question_ref and batch_ref")
+            if any(params.get(field) not in (None, "", [], {}) for field in (
+                "question", "header", "options", "multiple", "custom_label", "context"
+            )):
+                raise ValueError("ask_batch accepts only batch and worker identity fields")
+            result = _publish_worker_question_batch(params, task_dir, state, attempt)
+            record = result["batch"]
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "outcome": "batch_recorded",
+                "batch_ref": record["batch_id"],
+                # Keep the established coordinator transport compact: batch
+                # refs travel through the existing question_ref envelope.
+                "question_ref": record["batch_id"],
+                "status": record["status"],
+                "idempotent": bool(result.get("idempotent")),
+                "next_action": (
+                    "Return only QUESTION_RECORDED question_ref=<value> plus a concise batch summary to the parent "
+                    "coordinator; remain available and do not record a report until this batch is answered."
+                ),
+            }
         if action == "ask":
             if str(params.get("question_ref") or "").strip():
                 raise ValueError("ask must omit question_ref")
@@ -191,8 +505,9 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "outcome": "question_answered",
             "question_ref": question_ref,
             "status": "answered",
-            "answer": record.get("answer"),
-            "answer_text": record.get("answer_text"),
+            "answer": record.get("answer_en") or record.get("answer"),
+            "answer_text": record.get("answer_en_text") or record.get("answer_text"),
+            "answer_option_ids": record.get("answer_option_ids") or [],
             "resume_context": record.get("resume_context"),
             "next_action": "Resume this same worker attempt with the user's answer; record the report only after the mission is complete.",
         }
@@ -245,21 +560,47 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
-        preflight_journal(task_dir)
         question_id = safe_id(str(params.get("question_id", "")))
         submission_id = safe_id(str(params.get("submission_id", "")))
         answer, answer_text = _normalize_question_answer(params.get("answer"))
+        supplied_answer_en, supplied_answer_en_text = _normalize_question_answer(params.get("answer_en"))
         resume_context = sanitize_structured(params.get("resume_context"))
         if not answer_text:
             raise ValueError("worker question answer is required")
         if resume_context in (None, "", [], {}):
             raise ValueError("worker question resume_context is required")
-        answer_digest = digest_text(json.dumps({"answer": answer, "resume_context": resume_context}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         paths = question_bus_paths(task_dir)
         records = _question_records(paths, state)
         record = next((item for item in records if item.get("question_id") == question_id), None)
         if record is None:
             raise ValueError("question_id does not belong to this task")
+        option_map = {item["option_id"]: item.get("label_en") or item.get("label") for item in record.get("options") or []}
+        option_ids = []
+        custom_text = ""
+        if isinstance(answer, dict):
+            raw_ids = answer.get("option_ids")
+            if raw_ids is None:
+                raw_ids = answer.get("selections")
+            option_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids] if raw_ids else []
+            if any(item not in option_map for item in option_ids):
+                raise ValueError("worker question answer contains an unknown option_id")
+            custom = answer.get("custom_response")
+            custom_text = str(custom or "").strip() if not isinstance(custom, (dict, list)) else json.dumps(custom, ensure_ascii=False, sort_keys=True)
+        canonical_parts = [str(option_map[item]) for item in option_ids]
+        if supplied_answer_en_text:
+            canonical_parts.append(supplied_answer_en_text)
+        elif custom_text:
+            user_language = str((resume_context if isinstance(resume_context, dict) else {}).get("user_language") or "en")
+            if not user_language.lower().startswith("en"):
+                raise ValueError("localized free-text answer requires answer_en translation")
+            canonical_parts.append(custom_text)
+        answer_en_text = "\n".join(part for part in canonical_parts if part).strip()
+        answer_en = supplied_answer_en if supplied_answer_en_text else {
+            "option_ids": option_ids,
+            "selections": [option_map[item] for item in option_ids],
+            "custom_response": custom_text,
+        }
+        answer_digest = digest_text(json.dumps({"answer": answer, "answer_en": answer_en, "resume_context": resume_context}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         if record.get("status") == "answered":
             if record.get("answer_submission_id") != submission_id:
                 raise ValueError("worker question has already been answered")
@@ -270,6 +611,11 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "status": "answered",
             "answer": answer,
             "answer_text": answer_text,
+            "answer_original": answer,
+            "answer_original_language": str((resume_context if isinstance(resume_context, dict) else {}).get("user_language") or "en"),
+            "answer_option_ids": option_ids,
+            "answer_en": answer_en,
+            "answer_en_text": answer_en_text,
             "resume_context": resume_context,
             "answer_submission_id": submission_id,
             "answer_digest": answer_digest,
@@ -286,7 +632,10 @@ def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     options = list(config.get("options") or [])
     if options:
-        titled_options = [{"const": item["label"], "title": item["description"]} for item in options]
+        titled_options = [
+            {"const": item["option_id"], "title": item.get("label_localized") or item.get("label") or item["option_id"]}
+            for item in options
+        ]
         if config.get("multiple"):
             properties["selections"] = {
                 "type": "array",
@@ -320,13 +669,13 @@ def _request_mcp_elicitation(message: str, requested_schema: dict[str, Any], *, 
             # as attachment-capable free-form input). Use it only when the
             # connected host advertised the extension; otherwise remain
             # standards-compliant with MCP form mode.
-            "mode": "openai/form" if _runtime.MCP_OPENAI_FORM else "form",
+            "mode": "openai/form" if bound_symbol("questions", "MCP_OPENAI_FORM") else "form",
             "requestedSchema": requested_schema,
             "_meta": {"cortex": {"schema": QUESTION_SCHEMA, "thread_id": thread_id, "turn_id": turn_id or None}},
         },
     })
     while True:
-        line = _runtime.sys.stdin.readline()
+        line = sys.stdin.readline()
         if not line:
             raise RuntimeError("MCP client closed before answering cortex.question")
         try:
@@ -350,31 +699,459 @@ def _request_mcp_elicitation(message: str, requested_schema: dict[str, Any], *, 
 
 def _question_answer_from_content(content: dict[str, Any] | None, config: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     content = content or {}
-    options = {item["label"] for item in config.get("options") or []}
+    option_aliases: dict[str, str] = {}
+    for item in config.get("options") or []:
+        option_id = item["option_id"]
+        for alias in (option_id, item.get("label_localized"), item.get("label"), item.get("label_en")):
+            if str(alias or "").strip():
+                option_aliases[str(alias)] = option_id
+    options = set(option_aliases.values())
     multiple = bool(config.get("multiple"))
     if multiple:
         raw_selections = content.get("selections", [])
         selections = raw_selections if isinstance(raw_selections, list) else [raw_selections]
         selections = [redact(item, 200) for item in selections if str(item).strip()]
+        selections = [option_aliases.get(item, item) for item in selections]
         if options and any(item not in options for item in selections):
             raise ValueError("MCP elicitation returned an unknown question option")
     else:
         raw_selection = content.get("selection")
         selections = [redact(raw_selection, 200)] if raw_selection not in (None, "") else []
+        selections = [option_aliases.get(item, item) for item in selections]
         if options and selections and selections[0] not in options:
             raise ValueError("MCP elicitation returned an unknown question option")
     custom = content.get("custom_response", "")
     normalized_custom, custom_text = _normalize_question_answer(custom)
+    # Some hosts return a ``selection`` value even when the rendered form has
+    # only the free-form field.  It is user prose in that shape, never a
+    # canonical option id; preserve it as custom text for compatibility.
+    if not options and selections:
+        selected_text = "\n".join(str(item) for item in selections)
+        if custom_text:
+            selected_text = selected_text + "\n" + custom_text
+        normalized_custom, custom_text = _normalize_question_answer(selected_text)
+        selections = []
     if not selections and not custom_text:
         return None, ""
     answer: dict[str, Any] = {
         "selections": selections if multiple else (selections[0] if selections else None),
+        "option_ids": selections,
         "custom_response": normalized_custom,
     }
     extras = {key: value for key, value in content.items() if key not in {"selection", "selections", "custom_response"}}
     if extras:
         answer["host_fields"] = sanitize_structured(extras)
     return answer, redact(json.dumps(answer, ensure_ascii=False, sort_keys=True), 8000)
+
+
+def _batch_record_for_main(params: dict[str, Any], batch_id: str) -> dict[str, Any]:
+    _, task_dir, state = load_state(str(params["task_id"]), params)
+    authorize_principal(state, params)
+    record = _batch_record(task_dir, state, batch_id)
+    if record is None:
+        raise ValueError("batch_ref does not belong to this task")
+    return dict(record)
+
+
+def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Build a localized form view without changing canonical batch values."""
+    questions = [dict(item) for item in record.get("questions") or []]
+    raw_localized = params.get("localized_questions")
+    if raw_localized is None and isinstance(params.get("localized_batch"), dict):
+        raw_localized = params["localized_batch"].get("questions")
+    if raw_localized is None:
+        return {**record, "questions": questions}
+    if not isinstance(raw_localized, list) or len(raw_localized) != len(questions):
+        raise ValueError("localized_questions must contain one projection for every batch question")
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in raw_localized:
+        if not isinstance(item, dict):
+            raise ValueError("localized batch question must be an object with question_key")
+        key = safe_id(str(item.get("question_key") or ""))
+        if key in by_key:
+            raise ValueError("localized question_key values must be unique")
+        by_key[key] = item
+    canonical_keys = {str(item["question_key"]) for item in questions}
+    if set(by_key) != canonical_keys:
+        raise ValueError("localized question_key values must exactly match the canonical batch")
+    for question in questions:
+        localized = by_key[question["question_key"]]
+        localized_question = localized.get("localized_question", localized.get("question"))
+        if localized_question is not None:
+            question["localized_question"] = redact(str(localized_question).strip(), 4000) or question["canonical_question"]
+        if localized.get("header") is not None:
+            question["localized_header"] = redact(str(localized["header"]).strip(), 200) or question["header"]
+        if localized.get("custom_label") is not None:
+            question["localized_custom_label"] = redact(str(localized["custom_label"]).strip(), 160) or question["custom_label"]
+        if "options" not in localized:
+            continue
+        raw_options = localized["options"]
+        canonical_options = list(question.get("options") or [])
+        if not isinstance(raw_options, list) or len(raw_options) != len(canonical_options):
+            raise ValueError("localized batch options must match the canonical option count")
+        merged = []
+        for canonical, display in zip(canonical_options, raw_options):
+            supplied_id = ""
+            if isinstance(display, dict):
+                supplied_id = str(display.get("option_id") or "").strip()
+                title = display.get("label_localized", display.get("label", display.get("label_en", "")))
+            else:
+                title = display
+            if supplied_id and safe_id(supplied_id) != canonical["option_id"]:
+                raise ValueError("localized batch option_id must match the canonical option_id")
+            localized_title = redact(str(title or "").strip(), 120)
+            if not localized_title:
+                raise ValueError("localized batch options require non-empty labels")
+            # Only the title changes.  ``option_id`` and ``label_en`` remain
+            # immutable canonical values used for worker answers.
+            merged.append({**canonical, "label_localized": localized_title})
+        question["options"] = merged
+    return {**record, "questions": questions}
+
+
+def _batch_form_schema(record: dict[str, Any]) -> dict[str, Any]:
+    """Render every material ambiguity in one native elicitation form."""
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for question in record.get("questions") or []:
+        key = question["question_key"]
+        question_type = question["question_type"]
+        title = question.get("localized_question") or question["canonical_question"]
+        description = question.get("localized_header") or question.get("header") or ""
+        if question_type == "text":
+            properties[key] = {
+                "type": "string",
+                "minLength": 1,
+                "title": title,
+                "description": description or question.get("localized_custom_label") or question.get("custom_label"),
+            }
+        else:
+            choices = [
+                {
+                    "const": option["option_id"],
+                    "title": option.get("label_localized") or option.get("label_en") or option["option_id"],
+                }
+                for option in question.get("options") or []
+            ]
+            if question_type == "multi_select":
+                properties[key] = {
+                    "type": "array",
+                    "minItems": 1,
+                    "title": title,
+                    "description": description,
+                    "items": {"anyOf": choices},
+                }
+            else:
+                properties[key] = {
+                    "type": "string",
+                    "title": title,
+                    "description": description,
+                    "oneOf": choices,
+                }
+        required.append(key)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": required,
+    }
+
+
+def _batch_answers_from_content(content: dict[str, Any] | None, record: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not isinstance(content, dict):
+        raise ValueError("MCP elicitation returned an invalid batch response")
+    questions = record.get("questions") or []
+    expected = {str(item["question_key"]) for item in questions}
+    if set(content) != expected:
+        raise ValueError("MCP elicitation must answer every batch question exactly once")
+    answers: dict[str, dict[str, Any]] = {}
+    for question in questions:
+        key = str(question["question_key"])
+        raw = content[key]
+        question_type = question["question_type"]
+        if question_type == "text":
+            original = redact(str(raw or "").strip(), 8000)
+            if not original:
+                raise ValueError("batch text answers must be non-empty")
+            option_ids: list[str] = []
+        else:
+            option_map = {
+                option["option_id"]: option.get("label_en") or option.get("label") or option["option_id"]
+                for option in question.get("options") or []
+            }
+            if question_type == "multi_select":
+                raw_ids = raw if isinstance(raw, list) else [raw]
+                option_ids = [safe_id(str(item)) for item in raw_ids if str(item).strip()]
+            else:
+                option_ids = [safe_id(str(raw))] if str(raw or "").strip() else []
+            if not option_ids or len(option_ids) != len(set(option_ids)) or any(item not in option_map for item in option_ids):
+                raise ValueError("MCP elicitation returned an unknown or empty batch option")
+            original = option_ids if question_type == "multi_select" else option_ids[0]
+        answers[key] = {
+            "answer_original": original,
+            "answer_option_ids": option_ids,
+            "answer_original_text": (
+                json.dumps(original, ensure_ascii=False, sort_keys=True)
+                if isinstance(original, list) else str(original)
+            ),
+        }
+    return answers
+
+
+def _persist_batch_answers(
+    params: dict[str, Any],
+    batch_id: str,
+    answers: dict[str, dict[str, Any]] | None,
+    *,
+    elicitation_id: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Commit all answers/translations in one state-lock SQLite transaction."""
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize(state, params)
+        record = _batch_record(task_dir, state, batch_id)
+        if record is None:
+            raise ValueError("batch_ref does not belong to this task")
+        attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        if _batch_is_stale(record, state):
+            _supersede_batch(task_dir, state, record, reason="task revision superseded this unresolved batch")
+        if attempt.get("invalidated"):
+            _supersede_batch(task_dir, state, record, reason="worker attempt was superseded before its batch was answered")
+        if record.get("status") == "superseded":
+            return record, False
+        if record.get("status") == "answered":
+            return record, True
+        if record.get("status") == "open":
+            if answers is None:
+                raise ValueError("open batch requires native form answers")
+            record["answers"] = answers
+            record["answer_original_language"] = str(params.get("user_language") or "en")
+            record["elicitation_id"] = elicitation_id
+        elif answers is not None:
+            # A second native form answer cannot replace a durable original
+            # while a coordinator is translating it.
+            raise ValueError("batch is awaiting translation; submit canonical_answers without reopening the form")
+
+        stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+        language = str(record.get("answer_original_language") or params.get("user_language") or "en")
+        supplied = params.get("canonical_answers")
+        if supplied is None:
+            supplied = {}
+        if not isinstance(supplied, dict):
+            raise ValueError("canonical_answers must be an object keyed by text question_key")
+        question_by_key = {str(item["question_key"]): item for item in record.get("questions") or []}
+        unknown = sorted(set(supplied) - set(question_by_key))
+        if unknown:
+            raise ValueError("canonical_answers contains an unknown question_key: " + ", ".join(unknown))
+        pending_translation: list[str] = []
+        for key, question in question_by_key.items():
+            answer = stored.get(key)
+            if not isinstance(answer, dict):
+                raise ValueError("batch answer record is incomplete")
+            option_ids = list(answer.get("answer_option_ids") or [])
+            if question["question_type"] != "text":
+                option_map = {
+                    option["option_id"]: option.get("label_en") or option.get("label") or option["option_id"]
+                    for option in question.get("options") or []
+                }
+                if not option_ids or any(item not in option_map for item in option_ids):
+                    raise ValueError("batch answer record has an invalid canonical option_id")
+                answer["answer_en"] = "\n".join(str(option_map[item]) for item in option_ids)
+                answer["translation_status"] = "not_required"
+                continue
+            original = redact(str(answer.get("answer_original") or "").strip(), 8000)
+            if not original:
+                raise ValueError("batch answer record has an empty free-text answer")
+            if language.lower().startswith("en"):
+                require_internal_english(original, "free-text batch answer")
+                answer["answer_en"] = original
+                answer["translation_status"] = "not_required"
+            elif key in supplied:
+                translated = redact(str(supplied[key] or "").strip(), 8000)
+                if not translated:
+                    raise ValueError("canonical_answers translations must be non-empty")
+                require_internal_english(translated, "canonical batch answer translation")
+                answer["answer_en"] = translated
+                answer["translation_status"] = "translated"
+                answer["translated_by"] = redact(str(params.get("translated_by") or "coordinator"), 160)
+                answer["translated_at"] = now()
+            else:
+                answer["translation_status"] = "awaiting_translation"
+                pending_translation.append(key)
+        record["answers"] = stored
+        record["answer_original"] = {key: item["answer_original"] for key, item in stored.items()}
+        record["answer_option_ids"] = {key: list(item.get("answer_option_ids") or []) for key, item in stored.items()}
+        record["answer_en"] = {
+            key: str(item["answer_en"])
+            for key, item in stored.items()
+            if str(item.get("answer_en") or "").strip()
+        }
+        if pending_translation:
+            record["translation_status"] = "awaiting_translation"
+        elif all(item.get("translation_status") == "not_required" for item in stored.values()):
+            record["translation_status"] = "not_required"
+        else:
+            record["translation_status"] = "translated"
+        if pending_translation:
+            record["status"] = "awaiting_translation"
+            record["translation_required_for"] = pending_translation
+            record["translation_requested_at"] = now()
+        else:
+            record["status"] = "answered"
+            record["translation_required_for"] = []
+            record["answered_at"] = now()
+        _write_batch_record(task_dir, state, record)
+        append_journal_best_effort(task_dir, "worker_question_batch_answer", f"{batch_id} {record['status']}")
+        return record, False
+
+
+def _supersede_batch_for_main(params: dict[str, Any], batch_id: str) -> dict[str, Any]:
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize(state, params)
+        record = _batch_record(task_dir, state, batch_id)
+        if record is None:
+            raise ValueError("batch_ref does not belong to this task")
+        if _batch_is_stale(record, state):
+            _supersede_batch(task_dir, state, record, reason="task revision superseded this unresolved batch")
+        return record
+
+
+def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, Any]:
+    """Surface one durable batch in a single localized native form."""
+    record = _supersede_batch_for_main(params, batch_id)
+    if record.get("status") == "superseded":
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "superseded",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "resume": False,
+            "durable": {"batch": record},
+            "next_action": "Do not resume the worker from a superseded question batch.",
+        }
+    if record.get("status") == "answered":
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "answered",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "answers": _batch_answer_view(record),
+            "idempotent": True,
+            "durable": {"batch": record},
+        }
+    if record.get("status") == "awaiting_translation":
+        if params.get("canonical_answers") is None:
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "awaiting_translation",
+                "question_id": batch_id,
+                "batch_ref": batch_id,
+                "answer_original": record.get("answer_original"),
+                "answer_original_language": record.get("answer_original_language"),
+                "answer_option_ids": record.get("answer_option_ids"),
+                "translation_required_for": record.get("translation_required_for") or [],
+                "next_action": "Translate only the listed free-text answers, then call the same batch question_ref with canonical_answers.",
+                "durable": {"batch": record},
+            }
+        record, idempotent = _persist_batch_answers(params, batch_id, None)
+        if record.get("status") == "superseded":
+            return {
+                "schema": QUESTION_SCHEMA, "status": "superseded", "question_id": batch_id,
+                "batch_ref": batch_id, "resume": False, "durable": {"batch": record},
+            }
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "answered",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "answers": _batch_answer_view(record),
+            "idempotent": idempotent,
+            "durable": {"batch": record},
+        }
+
+    view = _localized_batch_view(record, params)
+    if not bool(params.get("interactive", True)):
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "pending_user_input",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "batch": view,
+            "ui": _batch_form_schema(view),
+            "next_action": "invoke cortex.question with interactive=true from the main Codex chat",
+            "recoverable": True,
+            "durable": {"batch": record},
+        }
+    try:
+        action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
+            "Please answer every question in this batch.",
+            _batch_form_schema(view),
+            thread_id=str(params.get("thread_id") or ""),
+            turn_id=str(params.get("turn_id") or ""),
+        )
+    except RuntimeError as exc:
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "elicitation_unavailable",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "error": redact(str(exc), 1000),
+            "recoverable": True,
+            "durable": {"batch": record},
+        }
+    if action != "accept":
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": action if action in {"decline", "cancel"} else "cancel",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "elicitation_id": elicitation_id,
+            "durable": {"batch": record},
+        }
+    try:
+        answers = _batch_answers_from_content(content, view)
+        record, _ = _persist_batch_answers(params, batch_id, answers, elicitation_id=elicitation_id)
+    except ValueError as exc:
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "invalid_answer",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "error": redact(str(exc), 1000),
+            "recoverable": True,
+            "durable": {"batch": record},
+        }
+    if record.get("status") == "superseded":
+        return {
+            "schema": QUESTION_SCHEMA, "status": "superseded", "question_id": batch_id,
+            "batch_ref": batch_id, "resume": False, "durable": {"batch": record},
+        }
+    if record.get("status") == "awaiting_translation":
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "awaiting_translation",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "elicitation_id": elicitation_id,
+            "answer_original": record.get("answer_original"),
+            "answer_original_language": record.get("answer_original_language"),
+            "answer_option_ids": record.get("answer_option_ids"),
+            "translation_required_for": record.get("translation_required_for") or [],
+            "next_action": "Translate only the listed free-text answers, then call the same batch question_ref with canonical_answers.",
+            "durable": {"batch": record},
+        }
+    return {
+        "schema": QUESTION_SCHEMA,
+        "status": "answered",
+        "question_id": batch_id,
+        "batch_ref": batch_id,
+        "elicitation_id": elicitation_id,
+        "answers": _batch_answer_view(record),
+        "durable": {"batch": record},
+    }
 
 
 def _question_record_for_main(params: dict[str, Any], question_id: str) -> dict[str, Any]:
@@ -392,7 +1169,18 @@ def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> 
     if params.get("localized_header"):
         config["header"] = redact(params["localized_header"], 200)
     if isinstance(params.get("localized_options"), list):
-        config["options"] = _question_options(params["localized_options"])
+        localized = _question_options(params["localized_options"])
+        canonical_options = list(config.get("options") or [])
+        if len(localized) != len(canonical_options):
+            raise ValueError("localized_options must match the canonical option count")
+        merged = []
+        for index, (canonical, display) in enumerate(zip(canonical_options, localized)):
+            raw_display = params["localized_options"][index]
+            supplied_id = str(raw_display.get("option_id") or "") if isinstance(raw_display, dict) else ""
+            if supplied_id and safe_id(supplied_id.lower()) != canonical["option_id"]:
+                raise ValueError("localized option_id must match the canonical option_id")
+            merged.append({**canonical, "label_localized": display["label"]})
+        config["options"] = merged
     if params.get("localized_custom_label"):
         config["custom_label"] = redact(params["localized_custom_label"], 200)
     return question, config
@@ -410,6 +1198,8 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
     durable: dict[str, Any] | None = None
     if question_id:
         question_id = safe_id(question_id)
+        if question_id.startswith("batch-"):
+            return _cortex_question_batch(params, question_id)
         record = _question_record_for_main(params, question_id)
         if record.get("status") == "answered":
             return {
@@ -417,8 +1207,10 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
                 "status": "answered",
                 "question_id": question_id,
                 "question": record.get("question"),
-                "answer": record.get("answer"),
+                "answer": record.get("answer_original") or record.get("answer"),
                 "answer_text": record.get("answer_text"),
+                "answer_en": record.get("answer_en"),
+                "answer_option_ids": record.get("answer_option_ids") or [],
                 "idempotent": True,
                 "durable": {"question": record},
             }
@@ -462,9 +1254,10 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
             "durable": durable,
         }
     try:
-        # Resolve through the facade so host integrations and tests can replace
-        # only this narrow compatibility seam without patching module internals.
-        action, content, elicitation_id = _runtime._request_mcp_elicitation(
+        # The composition binding resolves this narrow host seam at call time,
+        # allowing integrations and tests to replace it without a runtime
+        # dependency on the executable facade.
+        action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
             question,
             _question_form_schema(config),
             thread_id=str(params.get("thread_id") or ""),
@@ -506,6 +1299,21 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
             "recoverable": True,
             "durable": durable,
         }
+    custom_answer = answer.get("custom_response") if isinstance(answer, dict) else None
+    user_language = str(params.get("user_language") or "en")
+    if custom_answer not in (None, "", [], {}) and not user_language.lower().startswith("en") and not params.get("canonical_answer"):
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "awaiting_translation",
+            "question_id": question_id or (durable or {}).get("question", {}).get("question_id"),
+            "question": question,
+            "elicitation_id": elicitation_id,
+            "answer_original": answer,
+            "answer_original_language": user_language,
+            "answer_option_ids": answer.get("option_ids") or [],
+            "next_action": "Translate only the free-text portion to English, then answer the same durable question with answer plus answer_en.",
+            "durable": durable,
+        }
     answered = None
     if question_id:
         answer_submission_id = str(params.get("answer_submission_id") or "").strip()
@@ -516,7 +1324,8 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
             "question_id": question_id,
             "submission_id": safe_id(answer_submission_id),
             "answer": answer,
-            "resume_context": {"source": "cortex.question", "elicitation_id": elicitation_id, "ui": config},
+            "answer_en": params.get("canonical_answer"),
+            "resume_context": {"source": "cortex.question", "elicitation_id": elicitation_id, "ui": config, "user_language": user_language},
         })
     return {
         "schema": QUESTION_SCHEMA,
@@ -555,8 +1364,9 @@ def get_worker_question_updates(params: dict[str, Any]) -> dict[str, Any]:
                 "sequence": record["answered_sequence"],
                 "kind": "question_answered",
                 "question_id": record["question_id"],
-                "answer": record["answer"],
-                "answer_text": record.get("answer_text"),
+                "answer": record.get("answer_en") or record["answer"],
+                "answer_text": record.get("answer_en_text") or record.get("answer_text"),
+                "answer_option_ids": record.get("answer_option_ids") or [],
                 "resume_context": record["resume_context"],
                 "answered_at": record["answered_at"],
             })

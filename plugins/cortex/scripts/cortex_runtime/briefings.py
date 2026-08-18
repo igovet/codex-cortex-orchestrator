@@ -5,17 +5,24 @@ import re
 from pathlib import Path
 from typing import Any
 
-from cortex import (
-    CODEBASE_MEMORY_REFRESH_PROFILES,
-    EXECUTED_CHECK_RESULT_GATES,
-    PROFILE_EXECUTION_CONTRACTS,
-    PROFILE_INSTRUCTIONS,
-    WRITE_REQUIRED_RESULT_GATES,
-    _predecessor_review_marker,
-    _result_contract_markers,
-    render_profile_catalog,
-    result_contract_is_read_only,
-    safe_id,
+from cortex_runtime.core.runtime_bindings import bind_symbols
+
+
+bind_symbols(
+    "briefings",
+    globals(),
+    (
+        "CODEBASE_MEMORY_REFRESH_PROFILES",
+        "EXECUTED_CHECK_RESULT_GATES",
+        "PROFILE_EXECUTION_CONTRACTS",
+        "PROFILE_INSTRUCTIONS",
+        "WRITE_REQUIRED_RESULT_GATES",
+        "_predecessor_review_marker",
+        "_result_contract_markers",
+        "render_profile_catalog",
+        "result_contract_is_read_only",
+        "safe_id",
+    ),
 )
 
 def dispatch_briefing_review_marker(briefing_digest: str) -> str:
@@ -139,6 +146,10 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "plus at most a two-sentence summary. If report publication fails, return only the exact error and a "
             "short blocker description."
         )
+    closure_contract = (
+        "`record_report` needs top-level `gate_result` (not inside the eight-key report); "
+        "follow the tool schema. Top-level `closure` remains review/close compatibility only."
+    )
     briefing_transport_contract = (
         "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "
         f"dispatch_ref={package.get('dispatch_ref')!r}. The native bootstrap authorized reading this exact briefing "
@@ -372,6 +383,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         identity_contract,
         planning_contract,
         executed_test_contract,
+        closure_contract,
         "Internal worker protocol: English only. " + output_language_contract,
         report_evidence_checklist(),
         lifecycle_contract,

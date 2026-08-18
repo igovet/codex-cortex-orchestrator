@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import re
+import hashlib
+import stat
 from pathlib import Path
 from typing import Any
 
-import cortex as _runtime
-
+from cortex_runtime.core.runtime_bindings import bind_symbols
 from cortex_runtime.delegation import (
     delegation_lists,
     dispatch_context,
@@ -15,73 +15,118 @@ from cortex_runtime.delegation import (
     spawn_request as build_spawn_request,
     task_kind_and_risk,
 )
-from cortex import (
-    AGENTS,
-    AWAITING_HOST_SPAWN,
-    DOCUMENTATION_EVIDENCE_KINDS,
-    PROFILES,
-    QUESTION_SCHEMA,
-    REPORT_SCHEMA,
-    SCHEMA,
-    _contained_path,
-    _delegation_report_index,
-    _write_delegation_package,
-    _write_delegation_report_index,
-    _project_knowledge_context,
-    _report_index,
-    _v3_task_ref,
-    active_gates,
-    authorize,
-    canonical_profile,
-    capture_project_manifest,
-    digest_text,
-    host_spawn_bootstrap,
-    host_spawn_prompt,
-    ledger_root,
-    load_task_definition,
-    load_state,
-    native_worker_task_name,
-    now,
-    primary_gate,
-    profiles_for_gate,
-    redact,
-    render_gate_briefing,
-    report_bus_paths,
-    safe_id,
-    sanitize_structured,
-    save_state,
-    select_implementation_profile,
-    select_project_root,
-    state_lock,
-    worker_display_name,
-    worker_module_label,
-    store_manifest_snapshot,
-    store_immutable_artifact,
-    write_text_immutable,
+
+
+bind_symbols(
+    "delegation_service",
+    globals(),
+    (
+        "AGENTS",
+        "AWAITING_HOST_SPAWN",
+        "DOCUMENTATION_EVIDENCE_KINDS",
+        "PROFILES",
+        "QUESTION_SCHEMA",
+        "REPORT_SCHEMA",
+        "SCHEMA",
+        "_contained_path",
+        "_delegation_report_index",
+        "_project_knowledge_context",
+        "_report_index",
+        "_v3_task_ref",
+        "_write_delegation_package",
+        "_write_delegation_report_index",
+        "active_gates",
+        "authorize",
+        "canonical_profile",
+        "capture_project_manifest",
+        "digest_text",
+        "host_spawn_bootstrap",
+        "host_spawn_prompt",
+        "ledger_root",
+        "load_state",
+        "load_task_definition",
+        "native_worker_task_name",
+        "now",
+        "primary_gate",
+        "profiles_for_gate",
+        "redact",
+        "render_gate_briefing",
+        "report_bus_paths",
+        "resolve_dispatch_route",
+        "safe_id",
+        "sanitize_structured",
+        "save_state",
+        "select_implementation_profile",
+        "select_project_root",
+        "state_lock",
+        "store_immutable_artifact",
+        "store_manifest_snapshot",
+        "worker_display_name",
+        "worker_module_label",
+    ),
 )
+from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
+from cortex_runtime.ledger_db import fail_projection_job
 
 
 def _next_attempt_id(state: dict[str, Any], task_dir: Path, gate: str) -> str:
-    """Allocate a monotonic attempt id even after a briefing-only crash.
+    """Allocate an attempt id from canonical state only.
 
-    Briefings are intentionally immutable and are written before the mutable
-    SQLite attempt row.  If a later step fails, the briefing remains as an
-    orphan.  Reusing ``len(state["attempts"]) + 1`` would then address the
-    same path with different bytes on recovery.  Include both durable attempts
-    and orphan briefing ordinals when selecting the next number.
+    Briefing projections are derived outbox output.  Looking at their
+    directory made an absent or stale export influence business identity and
+    forced an eager filesystem dependency before the attempt existed.
     """
+    del task_dir
     highest = len(state.get("attempts", []))
-    pattern = re.compile(r"^[a-z0-9_]+-(\d+)\.dispatch-[a-z0-9]+\.briefing\.md$")
-    delegations = task_dir / "delegations"
-    if delegations.is_dir():
-        for path in delegations.iterdir():
-            match = pattern.fullmatch(path.name)
-            if match:
-                highest = max(highest, int(match.group(1)))
     return f"{gate}-{highest + 1:02d}"
+
+
+def _mark_projection_failure(params: dict[str, Any], attempt_id: str, error: Exception) -> None:
+    """Record a required-briefing failure after the outbox has been failed.
+
+    The attempt was committed before filesystem work began.  Leaving it in
+    ``awaiting_host_spawn`` after a failed required export would let a later
+    coordinator return a dispatch that this call never made ready.
+    """
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        attempt = next((item for item in state.get("attempts", []) if item.get("attempt_id") == attempt_id), None)
+        if attempt is None or attempt.get("status") != AWAITING_HOST_SPAWN:
+            return
+        attempt["status"] = "failed"
+        attempt["failure_reason"] = "required_dispatch_briefing_projection_failed"
+        attempt["failure_detail"] = redact(str(error), 1000)
+        attempt["failed_at"] = now()
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "delegation_projection_failed",
+            f"{attempt_id}: required dispatch briefing projection failed",
+        )
+
+
+def _ensure_briefing_task_directory(task_dir: Path) -> None:
+    """Create the task root only for the required briefing projection.
+
+    New task records intentionally have no artifact directory.  A dispatched
+    worker is the one exception: its immutable briefing must exist before the
+    host receives the dispatch.  Never repurpose, empty, or follow a pre-made
+    path while satisfying that requirement.
+    """
+    try:
+        task_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = task_dir.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("dispatch briefing task directory must be a real directory")
+    task_dir.chmod(0o700, follow_symlinks=False)
 
 def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
+    prepared: dict[str, Any]
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
@@ -186,7 +231,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             agent=agent,
             task_kind=task_kind,
             complexity=str(state.get("complexity", "C1")),
-            resolve_dispatch_route=_runtime.resolve_dispatch_route,
+            resolve_dispatch_route=resolve_dispatch_route,
         )
         required_lists = delegation_lists(params, task_definition, briefing)
         context_report_ids = [safe_id(str(item)) for item in params.get("context_report_ids", [])]
@@ -257,10 +302,23 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             task_definition.get("intent_clarification_reason", ""), 500
         ) or None
         full_briefing = host_spawn_prompt(agent, package)
-        briefing_digest = write_text_immutable(briefing_path, full_briefing)
         briefing_artifact = store_immutable_artifact(
             task_dir, state["task_id"], kind="dispatch_briefing", title=briefing_file,
             mime_type="text/markdown", content=full_briefing, export_path=briefing_file,
+        )
+        # The immutable artifact and outbox row are committed by their own
+        # SQLite transactions before materialization begins.  The export is
+        # never written through the legacy direct writer.
+        briefing_digest = str(briefing_artifact["digest_sha256"])
+        # Required dispatch exports are an outbox barrier.  The task attempt,
+        # canonical briefing artifact, and its intent must commit before a
+        # filesystem worker can see or materialize the projection.  Do not
+        # call the materializer from this state-lock transaction.
+        briefing_job = enqueue_projection(
+            root=ledger_root(params), task_id=state["task_id"],
+            artifact_id=briefing_artifact["artifact_ref"],
+            projection_type="dispatch_briefing", export_path=briefing_file,
+            required=True,
         )
         package["briefing_digest"] = briefing_digest
         package["briefing_artifact_ref"] = briefing_artifact["artifact_ref"]
@@ -283,7 +341,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         delegation_index["updated_at"] = now()
         _write_delegation_report_index(report_paths, state["task_id"], attempt_id, delegation_index)
         save_state(task_dir, task_dir / "state.sqlite", state, "delegation", f"{gate} → {agent} ({attempt_id})")
-        return {
+        prepared = {
             "delegation_ref": f"dispatch:{attempt_id}",
             "briefing_file": str(briefing_path),
             "briefing_digest": briefing_digest,
@@ -298,3 +356,33 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "task_kind_correction": ({"requested": requested_task_kind or None, "used": task_kind} if requested_task_kind != task_kind else None),
             "risk_correction": ({"requested": requested_risk or None, "used": risk} if requested_risk != risk else None),
         }
+
+    # This must remain outside ``state_lock``: state_lock owns a re-entrant
+    # SQLite transaction, whereas projection materialization performs fsync
+    # and replace operations on the filesystem.  A failure is persisted as a
+    # recoverable outbox failure and deliberately returns no spawn request.
+    projection_key = str(briefing_job["projection_key"])
+    try:
+        _ensure_briefing_task_directory(briefing_path.parent.parent)
+        materialized = materialize_job(
+            root, {**briefing_job}, worker_id=f"dispatch-{dispatch_ref}",
+        )
+        if (
+            materialized.get("status") != "ready"
+            or str(materialized.get("materialized_digest") or "") != briefing_digest
+        ):
+            raise ValueError("required dispatch briefing projection is not ready")
+        payload = briefing_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != briefing_digest:
+            raise ValueError("required dispatch briefing projection digest is invalid")
+        briefing_path.chmod(0o400)
+    except Exception as exc:
+        try:
+            fail_projection_job(root, projection_key, str(exc))
+        except Exception:
+            # Preserve the materialization failure; a lease that cannot be
+            # marked failed is still recoverable when it expires.
+            pass
+        _mark_projection_failure(params, attempt_id, exc)
+        raise
+    return prepared

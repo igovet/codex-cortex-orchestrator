@@ -11,9 +11,9 @@ from typing import Any
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Cortex preserves that intent boundary, creates internal identifiers, and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: persist a material question, finish into resumable idle, then poll its answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "record_report": "Worker-only operation: validate the gate contract, executed-check evidence, and claimed file delta; then persist the strict report and return a compact report_ref. Do not paste the report body into the parent channel after success.",
+    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
+    "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
+    "record_report": "Worker-only operation: validate the gate contract, executed-check evidence, and claimed file delta; then persist the strict eight-field report and, for review/close, its optional top-level closure sibling, returning a compact report_ref. Do not paste the report body into the parent channel after success.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -31,6 +31,7 @@ def build_public_schemas(
     V3_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
+        "description": "Strict cortex/report/v1 object with exactly eight fields. Review and close closure belongs beside this object, never inside it.",
         "properties": {
             "summary": {"type": "string", "minLength": 1},
             "findings": {"type": "array"},
@@ -59,6 +60,81 @@ def build_public_schemas(
             "next_action": {"type": "string", "minLength": 1},
         },
         "required": sorted(report_fields),
+    }
+    CLOSURE_FINDING_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "fingerprint": {"type": "string", "minLength": 1},
+            "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3", "info"]},
+            "status": {"type": "string", "enum": ["open", "resolved", "waived"]},
+            "blocking": {"type": "boolean"},
+            "summary": {"type": "string", "minLength": 1},
+            "details": {},
+            "next_action": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "required": {"type": "boolean"},
+                    "target_gate": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["required"],
+            },
+            "waiver_reason": {"type": "string"},
+            "waived_by": {"type": "string"},
+            "waived_at": {"type": "string"},
+            "resolved_at": {"type": "string"},
+        },
+        "required": ["fingerprint", "severity", "status", "blocking", "summary"],
+    }
+    CLOSURE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Optional top-level review/close closure; do not add closure to report.",
+        "properties": {
+            "decision": {"type": "string", "enum": ["pass", "rework", "fail"]},
+            "findings": {"type": "array", "items": CLOSURE_FINDING_SCHEMA},
+            "verification": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "executed": {"type": "array", "items": {"type": "string"}},
+                    "not_executed": {"type": "array", "items": {"type": "string"}},
+                    "required_missing": {"type": "array", "items": {"type": "string"}},
+                    "limitations": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["executed", "not_executed", "required_missing", "limitations"],
+            },
+            "workspace": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "modified": {"type": "array", "items": {"type": "string"}},
+                    "untracked": {"type": "array", "items": {"type": "string"}},
+                    "staged": {"type": "array", "items": {"type": "string"}},
+                    "committed": {"type": ["boolean", "string"], "enum": [True, False, "not_required"]},
+                },
+                "required": ["modified", "untracked", "staged", "committed"],
+            },
+        },
+        "required": ["decision", "findings", "verification", "workspace"],
+    }
+    GATE_RESULT_SCHEMA = {
+        **CLOSURE_SCHEMA,
+        "description": (
+            "Canonical result envelope for every gate. The legacy closure sibling remains an alias for "
+            "review/close during the compatibility window."
+        ),
+        "properties": {
+            **CLOSURE_SCHEMA["properties"],
+            "decision": {"type": "string", "enum": ["pass", "rework", "fail", "blocked"]},
+            "failure_class": {
+                "type": "string",
+                "enum": ["product", "infrastructure", "environment", "policy", "worker"],
+            },
+        },
+        "required": ["decision", "failure_class", "findings", "verification", "workspace"],
     }
     V3_PLANNING_SCHEMA = {
         "type": "object",
@@ -204,12 +280,15 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
+        "description": "Worker report request. report remains exactly eight fields; gate_result is the canonical result envelope for every gate and closure is the temporary review/close alias.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Exact attempt_id from this worker's Cortex briefing; never substitute a phase or profile."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Exact canonical profile from this worker's Cortex briefing."},
             "report": V3_REPORT_SCHEMA,
+            "gate_result": GATE_RESULT_SCHEMA,
+            "closure": CLOSURE_SCHEMA,
             "planning": V3_PLANNING_SCHEMA,
         },
         "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
@@ -222,14 +301,40 @@ def build_public_schemas(
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
-            "action": {"type": "string", "enum": ["ask", "poll"]},
+            "action": {"type": "string", "enum": ["ask", "poll", "ask_batch", "poll_batch"]},
             "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
+            "batch_ref": {"type": "string", "description": "Exact ref returned by ask_batch; required for poll_batch."},
             "question": {"type": "string", "minLength": 1, "description": "Material user decision; required for ask."},
             "header": {"type": "string"},
             "options": {"type": "array", "maxItems": 32, "items": question_option_schema},
             "multiple": {"type": "boolean"},
             "custom_label": {"type": "string"},
             "context": {},
+            "batch": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": "Atomic material-question batch. question_key and option_id are stable canonical identifiers; every question/options label must be English.",
+                "properties": {
+                    "batch_key": {"type": "string", "minLength": 1},
+                    "questions": {
+                        "type": "array", "minItems": 1, "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "question_key": {"type": "string", "minLength": 1},
+                                "question": {"type": "string", "minLength": 1},
+                                "type": {"type": "string", "enum": ["single_select", "multi_select", "text"]},
+                                "header": {"type": "string"},
+                                "options": {"type": "array", "maxItems": 32, "items": question_option_schema},
+                                "custom_label": {"type": "string"},
+                            },
+                            "required": ["question_key", "question", "type"],
+                        },
+                    },
+                },
+                "required": ["batch_key", "questions"],
+            },
         },
         "required": ["project_root", "task_id", "attempt_id", "profile", "action"],
     }
@@ -269,7 +374,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, or prune; common aliases are normalized."},
+            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, prune, legacy, or maintenance; common aliases are normalized."},
             "task_ref": {"type": "string", "description": "Needed only when several tasks are selectable."},
             "reason": {"type": "string"},
             "payload": {
@@ -280,7 +385,8 @@ def build_public_schemas(
                     "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
                     "elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
-                    "and accepts older_than_days (default 7). Normal wave progression never uses this field."
+                    "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
+                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup targets use only safe backup_name values. Normal wave progression never uses this field."
                 ),
             },
         },
@@ -375,9 +481,9 @@ def v3_response(
         )
         next_action = (
             f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: call every dispatch.call once with its exact "
-            "dispatch.arguments, one call at a time in returned worker order; the children still run concurrently after "
-            "each call returns. This order lets the documented generic SubagentStart events bind to the exact issued "
-            "dispatch. A worker is dispatched only after that native call returns a child id. Never claim "
+            "dispatch.arguments in one model turn when the host supports parallel tool calls. Exact task_name and "
+            "dispatch identity bind out-of-order SubagentStart events; ordinal correlation is forbidden. A worker is "
+            "dispatched only after that native call returns a child id. Never claim "
             "it was sent or call wait without the returned child target; if the native call is unavailable or fails, "
             "stop and report the blocker. Keep the returned child targets, then remain idle and wait only for them. Do not repeat a "
             "completed lifecycle call while dispatching. Each worker publishes through record_report and returns only "
@@ -411,6 +517,10 @@ def v3_response(
         stopped_workers = [
             item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
         ]
+        resumable_workers = [
+            item for item in stopped_workers
+            if item.get("resumable") and str(item.get("host_agent_id") or "").strip()
+        ]
         if outcome == "waiting_workers":
             if active_worker_ids:
                 next_action = (
@@ -443,6 +553,13 @@ def v3_response(
                     "children. Never wait on or respawn them. Read and publish these report refs, then call "
                     "continue_orchestration for the current step: " + ", ".join(report_refs) + "."
                 )
+            elif resumable_workers:
+                resume_targets = [str(item["host_agent_id"]) for item in resumable_workers]
+                next_action = (
+                    f"{coordinator_lock} Recovery found a stopped but addressable worker. Do not spawn a replacement "
+                    "and do not wait on the stopped child. Resume the exact persisted worker with followup_task "
+                    "targeting: " + ", ".join(resume_targets) + "."
+                )
             else:
                 next_action = (
                     f"{coordinator_lock} Recovery found a running attempt without a persisted native child id. "
@@ -457,8 +574,9 @@ def v3_response(
             ]
             if waiting_questions:
                 next_action = (
-                    f"{coordinator_lock} Never wait on or respawn the stopped worker. Surface the durable question "
-                    "through manage_orchestration(intent=question): " + ", ".join(waiting_questions) + "."
+                    f"{coordinator_lock} Never wait on or respawn the paused worker. Surface and answer the durable "
+                    "question through manage_orchestration(intent=question): " + ", ".join(waiting_questions)
+                    + ". Then resume the same persisted host_agent_id with followup_task."
                 )
             elif all(item.get("report_refs") for item in stopped_workers):
                 report_refs = [
@@ -471,13 +589,17 @@ def v3_response(
                     f"{coordinator_lock} Never wait on or respawn the stopped worker. Read and publish these "
                     "persisted report refs, then continue the current step: " + ", ".join(report_refs) + "."
                 )
+            elif resumable_workers:
+                resume_targets = [str(item["host_agent_id"]) for item in resumable_workers]
+                next_action = (
+                    f"{coordinator_lock} The native worker stopped before recording a report but remains addressable. "
+                    "Do not mark the attempt failed and do not spawn a replacement. Resume it with followup_task "
+                    "using the exact persisted target: " + ", ".join(resume_targets) + "."
+                )
             else:
                 next_action = (
-                    f"{coordinator_lock} The native worker stopped without a report and Cortex durably marked its "
-                    "attempt failed. Never wait on or respawn it directly. Call continue_orchestration for this step "
-                    "with the matching worker slot, that stopped worker's exact dispatch_ref, status=failed, and "
-                    "reason=native_worker_stopped_without_report; "
-                    "Cortex will apply the canonical rework policy."
+                    f"{coordinator_lock} Recovery found stopped worker state without a report or an addressable host "
+                    "identity. Fail closed: do not respawn or fabricate a failed receipt; report the host-binding blocker."
                 )
         else:
             next_action = (
@@ -494,6 +616,13 @@ def v3_response(
         "next_action": next_action,
         "dispatches": dispatches,
     }
+    if outcome == "waiting_workers":
+        response.update({
+            "output_policy": "silent",
+            "allowed_visible_events": [
+                "user_message", "worker_question", "worker_completed", "worker_failed", "blocking_error",
+            ],
+        })
     if start_replayed is not None:
         response["replayed"] = start_replayed
     if isinstance(old.get("pipeline"), dict):

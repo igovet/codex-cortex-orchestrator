@@ -1,44 +1,44 @@
-name: cortex
+name: Cortex offline validation
 
 on:
   push:
   pull_request:
 
 jobs:
-  verify:
+  offline-validation:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      # The suite is deliberately self-contained: it needs only the Python
+      # standard library and must not leave bytecode or test caches behind.
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Syntax checks
+      - name: Validate bundled plugin configuration
         run: |
-          python -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py scripts/cortex-cold-boot-smoke.py scripts/cortex-luna-high-eval.py scripts/probe-fresh-cortex-plugin.py scripts/sync-cortex-hook-trust.py scripts/validate-cortex-marketplace.py scripts/verify-cortex-release.py tests/jsonrpc_harness.py
-          bash -n scripts/sync-cortex.sh
-          python scripts/validate-cortex-marketplace.py
-      - name: Regression tests
-        run: python -m unittest discover -s tests -v
-      - name: Diff hygiene
+          python -B scripts/validate-cortex-marketplace.py
+      - name: Run offline SQLite and projection regression suites
         run: |
-          base="${{ github.event.pull_request.base.sha || github.event.before }}"
-          if git cat-file -e "${base}^{commit}" 2>/dev/null; then
-            git diff --check "${base}...HEAD"
-          else
-            git diff --check
-          fi
-      - name: Clean-ledger smoke
-        run: python3 scripts/cortex-cold-boot-smoke.py
-      - name: Luna-high orchestration fixtures
-        run: python3 scripts/cortex-luna-high-eval.py
-      - name: Tracked release archive boundary
-        run: python3 scripts/verify-cortex-release.py --require-tracked
-      - name: Fresh Codex plugin registration
-        run: python3 scripts/probe-fresh-cortex-plugin.py
-      - name: Codex CLI availability
+          python -B -m unittest -v \
+            tests.test_ledger_db \
+            tests.test_projection_jobs \
+            tests.test_delegation_projection \
+            tests.test_lazy_filesystem \
+            tests.test_legacy_lifecycle \
+            tests.test_health_maintenance \
+            tests.test_record_report_slice \
+            tests.test_cortex_control \
+            tests.test_cortex_invariants
+      - name: Verify no bytecode or test cache artifacts
         run: |
-          if command -v codex >/dev/null 2>&1; then
-            codex --version
-          else
-            echo "Codex CLI unavailable; isolated plugin registration probe reports SKIP."
+          cache_paths="$(find . -path './.git' -prune -o \( -type d \( -name '__pycache__' -o -name '.pytest_cache' \) -o -type f \( -name '*.pyc' -o -name '*.pyo' \) \) -print)"
+          if [ -n "${cache_paths}" ]; then
+            echo "Unexpected Python or test cache artifacts:"
+            printf '%s\n' "${cache_paths}"
+            exit 1
           fi

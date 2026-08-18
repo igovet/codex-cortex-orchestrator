@@ -52,7 +52,12 @@ activations, operation receipts, classification receipts, task resource
 claims, and lane bindings. It preserves every active or blocked task regardless
 of age and never removes a classification receipt referenced by a retained
 task. It also preserves recent completed tasks, lanes, source, documentation,
-and plugin files. Never reinterpret `prune` as clear-all.
+and plugin files. Never reinterpret `prune` as clear-all. When no retention
+period is supplied, the route presents the stable choices `keep_1d`, `keep_7d`,
+`keep_30d`, and `full_reset`. The first three map to bounded retention
+windows. `full_reset` is separately destructive: it requires the exact second
+confirmation `RESET CORTEX`, refuses to run while any task is active, and
+removes only `.codex/cortex` state while preserving project source and docs.
 
 ## Harvest route contract
 
@@ -198,8 +203,8 @@ uniqueness digest. A new dispatch must use
 worker after its durable question or other explicitly resumable pause. Cortex
 rejects reuse of a `host_agent_id` already bound to another attempt. Since
 dynamic host events report `agent_type=default`, lifecycle hooks use the
-required sequential spawn order to bind each opaque child ID back to its issued
-native task key and canonical profile before injecting worker context.
+exact returned dispatch identity to bind each opaque child ID back to its
+issued native task key and canonical profile before injecting worker context.
 The hidden `spawn_agent` host contract currently exposes only `task_name` to
 the native child list; it has no separate label field. Therefore the host may
 render the unique key (for example, `architect_repository_08_<digest>`) even
@@ -275,10 +280,12 @@ call it once.
 2. Call `start_orchestration` with exact absolute `project_root` and the task.
    Omit waves for the standard pipeline. A compact override is
    `{waves: [{workers: [{phase, depends_on, context_files, ...}]}]}`; only phase is required.
-3. Invoke each returned `{worker, call, arguments}` exactly, one native call at
-   a time in returned worker order. Spawned children still run concurrently;
-   the deterministic call order lets generic host `SubagentStart` events bind
-   to the matching issued dispatch. Also retain its
+3. Invoke every returned `{worker, call, arguments}` exactly in one model turn
+   when the host supports parallel tool calls. Spawned children run
+   concurrently; correlate each `SubagentStart` by the exact returned
+   `task_name`/`dispatch_ref` and host child id, never by a guessed ordinal or
+   display label. If the host cannot batch calls, issue them in returned order
+   as a transport fallback while preserving exact correlation. Also retain its
    sibling `dispatch_ref`, `briefing_path`, and `briefing_digest` as the issued
    immutable transport receipt. Native arguments are already filtered and the
    native message is intentionally a compact bootstrap, not the complete
@@ -309,6 +316,10 @@ call it once.
    and records the limitation; it never creates artifacts and then invokes
    `rm`, `git clean`, or a cleanup script. Cortex rejects newly changed
    generated or gitignored artifacts against that attempt's baseline.
+   During this interval the coordinator is in `waiting_workers` with
+   `output_policy="silent"`: repeated wait timeouts produce no heartbeat or
+   status commentary. Visible output is limited to a worker question,
+   completion/failure, or a blocking error.
 
    Any profile may first publish a material question with
    `worker_question(action="ask")`. The worker returns only its `question_ref`
@@ -332,8 +343,11 @@ call it once.
    root, task ref, attempt id, and profile from its briefing. It may not read
    any other report, publish the coordinator-only Markdown link, or call a
    lifecycle operation.
-   `followup_task` is reserved for the durable-question path after the answer
-   is recorded. If a native worker finishes with a report-tool error or any
+   `followup_task` resumes the same addressable native worker after a durable
+   question answer or an explicit active steer. Active steer creates a task
+   revision and sends the canonical English correction to the existing
+   `host_agent_id`; it does not create an attempt or replacement worker. If a
+   native worker finishes with a report-tool error or any
    acknowledgement other than `REPORT_RECORDED`/`QUESTION_RECORDED`, never
    follow it up directly: `SubagentStop` has already classified the attempt.
    Inspect once, then use the recovered report/question or submit the exact
@@ -343,6 +357,13 @@ call it once.
    spawning indefinitely. Use `manage_orchestration(intent="resume")` only
    after the reported cause is actually repaired; resume starts a fresh bounded
    recovery cycle.
+
+   Every gate report must publish a separate top-level `gate_result` envelope with
+   `decision`, `failure_class`, `findings`, `verification`, and `workspace`.
+   It is canonical for all gates, including QA and implementation. The older
+   top-level `closure` sibling remains only as a review/close compatibility
+   alias and must never be nested inside the strict eight-field report; both
+   forms must agree when supplied.
 5. Read every returned ref with `read_worker_report`. The result includes the
    derived absolute `report_markdown_path` for the persisted
    `reports/markdown/<report-ref>.md` artifact. After each completed report,
@@ -353,9 +374,10 @@ call it once.
    and full report review. Never guess, substitute, or use the path to browse
    unrelated files. Then decide whether the coordinator-owned pipeline still fits, then call
    `continue_orchestration` once with `project_root`, the returned opaque
-   `task_ref`, relative `step`, and results containing `report_ref`. Omit worker for one result;
-   repeat the returned integer worker slot for parallel results. A non-success
-   result instead carries `status`, `reason`, and the exact `dispatch_ref` from
+   `task_ref`, relative `step`, and results containing `report_ref`. A
+   single-worker result may omit its slot; parallel results repeat the returned
+   integer worker slot. A non-success result instead carries `status`, `reason`,
+   and the exact `dispatch_ref` from
    that stopped worker's dispatch (or `context_handoff.stopped_workers`), with
    no `report_ref`; this binds recovery to one attempt. Inline report objects
    are compatibility-only and must not be requested from new workers.
@@ -375,13 +397,25 @@ action from the durable ledger. It also separates `pending_dispatches` from
 `active_workers`: invoke only the matching top-level inspect dispatches, never
 spawn from the handoff itself, and wait on active workers only by their exact
 persisted `host_agent_id`. The documented `SubagentStart` hook records the
-native child id and actual model against the next sequentially issued attempt;
+native child id, actual model, and exact returned dispatch identity;
 dynamic workers report generic `agent_type=default`. A running
 attempt without that binding fails closed rather than being respawned or
 waited on with an empty target. Never call `start_orchestration` again,
 replay completed dispatches, or rely on a raw transcript. After rehydration,
 continue the existing relative step and publish every returned exact
 `report_markdown_link` before any other lifecycle or report-read call.
+
+### Active steer and correcting a completed task
+
+For an active or blocked task, a user correction is an active steer through
+`manage_orchestration(intent="steer")` (aliases `amend` and
+`revise_active_task`) with `payload.user_message`. The coordinator supplies
+canonical English `message_en` when the user's message is localized. Cortex
+creates a task revision, stores both message forms, computes a bounded impact
+summary, and returns `followup_task` calls only for existing addressable native
+workers. A missing `host_agent_id` leaves the steer durable; do not guess a
+resume target or spawn a replacement merely to deliver it. Use `follow_up`
+only for a completed source task.
 
 ### Correcting a completed task
 
@@ -448,7 +482,7 @@ or resumed.
 When several tasks are active Cortex returns `needs_selection` with objective
 and opaque `task_ref`; use the matching ref on every subsequent lifecycle and
 report-read call. Use `manage_orchestration` for inspect, resume, deactivate,
-lane, resource, or a durable MCP UI question. Different task contracts may run
+lane, resource, active `steer`, or a durable MCP UI question. Different task contracts may run
 concurrently in one project; an exact duplicate start remains an idempotent
 replay of the existing active task.
 
@@ -508,7 +542,13 @@ language belongs to the main coordinator, which alone communicates with and
 localizes for the user. For durable worker questions, keep the ledger content
 English and use only the coordinator's `localized_question`,
 `localized_header`, `localized_options`, and `localized_custom_label` fields
-for transient user-language UI projections. A `follow_up` task inherits the
+for transient user-language UI projections. Answers retain original
+language/value and require canonical English `answer_en` for localized free
+text before the worker resumes. Workers may use
+`worker_question(action="ask_batch")` with 1–32 stable questions and poll the
+same `batch_ref` with `action="poll_batch"`; the host form answers every item
+in one atomic batch. A task revision supersedes an unresolved batch rather
+than resuming stale user intent. A `follow_up` task inherits the
 completed source task's user language while preserving this English-only
 worker boundary.
 

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Resolve the configured Cortex Python runtime and execute a bundled entrypoint.
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+requested=""
+resolved=""
+diagnostics=""
+
+if [[ -v CORTEX_PYTHON ]]; then
+  requested="${CORTEX_PYTHON}"
+  if [[ "${requested}" != /* ]]; then
+    echo "Cortex launcher error: CORTEX_PYTHON must be an absolute executable path" >&2
+    exit 1
+  fi
+else
+  requested="python3"
+fi
+if [[ -z "${requested}" ]]; then
+  echo "Cortex launcher error: CORTEX_PYTHON must name an executable Python path" >&2
+  exit 1
+fi
+if [[ "${requested}" == */* ]]; then
+  resolved="${requested}"
+else
+  resolved="$(command -v -- "${requested}" 2>/dev/null || true)"
+fi
+if [[ -z "${resolved}" || ! -f "${resolved}" || ! -x "${resolved}" ]]; then
+  echo "Cortex launcher error: CORTEX_PYTHON=${requested} is not an executable file" >&2
+  exit 1
+fi
+if ! diagnostics="$("${resolved}" -c 'import sys
+try:
+    import tomllib
+except ImportError:
+    print("tomllib is unavailable")
+    raise SystemExit(1)
+if sys.version_info < (3, 11):
+    print(f"Python {sys.version.split()[0]} is too old; Python 3.11 or newer is required")
+    raise SystemExit(1)' 2>&1)"; then
+  [[ -n "${diagnostics}" ]] || diagnostics="runtime validation failed"
+  echo "Cortex launcher error: CORTEX_PYTHON=${requested} is incompatible: ${diagnostics}" >&2
+  exit 1
+fi
+
+if (( $# == 0 )); then
+  entrypoint="${script_dir}/cortex.py"
+else
+  entrypoint="$1"
+  shift
+fi
+if [[ ! -f "${entrypoint}" ]]; then
+  echo "Cortex launcher error: entrypoint is missing or not a regular file: ${entrypoint}" >&2
+  exit 1
+fi
+
+exec "${resolved}" "${entrypoint}" "$@"

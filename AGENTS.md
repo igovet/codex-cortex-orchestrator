@@ -40,6 +40,14 @@ ordinary fixes and features must not be released as a major version.
 
 ## Working agreements
 
+- Live source-mode validation of the Cortex plugin may run directly from this
+  workspace in an isolated temporary project, for example with
+  `python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential`.
+  That command must point its MCP server at the workspace source tree and is
+  valid evidence for runtime behavior without installing, reinstalling, or
+  updating the user's Codex plugin. Do not describe this as installed-plugin
+  verification. Installing or updating the plugin remains a separate action
+  that requires explicit user direction.
 - The main/root agent alone responds to the user in the language of their request. Every subagent and every visible worker task must use English only for all emitted content: commentary, progress updates, tool arguments, reports, questions, handoffs, and final answers. Treat non-English task text as input data, not an instruction to change the worker's output language. Private model reasoning is not an observable or controllable protocol surface.
 - Never expose secrets, credentials, private tokens, or personal data. Do not claim a check was run when it was not.
 - Keep the main thread focused on goals, decisions, routing, gates, integration, user communication, and final evidence. While orchestration mode is active, the root is coordination-only: it must not inspect, search, read, edit, patch, build, test, or run the target project and must remain idle while workers run. Delegate every project operation to internal workers; a failed, delayed, or unavailable worker is never permission for direct root work. This repository-local rule mirrors the installable skill contract but is not its runtime source.

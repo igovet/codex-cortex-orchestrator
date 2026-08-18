@@ -1,4 +1,6 @@
+import ast
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -71,6 +73,42 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def report(self, task_id, attempt_id, submission_id="final"):
         return control.record_report({"task_id": task_id, "principal": "owner", "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused evidence"], "uncertainty": [], "next_action": "advance"}})
+
+    def test_runtime_dependency_slices_do_not_import_executable_facade(self):
+        """Extracted slices depend on the explicit composition binding only."""
+        runtime_root = Path(control.__file__).parent / "cortex_runtime"
+        owned = [
+            runtime_root / "briefings.py",
+            runtime_root / "context_handoff.py",
+            runtime_root / "delegation_service.py",
+            runtime_root / "gate_transitions.py",
+            runtime_root / "orchestration_engine.py",
+            runtime_root / "questions.py",
+            runtime_root / "core" / "__init__.py",
+            runtime_root / "core" / "runtime_bindings.py",
+        ]
+        for path in owned:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            facade_imports = [
+                node for node in ast.walk(tree)
+                if (isinstance(node, ast.Import) and any(alias.name == "cortex" for alias in node.names))
+                or (isinstance(node, ast.ImportFrom) and node.module == "cortex")
+            ]
+            self.assertEqual(facade_imports, [], path.name)
+
+        # Import after the executable composition root has bound its explicit
+        # collaborators.  This catches missing/late bindings without relying
+        # on a second facade module.
+        for module_name in (
+            "cortex_runtime.core.runtime_bindings",
+            "cortex_runtime.briefings",
+            "cortex_runtime.context_handoff",
+            "cortex_runtime.delegation_service",
+            "cortex_runtime.gate_transitions",
+            "cortex_runtime.orchestration_engine",
+            "cortex_runtime.questions",
+        ):
+            self.assertIsNotNone(importlib.import_module(module_name))
 
     @classmethod
     def replace_generated_facts(cls, content, facts):
@@ -461,6 +499,42 @@ class OrchestrationInvariantTests(unittest.TestCase):
         verification_properties = control.TOOLS["execute_verification_command"][1]["properties"]
         self.assertFalse({"argv", "cwd", "env", "shell", "executable"} & set(verification_properties))
 
+    def test_public_report_contract_keeps_closure_as_top_level_review_sibling(self):
+        schema = control.WORKER_RECORD_REPORT_SCHEMA
+        self.assertEqual(
+            set(schema["properties"]["report"]["properties"]),
+            {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"},
+        )
+        self.assertEqual(set(schema["properties"]["report"]["required"]), set(schema["properties"]["report"]["properties"]))
+        closure = schema["properties"]["closure"]
+        self.assertEqual(closure["properties"]["decision"]["enum"], ["pass", "rework", "fail"])
+        self.assertEqual(set(closure["properties"]["verification"]["properties"]), {"executed", "not_executed", "required_missing", "limitations"})
+        self.assertEqual(set(closure["properties"]["workspace"]["properties"]), {"modified", "untracked", "staged", "committed"})
+        self.assertEqual(closure["properties"]["workspace"]["properties"]["committed"]["enum"], [True, False, "not_required"])
+        finding = closure["properties"]["findings"]["items"]
+        self.assertEqual(finding["properties"]["severity"]["enum"], ["P0", "P1", "P2", "P3", "info"])
+        self.assertEqual(finding["properties"]["status"]["enum"], ["open", "resolved", "waived"])
+        self.assertNotIn("closure", schema["properties"]["report"]["properties"])
+
+    def test_review_and_close_briefings_require_top_level_closure(self):
+        package = {
+            "task_id": "task", "gate": "review", "attempt_id": "review-01", "dispatch_ref": "dispatch-review-000000000000",
+            "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
+            "task_user_request": "Review the delegated project outcome.", "task_objective": "Review the delegated outcome.",
+            "objective": "Review the mission.", "ownership": "Own review", "allowed_paths": ["tests"],
+            "acceptance_criteria": ["Review complete"], "verification": ["Review evidence"],
+            "task_acceptance_criteria": [], "task_verification": [], "context_files": [], "knowledge_index_files": [],
+            "context_report_ids": [], "result_baseline_ref": "manifest-" + "a" * 64, "task_requirements": [], "task_scope": [],
+            "pause_conditions": [], "budget": "none", "plan_feedback": None, "intent_clarification_required": False,
+            "intent_clarification_reason": None,
+        }
+        review_prompt = control.host_spawn_prompt("code_reviewer", package)
+        self.assertIn("top-level `gate_result`", review_prompt)
+        self.assertIn("Top-level `closure` remains review/close compatibility only", review_prompt)
+        package["gate"] = "close"
+        close_prompt = control.host_spawn_prompt("build_verification", package)
+        self.assertIn("top-level `gate_result`", close_prompt)
+
     def test_sync_detects_and_repairs_same_version_plugin_content_drift(self):
         if not shutil.which("codex"):
             self.skipTest("codex CLI is unavailable")
@@ -482,7 +556,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         before_preview = config.read_text(encoding="utf-8")
         preview = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(preview.returncode, 0, preview.stderr)
-        self.assertIn("would preserve Cortex MCP default_tools_approval_mode=approve", preview.stdout)
+        self.assertIn("would set Cortex MCP default_tools_approval_mode=approve", preview.stdout)
         self.assertIn("would set agents.default_subagent_model=gpt-5.6-luna", preview.stdout)
         self.assertEqual(config.read_text(encoding="utf-8"), before_preview)
         installed = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
@@ -550,6 +624,74 @@ class OrchestrationInvariantTests(unittest.TestCase):
             target.read_text(encoding="utf-8"),
             '[agents]\ndefault_subagent_model = "gpt-5.6-terra"\n',
         )
+
+    def test_sync_resolves_cortex_python_path_with_spaces_before_dry_run(self):
+        isolated = self.base / "resolver-space-home"
+        codex_home = isolated / ".codex"
+        codex_home.mkdir(parents=True)
+        selected = isolated / "python 3.12"
+        selected.symlink_to(Path(sys.executable).resolve())
+        environment = os.environ.copy()
+        environment.update({
+            "HOME": str(isolated),
+            "CODEX_HOME": str(codex_home),
+            "CORTEX_PYTHON": str(selected),
+        })
+        script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
+        completed = subprocess.run(
+            ["bash", str(script), "--dry-run"],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse((codex_home / "config.toml").exists())
+
+    def test_sync_rejects_invalid_cortex_python_before_configuration_write(self):
+        isolated = self.base / "invalid-resolver-home"
+        codex_home = isolated / ".codex"
+        codex_home.mkdir(parents=True)
+        environment = os.environ.copy()
+        environment.update({
+            "HOME": str(isolated),
+            "CODEX_HOME": str(codex_home),
+            "CORTEX_PYTHON": str(isolated / "missing python"),
+        })
+        script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
+        completed = subprocess.run(
+            ["bash", str(script), "--dry-run"],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("not an executable file", completed.stderr)
+        self.assertFalse((codex_home / "config.toml").exists())
+
+    def test_cortex_launcher_executes_selected_interpreter(self):
+        isolated = self.base / "launcher-home"
+        isolated.mkdir()
+        selected = isolated / "python launcher 3.12"
+        selected.symlink_to(Path(sys.executable).resolve())
+        entrypoint = isolated / "entrypoint.py"
+        entrypoint.write_text("import sys\nprint(sys.executable)\n", encoding="utf-8")
+        launcher = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex-launcher"
+        environment = os.environ.copy()
+        environment.update({"CORTEX_PYTHON": str(selected), "HOME": str(isolated), "CODEX_HOME": str(isolated / ".codex")})
+        completed = subprocess.run(
+            [str(launcher), str(entrypoint)],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), str(selected))
 
     def test_sync_backs_up_and_replaces_a_different_global_subagent_model(self):
         if not shutil.which("codex"):
@@ -683,12 +825,22 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_numbered_task_hook_resolution(self):
         created = self.init(task_id="hooked")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        task_dir = self.ledger / "tasks" / created["task_directory"]
+        self.assertFalse(task_dir.exists(), "task initialization must not eagerly materialize telemetry")
         event = {"hook_event_name": "PostToolUse", "session_id": "owner", "tool_name": "Agent"}
         completed = subprocess.run([sys.executable, str(hook)], input=json.dumps(event), text=True, capture_output=True, env=os.environ.copy(), check=True)
         self.assertEqual(completed.stdout.strip(), "{}")
-        lifecycle = self.ledger / "tasks" / created["task_directory"] / "lifecycle-events.jsonl"
+        lifecycle = task_dir / "lifecycle-events.jsonl"
         self.assertTrue(lifecycle.exists())
         self.assertEqual(lifecycle.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(task_dir.stat().st_mode & 0o777, 0o700)
+        for name in ("lifecycle-events-meta.json", ".lifecycle-events.lock"):
+            artifact = task_dir / name
+            self.assertTrue(artifact.is_file())
+            self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((task_dir / "state.sqlite").exists())
+        self.assertFalse((task_dir / "reports").exists())
+        self.assertFalse((task_dir / "delegations").exists())
 
     def test_agent_hook_rejects_empty_wait_as_unspawned_dispatch(self):
         self.init(task_id="empty-wait")
@@ -874,6 +1026,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_hook_refuses_symlinked_lifecycle_event_file(self):
         created = self.init(task_id="hook-symlink")
         task_dir = self.ledger / "tasks" / created["task_directory"]
+        task_dir.mkdir(mode=0o700)
         victim = self.base / "victim.txt"
         victim.write_text("unchanged\n", encoding="utf-8")
         (task_dir / "lifecycle-events.jsonl").symlink_to(victim)
@@ -984,7 +1137,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("The public Cortex API exposes three coordinator lifecycle operations plus scoped worker", skill)
         self.assertIn("Coordinators use `start_orchestration`", skill)
         self.assertIn("`continue_orchestration` for normal work", skill)
-        self.assertIn("Invoke each returned dispatch", skill)
+        self.assertIn("Invoke every returned dispatch", skill)
         self.assertIn("Expected routes are metadata, not proof", skill)
         self.assertIn("Workers do not call lifecycle operations", skill)
         self.assertIn("`record_report`", skill)
@@ -1009,7 +1162,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         markers = [
             "## Normal flow",
             "Call `start_orchestration` once",
-            "Invoke each returned dispatch",
+            "Invoke every returned dispatch",
             "Workers do not call lifecycle operations",
             "After all workers finish",
             "then call `continue_orchestration` exactly",
@@ -1048,7 +1201,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("bind_host_worker_from_hook", hook)
         self.assertIn("Dispatch briefing reviewed digest", hook)
         self.assertIn("def stopped_worker_after_wait_context(", hook)
-        self.assertIn("even when its native final text is a report-tool error", hook)
+        self.assertIn("stopped without a report but remains resumable", hook)
         for relative in (
             "skills/cortex-control/SKILL.md",
             "skills/orchestrator/SKILL.md",

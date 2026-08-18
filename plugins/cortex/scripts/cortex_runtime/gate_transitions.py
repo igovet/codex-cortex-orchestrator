@@ -11,7 +11,40 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import cortex as _runtime
+from cortex_runtime.core.runtime_bindings import bind_symbols
+
+
+bind_symbols(
+    "gate_transitions",
+    globals(),
+    (
+        "AWAITING_HOST_SPAWN",
+        "TERMINAL_ATTEMPT_STATUSES",
+        "_attempts_missing_result_validation",
+        "_validated_evidence_records",
+        "active_gates",
+        "append_pipeline_change",
+        "apply_pipeline_operations",
+        "authorize",
+        "capture_project_manifest",
+        "cleanup_completed_manifest_snapshots",
+        "db_list_task_findings",
+        "db_task_findings_blockers",
+        "invalidate_reworked_report_receipts",
+        "ledger_root",
+        "load_state",
+        "load_task_definition",
+        "now",
+        "reconcile_manifest",
+        "redact",
+        "remove_active_mapping",
+        "save_state",
+        "state_lock",
+        "sync_current_wave",
+        "task_manifest_baseline",
+        "validate_completion_invariants",
+    ),
+)
 
 
 _OUTCOMES = {"passed", "failed", "blocked", "skipped"}
@@ -49,7 +82,7 @@ def _resolve_active_gate(
         else None
     )
     requested_gate = str(params["gate"])
-    current_wave = _runtime.active_gates(state)
+    current_wave = active_gates(state)
     gate = requested_gate if requested_gate in current_wave else (current_wave[0] if current_wave else "")
     return requested_gate, gate, revision_correction
 
@@ -80,7 +113,7 @@ def _gate_inputs(
     task_dir: Path, state: dict[str, Any], gate: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     gate_evidence = [
-        item for item in _runtime._validated_evidence_records(task_dir, state)
+        item for item in _validated_evidence_records(task_dir, state)
         if item.get("gate") == gate and not item.get("invalidated")
     ]
     gate_attempts = [
@@ -89,11 +122,11 @@ def _gate_inputs(
     ]
     non_terminal_attempts = [
         item for item in gate_attempts
-        if item.get("status") not in _runtime.TERMINAL_ATTEMPT_STATUSES
+        if item.get("status") not in TERMINAL_ATTEMPT_STATUSES
     ]
     terminal_non_success_attempts = [
         item for item in gate_attempts
-        if item.get("status") in _runtime.TERMINAL_ATTEMPT_STATUSES - {"passed"}
+        if item.get("status") in TERMINAL_ATTEMPT_STATUSES - {"passed"}
     ]
     passed_attempts = [item for item in gate_attempts if item.get("status") == "passed"]
     return gate_evidence, gate_attempts, non_terminal_attempts, terminal_non_success_attempts, passed_attempts
@@ -192,7 +225,7 @@ def _validate_pass_evidence(
         if gate == "documentation":
             return [], _documentation_recovery(state, revision_correction, "documentation_report_receipt_required", gate, missing_reports)
         raise ValueError("every passed attempt needs a consumed report receipt before the gate can pass: " + ", ".join(missing_reports))
-    unvalidated_results = _runtime._attempts_missing_result_validation(task_dir, passed_attempts)
+    unvalidated_results = _attempts_missing_result_validation(task_dir, passed_attempts)
     if unvalidated_results:
         raise ValueError(
             "every passed facade attempt needs a server-validated result contract before the gate can pass: "
@@ -274,9 +307,9 @@ def _validate_handoff_and_close(
     manifest = state.get("final_manifest_receipt")
     if not manifest or not manifest.get("complete"):
         raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
-    baseline_manifest = _runtime.task_manifest_baseline(task_dir, state)
-    current_manifest = _runtime.capture_project_manifest(
-        Path(_runtime.load_task_definition(task_dir, state)["project_root"]),
+    baseline_manifest = task_manifest_baseline(task_dir, state)
+    current_manifest = capture_project_manifest(
+        Path(load_task_definition(task_dir, state)["project_root"]),
         policy=baseline_manifest.get("policy"),
     )
     if current_manifest["digest"] != manifest.get("current_digest"):
@@ -294,9 +327,9 @@ def _apply_transition(
 ) -> tuple[bool, list[dict[str, Any]]]:
     state["gates"][gate] = {
         "outcome": outcome,
-        "at": _runtime.now(),
-        "summary": _runtime.redact(params.get("summary", ""), 2000),
-        "skip_reason": _runtime.redact(params.get("skip_reason", ""), 2000),
+        "at": now(),
+        "summary": redact(params.get("summary", ""), 2000),
+        "skip_reason": redact(params.get("skip_reason", ""), 2000),
         "evidence_ids": [item["evidence_id"] for item in gate_evidence],
     }
     if outcome == "passed":
@@ -312,31 +345,31 @@ def _apply_transition(
         state["status"] = "blocked"
     else:
         for attempt in state["attempts"]:
-            if attempt["gate"] == gate and attempt["status"] in {"running", _runtime.AWAITING_HOST_SPAWN}:
+            if attempt["gate"] == gate and attempt["status"] in {"running", AWAITING_HOST_SPAWN}:
                 attempt["status"] = "failed"
     operations = params.get("pipeline_operations", [])
     if operations:
-        change = _runtime.apply_pipeline_operations(
+        change = apply_pipeline_operations(
             state,
             operations=operations,
             allow_rework=bool(params.get("allow_rework", False)),
         )
-        _runtime.append_pipeline_change(
+        append_pipeline_change(
             state,
             change,
             str(params.get("pipeline_reason", "adaptive gate outcome")),
             params.get("signals", []),
         )
-        _runtime.invalidate_reworked_report_receipts(
+        invalidate_reworked_report_receipts(
             task_dir, state
         )
     if outcome in {"passed", "skipped"}:
-        candidate_wave = _runtime.sync_current_wave(state)
+        candidate_wave = sync_current_wave(state)
         if not candidate_wave:
-            _runtime.validate_completion_invariants(state)
+            validate_completion_invariants(state)
             state["status"] = "completed"
     else:
-        _runtime.sync_current_wave(state)
+        sync_current_wave(state)
     return state["status"] == "completed", operations
 
 
@@ -351,14 +384,14 @@ def _persist_transition(
     completed: bool,
 ) -> None:
     if completed:
-        closed_receipt, _ = _runtime.reconcile_manifest(task_dir, state, [])
+        closed_receipt, _ = reconcile_manifest(task_dir, state, [])
         closed_paths = list(closed_receipt["comparison"]["changed_paths"])
         closed_receipt["reported_paths"] = closed_paths
         closed_receipt["unaccounted_paths"] = []
         closed_receipt["complete"] = True
         state["closed_manifest_receipt"] = closed_receipt
-        state["manifest_snapshot_cleanup"] = {"status": "pending", "at": _runtime.now()}
-    _runtime.save_state(
+        state["manifest_snapshot_cleanup"] = {"status": "pending", "at": now()}
+    save_state(
         task_dir,
         task_dir / "state.sqlite",
         state,
@@ -367,10 +400,10 @@ def _persist_transition(
     )
     if not completed:
         return
-    task = _runtime.load_task_definition(task_dir, state)
-    _runtime.remove_active_mapping(root, state["task_id"], str(task.get("thread_id", "")))
-    cleanup = _runtime.cleanup_completed_manifest_snapshots(task_dir, state)
-    _runtime.save_state(
+    task = load_task_definition(task_dir, state)
+    remove_active_mapping(root, state["task_id"], str(task.get("thread_id", "")))
+    cleanup = cleanup_completed_manifest_snapshots(task_dir, state)
+    save_state(
         task_dir,
         task_dir / "state.sqlite",
         state,
@@ -379,12 +412,99 @@ def _persist_transition(
     )
 
 
+def _closure_rework_target(
+    state: dict[str, Any],
+    gate: str,
+    findings: list[dict[str, Any]],
+) -> str:
+    """Choose a durable remediation gate without accepting a worker verdict.
+
+    A finding may nominate a target gate, but a closure cannot send work to a
+    gate outside the canonical pipeline.  Documentation is the conservative
+    fallback because C2/C3 tasks always have that gate and it is the last
+    writer before review and close.
+    """
+    pipeline = list(state.get("current_pipeline", []))
+    requested = next(
+        (
+            str((item.get("next_action") or {}).get("target_gate") or "").strip()
+            for item in findings
+            if str((item.get("next_action") or {}).get("target_gate") or "").strip()
+        ),
+        "",
+    )
+    gate_index = pipeline.index(gate) if gate in pipeline else len(pipeline) - 1
+    if requested in pipeline and pipeline.index(requested) <= gate_index:
+        return requested
+    if gate == "qa" and "implementation" in pipeline:
+        return "implementation"
+    if gate in {"review", "close", "security", "performance"} and "implementation" in pipeline:
+        return "implementation"
+    if "documentation" in pipeline:
+        return "documentation"
+    return gate
+
+
+def _activate_closure_rework(
+    task_dir: Path,
+    state: dict[str, Any],
+    *,
+    gate: str,
+    findings: list[dict[str, Any]],
+) -> str:
+    """Make canonical closure debt an executable non-terminal rework chain.
+
+    The current review/close attempt is deliberately not allowed to complete.
+    Reordering the canonical pipeline places the corrective target ahead of a
+    fresh review and close, while ``rework`` invalidates all stale evidence and
+    attempts from that target onward.  The orchestration engine subsequently
+    sees the target as the active wave and reuses its canonical wave contract
+    to prepare a new delegation.
+    """
+    target_gate = _closure_rework_target(state, gate, findings)
+    pipeline = list(state.get("current_pipeline", []))
+    # Preserve the corrective target's position so the rework operation makes
+    # it the first incomplete gate. Move only the final review/close checks to
+    # the tail; moving the target itself behind QA or documentation would leave
+    # the just-failed gate active and produce a false ``needs_input`` state.
+    final_checks = [item for item in ("review", "close") if item in pipeline]
+    reordered = [item for item in pipeline if item not in final_checks] + final_checks
+    change = apply_pipeline_operations(
+        state,
+        pipeline=reordered,
+        operations=[{"op": "rework", "gate": target_gate}],
+        allow_rework=True,
+        parallel_groups=[[item] for item in reordered],
+    )
+    append_pipeline_change(
+        state,
+        change,
+        "Canonical closure finding requires corrective work followed by fresh review and close.",
+        [f"closure finding blocked {gate}"],
+    )
+    invalidate_reworked_report_receipts(task_dir, state)
+    state["status"] = "active"
+    fingerprints = sorted({str(item["fingerprint"]) for item in findings})
+    rework = state.setdefault("closure_rework", {})
+    prior = rework.get(gate)
+    if not isinstance(prior, dict) or prior.get("finding_fingerprints") != fingerprints:
+        rework[gate] = {
+            "status": "rework_required",
+            "target_gate": target_gate,
+            "rerun_gates": [item for item in ("review", "close") if item in reordered],
+            "finding_fingerprints": fingerprints,
+            "at": now(),
+        }
+    sync_current_wave(state)
+    return target_gate
+
+
 def record_gate(params: dict[str, Any]) -> dict[str, Any]:
     """Validate and commit one gate outcome through focused policy phases."""
-    root = _runtime.ledger_root(params)
-    with _runtime.state_lock(root):
-        root, task_dir, state = _runtime.load_state(str(params["task_id"]), params)
-        _runtime.authorize(state, params)
+    root = ledger_root(params)
+    with state_lock(root):
+        root, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize(state, params)
         requested_gate, gate, revision_correction = _resolve_active_gate(state, params)
         outcome = str(params["outcome"])
         if outcome not in _OUTCOMES:
@@ -416,6 +536,36 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             outcome=outcome,
             current_attempt_evidence=current_attempt_evidence,
         )
+        if outcome in {"passed", "failed"} and (
+            gate in {"review", "close"} or bool(params.get("enforce_canonical_findings"))
+        ):
+            blockers = db_task_findings_blockers(root, state["task_id"])
+            missing = [item for item in db_list_task_findings(root, state["task_id"], include_resolved=False) if item.get("status") == "open" and (item.get("next_action") or {}).get("required")]
+            if blockers or missing:
+                actionable = blockers + [item for item in missing if item not in blockers]
+                target_gate = _activate_closure_rework(
+                    task_dir,
+                    state,
+                    gate=gate,
+                    findings=actionable,
+                )
+                save_state(task_dir, task_dir / "state.sqlite", state, "gate_rework", f"{gate}: canonical gate blockers require rework")
+                # Returning a normal transition shape lets the v3 adapter
+                # finish the current wave bookkeeping and prepare the active
+                # remediation wave.  The gate itself is intentionally absent
+                # from completed_gates, so this is non-terminal rework rather
+                # than a worker-controlled pass.
+                return {
+                    "state": state,
+                    "revision_correction": revision_correction,
+                    "gate_rework": True,
+                    "closure_rework": gate in {"review", "close"},
+                    "reason": "gate_blockers",
+                    "gate": gate,
+                    "target_gate": target_gate,
+                    "next_action": "resolve_findings_then_rerun_review_and_close",
+                    "blockers": actionable,
+                }
         completed, operations = _apply_transition(
             task_dir,
             state,

@@ -47,6 +47,78 @@ def waves() -> list[dict[str, object]]:
     ]
 
 
+def workspace_summary(project: Path) -> dict[str, object]:
+    """Return a small, truthful closure-workspace summary.
+
+    The fixture itself intentionally changes project files.  The closure
+    contract records that state; it does not equate an uncommitted fixture
+    change with an unresolved review finding.
+    """
+    completed = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        return {"modified": [], "untracked": [], "staged": [], "committed": "not_required"}
+    modified: list[str] = []
+    untracked: list[str] = []
+    staged: list[str] = []
+    for line in completed.stdout.splitlines():
+        if line.startswith("?? "):
+            untracked.append(line[3:])
+            continue
+        if len(line) < 4:
+            continue
+        index, worktree, path = line[0], line[1], line[3:]
+        if index != " ":
+            staged.append(path)
+        if worktree != " ":
+            modified.append(path)
+    has_changes = bool(modified or untracked or staged)
+    return {
+        "modified": sorted(modified),
+        "untracked": sorted(untracked),
+        "staged": sorted(staged),
+        "committed": False if has_changes else "not_required",
+    }
+
+
+def passing_closure(project: Path, gate: str) -> dict[str, object]:
+    """Build the separate review/close closure required by record_report."""
+    return {
+        "decision": "pass",
+        # The fixture found no actionable debt, so no open blocker can enter
+        # the canonical findings table and divert the close gate to rework.
+        "findings": [],
+        "verification": {
+            "executed": [f"Cold-boot fixture verification completed for the {gate} gate."],
+            "not_executed": [],
+            "required_missing": [],
+            "limitations": [],
+        },
+        "workspace": workspace_summary(project),
+    }
+
+
+def canonical_artifacts(
+    ledger: Path, task_id: str, *, kind: str | None = None
+) -> list[dict[str, object]]:
+    """Read artifact metadata from SQLite without assuming an eager export."""
+    artifacts: list[dict[str, object]] = []
+    offset = 0
+    while True:
+        page, next_offset = cortex.db_list_artifacts(
+            ledger, task_id, kind=kind, offset=offset, page_size=100,
+        )
+        artifacts.extend(page)
+        if next_offset is None:
+            return artifacts
+        offset = next_offset
+
+
 def report(
     worker: int,
     step: int,
@@ -203,6 +275,8 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                     "profile": dispatch["profile"],
                     "report": worker_report,
                 }
+                if attempt.get("gate") in {"review", "close"}:
+                    publication["closure"] = passing_closure(project, str(attempt["gate"]))
                 if dispatch.get("phase") == "plan":
                     publication["planning"] = planning(index, int(current["step"]))
                 published = rpc.tool("record_report", publication)
@@ -238,15 +312,26 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
     task_path = ledger / "tasks" / task_directory
     state = cortex.load_task_state_for_artifact(task_path)
     task = cortex.load_task_definition(task_path, state)
-    receipts = [json.loads(path.read_text(encoding="utf-8")) for path in (task_path / "reports/receipts").glob("*.json")]
+    receipt_artifacts = canonical_artifacts(ledger, state["task_id"], kind="report_receipt")
+    receipts = [
+        json.loads(cortex.db_read_artifact_content(ledger, state["task_id"], str(item["artifact_ref"])))
+        for item in receipt_artifacts
+    ]
+    receipt_states = [
+        cortex.db_get_task_document(ledger, state["task_id"], f"receipt_state:{item['receipt_id']}")
+        for item in receipts
+    ]
     if task.get("schema") != "cortex/v8" or state.get("schema") != "cortex/v8" or state.get("status") != "completed":
         raise AssertionError("public orchestration did not preserve the cortex/v8 ledger or complete the task")
-    if not receipts or any(not item.get("consumed_at") for item in receipts):
-        raise AssertionError("every passed worker report must be consumed by evidence")
+    if not receipts or any(not item or not item.get("consumed_at") for item in receipt_states):
+        raise AssertionError("every passed worker report must have a consumed canonical receipt state")
     if not state.get("handoff_created"):
         raise AssertionError("handoff or durable transaction commit is missing")
     if cortex.current_planning_manifest(task_path) is None:
         raise AssertionError("Planner work-breakdown manifest is missing")
+    planning_artifacts = canonical_artifacts(ledger, state["task_id"], kind="planning_revision")
+    if not planning_artifacts:
+        raise AssertionError("Planner work-breakdown artifacts are missing from the canonical SQLite catalog")
     return {
         "status": "PASS", "fixture": str(base), "task_directory": str(task_path),
         "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
