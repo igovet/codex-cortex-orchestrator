@@ -1,5 +1,36 @@
 # Changelog
 
+## [9.0.2] - 2026-08-18
+
+- Reject system and home directories as `project_root` before Cortex begins its
+  recursive content-addressed manifest capture. A project root must be a
+  specific repository or worktree, preventing an oversized synchronous MCP
+  request from appearing hung.
+- Make localized durable-question translation self-contained: the public
+  `answer` + `answer_en` contract now records a single-question answer directly,
+  and `awaiting_translation` returns an exact `translation_request` for either
+  a single question or batch. Coordinator guidance explicitly forbids searching
+  plugin source/cache or runtime internals to infer public arguments.
+
+## [9.0.1] - 2026-08-18
+
+- Let read-only result gates retain recognized cross-language test, build, and
+  cache residue as auditable receipt data instead of rejecting a valid report
+  and retrying the same worker. The bounded manifest policy covers conventional
+  generated directories, roots, files, bytecode, virtual environments, and
+  build outputs, including the common forms that projects put in `.gitignore`.
+  Unknown ignored artifacts remain hard failures.
+
+## [9.0.0] - 2026-08-18
+
+- Consolidate report draft validation and persistence in `record_report`.
+  Workers now fill the private template and record it directly; callers that
+  cannot edit the draft may submit a merge patch or complete replacement.
+  Invalid records retain the draft for retry without consuming an attempt, and
+  successful records revalidate, atomically persist, then delete it.
+- Remove the public `validate_report_draft` operation and `validation_digest`;
+  the public contract is now `cortex/orchestration/v5` with exactly eight tools.
+
 All notable public changes to Cortex are recorded here. Release entries use
 semantic versions; the plugin manifest adds a unique Codex cachebuster to the
 same base version.

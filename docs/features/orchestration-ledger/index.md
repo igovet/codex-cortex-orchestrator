@@ -3,12 +3,12 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 8.1.2 `cortex/v8` task ledger and
-public `cortex/orchestration/v4` lifecycle, staged waves,
-worker questions/reports, maintenance, and optional execution lanes through exactly nine public
+The local MCP server implements the Cortex 9.0.2 `cortex/v8` task ledger and
+public `cortex/orchestration/v5` lifecycle, staged waves,
+worker questions/reports, maintenance, and optional execution lanes through exactly eight public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker
-`worker_question`, `get_report_template`, `validate_report_draft`,
+`worker_question`, `get_report_template`,
 `record_report`, exact identity/digest-scoped immutable
 briefing fallback `read_dispatch_briefing`, and scoped predecessor
 `read_worker_report`.
@@ -128,7 +128,7 @@ the sole server-supplied exception: Cortex provides their exhaustive census
 contract. If a caller cannot ground either list without inventing material
 intent, it must ask the user before starting.
 
-Cortex keeps each new v4 task on a generated task-local authorization identity.
+Cortex keeps each new v5 task on a generated task-local authorization identity.
 The synchronous `PostToolUse` hook separately binds its returned `task_ref` to
 the documented hook `session_id`; environment identity is only a compatibility
 hint. `SessionStart` handles `resume`, `clear`, and `compact` and exposes model
@@ -275,9 +275,12 @@ While a Cortex task is active, the main/root agent is coordination-only. It
 may use Cortex lifecycle calls, launch only the exact returned worker
 dispatches, wait, evaluate reports, route questions, and communicate with the
 user. It must never inspect, search, read, edit, patch, build, test, or run the
-target project and must remain idle while workers run. Worker delay, failure,
-or unavailability is handled through recovery, rework, or a blocker; it never
-authorizes direct root project work. `SessionStart` and every public v4
+target project, Cortex plugin source/cache, `.codex` state, or runtime
+internals. For every public tool, bundled instructions, public schemas, and
+exact returned responses are authoritative; code/cache inspection is forbidden.
+It must remain idle while workers run. Worker delay, failure, or unavailability
+is handled through recovery, rework, or a blocker; it never authorizes direct
+root project work or source inspection. `SessionStart` and every public v5
 `next_action`, including caller-correctable failures, reassert this lock.
 
 Host spawn prompts first de-duplicate the exact user request, then add the
@@ -390,18 +393,18 @@ before resumption. A task revision supersedes an unresolved batch.
 
 After questions are resolved, every worker calls `get_report_template`, replaces
 its gate-specific placeholders in the exact private draft file, and calls
-`validate_report_draft` with that file's ref until `draft_valid=true`. `get_report_template`
+`record_report` with that file's ref. `get_report_template`
 creates a fully structured JSON draft with mode `0600` and returns only
 `draft_ref`, `draft_path`, and its expiry, never the report body. Writers edit
-that exact file; a read-only worker may instead send a small RFC 7396 merge patch.
-Validation uses the same canonical content checks as persistence, returns field
-paths and fixes, and leaves the same file in place when invalid. A successful
-validation binds `validation_digest` to that exact file. Draft validation
-consumes no failed-worker attempt; only failed worker attempts count toward the
+that exact file; a read-only worker may instead send a small RFC 7396 merge patch
+or complete replacement through `record_report`. The same canonical content
+checks run during recording; invalid records return field paths and fixes while
+leaving the same file in place. Recording consumes no failed-worker attempt;
+only failed worker attempts count toward the
 three-attempt recovery budget. A new template supersedes an old or expired
-draft. The worker then sends only its exact identity, `draft_ref`, and
-`validation_digest` to one atomic `record_report`, which rereads the file,
-revalidates current state, and deletes the file and metadata only after commit,
+draft. The worker then sends its exact identity and `draft_ref` to one atomic
+`record_report`, which rereads and revalidates current state,
+and deletes the file and metadata only after commit,
 persisting exactly seven fields:
 `summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`,
 and `uncertainty`. A worker report has no `next_action`; findings contain observed
@@ -412,13 +415,18 @@ questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
 tool failure returns only the exact error. Independent draft-shape mistakes are
 returned together as `{path, message, fix}` diagnostics; later semantic
-diagnostics use the same structure. A changed draft file requires another draft
-validation and digest. A non-retryable error or unavailable exact identity
+diagnostics use the same structure. A changed draft file requires another
+`record_report` call with the same ref. A non-retryable error or unavailable exact identity
 remains a blocker. A legacy full-payload `record_report` remains
 accepted for compatibility. Host-sandboxed read-only gates record ordinary
 source deltas observed in the shared checkout as concurrency evidence rather
-than attributing them to the worker; claimed `changed_files` and generated,
-cache, coverage, or ignored side effects still fail validation. The coordinator
+than attributing them to the worker; claimed `changed_files` still fail
+validation. The manifest recognizes only conventional cross-language ephemeral
+outputs—generated directories/roots/files, virtual environments, recognized
+build-output directories, and bytecode suffixes—as ignorable for this
+read-only check, including matching conventional paths listed in `.gitignore`.
+Arbitrary `.gitignore` outputs and unrecognized cache, coverage, snapshot, or
+generated side effects still fail validation. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
 never an inline report body. That read also returns Cortex's derived absolute
 `report_markdown_path` and the exact `report_markdown_link` for
@@ -571,11 +579,13 @@ and including negations, and store the discovered rules in the baseline policy.
 Reconciliation reuses that frozen policy for task stability. In addition,
 language-agnostic high-confidence dependency, cache, test-output, and runtime
 directories are excluded automatically. Names that can be either source or
-generated output (`build`, `dist`, `target`, `bin`, and `obj`) are excluded
-only with an applicable ignore rule or recognizable build marker. Symlinks are
-recorded but never followed. Thus the receipt remains an independent local
-changed-file check without treating virtual environments or package stores as
-source changes.
+generated output (`build`, `dist`, `out`, `target`, `bin`, and `obj`) are excluded
+only with an applicable ignore rule or recognizable build marker; conventional
+generated roots, virtual environments, and `.pyc`/`.pyo` bytecode are likewise
+recognized by the manifest. Arbitrary ignored paths remain visible to the
+read-only result validator. Symlinks are recorded but never followed. Thus the
+receipt remains an independent local changed-file check without treating
+recognized ephemeral outputs as source changes.
 
 Every task-start and per-attempt manifest capture is normalized into an
 immutable content-addressed `cortex.db` record. The snapshot address
@@ -599,15 +609,15 @@ fail before replacement with actionable diagnostics. Manifest snapshot reads
 use `MAX_MANIFEST_BYTES=64 MiB`; initial capture preflight runs before task-directory creation,
 and handoff/reconciliation snapshot serialization remains bounded, so oversized
 artifacts fail closed rather than surfacing at close. Every call includes an absolute
-`project_root`; the same server process may serve multiple roots. Mutating v4
+`project_root`; the same server process may serve multiple roots. Mutating v5
 operations use server-owned request-digest receipts tied to the internal
 active wave, so identical retries replay and changed or stale payloads
-conflict before partial writes. Expected public v4 validation and recovery
+conflict before partial writes. Expected public v5 validation and recovery
 outcomes return structured `ok: false` responses with bounded diagnostics and
 a corrective `next_action`; because these are caller-correctable protocol
 results, they do not enter the exception log. Exceptions raised at the MCP
 boundary remain redacted and logged. Host model/tool/effort values
-are selected routing metadata; v4 does not claim actual host attestation
+are selected routing metadata; v5 does not claim actual host attestation
 unless the host supplies observable evidence.
 Profiles and all scope/plan-aware gate briefings are preloaded and validated at MCP startup;
 invariant coverage checks that all 21 playbooks contain the required

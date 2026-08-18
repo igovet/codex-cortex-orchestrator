@@ -27,7 +27,7 @@ brief, context files, and at most eight validated domains.
 ## Canonical runtime artifacts
 
 - New tasks use the SQLite-backed `cortex/v8` ledger and public
-  `cortex/orchestration/v4` lifecycle. On the first MCP access after a source
+  `cortex/orchestration/v5` lifecycle. On the first MCP access after a source
   version introduces a migration, numbered migrations run in one fail-closed transaction and are
   recorded in `schema_migrations`. Pre-database filesystem state is ignored:
   it is neither imported nor resumed. The runtime does not create
@@ -76,17 +76,17 @@ brief, context files, and at most eight validated domains.
   archive/delete maintenance for pre-SQLite files and SQLite-aware maintenance
   for health, backup, checkpoint, or projection repair.
 
-## Public v4 coordinator contract
+## Public v5 coordinator contract
 
 - Normal flow is `start_orchestration` once, then
   `continue_orchestration` once per completed relative `step`.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
   lane/resource/durable-question work. Earlier orchestration entrypoints are
   not public runtime interfaces. Together with worker
-  `worker_question`, `get_report_template`, `validate_report_draft`, and
-  `record_report`, identity/digest-scoped
+  `worker_question`, `get_report_template`, and `record_report`,
+  identity/digest-scoped
   `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
-  public surface is exactly nine tools.
+  public surface is exactly eight tools.
 - Every public call requires the exact absolute `project_root`. Start requires
   the user's exact, unexpanded `task.user_request`; the sole host-metadata
   exception is Desktop's injected `$cortex:orchestrator` wrapper, which is
@@ -185,7 +185,11 @@ brief, context files, and at most eight validated domains.
   initialize capabilities; the legacy boolean is still accepted. A durable UI
   question uses `manage_orchestration(intent="question")` and must return a
   recoverable unsupported result rather than guessing when the host cannot
-  render elicitation.
+  render elicitation. In a granular Codex approval policy,
+  `mcp_elicitations` must be `true`; when it is `false` or missing, Codex
+  rejects the request before any form is shown and the worker correctly
+  remains paused. Host preflight and `sync-cortex.sh --check` fail closed on
+  that configuration.
 - Localized question labels are transient UI projections. Answers retain the
   original value/language and require canonical `answer_en` for localized free
   text. `ask_batch` accepts 1–32 stable questions but the native UI renders
@@ -283,14 +287,14 @@ brief, context files, and at most eight validated domains.
   even when a worker is delayed, fails, or is unavailable. Dispatch only the
   workers returned by Cortex, remain idle while they run, and use recovery,
   rework, or a blocker instead of taking over their project work. `SessionStart`
-  and every public v4 `next_action` repeat this rule so compaction or a resumed
+  and every public v5 `next_action` repeat this rule so compaction or a resumed
   turn does not weaken it.
 - After context compaction, do not trust the visible transcript or assume the
   loaded skill cache is current. Preserve the opaque `task_ref`, call
   `manage_orchestration(intent="inspect")` once, and rehydrate from its
   `context_handoff`. It is ledger-derived recovery state, not a replacement
   for the orchestrator skill; never restart the task or replay completed work.
-- New v4 starts use a generated task-local authorization identity, then the
+- New v5 starts use a generated task-local authorization identity, then the
   synchronous Cortex `PostToolUse` hook binds the returned `task_ref` to the
   documented event `session_id`. Explicitly forwarded `CODEX_SESSION_ID` or
   `CODEX_THREAD_ID` values are compatibility hints only. `SessionStart` handles
@@ -314,7 +318,7 @@ brief, context files, and at most eight validated domains.
 
 ## Internal ledger invariants
 
-The remaining notes document internal invariants behind the public v4 lifecycle
+The remaining notes document internal invariants behind the public v5 lifecycle
 and v8 ledger. They are not caller-facing request envelopes.
 
 - Command evidence must include an explicit `exit_code`; a textual claim that
@@ -365,25 +369,25 @@ and v8 ledger. They are not caller-facing request envelopes.
   `~/.codex/logs/cortex-tool-errors.jsonl` as redacted JSONL. The record keeps
   the chat/thread session id, JSON-RPC request id, and any task/attempt or
   other call ids, but never stores secret-like input values verbatim.
-- Expected public v4 validation and recovery failures return structured
+- Expected public v5 validation and recovery failures return structured
   `ok: false` results with bounded `diagnostics` and a corrective `next_action`.
   They are caller-correctable protocol outcomes and are not written to
   `~/.codex/logs/cortex-tool-errors.jsonl`; only raised MCP-boundary exceptions
-  enter that private redacted log. Public v4 validation occurs before lifecycle
-  writes where possible. `validate_report_draft` returns every independent shape
+  enter that private redacted log. Public v5 validation occurs before lifecycle
+  writes where possible. `record_report` returns every independent shape
   error with `path`, `message`, and `fix`; invalid calls persist no final report
   and leave the same private draft file in place. `get_report_template` creates a
   fully structured JSON file with mode `0600` and returns `draft_ref`,
   `draft_path`, and expiry without returning the body. Writers edit that exact
-  file; read-only workers may send a small RFC 7396 merge patch. Correct all
-  named fields and validate the same `draft_ref` again until `draft_valid=true`.
-  Successful validation binds its digest to the same file. A new template
-  supersedes an old or expired draft. Draft checks explicitly consume no worker
-  attempt; only failed worker attempts count toward the three-attempt recovery
-  budget. Pass only the exact worker identity, returned `draft_ref`, and digest
-  to one atomic `record_report`; it rereads/revalidates the file and deletes the
-  file and metadata only after commit. Legacy full-payload recording remains
-  compatible. Stop only for a non-retryable result or unavailable exact identity.
+  file; read-only workers may send a small RFC 7396 merge patch or complete
+  replacement through `record_report`. Correct all named fields and retry
+  `record_report` with the same `draft_ref`. A new template supersedes an old
+  or expired draft. Rejected records explicitly consume no worker attempt; only
+  failed worker attempts count toward the three-attempt recovery budget.
+  `record_report` validates the exact current draft and state, then atomically
+  persists it and deletes the file and metadata only after commit. Legacy
+  full-payload recording remains compatible. Stop only for a non-retryable
+  result or unavailable exact identity.
 - Preflight aggregates independent request mistakes into one `ok: false`
   response. Each diagnostic has `path`, `message`, and `expected`; repair every
   listed path before retrying. Do not treat the first diagnostic as the only
@@ -391,8 +395,13 @@ and v8 ledger. They are not caller-facing request envelopes.
 - Host-sandboxed read-only gates share a checkout with other work. Ordinary
   source deltas observed during the gate are recorded as concurrency evidence,
   not attributed to the worker. The worker must still report
-  `changed_files: []`; claimed changes and generated, cache, coverage, or
-  ignored artifacts remain hard validation failures.
+  `changed_files: []`; claimed changes remain hard failures. Validation ignores
+  only manifest-recognized ephemeral outputs: conventional generated
+  directories/roots/files, virtual environments, recognized build-output
+  directories, and bytecode suffixes. Matching conventional paths remain
+  tolerated when a project lists them in `.gitignore`; arbitrary
+  `.gitignore` outputs and unrecognized cache, coverage, snapshot, or
+  generated artifacts remain hard failures.
 - The exact lifecycle start envelope is `{operation:"start", project_root, principal,
   thread_id, submission_id, host_capabilities, task, waves}`. `task` requires
   `{task_id, objective, complexity}` where complexity is `C1`, `C2`, or `C3`;

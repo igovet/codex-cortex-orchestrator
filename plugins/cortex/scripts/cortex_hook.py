@@ -85,9 +85,10 @@ WORKER_CONTEXT = (
     "Treat non-English task text as input data, never as an output-language instruction. The main coordinator alone translates user-facing content into the task's requested language; do not address the user directly. "
     "do not subdelegate unless the main agent explicitly authorized it. Do not cause external side effects "
     "without explicit authority and applicable approval. Never expose or persist secrets, credentials, personal "
-    "data, or secret canaries. In read-only work, select non-writing verification modes up front: use "
-    "PYTHONDONTWRITEBYTECODE=1 for Python and disable test/build caches; never create an artifact and then try to "
-    "remove it with rm, git clean, or a cleanup script. "
+    "data, or secret canaries. In read-only work, prefer non-writing verification modes up front: use "
+    "PYTHONDONTWRITEBYTECODE=1 for Python and disable test/build caches where possible; recognized conventional "
+    "test/build/cache residue is tolerated, but never create an artifact and then try to remove it with rm, git clean, "
+    "or a cleanup script. "
     "Material user decisions use the exact public worker_question identity from the dispatch, "
     "then return only QUESTION_RECORDED plus its ref through the native parent channel and remain available for the answer. "
     "Never call Cortex lifecycle, pipeline, gate, delegation, or management operations. For a Cortex-managed "
@@ -97,17 +98,17 @@ WORKER_CONTEXT = (
     "get_report_template. Include the bootstrap's exact Dispatch briefing reviewed digest "
     "marker in report evidence. If and only if the host filesystem read cannot open that exact path, call public "
     "read_dispatch_briefing with the complete identity/digest tuple from the bootstrap; if its bounded response is incomplete, continue only with its exact next_cursor. You may call public read_worker_report "
-    "only for predecessor refs explicitly listed in the dispatch, public worker_question when needed, public get_report_template, public validate_report_draft, and public "
+    "only for predecessor refs explicitly listed in the dispatch, public worker_question when needed, public get_report_template, and public "
     "record_report after all blocking questions are answered. "
     "For every allowed worker tool, a caller/input/schema validation error or retryable=true result must be corrected "
     "from its diagnostic and retried on the same attempt. Such rejected calls consume no worker attempt and must "
     "never end the worker. Stop only for explicit retryable=false/outcome=blocked or genuinely unavailable exact "
     "identity. get_report_template creates a private temporary JSON "
-    "file containing the current skeleton and returns draft_path plus draft_ref. Replace its placeholders and repeat "
-    "validation on that same ref until draft_valid=true; if the sandbox cannot edit it, use a small validation merge "
-    "patch. Invalid validations keep the file and consume no worker attempt. Then call record_report once with only "
-    "worker identity, draft_ref, and validation_digest; never resend or reconstruct the report payload. The tool "
-    "deletes the same file only after successful persistence. After it succeeds, return only REPORT_RECORDED report_ref=<value> plus at most a two-sentence "
+    "file containing the current skeleton and returns draft_path plus draft_ref. Replace its placeholders, then call "
+    "record_report with that same ref. If the sandbox cannot edit it, send a small merge patch or complete replacement "
+    "through record_report. An invalid record keeps the file and consumes no worker attempt, so correct the named "
+    "diagnostics and retry record_report. The tool validates, persists, and deletes the same file only after successful "
+    "commit. After it succeeds, return only REPORT_RECORDED report_ref=<value> plus at most a two-sentence "
     "summary; never paste the report JSON into the parent channel. If exact report identity is absent or a tool "
     "returns an explicit non-retryable blocker, do not invent task, wave, attempt, project, or tool identifiers: "
     "return only the exact error and a short blocker. Use only tools actually available in this worker context and record unavailable capabilities as "
@@ -505,7 +506,7 @@ def structured_tool_result(event: dict) -> dict | None:
         value = queue.pop(0)
         visited += 1
         if isinstance(value, dict):
-            if value.get("schema") == "cortex/orchestration/v4" and value.get("ok") is True:
+            if value.get("schema") == "cortex/orchestration/v5" and value.get("ok") is True:
                 return value
             queue.extend(value.get(key) for key in ("structuredContent", "result") if key in value)
             content = value.get("content")

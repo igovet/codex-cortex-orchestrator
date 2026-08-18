@@ -156,10 +156,10 @@ ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
 Every Cortex worker edits the private temporary report file created by
-`get_report_template`, repeats `validate_report_draft` on the same `draft_ref`
-until valid, then records it once through `record_report` using only that ref
-and validation digest. A read-only worker uses a small validation merge patch;
-successful recording deletes the temporary file. The worker acknowledges all
+`get_report_template`, fills the private draft, then calls `record_report` on
+the same `draft_ref`. A read-only worker uses a small merge patch or complete
+replacement through `record_report`; invalid records retain the temporary file
+for correction, and successful recording revalidates, commits, and deletes it. The worker acknowledges all
 supplied predecessor handoffs and identifies its inventory counts, mapped
 surfaces, exclusions, unknowns, evidence, and coverage gaps. It must also
 review only the exact immutable briefing

@@ -682,7 +682,14 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("worker question has already been answered")
             if record.get("answer_digest") != answer_digest:
                 raise ValueError("idempotent answer submission_id was reused with different content")
-            return {"idempotent": True, "question": record, "cursor": _question_sequence(records)}
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "answered",
+                "question_id": question_id,
+                "idempotent": True,
+                "question": record,
+                "cursor": _question_sequence(records),
+            }
         record.update({
             "status": "answered",
             "answer": answer,
@@ -700,7 +707,14 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         })
         _write_question_record(task_dir, state, record)
         append_journal_best_effort(task_dir, "worker_answer", f"{question_id} answered for {record['attempt_id']}")
-        return {"idempotent": False, "question": record, "cursor": record["answered_sequence"]}
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "answered",
+            "question_id": question_id,
+            "idempotent": False,
+            "question": record,
+            "cursor": record["answered_sequence"],
+        }
 
 
 def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:

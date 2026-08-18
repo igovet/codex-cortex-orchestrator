@@ -155,15 +155,27 @@ CODEX_SESSION_ENV_KEYS = ("CODEX_SESSION_ID", "CODEX_THREAD_ID")
 HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
 PLUGIN_ROOT = PROFILE_CONTRACT_PATH.parent
 PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
+# Cortex captures a complete content-addressed manifest before it creates a
+# task. These are host-wide roots, not useful project workspaces: walking one
+# can make the synchronous MCP request appear stuck for a long time. Keep this
+# an exact-root denylist so projects below conventional development parents
+# such as /home, /opt, or /tmp remain supported.
+SYSTEM_PROJECT_ROOTS = frozenset(
+    Path(item) for item in (
+        "/", "/Applications", "/Library", "/System", "/Users", "/bin", "/boot",
+        "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt", "/opt",
+        "/private", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp",
+        "/usr", "/var",
+    )
+)
 MCP_OPENAI_FORM = False
 MCP_INTERACTIVE = False
 _STATE_LOCK_LOCAL = threading.local()
 MCP_SERVER_INSTRUCTIONS = (
-    "Cortex is opt-in. Root preserves task_ref, follows exact dispatches, and publishes every read_worker_report "
-    "report_markdown_link before lifecycle. Internal workers emit English only and read scoped predecessor refs. "
-    "Each dispatch has one immutable briefing+digest plus an exact scoped read fallback; bind native starts by exact task_name/dispatch identity. "
-    "After resume, clear, or compaction, inspect once: spawn returned pending dispatches, wait persisted child ids, "
-    "use context_handoff, never restart."
+    "Cortex opt-in. Root preserves task_ref, follows exact responses/dispatches, and publishes every read_worker_report "
+    "report_markdown_link. Internal workers emit English only. For all public tools use bundled skills, schemas and "
+    "responses; never inspect plugin source/cache/.codex. Bind starts by exact task_name/dispatch identity. After resume, "
+    "clear, or compaction inspect once: spawn pending dispatches, wait child ids, use context_handoff, never restart."
 )
 
 try:
@@ -248,13 +260,13 @@ if (
     or SHARED_WORKER_CONTRACT.get("codebase_memory_fallback")
     != "one_bounded_attempt_then_repository_native_tools_without_looping"
     or SHARED_WORKER_CONTRACT.get("report_draft_lifecycle")
-    != "template_private_file_direct_or_patch_validate_one_hour_consume"
+    != "template_private_file_direct_or_patch_atomic_record_one_hour_consume"
     or SHARED_WORKER_CONTRACT.get("report_finalization")
-    != "identity_draft_ref_validation_digest_same_file_then_delete"
+    != "identity_draft_ref_same_file_validate_commit_then_delete"
     or SHARED_WORKER_CONTRACT.get("caller_correctable_tool_errors")
     != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
     or SHARED_WORKER_CONTRACT.get("read_only_workspace_delta")
-    != "ordinary_source_changes_are_concurrency_evidence_generated_or_ignored_side_effects_fail"
+    != "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
     or not CODEBASE_MEMORY_REFRESH_PROFILES.issubset(AGENTS)
 ):
@@ -711,27 +723,44 @@ TRACKER_POLICY = {
     "scope": "all non-directory entries below project_root after policy exclusions",
     "ignored_roots": [".git", ".codex/cortex"],
     # These are language-agnostic dependency, cache, test-output, and runtime
-    # directories.  They are deliberately limited to names that conventionally
-    # contain generated material rather than project source.
+    # directories. They cover common test/build stacks across languages while
+    # remaining limited to names that conventionally contain generated material
+    # rather than project source.
     "ignored_directory_names": [
-        "__pycache__", ".build", ".cache", ".direnv", ".eggs", ".gradle",
-        ".hypothesis", ".mypy_cache", ".next", ".nox", ".parcel-cache",
-        ".pnpm-store", ".pytest_cache", ".ruff_cache", ".serverless",
-        ".svelte-kit", ".terraform", ".tox", ".turbo", ".venv", "CMakeFiles",
-        "DerivedData", "Pods", "_build", "coverage", "dist-newstyle", "htmlcov",
-        "node_modules", "pip-wheel-metadata", "test-results",
+        "__pycache__", ".build", ".bundle", ".cache", ".dart_tool", ".direnv",
+        ".eggs", ".gradle", ".hypothesis", ".mypy_cache", ".next", ".nox",
+        ".nyc_output", ".parcel-cache", ".phpunit.cache", ".pnpm-store",
+        ".pub-cache", ".pytest_cache", ".ruff_cache", ".serverless", ".stack-work",
+        ".svelte-kit", ".terraform", ".tox", ".turbo", ".venv", "BenchmarkDotNet.Artifacts",
+        "CMakeFiles", "DerivedData", "Pods", "TestResults", "_build", "allure-report",
+        "allure-results", "blob-report", "coverage", "dist-newstyle", "htmlcov",
+        "node_modules", "pip-wheel-metadata", "playwright-report", "test-results",
     ],
-    "ignored_relative_roots": [".yarn/cache", ".yarn/unplugged", "Carthage/Build"],
+    "ignored_relative_roots": [
+        ".yarn/cache", ".yarn/unplugged", "Carthage/Build", "cypress/screenshots", "cypress/videos",
+    ],
     # Generic output names require either an explicit .gitignore rule or a
     # recognizable build marker; source directories named build/dist/target
     # are therefore not hidden merely because of their name.
     "build_output_directory_names": ["build", "dist", "out", "target", "bin", "obj"],
     "virtual_environment_prefixes": [".venv"],
     "ignored_file_suffixes": [".pyc", ".pyo"],
+    "ignored_file_patterns": [
+        ".coverage", ".rspec_status", "TEST-*.xml", "clover.xml", "coverage-*", "coverage.*",
+        "jacoco.exec", "junit.xml", "lcov.info", "*.lcov", "*.trx",
+    ],
     "symlinks": "record link target and never follow",
     "special_files": "record type and metadata without reading content",
     "gitignore": "honor directory and file patterns from .gitignore, including negation",
 }
+READ_ONLY_EPHEMERAL_REASON_PREFIXES = (
+    "conventional generated directory: ",
+    "conventional generated root: ",
+    "conventional generated file: ",
+    "virtual environment directory: ",
+    "recognized build output directory: ",
+    "ignored file suffix: ",
+)
 MANIFEST_SNAPSHOT_PREFIX = "manifest-"
 MANIFEST_SNAPSHOT_REF_RE = re.compile(r"^manifest-([0-9a-f]{64})$")
 VERIFICATION_COMMANDS = {
@@ -834,7 +863,7 @@ def digest_text(value: object) -> str:
 def _codex_host_session_id() -> str | None:
     """Return a validated session hint explicitly forwarded to the MCP process.
 
-    Public v4 arguments intentionally do not accept caller-supplied durable
+    Public v5 arguments intentionally do not accept caller-supplied durable
     identity.  Some hosts or operator configurations forward a session/thread
     environment value; the documented PostToolUse hook session_id is the
     primary lifecycle binding.  An absent or malformed value keeps the
@@ -881,7 +910,7 @@ def select_project_root(params: dict[str, Any] | None = None) -> Path:
     requested = str((params or {}).get("project_root") or "").strip()
     if not requested:
         raise ValueError("project_root is required for every Cortex tool call")
-    requested_path = Path(requested).expanduser()
+    requested_path = Path(os.path.normpath(str(Path(requested).expanduser())))
     if not requested_path.is_absolute():
         raise ValueError("project_root must be an absolute path")
     path = _reject_symlink_ancestry(requested_path, "project root")
@@ -889,6 +918,11 @@ def select_project_root(params: dict[str, Any] | None = None) -> Path:
         raise ValueError(f"project root is not a directory: {path}")
     if path == PLUGIN_ROOT or PLUGIN_ROOT in path.parents:
         raise ValueError("project_root must not be the Cortex plugin directory")
+    if path == Path.home().absolute() or path in SYSTEM_PROJECT_ROOTS:
+        raise ValueError(
+            "project_root must be a specific repository or worktree, not a system or home directory; "
+            "Cortex recursively captures a content-addressed manifest before orchestration starts"
+        )
     return path
 
 
@@ -1052,6 +1086,65 @@ def _manifest_auto_ignore_reason(
     return None
 
 
+def _manifest_ephemeral_file_reason(parts: tuple[str, ...], policy: dict[str, Any]) -> str | None:
+    """Return a bounded conventional generated-file reason, if one applies."""
+    name = parts[-1]
+    patterns = tuple(str(item) for item in policy.get("ignored_file_patterns", []))
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns):
+        return f"conventional generated file: {name}"
+    return None
+
+
+def _read_only_ephemeral_ignored_entry(path: str, entry: object, policy: dict[str, Any]) -> bool:
+    """Whether one ignored-manifest entry is safe test/build residue for read-only gates.
+
+    A project may list a conventional cache or coverage path in ``.gitignore``.
+    The manifest records the user's rule first, so recognize the same bounded
+    conventions here rather than treating that spelling detail as a failed
+    read-only worker result. Arbitrary gitignored paths intentionally remain
+    observable failures.
+    """
+    if not isinstance(entry, dict):
+        return False
+    reason = str(entry.get("reason") or "")
+    if reason.startswith(READ_ONLY_EPHEMERAL_REASON_PREFIXES):
+        return True
+    if not reason.startswith(".gitignore:"):
+        return False
+
+    # Older active attempts retain a frozen v1 policy. Merge defaults so a
+    # runtime upgrade still recognizes the stable cross-language conventions
+    # below without rewriting that attempt's baseline policy.
+    effective_policy = dict(TRACKER_POLICY)
+    effective_policy.update(policy)
+    parts = tuple(Path(path).parts)
+    if not parts:
+        return False
+    name = parts[-1]
+    kind = str(entry.get("kind") or "")
+    if kind == "directory":
+        if name in {str(item) for item in effective_policy.get("ignored_directory_names", [])}:
+            return True
+        relative = Path(*parts).as_posix()
+        for root in effective_policy.get("ignored_relative_roots", []):
+            root_text = Path(str(root)).as_posix().strip("/")
+            if relative == root_text or relative.startswith(root_text + "/"):
+                return True
+        prefixes = tuple(str(item) for item in effective_policy.get("virtual_environment_prefixes", []))
+        if any(name.startswith(prefix) for prefix in prefixes):
+            return True
+        # Maven, Gradle, Rust, .NET, C/C++, and similar projects commonly
+        # ignore these roots directly, which prevents marker inspection.
+        if name in {str(item) for item in effective_policy.get("build_output_directory_names", [])}:
+            return True
+        return False
+    if kind == "file":
+        if name.endswith(tuple(str(item) for item in effective_policy.get("ignored_file_suffixes", []))):
+            return True
+        return _manifest_ephemeral_file_reason(parts, effective_policy) is not None
+    return False
+
+
 def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | None = None) -> dict[str, Any]:
     """Capture every non-ignored project entry without following symlinks.
 
@@ -1090,8 +1183,12 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
             reason = _manifest_auto_ignore_reason(path, parts, active_policy)
             if reason:
                 return True, reason
-        if not is_dir and parts and parts[-1].endswith(ignored_suffixes):
-            return True, f"ignored file suffix: {parts[-1]}"
+        if not is_dir and parts:
+            conventional_file = _manifest_ephemeral_file_reason(parts, active_policy)
+            if conventional_file:
+                return True, conventional_file
+            if parts[-1].endswith(ignored_suffixes):
+                return True, f"ignored file suffix: {parts[-1]}"
         return False, None
 
     def walk(directory: Path, relative: tuple[str, ...] = (), inherited_rules: list[dict[str, Any]] | None = None) -> None:
@@ -3657,8 +3754,10 @@ def _validate_result_artifacts(
     # the user, or a concurrent writer and cannot safely be attributed to this
     # worker. Preserve the delta as concurrency evidence instead of rejecting
     # an otherwise valid report with an impossible "fix the JSON" loop.
-    # Generated/ignored artifacts remain a hard failure below because they are
-    # the common observable side effect of a supposedly non-writing check.
+    # Known conventional test/build/cache residue is preserved as an audit
+    # receipt, but cannot turn a read-only result into a retry loop. Unknown
+    # ignored artifacts remain a hard failure below: they may be project-owned
+    # files hidden by a custom .gitignore rule.
     concurrent_read_only_paths = observed_in_scope if read_only_result else []
     baseline_ignored = (baseline.get("policy") or {}).get("detected_ignored_entries") or {}
     current_ignored = (current.get("policy") or {}).get("detected_ignored_entries") or {}
@@ -3666,10 +3765,19 @@ def _validate_result_artifacts(
         path for path in set(baseline_ignored) | set(current_ignored)
         if baseline_ignored.get(path) != current_ignored.get(path)
     )
-    if read_only_result and ignored_side_effects:
+    tolerated_ephemeral_artifacts = sorted(
+        path for path in ignored_side_effects
+        if all(
+            _read_only_ephemeral_ignored_entry(path, entry, dict(baseline.get("policy") or {}))
+            for entry in (baseline_ignored.get(path), current_ignored.get(path))
+            if entry is not None
+        )
+    )
+    blocking_ignored_side_effects = sorted(set(ignored_side_effects) - set(tolerated_ephemeral_artifacts))
+    if read_only_result and blocking_ignored_side_effects:
         raise ValueError(
             f"generated or ignored project artifacts changed during read-only result gate {gate}: "
-            + ", ".join(ignored_side_effects)
+            + ", ".join(blocking_ignored_side_effects)
         )
     unsupported = sorted(set(reported) - changed)
     if unsupported:
@@ -3690,6 +3798,8 @@ def _validate_result_artifacts(
         "reported_paths_digest": digest_text("\n".join(reported)),
         "concurrent_change_count": len(concurrent_read_only_paths),
         "concurrent_paths_digest": digest_text("\n".join(concurrent_read_only_paths)),
+        "ephemeral_artifact_count": len(tolerated_ephemeral_artifacts) if read_only_result else 0,
+        "ephemeral_artifacts_digest": digest_text("\n".join(tolerated_ephemeral_artifacts)),
     }
 
 
@@ -6176,9 +6286,10 @@ ORCHESTRATION_TRANSACTION_SCHEMA = "cortex/orchestration-transaction/v1"
 ORCHESTRATION_PLAN_SCHEMA = "cortex/orchestration-plan/v1"
 ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
 ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
-PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v4"
+PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v5"
 COORDINATOR_LOCK = (
-    "COORDINATOR LOCK: root is coordination-only. Never inspect, read, edit, build, test, or run the target project. "
+    "COORDINATOR LOCK: root is coordination-only. Never inspect, search, read, edit, build, test, or run the target project, "
+    "Cortex plugin source/cache, .codex state, or runtime internals. The public MCP schema and this response are authoritative. "
     "Use only Cortex lifecycle, exact dispatches, waiting, report evaluation, user communication, and safe recovery. "
     "All project operations belong to workers; failure or delay never authorizes direct project work."
 )
@@ -6349,13 +6460,13 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
 
 
 def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
-    """Internal engine facade retained for v4 lifecycle composition."""
+    """Internal engine facade retained for v5 lifecycle composition."""
     from cortex_runtime.orchestration_engine import orchestrate as _orchestrate
 
     return _orchestrate(params)
 
 
-# These helpers remain importable for the v4 projection and compaction module,
+# These helpers remain importable for the v5 projection and compaction module,
 # but their implementation belongs exclusively to the orchestration engine.
 # Keeping the late binding avoids a second partially initialized ``cortex``
 # module when Codex loads the executable through importlib.
@@ -6407,7 +6518,7 @@ def _pre_recorded_report(
     attempt_id: str,
     report_ref: object,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Expose the engine's report ownership validator to v4 adapter code."""
+    """Expose the engine's report ownership validator to v5 adapter code."""
     from cortex_runtime.orchestration_engine import _pre_recorded_report as _implementation
 
     return _implementation(task_dir, state, attempt_id, report_ref)
@@ -6419,7 +6530,7 @@ def _auto_handoff(
     state: dict[str, Any],
     next_action: str,
 ) -> dict[str, Any]:
-    """Expose the engine's automatic handoff helper to existing v4 tests."""
+    """Expose the engine's automatic handoff helper to existing v5 tests."""
     from cortex_runtime.orchestration_engine import _auto_handoff as _implementation
 
     return _implementation(params, task_dir, state, next_action)
@@ -7633,7 +7744,7 @@ def _v3_question_management_payload(value: object) -> dict[str, Any]:
         raise ValueError("question management requires payload with question_ref")
     payload = dict(value)
     forbidden_identity = sorted(
-        set(payload) & {"task_id", "principal", "thread_id", "attempt_id", "profile"}
+        set(payload) & {"task_id", "principal", "thread_id", "attempt_id", "profile", "submission_id"}
     )
     if forbidden_identity:
         raise ValueError(
@@ -7646,16 +7757,31 @@ def _v3_question_management_payload(value: object) -> dict[str, Any]:
     question_ref = str(payload.pop("question_ref", "") or "").strip()
     if question_ref:
         payload["question_id"] = safe_id(question_ref)
+    # ``canonical_answer`` was an internal cortex.question field. The public
+    # management contract uses ``answer_en``; retain the former only as a
+    # compatibility alias so coordinators never need plugin-source lookup.
+    if "canonical_answer" in payload:
+        if "answer_en" in payload:
+            raise ValueError("question answer must use answer_en, not both answer_en and canonical_answer")
+        payload["answer_en"] = payload.pop("canonical_answer")
     command = str(payload.get("command") or "ask").strip().lower()
     # A batch translation resumes the existing durable batch through the same
     # coordinator UI route; it is not a legacy single-question answer call.
     if command == "answer" and "canonical_answers" in payload:
         command = "ask"
+    if "answer" in payload or "answer_en" in payload:
+        if command not in {"ask", "answer"}:
+            raise ValueError("question translation must use answer and answer_en with the same question_ref")
+        if "answer" not in payload:
+            raise ValueError("question answer requires the original answer copied from result.answer_original")
+        command = "answer"
     payload["command"] = command
     if command == "ask" and not payload.get("question_id") and not str(payload.get("question") or "").strip():
         raise ValueError("question ask requires the worker's exact question_ref")
     if command == "answer" and not payload.get("question_id"):
         raise ValueError("question answer requires question_ref")
+    if command == "answer" and "answer" not in payload:
+        raise ValueError("question answer requires answer")
     return payload
 
 
@@ -7681,11 +7807,33 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
         )
     elif status_value == "awaiting_translation":
         response["outcome"] = "awaiting_translation"
-        translation_field = "canonical_answers" if result.get("batch_ref") else "answer plus answer_en"
+        question_ref = str(result.get("batch_ref") or result.get("question_id") or "")
+        if result.get("batch_ref"):
+            required_keys = [str(item) for item in result.get("translation_required_for") or []]
+            translation_payload: dict[str, Any] = {
+                "question_ref": question_ref,
+                "canonical_answers": {
+                    key: "<canonical English translation of that free-text answer>"
+                    for key in required_keys
+                },
+                "translated_by": "coordinator",
+            }
+        else:
+            translation_payload = {
+                "question_ref": question_ref,
+                "answer": result.get("answer_original"),
+                "answer_en": "<canonical English translation of the free-text answer>",
+            }
+        response["translation_request"] = {
+            "intent": "question",
+            "payload": translation_payload,
+            "answer_option_ids": result.get("answer_option_ids") or [],
+        }
         response["next_action"] = (
             f"{COORDINATOR_LOCK} Translate only result.answer_original free text into canonical English, preserve "
-            f"result.answer_option_ids, then answer the same question_ref with {translation_field}. Do not resume "
-            "the worker until Cortex records both representations."
+            "result.answer_option_ids, then call manage_orchestration exactly once with translation_request. "
+            "Do not inspect skills, plugin source/cache, or runtime code to infer fields, and do not resume the worker "
+            "until Cortex records both representations."
         )
     elif status_value == "superseded":
         response["outcome"] = "batch_superseded"
@@ -8220,6 +8368,11 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         normalized_payload = None
         if intent == "question":
             normalized_payload = _v3_question_management_payload(params.get("payload"))
+            if normalized_payload.get("command") == "answer":
+                normalized_payload["resume_context"] = {
+                    "source": "manage_orchestration",
+                    "user_language": str(state.get("user_language") or "en"),
+                }
         elif intent == "plan_approval":
             normalized_payload = _v3_plan_approval_payload(params.get("payload"))
             if normalized_payload["decision"] == "prompt":
@@ -8333,7 +8486,6 @@ from cortex_runtime.reports import (
     read_dispatch_briefing,
     read_worker_report,
     record_report,
-    validate_report_draft,
 )
 
 
@@ -8506,7 +8658,6 @@ CONTINUE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["continue_orchestration"]
 MANAGE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["manage_orchestration"]
 WORKER_QUESTION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_question"]
 WORKER_GET_REPORT_TEMPLATE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["get_report_template"]
-WORKER_VALIDATE_REPORT_DRAFT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["validate_report_draft"]
 WORKER_RECORD_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["record_report"]
 READ_DISPATCH_BRIEFING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_dispatch_briefing"]
 READ_WORKER_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_worker_report"]
@@ -8571,8 +8722,6 @@ PUBLIC_TOOLS = build_public_tools(
     worker_question_schema=WORKER_QUESTION_SCHEMA,
     get_report_template=get_report_template,
     get_report_template_schema=WORKER_GET_REPORT_TEMPLATE_SCHEMA,
-    validate_report_draft=validate_report_draft,
-    validate_report_draft_schema=WORKER_VALIDATE_REPORT_DRAFT_SCHEMA,
     record_report=publish_worker_report,
     record_report_schema=WORKER_RECORD_REPORT_SCHEMA,
     read_dispatch_briefing=read_dispatch_briefing,

@@ -32,7 +32,7 @@ without asking for another activation.
 Do not guess unknown arguments. Show help and ask the user to choose.
 
 The help route explains invocation, opt-in behavior, the project-local
-`.codex/cortex` ledger, the nine public v4 lifecycle/report tools, internal workers, and that
+`.codex/cortex` ledger, the eight public v5 lifecycle/report tools, internal workers, and that
 source/tests outrank generated docs. Help performs no activation, dispatch, or
 write.
 
@@ -225,7 +225,11 @@ human-readable `display_name` as the native thread title.
 
 ## Repository knowledge consumption
 
-The coordination-only root does not inspect project documentation itself.
+The coordination-only root does not inspect project documentation, Cortex
+plugin source/cache, `.codex` state, or runtime implementation itself. For
+every public Cortex tool, bundled skill instructions, public MCP schemas, and
+exact returned responses are the only protocol authority; it never reads code
+or cache to infer a tool's behavior.
 Cortex automatically puts `docs/project/index.md` and
 `docs/features/index.md` in every worker's Context files when they exist. The
 first planning worker must read both before broad source discovery, use the
@@ -332,10 +336,13 @@ call it once.
    are corrected and retried; they are never a reason to finish the worker.
    A read-only worker chooses non-writing verification flags up front:
    `PYTHONDONTWRITEBYTECODE=1` for Python, no pytest/test/build cache, and no
-   coverage or snapshot output. It skips a check that cannot be non-mutating
-   and records the limitation; it never creates artifacts and then invokes
-   `rm`, `git clean`, or a cleanup script. Cortex rejects newly changed
-   generated or gitignored artifacts against that attempt's baseline.
+   coverage or snapshot output where possible. It skips a check only when it
+   would write source or an unrecognized project artifact; it never creates an
+   artifact and then invokes `rm`, `git clean`, or a cleanup script. Cortex
+   records ordinary shared-checkout source deltas as concurrency evidence,
+   rejects claimed `changed_files`, arbitrary gitignored artifacts, and
+   unrecognized generated outputs, while retaining manifest-recognized
+   ephemeral outputs as audit evidence.
    During this interval the coordinator is in `waiting_workers` with
    `output_policy="silent"`: repeated wait timeouts produce no heartbeat or
    status commentary. Visible output is limited to a worker question,
@@ -361,21 +368,21 @@ call it once.
    without asking the question as prose. Once
    complete, each worker calls `get_report_template`, edits the returned
    private `draft_path`, replaces every placeholder, and repeats
-   `validate_report_draft` with the same `draft_ref` until `draft_valid=true`.
-   A read-only worker uses a small validation merge patch when its sandbox
-   cannot edit the file. Invalid validations keep the draft and consume no
-   worker attempt. Only failed worker attempts count toward
-   the three-attempt recovery budget. The worker then calls scoped public
-   `record_report` once with only its exact identity, returned `draft_ref`, and
-   `validation_digest`; the tool reads and deletes that same file only after
-   successful persistence. It never resends or reconstructs the seven-field
+   `record_report` with the same `draft_ref`. A read-only worker uses a small
+   merge patch or complete replacement when its sandbox cannot edit the file.
+   Invalid records keep the draft and consume no worker attempt. Only failed
+   worker attempts count toward the three-attempt recovery budget. The worker
+   then calls scoped public `record_report`, which revalidates current state and
+   atomically persists and deletes that same file only after successful
+   persistence. It never resends or reconstructs the seven-field
    report payload, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
    A host-sandboxed read-only worker reports `changed_files: []`. Cortex records
    ordinary source deltas in the shared checkout as concurrency evidence rather
-   than attributing another writer's work to that worker; generated or ignored
-   artifacts still fail the report as read-only side effects.
+   than attributing another writer's work to that worker. It retains recognized
+   cross-language test/build/cache residue as audit evidence; arbitrary
+   `.gitignore` outputs and unrecognized artifacts still fail the report.
    Invalid drafts return field paths and concrete fixes; the still-running
    worker corrects every named field in the same file or with a small merge
    patch and validates the same ref again on the same task and attempt.
@@ -617,7 +624,10 @@ English and use only the coordinator's `localized_question`,
 `localized_header`, `localized_options`, and `localized_custom_label` fields
 for transient user-language UI projections. Answers retain original
 language/value and require canonical English `answer_en` for localized free
-text before the worker resumes. Workers may use
+text before the worker resumes. For `outcome="awaiting_translation"`, call the
+returned `translation_request` exactly: single questions submit `answer` and
+`answer_en`; batches submit `canonical_answers`. Never inspect plugin source
+or cache to infer a different payload. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
 same `batch_ref` with `action="poll_batch"`; the host renders one question per
 native step and durably checkpoints each accepted answer before showing the

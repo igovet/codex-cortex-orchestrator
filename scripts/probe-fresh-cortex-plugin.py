@@ -147,23 +147,16 @@ def main() -> int:
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
         expected_tools = {
             "start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question",
-            "get_report_template", "validate_report_draft", "record_report",
+            "get_report_template", "record_report",
             "read_dispatch_briefing", "read_worker_report",
         }
         if set(tools) != expected_tools:
             raise SystemExit("fresh plugin probe: Cortex public tool set is incomplete")
         record_schema = tools["record_report"]["inputSchema"]
-        if not {"draft_ref", "validation_digest"}.issubset(record_schema["properties"]):
-            raise SystemExit("fresh plugin probe: atomic report schema lacks short validated-draft identity")
-        if {"required": ["draft_ref", "validation_digest"]} not in record_schema.get("oneOf", []):
-            raise SystemExit("fresh plugin probe: atomic report schema does not require the validated draft pair")
-        validate_schema = tools["validate_report_draft"]["inputSchema"]
-        if validate_schema["properties"]["report"] != {"type": "object"}:
-            raise SystemExit("fresh plugin probe: draft validator does not accept malformed report objects")
-        if validate_schema.get("required") != ["project_root", "task_id", "attempt_id", "profile", "draft_ref"]:
-            raise SystemExit("fresh plugin probe: draft validator is not bound to the template file ref")
-        if "patch" not in validate_schema["properties"]:
-            raise SystemExit("fresh plugin probe: draft validator lacks incremental merge-patch correction")
+        if not {"draft_ref", "patch"}.issubset(record_schema["properties"]):
+            raise SystemExit("fresh plugin probe: atomic report schema lacks draft identity or merge-patch correction")
+        if {"required": ["draft_ref"]} not in record_schema.get("anyOf", []):
+            raise SystemExit("fresh plugin probe: atomic report schema does not require a draft or report payload")
         workspace = base / "workspace"
         workspace.mkdir()
         rejected = mcp_tool(launcher, entrypoint, environment, workspace, "start_orchestration", {

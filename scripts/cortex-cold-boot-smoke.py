@@ -211,7 +211,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
     with JsonRpcHarness(server, project, ledger, elicitation_responder=approve_plan_elicitation) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "validate_report_draft", "record_report", "read_dispatch_briefing", "read_worker_report"]:
+        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"]:
             raise AssertionError(f"unexpected Cortex public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
@@ -313,22 +313,9 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 draft_path = Path(str(template["draft_path"]))
                 if not draft_path.is_file():
                     raise AssertionError(f"get_report_template did not create its draft file: {template}")
-                validated = rpc.tool("validate_report_draft", {
+                published = rpc.tool("record_report", {
                     **publication,
                     "draft_ref": template["draft_ref"],
-                })
-                if (
-                    not validated.get("draft_valid")
-                    or validated.get("persisted") is not False
-                    or validated.get("draft_persisted") is not True
-                ):
-                    raise AssertionError(f"validate_report_draft failed: {validated}")
-                published = rpc.tool("record_report", {
-                    "task_id": state["task_id"],
-                    "attempt_id": attempt["attempt_id"],
-                    "profile": dispatch["profile"],
-                    "draft_ref": validated["draft_ref"],
-                    "validation_digest": validated["validation_digest"],
                 })
                 if not published.get("ok"):
                     raise AssertionError(f"record_report failed: {published}")

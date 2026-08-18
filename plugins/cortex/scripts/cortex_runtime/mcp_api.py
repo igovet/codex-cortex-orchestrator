@@ -11,11 +11,10 @@ from typing import Any
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
+    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. For intent=question pass payload.question_ref and optional localized UI labels. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
-    "validate_report_draft": "Worker-only validation operation: validate the existing temporary file identified by draft_ref. Edit draft_path directly, send one complete replacement, or send a small JSON Merge Patch for named corrections. Every invalid draft remains editable and consumes no worker retry budget; success binds validation_digest to the same file.",
-    "record_report": "Worker-only atomic operation: pass only worker identity, draft_ref, and validation_digest. Cortex rereads the same temporary file, verifies its digest, revalidates current state, atomically persists the report, and deletes the temporary file only after success. Do not resend the report or paste it into the parent channel.",
+    "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -32,7 +31,7 @@ def build_public_schemas(
     max_discovery_domains: int,
     question_option_schema: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Build the nine public contracts independently of internal handlers."""
+    """Build the eight public contracts independently of internal handlers."""
     EXECUTED_TEST_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -407,21 +406,20 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": f"Worker report request. Normal finalization sends only draft_ref and validation_digest after validate_report_draft. A complete {len(report_fields)}-field report payload remains accepted only for in-flight compatibility and must not be combined with draft_ref.",
+        "description": f"Worker report request. Normal finalization sends draft_ref after editing the private file returned by get_report_template. A complete {len(report_fields)}-field replacement or a small JSON Merge Patch may accompany draft_ref when the worker cannot edit draft_path. Cortex validates and persists in one atomic operation; invalid drafts remain editable.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Exact attempt_id from this worker's Cortex briefing; never substitute a phase or profile."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Exact canonical profile from this worker's Cortex briefing."},
-            "validation_digest": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$",
-                "description": "Digest returned with draft_ref by validate_report_draft.",
-            },
             "draft_ref": {
                 "type": "string",
                 "pattern": "^draft-[0-9a-f]{32}$",
-                "description": "Short reference for the task-scoped temporary report file created by get_report_template. Send this instead of the report payload.",
+                "description": "Short reference for the task-scoped temporary report file created by get_report_template.",
+            },
+            "patch": {
+                "type": "object",
+                "description": "Optional RFC 7396 JSON Merge Patch limited to report, scoping, planning, gate_result, and closure. Do not combine with a complete report replacement.",
             },
             "report": V3_REPORT_SCHEMA,
             "gate_result": GATE_RESULT_SCHEMA,
@@ -430,36 +428,10 @@ def build_public_schemas(
             "planning": V3_PLANNING_SCHEMA,
         },
         "required": ["project_root", "task_id", "attempt_id", "profile"],
-        "oneOf": [
-            {"required": ["draft_ref", "validation_digest"]},
+        "anyOf": [
+            {"required": ["draft_ref"]},
             {"required": ["report"]},
         ],
-    }
-    WORKER_VALIDATE_REPORT_DRAFT_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "description": "Validate the same temporary draft file by ref. Omit patch and payload after editing draft_path directly; send patch for small JSON Merge Patch corrections; or send report plus optional siblings once to replace the file content.",
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1},
-            "task_id": {"type": "string", "minLength": 1},
-            "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": sorted(agents)},
-            "draft_ref": {
-                "type": "string",
-                "pattern": "^draft-[0-9a-f]{32}$",
-                "description": "Exact ref returned by get_report_template for this worker attempt.",
-            },
-            "patch": {
-                "type": "object",
-                "description": "Optional RFC 7396 JSON Merge Patch limited to report, scoping, planning, gate_result, and closure. Do not combine with complete payload fields.",
-            },
-            "report": {"type": "object"},
-            "gate_result": {"type": "object"},
-            "closure": {"type": "object"},
-            "scoping": {"type": "object"},
-            "planning": {"type": "object"},
-        },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "draft_ref"],
     }
     WORKER_GET_REPORT_TEMPLATE_SCHEMA = {
         "type": "object",
@@ -565,8 +537,10 @@ def build_public_schemas(
                     "embedded response arguments (including request_id) for approve/cancel, while revise remains "
                     "the explicit feedback path. For intent=follow_up, use the completed source task_ref and an exact "
                     "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
-                    "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
-                    "elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
+                    "{question_ref: '<worker ref>'} plus optional localized UI labels. If Cortex returns "
+                    "awaiting_translation, submit its translation_request unchanged except for the English translation: "
+                    "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
+                    "Cortex resolves task/principal/thread and opens native MCP elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
                     "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
                     "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup targets use only safe backup_name values. Normal wave progression never uses this field."
@@ -587,7 +561,6 @@ def build_public_schemas(
         "manage_orchestration": MANAGE_ORCHESTRATION_SCHEMA,
         "worker_question": WORKER_QUESTION_SCHEMA,
         "get_report_template": WORKER_GET_REPORT_TEMPLATE_SCHEMA,
-        "validate_report_draft": WORKER_VALIDATE_REPORT_DRAFT_SCHEMA,
         "record_report": WORKER_RECORD_REPORT_SCHEMA,
         "read_dispatch_briefing": READ_DISPATCH_BRIEFING_SCHEMA,
         "read_worker_report": READ_WORKER_REPORT_SCHEMA,
@@ -959,8 +932,6 @@ def public_tools(
     worker_question_schema: dict[str, Any],
     get_report_template: Callable[..., Any],
     get_report_template_schema: dict[str, Any],
-    validate_report_draft: Callable[..., Any],
-    validate_report_draft_schema: dict[str, Any],
     record_report: Callable[..., Any],
     record_report_schema: dict[str, Any],
     read_dispatch_briefing: Callable[..., Any],
@@ -968,14 +939,13 @@ def public_tools(
     read_worker_report: Callable[..., Any],
     read_worker_report_schema: dict[str, Any],
 ) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
-    """Return the only nine MCP operations exposed to hosts and workers."""
+    """Return the only eight MCP operations exposed to hosts and workers."""
     return {
         "start_orchestration": internal_handlers["start_orchestration"],
         "continue_orchestration": internal_handlers["continue_orchestration"],
         "manage_orchestration": internal_handlers["manage_orchestration"],
         "worker_question": (worker_question, worker_question_schema),
         "get_report_template": (get_report_template, get_report_template_schema),
-        "validate_report_draft": (validate_report_draft, validate_report_draft_schema),
         "record_report": (record_report, record_report_schema),
         "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
         "read_worker_report": (read_worker_report, read_worker_report_schema),

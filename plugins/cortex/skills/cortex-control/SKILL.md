@@ -5,12 +5,12 @@ description: Use this skill when coordinating a non-trivial task across Codex ag
 
 # Cortex Control
 
-The public Cortex API exposes exactly nine tools: three coordinator lifecycle
+The public Cortex API exposes exactly eight tools: three coordinator lifecycle
 operations plus scoped worker question/report transport. Coordinators use `start_orchestration` and
 `continue_orchestration` for normal work, `read_worker_report` to evaluate a
 persisted report, and `manage_orchestration` only for recovery or rare
 subsystems. Workers use `worker_question`, `get_report_template`,
-`validate_report_draft`, and `record_report`; a worker whose
+`record_report`; a worker whose
 host filesystem read cannot open its exact briefing may call
 `read_dispatch_briefing` with the complete identity/digest tuple from its
 bootstrap. If a bounded response is incomplete, it may continue only with the
@@ -28,12 +28,16 @@ opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
 
 An active Cortex root is coordination-only. It must not use project-reading,
 search, shell, filesystem, patch, build, test, or execution tools on the target
-project. It may call Cortex, invoke the exact returned worker dispatches, wait,
-route questions, assess reports, and communicate with the user. Every project
-operation must be delegated, including investigation after a plan and small or
-obvious edits. The root must remain idle while a worker runs. Worker failure,
-delay, unavailable dispatch, or incomplete evidence is a blocker or rework
-signal, never permission for the root to perform the work directly.
+project, Cortex plugin source/cache, `.codex` state, or runtime internals. For
+**every public Cortex tool**, its bundled skill instructions, public MCP schema,
+and exact returned response are the only protocol authority. Never inspect
+plugin code or cache to infer fields, validation, recovery, or behavior. It may
+call Cortex, invoke the exact returned worker dispatches, wait, route questions,
+assess reports, and communicate with the user. Every project operation must be
+delegated, including investigation after a plan and small or obvious edits. The
+root must remain idle while a worker runs. Worker failure, delay, unavailable
+dispatch, or incomplete evidence is a blocker or rework signal, never
+permission for the root to perform the work directly or inspect sources.
 
 ## Normal flow
 
@@ -108,8 +112,13 @@ signal, never permission for the root to perform the work directly.
    commands: use `PYTHONDONTWRITEBYTECODE=1` for Python, disable pytest and
    equivalent test/build caches, and skip any check that requires cleanup.
    They must never create an artifact and then use `rm`, `git clean`, or a
-   cleanup script. The result validator compares both ordinary files and
-   generated/gitignored artifact sentinels against the attempt baseline.
+   cleanup script. The result validator records ordinary source deltas as
+   concurrency evidence and rejects claimed `changed_files`; it retains only
+   manifest-recognized cross-language ephemeral outputs (conventional generated
+   directories/roots/files, virtual environments, recognized build-output
+   directories, and bytecode suffixes), including matching conventional paths
+   listed in `.gitignore`. Arbitrary `.gitignore` outputs and unrecognized
+   generated/cache/coverage artifacts remain failures.
    Predecessor reports remain accessible only through scoped
    `read_worker_report`. While the wave is active, the coordinator is in
    `waiting_workers` with `output_policy="silent"`: repeated wait timeouts
@@ -136,13 +145,13 @@ signal, never permission for the root to perform the work directly.
    After work completes, `get_report_template` creates one private temporary
    JSON file already filled with the exact gate-specific skeleton and returns
    its `draft_path` and `draft_ref`. The worker edits that file, replaces every
-   placeholder, and repeats `validate_report_draft` with the same ref until
-   `draft_valid=true`; a host-sandboxed read-only worker instead sends a small
-   JSON Merge Patch through validation. Invalid validations keep the file and
+   placeholder, and calls `record_report` with the same ref; a host-sandboxed
+   read-only worker instead sends a small JSON Merge Patch or complete report
+   replacement through `record_report`. Invalid records keep the file and
    consume no worker attempt. Only failed worker attempts count toward the
-   three-attempt recovery budget. It then calls `record_report` once with only
-   its exact worker identity, `draft_ref`, and `validation_digest`; the tool
-   rereads and deletes that same file only after successful persistence. The
+   three-attempt recovery budget. `record_report` rereads and revalidates the
+   current state, then atomically persists and deletes that same file only
+   after successful persistence. The
    worker never resends, reconstructs, or reconsiders the strict report payload. It returns only
    `REPORT_RECORDED report_ref=<value>` plus at most a
    two-sentence summary. They must never paste the report JSON into the parent
@@ -170,8 +179,13 @@ signal, never permission for the root to perform the work directly.
    Read-only profiles run in a host-enforced read-only sandbox. Source changes
    that appear in their shared checkout during the attempt are recorded as
    concurrent workspace evidence and are not attributed to that worker.
-   `changed_files` must still be empty, and generated, cache, coverage, or
-   ignored artifacts remain a hard report failure.
+   `changed_files` must still be empty. Manifest-recognized ephemeral outputs
+   are retained for read-only validation: conventional generated
+   directories/roots/files, virtual environments, recognized build-output
+   directories, and bytecode suffixes, including matching conventional paths
+   listed in `.gitignore`. Arbitrary `.gitignore` outputs and unrecognized
+   generated, cache, coverage, or snapshot artifacts remain a hard report
+   failure.
    Every invalid draft returns field paths and fixes. Correct every named field
    in the same file or with a small merge patch and validate the same ref again
    on the same task and attempt. `record_report` loads that exact file and
@@ -360,9 +374,13 @@ normal path, resolves all durable identity internally, and requests main-chat
 MCP UI elicitation through `elicitation/create`. The coordinator may pass
 `localized_question`, `localized_header`, `localized_options`, and
 `localized_custom_label` as transient user-language labels; the stored
-question remains canonical English. Answers preserve the user's original
-value and language and require `answer_en` for localized free text before the
-worker receives the canonical English answer. Workers may use
+question remains canonical English. For a response with
+`outcome="awaiting_translation"`, use its returned `translation_request`
+directly: a single question uses the original `answer` plus its translated
+`answer_en`; a batch supplies only the listed `canonical_answers`. Do not
+inspect plugin sources or infer alternative fields. Answers preserve the
+user's original value and language and require `answer_en` for localized free
+text before the worker receives the canonical English answer. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
 same `batch_ref` with `action="poll_batch"`; the host renders one question per
 native step and durably checkpoints each accepted answer before showing the

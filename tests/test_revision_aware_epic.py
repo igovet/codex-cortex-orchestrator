@@ -822,6 +822,31 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             self.assertIn("No plugin or Codex configuration was changed", completed.stdout)
             self.assertFalse((Path(home) / "codex" / "config.toml").exists())
 
+    def test_installer_rejects_disabled_granular_mcp_elicitations(self) -> None:
+        script = Path(__file__).parents[1] / "scripts" / "sync-cortex.sh"
+        with tempfile.TemporaryDirectory() as home:
+            codex_home = Path(home) / "codex"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                "approval_policy = { granular = { mcp_elicitations = false } }\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["HOME"] = home
+            environment["CODEX_HOME"] = str(codex_home)
+
+            completed = subprocess.run(
+                [str(script), "--dry-run"],
+                cwd=script.parents[1],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("granular approval_policy requires mcp_elicitations=true", completed.stderr)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
