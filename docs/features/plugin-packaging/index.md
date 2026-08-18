@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `8.1.0`. This
+The current source manifest and server are intended for plugin version `8.1.1`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -79,5 +79,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; the targeted `follow_up_partial` scenario passes, while the longer `automatic_sequential` release gate remains pending. The 8.1.0 source candidate requires resolver, launcher, marketplace, shell, cold-boot, deterministic fixtures, benchmark, fresh-plugin, full lifecycle live, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
+Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 8.1.1 results are recorded there, and remaining gates are not implied by this page. The 8.1.1 source candidate requires resolver, launcher, marketplace, shell, cold-boot, deterministic fixtures, benchmark, fresh-plugin, full lifecycle live, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

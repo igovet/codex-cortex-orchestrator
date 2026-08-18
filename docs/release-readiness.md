@@ -11,8 +11,8 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `8.1.0` (the current candidate is
-  `8.1.0+codex.20260818200000`; installed builds may carry a cachebuster).
+  `8.1.1` (the current candidate is
+  `8.1.1+codex.20260818210000`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -36,6 +36,19 @@ MCP approval override, and creates a collision-safe private backup only before
 changing a configured global default-subagent model. It never inspects or
 removes previous orchestration state or unrelated plugin files.
 
+Report finalization uses a private pre-validation file: `get_report_template`
+creates a fully structured JSON file with mode `0600` and returns `draft_ref`,
+`draft_path`, and expiry without returning the body. Writers edit that exact
+file; read-only workers may send a small RFC 7396 merge patch. Invalid
+`validate_report_draft` calls leave the same file in place and consume no
+attempt; successful validation binds its digest to that file. A new template
+supersedes an old or expired draft. `record_report` rereads/revalidates and
+deletes the file and metadata only after commit. Normal callers send only
+identity, ref, and digest; legacy full-payload recording remains compatible.
+Host-sandboxed read-only gates treat ordinary shared-checkout source deltas as
+concurrency evidence, while claimed changes and generated or ignored side
+effects remain failures.
+
 ## Required repository checks
 
 Run the commands in `docs/project/verification.md`. A release candidate must
@@ -52,16 +65,15 @@ installation source is available; no guessed package-source command is a
 release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
 for the safe same-user sequence and the bounded stopped-worker recovery.
 
-The 8.1.0 source candidate has passed all 494 unit tests on Python 3.12.3,
-marketplace and plugin validation, Python and shell syntax checks, cold boot,
-deterministic fixtures, an isolated fresh-plugin probe, and the targeted
-source-mode `follow_up_partial` live scenario. The longer release-only
-`automatic_sequential` live scenario and tracked archive validation remain
-pending. The installed user plugin is out of scope; no installation or
-`~/.codex` mutation is part of this candidate. The evidence-first pipeline,
+The 8.1.1 source candidate has passed all 494 unit tests on Python 3.12.3,
+focused report/schema/read-only tests, cold boot, marketplace validation,
+Python and shell syntax checks, `git diff --check`, the composite benchmark,
+and an isolated fresh-plugin probe. The installed-plugin check, full lifecycle
+live scenario, and tracked archive gate have not been run. The installed user plugin is out
+of scope; no installation or `~/.codex` mutation is part of this candidate. The evidence-first pipeline,
 scope artifact, plan-basis digests, v1 resume compatibility, 10 MiB
 tail-preserving error-log cap, and Bash 3.2 launcher compatibility require
-focused regression coverage. The 8.1.0
+focused regression coverage. The 8.1.1
 ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
@@ -74,7 +86,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 8.1.0 release commit only with explicit authorization.
+- Create the Cortex 8.1.1 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

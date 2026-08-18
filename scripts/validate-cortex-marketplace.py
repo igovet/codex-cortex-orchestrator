@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.1.0":
-        fail("plugin manifest must identify cortex at release version 8.1.0")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.1.1":
+        fail("plugin manifest must identify cortex at release version 8.1.1")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -251,6 +251,15 @@ def main() -> int:
         fail("coordinator operations must own lifecycle and report reading")
     if shared.get("worker_final_response") != "compact_report_ref_and_at_most_two_sentence_summary_or_exact_error":
         fail("worker final response must be compact and must not contain report JSON")
+    if (
+        shared.get("report_draft_lifecycle")
+        != "template_private_file_direct_or_patch_validate_one_hour_consume"
+        or shared.get("report_finalization")
+        != "identity_draft_ref_validation_digest_same_file_then_delete"
+        or shared.get("read_only_workspace_delta")
+        != "ordinary_source_changes_are_concurrency_evidence_generated_or_ignored_side_effects_fail"
+    ):
+        fail("shared worker contract must define staged draft finalization and read-only concurrency semantics")
     if (
         shared.get("repository_intelligence")
         != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"

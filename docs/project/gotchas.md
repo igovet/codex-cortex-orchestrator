@@ -354,18 +354,29 @@ and v8 ledger. They are not caller-facing request envelopes.
   They are caller-correctable protocol outcomes and are not written to
   `~/.codex/logs/cortex-tool-errors.jsonl`; only raised MCP-boundary exceptions
   enter that private redacted log. Public v4 validation occurs before lifecycle
-  writes where possible. `validate_report_draft` writes nothing and returns
-  every independent shape error with `path`, `message`, and `fix`; correct all
-  named fields and validate the complete payload again until `draft_valid=true`.
-  Draft checks explicitly consume no worker attempt; only failed worker
-  attempts count toward the three-attempt recovery budget. Pass the returned
-  digest with the exact unchanged payload to one atomic `record_report`; a
-  changed payload must be validated again. Stop only for a non-retryable result or
-  unavailable exact identity.
+  writes where possible. `validate_report_draft` returns every independent shape
+  error with `path`, `message`, and `fix`; invalid calls persist no final report
+  and leave the same private draft file in place. `get_report_template` creates a
+  fully structured JSON file with mode `0600` and returns `draft_ref`,
+  `draft_path`, and expiry without returning the body. Writers edit that exact
+  file; read-only workers may send a small RFC 7396 merge patch. Correct all
+  named fields and validate the same `draft_ref` again until `draft_valid=true`.
+  Successful validation binds its digest to the same file. A new template
+  supersedes an old or expired draft. Draft checks explicitly consume no worker
+  attempt; only failed worker attempts count toward the three-attempt recovery
+  budget. Pass only the exact worker identity, returned `draft_ref`, and digest
+  to one atomic `record_report`; it rereads/revalidates the file and deletes the
+  file and metadata only after commit. Legacy full-payload recording remains
+  compatible. Stop only for a non-retryable result or unavailable exact identity.
 - Preflight aggregates independent request mistakes into one `ok: false`
   response. Each diagnostic has `path`, `message`, and `expected`; repair every
   listed path before retrying. Do not treat the first diagnostic as the only
   error or submit a sequence of one-field fixes.
+- Host-sandboxed read-only gates share a checkout with other work. Ordinary
+  source deltas observed during the gate are recorded as concurrency evidence,
+  not attributed to the worker. The worker must still report
+  `changed_files: []`; claimed changes and generated, cache, coverage, or
+  ignored artifacts remain hard validation failures.
 - The exact lifecycle start envelope is `{operation:"start", project_root, principal,
   thread_id, submission_id, host_capabilities, task, waves}`. `task` requires
   `{task_id, objective, complexity}` where complexity is `C1`, `C2`, or `C3`;

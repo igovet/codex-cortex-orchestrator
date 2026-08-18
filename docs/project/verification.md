@@ -32,28 +32,13 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The full Python 3.12.3 discovery run passed all 494 tests. Focused question,
-  lazy-filesystem, approval-freshness, pipeline-order, briefing-completeness,
-  log-cap, compatibility, and evaluator-contract regressions also passed.
-- Cold boot passed with 9 reports, 9 worker attempts, 8 continuation calls,
-  plan approval, and a parallel wave.
-- Marketplace and plugin validation, Python compilation, Bash syntax, and
-  `git diff --check` passed. Deterministic evaluator fixtures for
-  `automatic_sequential`, `compact_parallel`, and `blocked_resume` completed.
-- The isolated fresh-plugin probe passed for
-  `8.1.0+codex.20260818200000` in temporary `HOME`/`CODEX_HOME`.
-- The targeted source-mode `follow_up_partial` live scenario passed in 22
-  seconds: it created exactly one linked v2 corrective task, preserved the
-  completed source task, prepared the first dispatch, and made no failed public
-  calls. The longer `automatic_sequential` scenario was not run to completion
-  after the user requested faster targeted validation; it is still a separate
-  release-only gate. Both modes use this workspace's source tree in an isolated
-  temporary project and do **not** install, reinstall, update, or otherwise
-  verify a user's installed Cortex plugin.
-- The reportless-stop recovery coverage includes terminal failed-stop handling,
-  exact failed receipts, mixed-wave slot preservation, bounded retry failure,
-  and the ordering-sensitive PostToolUse case where an earlier reportless
-  attempt remains visible after a later attempt completes.
+- The complete Python 3.12.3 discovery suite passed: 494 tests. Focused
+  report/schema/read-only regressions and the private-file draft cold boot also
+  passed.
+- Marketplace validation, the isolated fresh-plugin probe, Python and shell
+  syntax checks, `git diff --check`, and the 8-worker/5-wave call-count
+  benchmark passed. The installed-plugin check, full lifecycle live scenario,
+  and tracked archive gate were not run for this candidate.
 
 The live evaluator emits newline-delimited JSON progress records while the
 parent runs. Each record has `type: "cortex_live_progress"`, the scenario, and
@@ -104,11 +89,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `8.1.0+codex.20260818200000`. These results are
+The source manifest declares `8.1.1+codex.20260818210000`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 8.1.0 source contract
+## Current 8.1.1 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -160,6 +145,18 @@ verification remain separate, explicitly requested actions.
   or blocking findings, and missing required verification, reopen the recorded
   target gate for rework; resolved or auditable non-self waivers are retained
   in SQLite rather than inferred from prose.
+- Report drafts use a private pre-validation file. `get_report_template` creates
+  a fully structured JSON file with mode `0600` and returns `draft_ref`,
+  `draft_path`, and expiry without returning the body. Writers edit that exact
+  file; read-only workers may send a small RFC 7396 merge patch. Invalid drafts
+  leave the same file in place and consume no worker attempt. Successful
+  validation binds its digest to the same file; a new template supersedes an
+  old or expired draft. Normal finalization sends only worker identity,
+  `draft_ref`, and digest; `record_report` rereads/revalidates and deletes the
+  file and metadata only after commit. Legacy full-payload `record_report`
+  remains compatible. Host-sandboxed read-only gates record
+  ordinary shared-checkout source deltas as concurrency evidence, while
+  claimed `changed_files` and generated or ignored side effects still fail.
 - Active user corrections use a task revision and resume addressable native
   worker sessions in place; completed-task corrections remain linked
   `follow_up` tasks. Schema v8 stores the revision, session, and atomic

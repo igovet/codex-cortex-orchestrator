@@ -353,18 +353,26 @@ call it once.
    dispatch a replacement or advance the wave. If native elicitation is
    unavailable, keep the durable question open and report the host limitation
    without asking the question as prose. Once
-   complete, each worker calls `get_report_template`, replaces every
-   placeholder, and repeats `validate_report_draft` until `draft_valid=true`.
-   Draft validation persists nothing and consumes no worker attempt; only failed
-   worker attempts count toward the three-attempt recovery budget. The worker
-   then publishes the exact unchanged strict seven-field `cortex/report/v1`
-   once through scoped public `record_report` with the returned
-   `validation_digest`, then
+   complete, each worker calls `get_report_template`, edits the returned
+   private `draft_path`, replaces every placeholder, and repeats
+   `validate_report_draft` with the same `draft_ref` until `draft_valid=true`.
+   A read-only worker uses a small validation merge patch when its sandbox
+   cannot edit the file. Invalid validations keep the draft and consume no
+   worker attempt. Only failed worker attempts count toward
+   the three-attempt recovery budget. The worker then calls scoped public
+   `record_report` once with only its exact identity, returned `draft_ref`, and
+   `validation_digest`; the tool reads and deletes that same file only after
+   successful persistence. It never resends or reconstructs the seven-field
+   report payload, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
+   A host-sandboxed read-only worker reports `changed_files: []`. Cortex records
+   ordinary source deltas in the shared checkout as concurrency evidence rather
+   than attributing another writer's work to that worker; generated or ignored
+   artifacts still fail the report as read-only side effects.
    Invalid drafts return field paths and concrete fixes; the still-running
-   worker corrects every named field and validates the complete payload again
-   on the same task and attempt. A changed payload requires a new digest.
+   worker corrects every named field in the same file or with a small merge
+   patch and validates the same ref again on the same task and attempt.
    When the dispatch supplies predecessor report refs, that successor worker
    first reads each ref through `read_worker_report` with the exact project
    root, task ref, attempt id, and profile from its briefing. It may not read

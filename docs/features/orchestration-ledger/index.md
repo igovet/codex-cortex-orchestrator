@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 8.1.0 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 8.1.1 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly nine public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -371,13 +371,20 @@ projection, and localized free text requires canonical English translation
 before resumption. A task revision supersedes an unresolved batch.
 
 After questions are resolved, every worker calls `get_report_template`, replaces
-its gate-specific placeholders, and submits the complete payload to
-`validate_report_draft` until `draft_valid=true`. Draft validation uses the same
-canonical content checks as persistence, returns field paths and fixes, writes
-nothing, and consumes no failed-worker attempt; only failed worker attempts
-count toward the three-attempt recovery budget. The worker then sends the
-unchanged payload and returned `validation_digest` to one atomic
-`record_report`, which revalidates and persists exactly seven fields:
+its gate-specific placeholders in the exact private draft file, and calls
+`validate_report_draft` with that file's ref until `draft_valid=true`. `get_report_template`
+creates a fully structured JSON draft with mode `0600` and returns only
+`draft_ref`, `draft_path`, and its expiry, never the report body. Writers edit
+that exact file; a read-only worker may instead send a small RFC 7396 merge patch.
+Validation uses the same canonical content checks as persistence, returns field
+paths and fixes, and leaves the same file in place when invalid. A successful
+validation binds `validation_digest` to that exact file. Draft validation
+consumes no failed-worker attempt; only failed worker attempts count toward the
+three-attempt recovery budget. A new template supersedes an old or expired
+draft. The worker then sends only its exact identity, `draft_ref`, and
+`validation_digest` to one atomic `record_report`, which rereads the file,
+revalidates current state, and deletes the file and metadata only after commit,
+persisting exactly seven fields:
 `summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`,
 and `uncertainty`. A worker report has no `next_action`; findings contain observed
 facts and evidence, not remediation instructions or target-gate decisions. Final `questions` must be `[]`: material decisions complete
@@ -387,9 +394,13 @@ questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
 tool failure returns only the exact error. Independent draft-shape mistakes are
 returned together as `{path, message, fix}` diagnostics; later semantic
-diagnostics use the same structure. A changed payload requires another draft
+diagnostics use the same structure. A changed draft file requires another draft
 validation and digest. A non-retryable error or unavailable exact identity
-remains a blocker. The coordinator
+remains a blocker. A legacy full-payload `record_report` remains
+accepted for compatibility. Host-sandboxed read-only gates record ordinary
+source deltas observed in the shared checkout as concurrency evidence rather
+than attributing them to the worker; claimed `changed_files` and generated,
+cache, coverage, or ignored side effects still fail validation. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
 never an inline report body. That read also returns Cortex's derived absolute
 `report_markdown_path` and the exact `report_markdown_link` for

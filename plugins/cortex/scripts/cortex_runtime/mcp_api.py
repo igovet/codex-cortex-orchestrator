@@ -13,9 +13,9 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
     "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "get_report_template": "Worker-only read operation: return the exact report skeleton, required top-level envelopes, generated evidence markers, and gate-specific placeholders for this active task and attempt. It persists nothing and consumes no worker attempt.",
-    "validate_report_draft": "Worker-only read operation: validate the complete report payload through the same canonical checks as record_report; it persists nothing and consumes no worker retry budget. Repeat until draft_valid=true, then pass validation_digest with the unchanged payload to record_report.",
-    "record_report": "Worker-only atomic operation: revalidate and persist one strict seven-field report after validate_report_draft succeeds. Planner Scope requires a top-level scoping discovery brief. Planner Plan requires a top-level planning work breakdown; profile and the required acceptance_criteria/verification belong on each microtask. Every report.tests item has exactly command, cwd, exit_code, and evidence. Optional gate_result is top-level; review/close require gate_result or compatible closure. Do not paste the report body into the parent channel after success.",
+    "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections; no final report is persisted and no worker attempt is consumed.",
+    "validate_report_draft": "Worker-only validation operation: validate the existing temporary file identified by draft_ref. Edit draft_path directly, send one complete replacement, or send a small JSON Merge Patch for named corrections. Every invalid draft remains editable and consumes no worker retry budget; success binds validation_digest to the same file.",
+    "record_report": "Worker-only atomic operation: pass only worker identity, draft_ref, and validation_digest. Cortex rereads the same temporary file, verifies its digest, revalidates current state, atomically persists the report, and deletes the temporary file only after success. Do not resend the report or paste it into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -407,7 +407,7 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": f"Worker report request. report remains exactly {len(report_fields)} fields; optional gate_result is a top-level canonical result envelope, while review/close require gate_result or the temporary closure alias.",
+        "description": f"Worker report request. Normal finalization sends only draft_ref and validation_digest after validate_report_draft. A complete {len(report_fields)}-field report payload remains accepted only for in-flight compatibility and must not be combined with draft_ref.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
@@ -416,7 +416,12 @@ def build_public_schemas(
             "validation_digest": {
                 "type": "string",
                 "pattern": "^[0-9a-f]{64}$",
-                "description": "Digest returned by validate_report_draft for this exact unchanged complete payload.",
+                "description": "Digest returned with draft_ref by validate_report_draft.",
+            },
+            "draft_ref": {
+                "type": "string",
+                "pattern": "^draft-[0-9a-f]{32}$",
+                "description": "Short reference for the task-scoped temporary report file created by get_report_template. Send this instead of the report payload.",
             },
             "report": V3_REPORT_SCHEMA,
             "gate_result": GATE_RESULT_SCHEMA,
@@ -424,24 +429,37 @@ def build_public_schemas(
             "scoping": V3_SCOPING_SCHEMA,
             "planning": V3_PLANNING_SCHEMA,
         },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
+        "required": ["project_root", "task_id", "attempt_id", "profile"],
+        "oneOf": [
+            {"required": ["draft_ref", "validation_digest"]},
+            {"required": ["report"]},
+        ],
     }
     WORKER_VALIDATE_REPORT_DRAFT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Permissive draft envelope; semantic validation returns field paths and fixes without persistence.",
+        "description": "Validate the same temporary draft file by ref. Omit patch and payload after editing draft_path directly; send patch for small JSON Merge Patch corrections; or send report plus optional siblings once to replace the file content.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
+            "draft_ref": {
+                "type": "string",
+                "pattern": "^draft-[0-9a-f]{32}$",
+                "description": "Exact ref returned by get_report_template for this worker attempt.",
+            },
+            "patch": {
+                "type": "object",
+                "description": "Optional RFC 7396 JSON Merge Patch limited to report, scoping, planning, gate_result, and closure. Do not combine with complete payload fields.",
+            },
             "report": {"type": "object"},
             "gate_result": {"type": "object"},
             "closure": {"type": "object"},
             "scoping": {"type": "object"},
             "planning": {"type": "object"},
         },
-        "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
+        "required": ["project_root", "task_id", "attempt_id", "profile", "draft_ref"],
     }
     WORKER_GET_REPORT_TEMPLATE_SCHEMA = {
         "type": "object",

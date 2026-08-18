@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `8.1.0` source line. The public
+Security fixes are prepared for the current `8.1.1` source line. The public
 contract remains `cortex/orchestration/v4` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -38,7 +38,15 @@ legacy targets and refuses unexpected paths or symlink ancestry.
 Worker prompts are immutable, read-only briefing artifacts addressed by an
 exact path and SHA-256 digest. Native dispatch carries only the compact
 identity/bootstrap needed to retrieve that briefing; workers cannot browse
-other ledger artifacts. Reports retain the strict seven-field
+other ledger artifacts except the exact report `draft_path` returned to that
+worker. `get_report_template` creates this task- and attempt-scoped JSON file
+with mode `0600`; the server stores only its exact path, identity, expiry, and
+validation metadata in SQLite. Public tools accept the opaque `draft_ref`, not
+an arbitrary caller path, and reject path escape, symlinks, broad permissions,
+identity mismatch, expiry, or digest drift. Invalid validation keeps the same
+file for correction; `record_report` deletes it and its metadata only after the
+durable report commit. A new template supersedes the prior attempt draft.
+Reports retain the strict seven-field
 `cortex/report/v1` contract. The sensitive diagnostic log at
 `~/.codex/logs/cortex-tool-errors.jsonl` is permission-protected and capped at
 10 MiB by retaining complete newest records and dropping the oldest records
@@ -61,6 +69,6 @@ working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This working tree is a source candidate only. The 8.1.0+codex.20260818200000
+This working tree is a source candidate only. The 8.1.1+codex.20260818210000
 changes are not installed into a user's plugin, published, committed, or
 tagged by this task.

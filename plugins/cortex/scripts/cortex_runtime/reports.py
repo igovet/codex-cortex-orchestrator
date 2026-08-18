@@ -8,7 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 import stat
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -78,8 +80,190 @@ from cortex_runtime.projection_service import (
     repair as repair_projection_job,
     verify_job as verify_projection_job,
 )
-from cortex_runtime.ledger_db import fail_projection_job
+from cortex_runtime.ledger_db import (
+    delete_task_document as db_delete_task_document,
+    fail_projection_job,
+    get_task_document as db_get_task_document,
+    list_task_documents as db_list_task_documents,
+    put_task_document as db_put_task_document,
+)
 from cortex_runtime.record_report import build_compatibility_facade
+
+_REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v1"
+_REPORT_DRAFT_TTL = timedelta(hours=1)
+_REPORT_DRAFT_PAYLOAD_FIELDS = {"report", "scoping", "planning", "gate_result", "closure"}
+
+
+def _report_draft_key(attempt_id: str, draft_ref: str) -> str:
+    return f"report_draft:{safe_id(attempt_id)}:{safe_id(draft_ref)}"
+
+
+def _report_draft_relative_path(attempt_id: str, draft_ref: str) -> Path:
+    return Path("report-drafts") / safe_id(attempt_id) / f"{safe_id(draft_ref)}.json"
+
+
+def _parse_utc_timestamp(value: object, *, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"report draft {field} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"report draft {field} is invalid")
+    return parsed.astimezone(timezone.utc)
+
+
+def _delete_report_draft(
+    root: Path,
+    *,
+    task_id: str,
+    document_key: str,
+    draft_path: Path,
+) -> None:
+    """Remove one scoped temporary draft and its metadata after commit or supersession."""
+    try:
+        try:
+            info = draft_path.lstat()
+        except FileNotFoundError:
+            info = None
+        if info is not None and (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            draft_path.unlink()
+            _runtime._fsync_directory(draft_path.parent)
+    finally:
+        db_delete_task_document(root, task_id, document_key)
+
+
+def _stage_report_draft_file(
+    root: Path,
+    task_dir: Path,
+    *,
+    project_root: str,
+    task_id: str,
+    attempt_id: str,
+    profile: str,
+    envelope: dict[str, Any],
+) -> tuple[dict[str, Any], Path]:
+    """Create one private editable report file before validation."""
+    draft_ref = "draft-" + secrets.token_hex(16)
+    document_key = _report_draft_key(attempt_id, draft_ref)
+    relative_path = _report_draft_relative_path(attempt_id, draft_ref)
+    draft_path = _contained_path(task_dir, task_dir / relative_path, "report draft")
+    created_at = datetime.now(timezone.utc)
+    metadata = {
+        "schema": _REPORT_DRAFT_SCHEMA,
+        "draft_ref": draft_ref,
+        "project_root": project_root,
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "profile": profile,
+        "relative_path": relative_path.as_posix(),
+        "validation_digest": None,
+        "validated_at": None,
+        "created_at": created_at.isoformat(),
+        "expires_at": (created_at + _REPORT_DRAFT_TTL).isoformat(),
+    }
+    _runtime.write_json(draft_path, envelope)
+    try:
+        db_put_task_document(root, task_id, document_key, metadata)
+    except Exception:
+        if draft_path.exists():
+            draft_path.unlink()
+        raise
+    prefix = f"report_draft:{safe_id(attempt_id)}:"
+    for key, previous in db_list_task_documents(root, task_id, prefix=prefix):
+        if key == document_key:
+            continue
+        previous_relative = Path(str(previous.get("relative_path") or ""))
+        if previous_relative and not previous_relative.is_absolute() and ".." not in previous_relative.parts:
+            previous_path = _contained_path(task_dir, task_dir / previous_relative, "superseded report draft")
+            _delete_report_draft(
+                root, task_id=task_id, document_key=key, draft_path=previous_path,
+            )
+        else:
+            db_delete_task_document(root, task_id, key)
+    return metadata, draft_path
+
+
+def _load_report_draft_file(
+    root: Path,
+    task_dir: Path,
+    *,
+    project_root: str,
+    task_id: str,
+    attempt_id: str,
+    profile: str,
+    draft_ref: str,
+) -> tuple[dict[str, Any], dict[str, Any], str, Path]:
+    normalized_ref = safe_id(draft_ref)
+    if not re.fullmatch(r"draft-[0-9a-f]{32}", normalized_ref):
+        raise ValueError("draft_ref is invalid; copy it exactly from get_report_template")
+    document_key = _report_draft_key(attempt_id, normalized_ref)
+    metadata = db_get_task_document(root, task_id, document_key)
+    if metadata is None:
+        raise ValueError(
+            "report draft is unavailable or superseded; call get_report_template again on this attempt"
+        )
+    required = {
+        "schema", "draft_ref", "project_root", "task_id", "attempt_id", "profile", "relative_path",
+        "validation_digest", "validated_at", "created_at", "expires_at",
+    }
+    if set(metadata) != required or metadata.get("schema") != _REPORT_DRAFT_SCHEMA:
+        raise ValueError("report draft metadata is invalid")
+    if any(str(metadata.get(field) or "") != value for field, value in (
+        ("draft_ref", normalized_ref),
+        ("project_root", project_root),
+        ("task_id", task_id),
+        ("attempt_id", attempt_id),
+        ("profile", profile),
+    )):
+        raise ValueError("report draft does not belong to this exact worker attempt")
+    relative_path = Path(str(metadata["relative_path"]))
+    expected_relative = _report_draft_relative_path(attempt_id, normalized_ref)
+    if relative_path != expected_relative or relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError("report draft path is outside its exact worker attempt")
+    draft_path = _contained_path(task_dir, task_dir / relative_path, "report draft")
+    if _parse_utc_timestamp(metadata["expires_at"], field="expires_at") <= datetime.now(timezone.utc):
+        raise ValueError("report draft has expired; call get_report_template again on this attempt")
+    try:
+        info = draft_path.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError("report draft file is missing; call get_report_template again on this attempt") from exc
+    if draft_path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise ValueError("report draft must remain a private regular non-symlink file")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError("report draft permissions are too broad; restore private 0600 permissions")
+    text = _read_private_text(draft_path, "report draft", max_bytes=_runtime.MAX_JSON_BYTES)
+    try:
+        envelope = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"report draft JSON is invalid at line {exc.lineno}, column {exc.colno}") from exc
+    allowed = {"project_root", "task_id", "attempt_id", "profile"} | _REPORT_DRAFT_PAYLOAD_FIELDS
+    if not isinstance(envelope, dict) or set(envelope) - allowed:
+        raise ValueError("report draft must contain only worker identity and report envelope fields")
+    for field, expected in (
+        ("project_root", project_root),
+        ("task_id", task_id), ("attempt_id", attempt_id), ("profile", profile),
+    ):
+        if str(envelope.get(field) or "") != expected:
+            raise ValueError(f"report draft {field} does not match this exact worker attempt")
+    return envelope, metadata, document_key, draft_path
+
+
+def _write_report_draft_file(draft_path: Path, envelope: dict[str, Any]) -> None:
+    _runtime.write_json(draft_path, envelope)
+
+
+def _merge_patch(target: Any, patch: Any) -> Any:
+    """Apply RFC 7396 JSON Merge Patch semantics to an in-memory draft."""
+    if not isinstance(patch, dict):
+        return patch
+    result = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = _merge_patch(result.get(key), value)
+    return result
+
 
 def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
@@ -157,6 +341,32 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         host_confirmation_pending = attempt.get("status") == AWAITING_HOST_SPAWN
         if attempt.get("invalidated") or attempt.get("status") not in {"running", AWAITING_HOST_SPAWN}:
             raise ValueError("cannot publish a report for an invalidated or terminal attempt")
+        draft_document_key = None
+        draft_path = None
+        supplied_draft_ref = str(params.get("_draft_ref") or "").strip()
+        validation_digest = str(params.get("_validation_digest") or "").strip().lower()
+        if supplied_draft_ref:
+            if not validation_digest:
+                raise ValueError("validation_digest is required with draft_ref")
+            draft_envelope, draft_metadata, draft_document_key, draft_path = _load_report_draft_file(
+                root,
+                task_dir,
+                project_root=str(select_project_root(params)),
+                task_id=state["task_id"],
+                attempt_id=attempt_id,
+                profile=str(attempt.get("profile") or ""),
+                draft_ref=supplied_draft_ref,
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", validation_digest):
+                raise ValueError("validation_digest is invalid; copy it exactly from validate_report_draft")
+            if (
+                draft_metadata.get("validation_digest") != validation_digest
+                or not draft_metadata.get("validated_at")
+            ):
+                raise ValueError(
+                    "report draft is not validated at this digest; call validate_report_draft again before record_report"
+                )
+            params = {**params, **draft_envelope}
         open_questions = _open_blocking_questions(task_dir, state, attempt_id)
         if open_questions:
             refs = ", ".join(str(item["question_id"]) for item in open_questions)
@@ -204,7 +414,7 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 str(attempt.get("gate") or ""),
             )
         if raw_planning is not None:
-            planning = sanitize_planning_payload(raw_planning)
+            planning = sanitize_planning_payload(raw_planning, persisted=bool(supplied_draft_ref))
         elif params.get("_require_plan_artifact") and attempt.get("gate") == "plan":
             raise ValueError("planner reports require a planning artifact with overview and work_packages")
         raw_scoping = params.get("scoping")
@@ -212,7 +422,7 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if raw_scoping is not None:
             if attempt.get("gate") != "scope" or attempt.get("profile") != "planner":
                 raise ValueError("scoping artifacts may be published only by the active planner scope attempt")
-            scoping = sanitize_scoping_payload(raw_scoping)
+            scoping = sanitize_scoping_payload(raw_scoping, persisted=bool(supplied_draft_ref))
         elif params.get("_require_scope_artifact") and attempt.get("gate") == "scope":
             raise ValueError(
                 "planner scope reports require a scoping artifact with overview, context_files, and discovery_domains"
@@ -225,7 +435,6 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if closure is not None:
             digest_payload["closure"] = closure
         content_digest = digest_text(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        validation_digest = str(params.get("_validation_digest") or "").strip().lower()
         if validation_digest and validation_digest != content_digest:
             raise ValueError(
                 "validation_digest does not match the current report draft; call validate_report_draft again with "
@@ -329,7 +538,15 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             # use case schedules all three canonical artifacts for repair
             # after this return, preserving retry semantics without a
             # duplicate logical export registration.
-            return {"idempotent": True, "report": existing, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
+            outcome = {"idempotent": True, "report": existing, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
+            if draft_document_key is not None:
+                assert draft_path is not None
+                outcome["_draft_cleanup"] = {
+                    "task_id": state["task_id"],
+                    "document_key": draft_document_key,
+                    "draft_path": str(draft_path),
+                }
+            return outcome
         attempt_count = sum(1 for item in authoritative if item.get("attempt_id") == attempt_id)
         aggregate_bytes = sum(len(json.dumps(item.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8")) for item in authoritative)
         report_bytes = len(json.dumps(report, ensure_ascii=False, sort_keys=True).encode("utf-8"))
@@ -423,7 +640,15 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         delegation_index["updated_at"] = now()
         _write_delegation_report_index(paths, state["task_id"], attempt_id, delegation_index)
         append_journal_best_effort(task_dir, "report", f"{attempt_id} published {report_id}")
-        return {"idempotent": False, "report": record, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
+        outcome = {"idempotent": False, "report": record, "receipt": receipt, "host_confirmation_pending": host_confirmation_pending, "principal_correction": principal_correction, "state": state}
+        if draft_document_key is not None:
+            assert draft_path is not None
+            outcome["_draft_cleanup"] = {
+                "task_id": state["task_id"],
+                "document_key": draft_document_key,
+                "draft_path": str(draft_path),
+            }
+        return outcome
 
 
 def _restore_report_projections(result: dict[str, Any], params: dict[str, Any]) -> None:
@@ -434,7 +659,27 @@ def _restore_report_projections(result: dict[str, Any], params: dict[str, Any]) 
     projection intents are committed by ``_record_report_locked``; explicit
     report reads or reconciliation can materialize them later.
     """
-    del result, params
+    cleanup = result.pop("_draft_cleanup", None)
+    if not isinstance(cleanup, dict):
+        return
+    try:
+        root = ledger_root(params)
+        task_id = safe_id(str(cleanup["task_id"]))
+        document_key = str(cleanup["document_key"])
+        draft_path = Path(str(cleanup["draft_path"]))
+        _contained_path(root / "tasks", draft_path, "report draft cleanup")
+        with state_lock(root):
+            _delete_report_draft(
+                root,
+                task_id=task_id,
+                document_key=document_key,
+                draft_path=draft_path,
+            )
+    except (KeyError, OSError, ValueError):
+        # The report is already committed. A later get_report_template call
+        # supersedes stale draft metadata and retries file cleanup without
+        # turning successful report persistence into a worker failure.
+        return
 
 
 # The public callable is now a vertical-slice facade.  Its adapters retain the
@@ -460,7 +705,7 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
     try:
         unknown = sorted(set(params) - {
             "project_root", "task_id", "attempt_id", "profile", "report", "scoping", "planning",
-            "gate_result", "closure", "validation_digest",
+            "gate_result", "closure", "draft_ref", "validation_digest",
         })
         if unknown:
             raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
@@ -470,6 +715,14 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
         profile = canonical_profile(params.get("profile") or "")
         if profile not in AGENTS:
             raise ValueError("profile must be an exact Cortex worker profile")
+        draft_ref = str(params.get("draft_ref") or "").strip()
+        payload_fields = {"report", "scoping", "planning", "gate_result", "closure"} & set(params)
+        if validate_only and draft_ref:
+            raise ValueError("internal draft validation accepts the loaded file payload, not draft_ref")
+        if not validate_only and draft_ref and payload_fields:
+            raise ValueError(
+                "record_report with draft_ref must not resend report, scoping, planning, gate_result, or closure"
+            )
         result = _runtime.record_report({
             "project_root": params.get("project_root"),
             "task_id": params.get("task_id"),
@@ -480,6 +733,7 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             "planning": params.get("planning"),
             "gate_result": params.get("gate_result"),
             "closure": params.get("closure"),
+            "_draft_ref": draft_ref,
             "_validation_digest": params.get("validation_digest"),
             "_validate_only": validate_only,
             "_require_predecessor_review": True,
@@ -590,7 +844,10 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             "report findings must", "report questions must", "report tests must", "report evidence must",
             "report uncertainty must", "report exceeds the", "report count quota exhausted",
             "report aggregate byte quota exhausted", "idempotent report submission_id",
-            "validation_digest does not match",
+            "validation_digest does not match", "validation_digest is required with draft_ref",
+            "validation_digest is invalid",
+            "draft_ref is invalid", "report draft", "record_report with draft_ref",
+            "internal draft validation accepts",
             "project_root is required", "project_root must be an absolute path", "CORTEX_ROOT is not supported",
             "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
@@ -628,10 +885,11 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             "gate": result["gate"],
             "profile": result["profile"],
             "persisted": False,
+            "draft_persisted": False,
             "attempt_budget_consumed": False,
             "next_action": (
-                "Call record_report once with this exact unchanged payload and validation_digest. record_report "
-                "revalidates inside its atomic write transaction before persisting."
+                "The loaded report payload is valid. The public draft adapter will bind this digest to its existing "
+                "temporary file before record_report is allowed to finalize it."
             ),
         }
     if result.get("recorded") is False:
@@ -661,7 +919,7 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
 
 
 def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
-    """Public worker adapter: atomically persist a validated report and return a compact receipt."""
+    """Public worker adapter: atomically promote a validated draft and return a compact receipt."""
     return _publish_worker_report(params, validate_only=False)
 
 
@@ -780,49 +1038,155 @@ def _draft_shape_diagnostics(params: dict[str, Any]) -> list[dict[str, str]]:
     return diagnostics
 
 
-def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
-    """Validate a complete worker report through the canonical path without persistence."""
-    shape_diagnostics = _draft_shape_diagnostics(params)
-    if shape_diagnostics:
-        return {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": False,
-            "outcome": "report_draft_invalid",
-            "code": "report_validation_failed",
-            "draft_valid": False,
-            "persisted": False,
-            "diagnostics": shape_diagnostics,
-            "retryable": True,
-            "attempt_budget_consumed": False,
-            "next_action": (
-                "Apply every field-specific fix, then call validate_report_draft again with the complete draft on "
-                "this same task and attempt. Draft validation persists nothing and consumes no worker attempt."
-            ),
-        }
-    result = _publish_worker_report(params, validate_only=True)
-    if result.get("ok"):
-        return result
-    diagnostics = []
-    for item in result.get("diagnostics", []):
-        message = str(item.get("message") or "Report draft validation failed.")
+def _draft_placeholder_diagnostics(value: Any, path: str = "$") -> list[dict[str, str]]:
+    diagnostics: list[dict[str, str]] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            diagnostics.extend(_draft_placeholder_diagnostics(item, f"{path}.{key}" if path != "$" else key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            diagnostics.extend(_draft_placeholder_diagnostics(item, f"{path}[{index}]"))
+    elif isinstance(value, str) and "<replace" in value.lower():
         diagnostics.append({
-            "code": item.get("code") or result.get("code") or "report_validation_failed",
-            "path": _draft_diagnostic_path(message),
-            "message": message,
-            "fix": result.get("next_action") or "Correct the named field and validate the complete draft again.",
+            "code": "report_placeholder_unresolved",
+            "path": path,
+            "message": f"template placeholder remains unresolved at {path}",
+            "fix": f"Replace {path} with concrete observed data in the existing draft file.",
         })
-    return {
-        **result,
+    return diagnostics
+
+
+def _draft_invalid_result(
+    diagnostics: list[dict[str, str]],
+    *,
+    draft_ref: str | None = None,
+    draft_path: Path | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": False,
         "outcome": "report_draft_invalid",
+        "code": "report_validation_failed",
         "draft_valid": False,
         "persisted": False,
+        "draft_persisted": bool(draft_ref and draft_path),
         "diagnostics": diagnostics,
-        "next_action": (
-            "Apply every diagnostic fix to the complete draft, then call validate_report_draft again on this same "
-            "task and attempt. Repeat until draft_valid=true; draft validation never consumes worker attempts."
-        ),
+        "retryable": True,
         "attempt_budget_consumed": False,
+        "next_action": (
+            "Apply only the diagnostic fixes to the existing draft file or send a small JSON Merge Patch, then "
+            "call validate_report_draft again with the same draft_ref. Repeat until draft_valid=true; draft "
+            "validation never consumes worker attempts."
+        ),
     }
+    if draft_ref:
+        result["draft_ref"] = draft_ref
+    if draft_path is not None:
+        result["draft_path"] = str(draft_path)
+    return result
+
+
+def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
+    """Edit and validate the scoped temporary report file without final persistence."""
+    draft_ref = str(params.get("draft_ref") or "").strip()
+    draft_path: Path | None = None
+    try:
+        allowed = {
+            "project_root", "task_id", "attempt_id", "profile", "draft_ref", "patch",
+        } | _REPORT_DRAFT_PAYLOAD_FIELDS
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError("unsupported validate_report_draft fields: " + ", ".join(unknown))
+        for field in ("project_root", "task_id", "attempt_id", "profile", "draft_ref"):
+            if not str(params.get(field) or "").strip():
+                raise ValueError(f"{field} is required; copy it exactly from get_report_template")
+        project_root = str(select_project_root(params))
+        root = ledger_root(params)
+        identity = {
+            "project_root": project_root,
+            "task_id": safe_id(str(params["task_id"])),
+            "attempt_id": safe_id(str(params["attempt_id"])),
+            "profile": canonical_profile(params["profile"]),
+        }
+        with state_lock(root):
+            task_dir, state, attempt, profile = _public_worker_template_context(identity)
+            envelope, metadata, document_key, draft_path = _load_report_draft_file(
+                root,
+                task_dir,
+                project_root=project_root,
+                task_id=state["task_id"],
+                attempt_id=attempt["attempt_id"],
+                profile=profile,
+                draft_ref=draft_ref,
+            )
+            payload_fields = _REPORT_DRAFT_PAYLOAD_FIELDS & set(params)
+            patch = params.get("patch")
+            if patch is not None and payload_fields:
+                raise ValueError("patch must not be combined with a complete report envelope replacement")
+            if patch is not None:
+                if not isinstance(patch, dict):
+                    raise ValueError("patch must be one JSON Merge Patch object")
+                unknown_patch = sorted(set(patch) - _REPORT_DRAFT_PAYLOAD_FIELDS)
+                if unknown_patch:
+                    raise ValueError(
+                        "patch may change only report, scoping, planning, gate_result, or closure: "
+                        + ", ".join(unknown_patch)
+                    )
+                envelope = _merge_patch(envelope, patch)
+                _write_report_draft_file(draft_path, envelope)
+            elif payload_fields:
+                if "report" not in payload_fields:
+                    raise ValueError("a complete draft replacement requires report")
+                envelope = {**identity, **{field: params[field] for field in payload_fields}}
+                _write_report_draft_file(draft_path, envelope)
+
+            diagnostics = _draft_shape_diagnostics(envelope)
+            diagnostics.extend(_draft_placeholder_diagnostics(envelope))
+            if diagnostics:
+                metadata["validation_digest"] = None
+                metadata["validated_at"] = None
+                db_put_task_document(root, state["task_id"], document_key, metadata)
+                return _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
+
+            result = _publish_worker_report(envelope, validate_only=True)
+            if not result.get("ok"):
+                metadata["validation_digest"] = None
+                metadata["validated_at"] = None
+                db_put_task_document(root, state["task_id"], document_key, metadata)
+                diagnostics = []
+                for item in result.get("diagnostics", []):
+                    message = str(item.get("message") or "Report draft validation failed.")
+                    diagnostics.append({
+                        "code": item.get("code") or result.get("code") or "report_validation_failed",
+                        "path": _draft_diagnostic_path(message),
+                        "message": message,
+                        "fix": result.get("next_action") or "Correct the named field in the existing draft file.",
+                    })
+                return _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
+
+            metadata["validation_digest"] = result["validation_digest"]
+            metadata["validated_at"] = datetime.now(timezone.utc).isoformat()
+            db_put_task_document(root, state["task_id"], document_key, metadata)
+            return {
+                **result,
+                "draft_ref": draft_ref,
+                "draft_path": str(draft_path),
+                "draft_expires_at": metadata["expires_at"],
+                "draft_persisted": True,
+                "next_action": (
+                    "Call record_report once with only this worker identity, draft_ref, and validation_digest. "
+                    "Cortex will read this same temporary file, revalidate current state atomically, persist the "
+                    "report, and delete the draft file only after success."
+                ),
+            }
+    except ValueError as exc:
+        message = redact(str(exc), 1000)
+        return _draft_invalid_result([{
+            "code": "report_validation_failed",
+            "path": _draft_diagnostic_path(message),
+            "message": message,
+            "fix": "Use the exact draft_ref and worker identity from get_report_template, then correct only the named field.",
+        }], draft_ref=draft_ref or None, draft_path=draft_path)
 
 
 def _public_worker_template_context(params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any], str]:
@@ -898,14 +1262,14 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                 "overview": "<replace with evidence-backed scope overview>",
                 "context_files": [],
                 "discovery_domains": [{
-                    "id": "<stable_domain_id>",
-                    "title": "<domain title>",
-                    "objective": "<domain objective>",
-                    "paths": ["<project-relative path>"],
-                    "context": ["<verified context>"],
+                    "id": "<replace with stable_domain_id>",
+                    "title": "<replace with domain title>",
+                    "objective": "<replace with domain objective>",
+                    "paths": ["<replace with project-relative path>"],
+                    "context": ["<replace with verified context>"],
                     "depends_on": [],
-                    "acceptance_criteria": ["<observable acceptance criterion>"],
-                    "verification": ["<exact verification>"],
+                    "acceptance_criteria": ["<replace with observable acceptance criterion>"],
+                    "verification": ["<replace with exact verification>"],
                 }],
             }
             required_top_level.append("scoping")
@@ -913,17 +1277,17 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
             template["planning"] = {
                 "overview": "<replace with implementation plan overview>",
                 "work_packages": [{
-                    "id": "<stable_package_id>",
-                    "title": "<package title>",
-                    "objective": "<package objective>",
+                    "id": "<replace with stable_package_id>",
+                    "title": "<replace with package title>",
+                    "objective": "<replace with package objective>",
                     "depends_on": [],
                     "microtasks": [{
-                        "id": "<globally_unique_microtask_id>",
-                        "title": "<microtask title>",
-                        "objective": "<microtask objective>",
+                        "id": "<replace with globally_unique_microtask_id>",
+                        "title": "<replace with microtask title>",
+                        "objective": "<replace with microtask objective>",
                         "depends_on": [],
-                        "acceptance_criteria": ["<observable acceptance criterion>"],
-                        "verification": ["<exact verification>"],
+                        "acceptance_criteria": ["<replace with observable acceptance criterion>"],
+                        "verification": ["<replace with exact verification>"],
                     }],
                 }],
             }
@@ -941,19 +1305,43 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                 },
             }
             required_top_level.append("gate_result")
+        project_root = str(select_project_root(params))
+        root = ledger_root(params)
+        with state_lock(root):
+            locked_task_dir, locked_state, locked_attempt, locked_profile = _public_worker_template_context(params)
+            if (
+                locked_task_dir != task_dir
+                or locked_state["task_id"] != state["task_id"]
+                or locked_attempt["attempt_id"] != attempt["attempt_id"]
+                or locked_profile != profile
+            ):
+                raise ValueError("worker attempt changed while the report template was being prepared")
+            metadata, draft_path = _stage_report_draft_file(
+                root,
+                task_dir,
+                project_root=project_root,
+                task_id=state["task_id"],
+                attempt_id=attempt["attempt_id"],
+                profile=profile,
+                envelope=template,
+            )
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "report_template_ready",
             "gate": gate,
             "required_top_level": required_top_level,
-            "template": template,
+            "draft_ref": metadata["draft_ref"],
+            "draft_path": str(draft_path),
+            "draft_expires_at": metadata["expires_at"],
             "placeholders_must_be_replaced": True,
             "persisted": False,
+            "draft_persisted": True,
             "attempt_budget_consumed": False,
             "next_action": (
-                "Replace every angle-bracket placeholder with observed data, keep all required keys, then call "
-                "validate_report_draft with the complete payload."
+                "Open draft_path and replace every angle-bracket placeholder with observed data while keeping all "
+                "required keys, then call validate_report_draft with this worker identity and draft_ref only. If "
+                "the worker sandbox cannot edit the file, send one full replacement once or a small patch instead."
             ),
         }
     except ValueError as exc:

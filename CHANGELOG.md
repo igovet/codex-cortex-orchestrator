@@ -4,6 +4,24 @@ All notable public changes to Cortex are recorded here. Release entries use
 semantic versions; the plugin manifest adds a unique Codex cachebuster to the
 same base version.
 
+## [8.1.1] - 2026-08-18
+
+- Make `get_report_template` create one private, fully structured temporary
+  JSON report file before validation and return only its `draft_ref`, absolute
+  `draft_path`, expiry, and required sections instead of echoing the template.
+- Let workers edit that same file directly or apply bounded JSON Merge Patches
+  through `validate_report_draft`. Invalid validation keeps the file and never
+  consumes the three-failed-attempt recovery budget; success binds a digest to
+  the same file without returning its body.
+- Make `record_report` reload and atomically revalidate that exact file from
+  only worker identity, `draft_ref`, and `validation_digest`, then delete the
+  draft and its metadata after the durable report transaction commits. Drafts
+  expire after one hour and a new template supersedes the prior attempt draft.
+- Treat ordinary source deltas observed by a host-sandboxed read-only worker
+  as concurrent shared-workspace evidence instead of an impossible report-JSON
+  correction. Claimed `changed_files` and generated or ignored side effects
+  remain hard failures for read-only gates.
+
 ## [8.1.0] - 2026-08-18
 
 - Add side-effect-free `get_report_template` and `validate_report_draft` worker

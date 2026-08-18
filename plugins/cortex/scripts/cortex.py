@@ -246,10 +246,16 @@ if (
     != "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200"
     or SHARED_WORKER_CONTRACT.get("codebase_memory_fallback")
     != "one_bounded_attempt_then_repository_native_tools_without_looping"
+    or SHARED_WORKER_CONTRACT.get("report_draft_lifecycle")
+    != "template_private_file_direct_or_patch_validate_one_hour_consume"
+    or SHARED_WORKER_CONTRACT.get("report_finalization")
+    != "identity_draft_ref_validation_digest_same_file_then_delete"
+    or SHARED_WORKER_CONTRACT.get("read_only_workspace_delta")
+    != "ordinary_source_changes_are_concurrency_evidence_generated_or_ignored_side_effects_fail"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
     or not CODEBASE_MEMORY_REFRESH_PROFILES.issubset(AGENTS)
 ):
-    raise RuntimeError("bundled Cortex Codebase Memory worker contract is invalid")
+    raise RuntimeError("bundled Cortex shared worker contract is invalid")
 AVAILABLE_GATES = {
     "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
     "qa", "security", "performance", "accessibility", "ux", "review",
@@ -3643,10 +3649,14 @@ def _validate_result_artifacts(
         path for path in changed
         if _result_path_is_allowed(path, list(attempt.get("allowed_paths") or []))
     )
-    if read_only_result and observed_in_scope:
-        raise ValueError(
-            f"project files changed during read-only result gate {gate}: " + ", ".join(observed_in_scope)
-        )
+    # Read-only workers execute in a host-enforced read-only sandbox. In a
+    # shared checkout, a manifest delta can therefore belong to another task,
+    # the user, or a concurrent writer and cannot safely be attributed to this
+    # worker. Preserve the delta as concurrency evidence instead of rejecting
+    # an otherwise valid report with an impossible "fix the JSON" loop.
+    # Generated/ignored artifacts remain a hard failure below because they are
+    # the common observable side effect of a supposedly non-writing check.
+    concurrent_read_only_paths = observed_in_scope if read_only_result else []
     baseline_ignored = (baseline.get("policy") or {}).get("detected_ignored_entries") or {}
     current_ignored = (current.get("policy") or {}).get("detected_ignored_entries") or {}
     ignored_side_effects = sorted(
@@ -3675,6 +3685,8 @@ def _validate_result_artifacts(
         "observed_change_count": comparison.get("change_count", 0),
         "reported_change_count": len(reported),
         "reported_paths_digest": digest_text("\n".join(reported)),
+        "concurrent_change_count": len(concurrent_read_only_paths),
+        "concurrent_paths_digest": digest_text("\n".join(concurrent_read_only_paths)),
     }
 
 
