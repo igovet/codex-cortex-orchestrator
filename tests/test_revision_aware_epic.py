@@ -582,6 +582,26 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(retried["outcome"], "ready_to_spawn")
         self.assertEqual(retried["dispatches"][0]["phase"], "plan")
 
+    def test_reportless_stop_restores_a_missing_matching_parent_binding(self) -> None:
+        started = self.start(
+            waves=[{"workers": [{"phase": "plan"}]}],
+            objective="recover the durable parent binding for a stopped worker",
+        )
+        _, state, _ = self.confirm_running(started, host_agent_id="native.binding-recovery:01")
+        root = self.project / ".codex" / "cortex"
+        with control.state_lock(root):
+            bindings = control._host_session_bindings(root)
+            bindings["tasks"].pop(state["task_id"], None)
+            bindings["updated_at"] = control.now()
+            control.db_put_global(root, "host_sessions", bindings)
+
+        stopped = control.finalize_host_worker_stop_from_hook(
+            str(self.project), state["task_id"], state["thread_id"], "native.binding-recovery:01",
+        )
+        self.assertEqual(stopped["outcome"], "native_worker_stopped_without_report")
+        restored = control._host_session_bindings(root)
+        self.assertEqual(restored["tasks"][state["task_id"]], state["thread_id"])
+
     def test_mixed_wave_reportless_stop_keeps_failed_slot_addressable(self) -> None:
         started = self.start(
             waves=[{"workers": [{"phase": "discover"}, {"phase": "discover"}]}],

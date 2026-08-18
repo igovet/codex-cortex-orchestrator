@@ -799,7 +799,8 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                 value["worker"] = worker
             results.append(value)
         current = cortex.continue_orchestration({
-            "project_root": str(project), "step": current["step"], "results": results,
+            "project_root": str(project), "task_ref": current["task_ref"],
+            "step": current["step"], "results": results,
         })
         if not current.get("ok"):
             raise AssertionError(current)
@@ -837,7 +838,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
         "waves": [{"workers": [{"phase": "discover"}]}],
     })
     blocked_result = cortex.continue_orchestration({
-        "project_root": str(blocked), "step": current["step"],
+        "project_root": str(blocked), "task_ref": current["task_ref"], "step": current["step"],
         "results": [{
             "status": "blocked",
             "reason": "fixture dependency unavailable",
@@ -847,7 +848,8 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     if blocked_result.get("outcome") != "blocked":
         raise AssertionError(blocked_result)
     resumed = cortex.manage_orchestration({
-        "project_root": str(blocked), "intent": "resume", "reason": "fixture dependency restored",
+        "project_root": str(blocked), "task_ref": current["task_ref"],
+        "intent": "resume", "reason": "fixture dependency restored",
     })
     completed = finish(blocked, resumed)
     scenarios.append({"name": "blocked_resume", "outcome": completed["outcome"]})

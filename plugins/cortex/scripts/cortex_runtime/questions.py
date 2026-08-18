@@ -872,19 +872,37 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
         return {**record, "questions": questions}
     if not isinstance(raw_localized, list) or len(raw_localized) != len(questions):
         raise ValueError("localized_questions must contain one projection for every batch question")
+    # ``localized_questions`` is a display projection supplied by the
+    # coordinator, not a second copy of the canonical batch.  In particular,
+    # a translating model must never be required to preserve opaque IDs.  Use
+    # exact keys when the whole projection preserves them, otherwise keep the
+    # server-owned batch order and ignore display-only keys altogether.
     by_key: dict[str, dict[str, Any]] = {}
+    preserves_canonical_keys = True
     for item in raw_localized:
         if not isinstance(item, dict):
-            raise ValueError("localized batch question must be an object with question_key")
-        key = safe_id(str(item.get("question_key") or ""))
-        if key in by_key:
-            raise ValueError("localized question_key values must be unique")
+            raise ValueError("localized batch question must be an object")
+        raw_key = str(item.get("question_key") or "").strip()
+        try:
+            key = safe_id(raw_key) if raw_key else ""
+        except ValueError:
+            # A localized display ID is not protocol data.  Fall back to the
+            # canonical position instead of making the user form depend on a
+            # model-generated identifier.
+            key = ""
+        if not key or key in by_key:
+            preserves_canonical_keys = False
+            continue
         by_key[key] = item
     canonical_keys = {str(item["question_key"]) for item in questions}
     if set(by_key) != canonical_keys:
-        raise ValueError("localized question_key values must exactly match the canonical batch")
-    for question in questions:
-        localized = by_key[question["question_key"]]
+        preserves_canonical_keys = False
+    localized_items = (
+        [by_key[question["question_key"]] for question in questions]
+        if preserves_canonical_keys
+        else list(raw_localized)
+    )
+    for question, localized in zip(questions, localized_items):
         localized_question = localized.get("localized_question", localized.get("question"))
         if requires_localization and not str(localized_question or "").strip():
             raise ValueError("every localized batch item requires localized_question")
@@ -910,19 +928,16 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
             raise ValueError("localized batch options must match the canonical option count")
         merged = []
         for canonical, display in zip(canonical_options, raw_options):
-            supplied_id = ""
             if isinstance(display, dict):
-                supplied_id = str(display.get("option_id") or "").strip()
                 title = display.get("label_localized", display.get("label", display.get("label_en", "")))
             else:
                 title = display
-            if supplied_id and safe_id(supplied_id) != canonical["option_id"]:
-                raise ValueError("localized batch option_id must match the canonical option_id")
             localized_title = redact(str(title or "").strip(), 120)
             if not localized_title:
                 raise ValueError("localized batch options require non-empty labels")
-            # Only the title changes.  ``option_id`` and ``label_en`` remain
-            # immutable canonical values used for worker answers.
+            # Localization changes only a display title.  The form position
+            # selects the server-owned option, so any model-supplied
+            # ``option_id`` is display metadata and cannot alter the answer.
             merged.append({**canonical, "label_localized": localized_title})
         question["options"] = merged
     return {**record, "questions": questions}

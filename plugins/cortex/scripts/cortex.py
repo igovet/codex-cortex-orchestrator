@@ -2097,35 +2097,60 @@ def finalize_host_worker_stop_from_hook(
     parent_session_id = safe_id(str(parent_session_id_value or ""))
     host_agent_id = str(host_agent_id_value or "").strip()
     if not HOST_AGENT_ID_RE.fullmatch(host_agent_id):
-        return {"updated": False, "reason": "host_agent_id_invalid"}
+        return {"updated": False, "outcome": "host_agent_id_invalid", "reason": "host_agent_id_invalid"}
     root = ledger_root({"project_root": str(project)})
     with state_lock(root):
         bindings = _host_session_bindings(root)
-        if bindings.get("tasks", {}).get(task_id) != parent_session_id:
-            return {"updated": False, "reason": "parent_session_mismatch"}
         loaded = _v3_task_state(root, task_id)
         if loaded is None:
-            return {"updated": False, "reason": "task_unavailable"}
+            return {"updated": False, "outcome": "task_unavailable", "reason": "task_unavailable"}
         task_dir, state, _ = loaded
+        bound_parent_session = str(bindings.get("tasks", {}).get(task_id) or "").strip()
+        state_parent_session = str(state.get("thread_id") or "").strip()
+        if bound_parent_session != parent_session_id:
+            # The task state is the durable, task-scoped authority.  A missing
+            # global binding can be left behind by an interrupted host start or
+            # compaction; restore it only when the hook supplies that exact
+            # persisted parent session.  Never accept a different session.
+            if not bound_parent_session and state_parent_session == parent_session_id:
+                bindings["tasks"][task_id] = parent_session_id
+                bindings["updated_at"] = now()
+                db_put_global(root, "host_sessions", bindings)
+            else:
+                return {
+                    "updated": False,
+                    "outcome": "parent_session_mismatch",
+                    "reason": "parent_session_mismatch",
+                }
         matches = [
             item for item in state.get("attempts", [])
             if not item.get("invalidated")
             and str((item.get("host_spawn") or {}).get("agent_id") or "") == host_agent_id
         ]
         if len(matches) != 1:
-            return {"updated": False, "reason": "host_worker_identity_unavailable"}
+            return {
+                "updated": False,
+                "outcome": "host_worker_identity_unavailable",
+                "reason": "host_worker_identity_unavailable",
+            }
         attempt = matches[0]
         attempt_id = str(attempt.get("attempt_id") or "")
         if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
             return {
                 "updated": False,
                 "idempotent": True,
+                "outcome": str(attempt.get("host_stop_outcome") or "attempt_already_terminal"),
                 "reason": "attempt_already_terminal",
                 "attempt_id": attempt_id,
                 "status": attempt.get("status"),
             }
         if attempt.get("status") != "running":
-            return {"updated": False, "reason": "attempt_not_running", "attempt_id": attempt_id}
+            return {
+                "updated": False,
+                "outcome": "attempt_not_running",
+                "reason": "attempt_not_running",
+                "attempt_id": attempt_id,
+            }
 
         stopped_at = now()
         open_questions = _open_blocking_questions(task_dir, state, attempt_id)

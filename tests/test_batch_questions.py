@@ -249,6 +249,57 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertEqual(polled["answers"]["extra_context"]["answer_en"], "Preserve backwards compatibility.")
         self.assertNotIn("Нужно", json.dumps(polled, ensure_ascii=False))
 
+    def test_localized_batch_uses_canonical_positions_when_display_ids_change(self):
+        started, _, state, attempt = self._start()
+        asked = self._ask(state, attempt)
+        localized = [
+            {
+                "question_key": "translated-question-one",
+                "question": "Какую стратегию базы данных использовать?",
+                "options": [
+                    {"option_id": "translated-option-one", "label": "Текущая схема"},
+                    {"option_id": "translated-option-two", "label": "Новая схема"},
+                ],
+            },
+            {
+                "question_key": "translated-question-one",
+                "question": "Какие области миграции нужны?",
+                "options": [
+                    {"option_id": "display-a", "label": "Данные"},
+                    {"option_id": "display-b", "label": "Код"},
+                ],
+            },
+            {"question": "Какой дополнительный контекст нужен?"},
+        ]
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            side_effect=[
+                ("accept", {"database_strategy": "use_existing_schema"}, "batch-position-1"),
+                ("accept", {"migration_scope": ["data"]}, "batch-position-2"),
+                ("accept", {"extra_context": "Сохранить совместимость."}, "batch-position-3"),
+            ],
+        ) as elicitation:
+            pending = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "question",
+                "payload": {
+                    "question_ref": asked["batch_ref"],
+                    "user_language": "ru",
+                    "localized_questions": localized,
+                },
+            })
+        self.assertTrue(pending["ok"], pending)
+        self.assertEqual(pending["outcome"], "awaiting_translation")
+        first_form = elicitation.call_args_list[0].args[1]
+        self.assertEqual(set(first_form["properties"]), {"database_strategy"})
+        self.assertEqual(first_form["properties"]["database_strategy"]["oneOf"][0], {
+            "const": "use_existing_schema", "title": "Текущая схема",
+        })
+        self.assertEqual(set(elicitation.call_args_list[1].args[1]["properties"]), {"migration_scope"})
+        self.assertEqual(set(elicitation.call_args_list[2].args[1]["properties"]), {"extra_context"})
+
     def test_batch_persistence_is_atomic_and_poll_rejects_superseded_revision(self):
         started, _, state, attempt = self._start()
         invalid = self._batch()

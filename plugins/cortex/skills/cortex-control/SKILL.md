@@ -401,9 +401,13 @@ text before the worker receives the canonical English answer. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
 same `batch_ref` with `action="poll_batch"`; the host renders one question per
 native step and durably checkpoints each accepted answer before showing the
-next. Cancellation preserves completed steps and resumes at the next unanswered
-item. A task revision supersedes an unresolved batch rather than resuming stale
-user intent. Every
+next. For a non-English batch, `localized_questions` is an ordered UI
+projection only: preserve the canonical order when possible, but never invent
+or reconstruct canonical `question_key` or `option_id` values. Cortex maps
+each projection by its exact canonical key only when the complete batch
+preserves all keys; otherwise it maps positions and ignores display IDs. A task
+revision supersedes an unresolved batch rather than resuming stale user intent.
+Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;
 existing code is current-state evidence, not evidence of desired product

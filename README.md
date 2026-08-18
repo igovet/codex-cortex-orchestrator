@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.0.3-7c3aed" alt="Cortex 9.0.3" />
+        <img src="https://img.shields.io/badge/Cortex-9.0.4-7c3aed" alt="Cortex 9.0.4" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -27,8 +27,8 @@
 > [!IMPORTANT]
 > **⚡ Copy the prompt below into a new Codex task.** It tells Codex to read this
 > repository's current installation guide, install Cortex from the GitHub
-> Marketplace `main` branch, install missing prerequisites, configure Codex,
-> and verify the result.
+> Marketplace `main` branch, install and configure Codebase Memory MCP,
+> configure Codex, and verify the result.
 
 ```text
 Install and configure the Cortex plugin for this Codex environment.
@@ -43,19 +43,25 @@ Then complete the setup end to end:
    multi-agent support, Python 3.11+ with tomllib, Git, and Bash). Install every
    missing prerequisite with the supported package manager for this operating
    system. Do not install unnecessary packages or Python dependencies.
-2. For a fresh installation, add the Cortex Marketplace from the main branch
+2. Install and configure the Codebase Memory MCP server as `codebase_memory`,
+   following the README's **Codebase Memory MCP** section and its linked
+   official upstream instructions. Install its required dependencies, register
+   it with Codex, enable automatic indexing when supported, and verify that
+   Codex can use it for this exact project root. Restart Codex if its
+   instructions require a restart.
+3. For a fresh installation, add the Cortex Marketplace from the main branch
    exactly with:
    codex plugin marketplace add https://github.com/igovet/codex-cortex-orchestrator --ref main --json
    If the `cortex` Marketplace is already registered, refresh it with the
    documented update flow instead of adding a duplicate. Then install the
    plugin (or use the README's documented remove/reinstall update flow) with:
    codex plugin add cortex@cortex --json
-3. Preserve existing ~/.codex/config.toml settings and add or correct every
+4. Preserve existing ~/.codex/config.toml settings and add or correct every
    Cortex-required setting documented in the README: multi_agent_v2 = true,
    agents.default_subagent_model = "gpt-5.6-luna", and, if this installation
    uses granular approvals, approval_policy.granular.mcp_elicitations = true.
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
-4. Complete the required Cortex hook-trust flow and run the README's relevant
+5. Complete the required Cortex hook-trust flow and run the README's relevant
    verification checks. Start a new Codex task if the README requires it.
 
 Use only the instructions and commands documented in that README. If an

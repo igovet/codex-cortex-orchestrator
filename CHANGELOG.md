@@ -1,5 +1,18 @@
 # Changelog
 
+## [9.0.4] - 2026-08-19
+
+- Treat localized batch questions and option IDs as display projections. A
+  complete exact canonical key set remains supported, but generated, missing,
+  or duplicate display IDs now safely map by canonical position instead of
+  rejecting the native user-question form.
+- Recover a missing matching parent-session binding from the task's durable
+  parent session when a worker stops, while rejecting every different session.
+  Every normal stop-hook return now includes an explicit `outcome`.
+- Keep deterministic Luna-high verification fixtures explicitly task-scoped,
+  so their `continue_orchestration` and resume calls cannot fail closed after
+  the task-ref safety change.
+
 ## [9.0.3] - 2026-08-19
 
 - Fail a new start closed when the operation registry is incompatible: the
