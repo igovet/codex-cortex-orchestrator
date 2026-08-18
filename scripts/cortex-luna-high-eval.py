@@ -939,7 +939,29 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "call manage_orchestration intent=plan_approval with decision=approve, then complete the task by creating "
             "result.md. Do not bypass the approval gate or edit .codex/cortex directly."
         )
-    return common + "Exercise a blocked/resume or future-wave reassessment path safely, then create result.md and complete the task."
+    return common + (
+        "Exercise a deterministic future-wave reassessment without manufacturing a blocker. "
+        "<cortex_task_contract>"
+        "{\"user_request\":\"Inspect README.md, then create result.md containing exactly one line: Reassessment fixture completed.\","
+        "\"complexity\":\"C1\","
+        "\"acceptance_criteria\":[\"README.md is inspected before result.md is created.\","
+        "\"result.md contains exactly one line: Reassessment fixture completed.\","
+        "\"The final handoff identifies result.md and the verification evidence.\"],"
+        "\"verification\":[\"Read README.md and result.md, then verify the exact result.md content.\","
+        "\"Inspect the resulting diff or equivalent file evidence.\"],"
+        "\"plan_approval\":\"auto\"}"
+        "</cortex_task_contract> "
+        "Call start_orchestration with that exact task and these exact initial waves: "
+        "[{\"workers\":[{\"phase\":\"discover\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
+        "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"close\"}]}]. "
+        "After the discover report is read and its completed child is closed, call continue_orchestration for that "
+        "wave with its exact task_ref, step, and report_ref result plus future_waves exactly "
+        "[{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
+        "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"close\"}]}] and reason exactly "
+        "'Discovery confirms result.md must be created, so add implementation before documentation.' Do not set "
+        "rework. This one replacement must create the reassessment evidence; after it, follow the returned pipeline "
+        "normally and do not replace future waves again."
+    )
 
 
 def live_eval(

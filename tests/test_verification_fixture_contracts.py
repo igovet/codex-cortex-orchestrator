@@ -79,6 +79,21 @@ class VerificationFixtureContractTests(unittest.TestCase):
         self.assertIn('"complexity":"C2"', prompt)
         self.assertIn("Verified note: README heading is Luna high Cortex fixture.", prompt)
 
+    def test_blocked_resume_live_prompt_forces_one_valid_future_wave_reassessment(self) -> None:
+        prompt = LUNA_EVAL.live_prompt("blocked_resume", Path("/workspace/cortex-live"))
+        self.assertIn("deterministic future-wave reassessment", prompt)
+        self.assertIn('"complexity":"C1"', prompt)
+        self.assertIn('these exact initial waves: [{"workers":[{"phase":"discover"}]}', prompt)
+        self.assertIn(
+            'future_waves exactly [{"workers":[{"phase":"implementation"}]}',
+            prompt,
+        )
+        self.assertIn(
+            "Discovery confirms result.md must be created, so add implementation before documentation.",
+            prompt,
+        )
+        self.assertIn("Do not set rework", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
