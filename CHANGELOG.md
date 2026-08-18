@@ -1,5 +1,22 @@
 # Changelog
 
+## [9.0.3] - 2026-08-19
+
+- Fail a new start closed when the operation registry is incompatible: the
+  result is non-retryable and creates neither a task nor a recoverable
+  `task_ref`, so a coordinator cannot recover an unrelated older task.
+- Require the exact `task_ref` from a successful lifecycle response for every
+  task-scoped continue, management, recovery, and report-read call. Cortex no
+  longer falls back to a project-wide active task.
+- Give every internal worker profile a turn-local read discipline: reuse a
+  fully read skill, briefing, source, or report within the turn, reopening it
+  only for pagination, an intervening edit, or a distinct unread range.
+- Make the final Planner's verified scope/discovery/design report basis
+  server-owned, so a compact future-wave request cannot accidentally omit it.
+  If a later future-wave validation fails after gate recording, the same
+  step/results may retry with corrected `future_waves`, `reason`, or `rework`
+  instead of being trapped behind the rejected payload's idempotency receipt.
+
 ## [9.0.2] - 2026-08-18
 
 - Reject system and home directories as `project_root` before Cortex begins its

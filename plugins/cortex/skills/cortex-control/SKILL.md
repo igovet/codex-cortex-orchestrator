@@ -39,6 +39,19 @@ root must remain idle while a worker runs. Worker failure, delay, unavailable
 dispatch, or incomplete evidence is a blocker or rework signal, never
 permission for the root to perform the work directly or inspect sources.
 
+## Turn-local read discipline
+
+Maintain a turn-local evidence index of every fully read skill, file, and
+bounded source range. Read each exact path only once per coordinator turn;
+reuse that evidence for every later decision, lifecycle call, and user update.
+Never repeatedly read the orchestrator skill, Cortex Control skill, or the
+same project file to compensate for uncertainty. A second read is allowed only
+when the first response was explicitly truncated or paginated, the file changed
+after it was read, or a different not-yet-read range is required. Search before
+opening a large file and read only the needed range. This discipline does not
+authorize the coordination-only root to read project, plugin, cache, or ledger
+paths forbidden above.
+
 ## Normal flow
 
 1. Call `start_orchestration` once with the exact absolute `project_root` and
@@ -55,6 +68,9 @@ permission for the root to perform the work directly or inspect sources.
    authority. If either list cannot be grounded without inventing material
    intent, ask the user before calling Cortex. Exact harvest routes are the
    sole exception because Cortex supplies their exhaustive census contract.
+   A `start_orchestration` result with `ok=false`, `task_created=false`, or no
+   `task_ref` did not create a recoverable task: do not call `manage_orchestration`,
+   inspect, list, infer, or select another task. Stop and report its blocker.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
    returns, and validates that plan and enforces documentation and close. An override uses only
@@ -133,8 +149,8 @@ permission for the root to perform the work directly or inspect sources.
    question summary through the native parent
    channel, publishes no report, and finishes its native turn into an
    idle/resumable state rather than busy-waiting. The coordinator calls
-   `manage_orchestration(intent="question", payload={"question_ref": "<exact
-   ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
+   `manage_orchestration(task_ref="<current task ref>", intent="question",
+   payload={"question_ref": "<exact ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
    the host-native question UI. A batch is rendered sequentially, one native
    question at a time, and every accepted answer is checkpointed before the
    next appears. Never ask the question in commentary/final prose or guess an
@@ -237,7 +253,7 @@ permission for the root to perform the work directly or inspect sources.
 If the host compacts or clears the conversation, or resumes the task with a new context
 window, or the coordinator no longer has the exact Cortex protocol in active
 context, preserve the opaque `task_ref` and call
-`manage_orchestration(intent="inspect")` exactly once for that task. Use the
+`manage_orchestration(task_ref="<preserved ref>", intent="inspect")` exactly once for that task. Use the
 returned `context_handoff`, current pipeline, report refs, and relative step
 as the authoritative recovery snapshot. Invoke only top-level inspect
 `dispatches` that correspond to `context_handoff.pending_dispatches`; the
@@ -348,12 +364,13 @@ or preparing native arguments. A replay returns no dispatches and cannot
 authorize a second worker wave. If the first response was lost before native
 dispatch, recover still-awaiting requests once through management inspect.
 
-Preserve the `task_ref` returned by start and pass it on later lifecycle and
-report-read calls. Different task contracts can run concurrently below one
-project root; the project registry is lock-serialized and task records remain
-isolated. An exact duplicate active start is an idempotent replay. If a caller
-omits the ref while several tasks are active, Cortex returns `needs_selection`
-with objectives and opaque refs instead of guessing.
+Preserve the `task_ref` returned by a **successful** start and pass it on every
+later task-scoped lifecycle and report-read call. Different task contracts can
+run concurrently below one project root; the project registry is
+lock-serialized and task records remain isolated. An exact duplicate active
+start is an idempotent replay. An omitted ref always fails closed with
+`task_ref_required`; never inspect, list, infer, or select a project task as
+recovery. A failed start without a `task_ref` created no recoverable task.
 
 ## Adaptation and recovery
 

@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.0.2 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 9.0.3 `cortex/v8` task ledger and
 public `cortex/orchestration/v5` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly eight public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -105,7 +105,7 @@ ledger writes. Cortex
 defaults complexity to safe C2, builds the standard pipeline when waves are
 omitted, and prepares the first wave. Each
 `continue_orchestration` call supplies the relative active-wave `step`, the
-opaque `task_ref`, and persisted worker `report_ref` values. A single-worker
+opaque `task_ref` returned by a successful lifecycle response, and persisted worker `report_ref` values. A single-worker
 completion may omit its slot; a parallel completion uses short relative
 `worker: 1..N` slots, while a non-success completion also carries the exact
 `dispatch_ref` for its attempt. The server validates completeness,
@@ -120,6 +120,13 @@ project-scoped prune, active-task `steer`, and completed-task `follow_up`; it is
 part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
+
+Every task-scoped `continue_orchestration`, `manage_orchestration`, recovery,
+and report-read call must carry that exact opaque `task_ref`. Unscoped
+management never inspects, lists, infers, or selects a task from the project
+root and fails closed with `task_ref_required`. A start result with `ok=false`,
+`task_created=false`, or no `task_ref` created no recoverable task; the
+coordinator stops and reports the blocker rather than recovering an older task.
 
 Before the single start call, ordinary tasks must advertise non-empty
 `task.acceptance_criteria` and `task.verification` lists grounded in the exact
@@ -143,9 +150,10 @@ Different task contracts can run concurrently below one project root. The same e
 metadata or proposed waves differ: it replays the existing task with
 `replayed: true` and no dispatches. A different user request creates a distinct
 task. Replayed continue calls also return no dispatches and cannot authorize a
-duplicate wave. Omitting the ref when several tasks are selectable returns
-`needs_selection` with bounded objective/ref candidates. The project registry
-is lock-serialized so concurrent process starts do not overwrite one another.
+duplicate wave. Omitting the ref always returns `task_ref_required`; task-
+scoped calls never infer, inspect, list, or select an active project task. The
+project registry is lock-serialized so concurrent process starts do not
+overwrite one another.
 
 An active or blocked task accepts a user correction through
 `manage_orchestration(intent="steer")`. Cortex increments `task_revision`,
@@ -259,6 +267,12 @@ the returned snapshot by default. Planner and explorer findings are advisory;
 only the coordinator may replace not-yet-started `future_waves`, and only when
 verified evidence materially changes ownership, dependencies, risk,
 sequencing, or validation. Every replacement includes a concise reason.
+The server always appends every verified scope, discovery, architecture,
+database-architecture, and UX report required by the final Planner, regardless
+of a compact future-wave context filter. If downstream future-wave validation
+fails after the completed gate was durably recorded, the coordinator may retry
+the same step and results with only `future_waves`, `reason`, or `rework`
+corrected; it is not trapped behind the rejected payload's receipt.
 Bounded phase aliases normalize `implement` to `implementation` and
 `build_verification` to final `close`; the server also rejects a canonical
 phase repeated across later waves, preventing correction/retry loops caused by
@@ -301,6 +315,11 @@ are filled from the validated briefing registry. Context files and explicitly
 granted predecessor reports are included in the assignment so workers can
 ground their work without inventing missing context. A gate-level mission or
 proposed criterion never expands the preserved user-authored intent boundary.
+
+Every coordinator and worker maintains a turn-local evidence index and reads
+each exact skill or file path at most once per turn. A second read is allowed
+only after explicit truncation/pagination, a post-read edit, or a distinct
+unread range; unchanged content is reused across later steps and tool calls.
 
 The `planner` profile is read-only and follows a repository-grounded,
 decision-complete workflow: it resolves discoverable facts, separates

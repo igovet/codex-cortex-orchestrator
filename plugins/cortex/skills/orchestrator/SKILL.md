@@ -48,6 +48,17 @@ skill is the authoritative runtime protocol for root isolation, dispatch,
 questions, evidence, recovery, ownership, verification, and private diagnostic
 handling. No project-local `AGENTS.md` is part of the installed contract.
 
+## Turn-local read discipline
+
+Maintain a turn-local evidence index of every fully read skill, file, and
+bounded source range. Read each exact path only once per coordinator turn and
+reuse that evidence; never reload the Orchestrator skill, Cortex Control skill,
+or an unchanged project file just because a lifecycle response needs attention.
+Read again only after an explicit truncation/pagination, a post-read file edit,
+or when a distinct unread range is necessary. Search before opening a large
+file and read only the required range. This does not relax the root's ban on
+project, plugin, cache, or ledger inspection during active orchestration.
+
 The `prune` route is maintenance, not a coding pipeline. After explicit user
 selection, call `manage_orchestration` once with exact absolute `project_root`,
 intent `prune`, no `task_ref`, and
@@ -355,8 +366,8 @@ call it once.
    returns only its `question_ref` and a concise summary, publishes no report,
    and finishes its current native turn into an idle/resumable state; it must
    not busy-wait for the user.
-   Call `manage_orchestration(intent="question", payload={"question_ref":
-   "<exact ref>"})` exactly once. That call must open the host-native question
+   Call `manage_orchestration(task_ref="<current task ref>", intent="question",
+   payload={"question_ref": "<exact ref>"})` exactly once. That call must open the host-native question
    UI; a batch is rendered sequentially, one native question at a time, with
    each accepted answer checkpointed before the next appears. Never restate the
    question as commentary or a final message, and never guess task, principal,
@@ -450,7 +461,7 @@ call it once.
 
 When an automatic/manual compaction, a host `clear`, or a resumed context may have weakened
 the active orchestration instructions, preserve the opaque `task_ref` and
-call `manage_orchestration` with `intent="inspect"` exactly once. Treat the
+call `manage_orchestration` with the preserved `task_ref` and `intent="inspect"` exactly once. Treat the
 returned `context_handoff` as the authoritative compact state and protocol
 snapshot. It restores the goal, acceptance criteria, verified reports,
 decisions, changed files, decisive checks, blockers, pipeline, and next
@@ -559,20 +570,28 @@ evidence, verification, manifest, and handoff stay private in the canonical
 v8 ledger. Legacy v7/v3 state is unsupported and is never created, migrated,
 or resumed.
 
-When several tasks are active Cortex returns `needs_selection` with objective
-and opaque `task_ref`; use the matching ref on every subsequent lifecycle and
-report-read call. Use `manage_orchestration` for inspect, resume, deactivate,
-lane, resource, active `steer`, or a durable MCP UI question. Different task contracts may run
+Use the `task_ref` from a **successful** lifecycle response on every
+task-scoped lifecycle and report-read call. Omitting it always returns
+`task_ref_required`; do not inspect, list, infer, or select a project task to
+recover. A failed start without a `task_ref` created no task to recover. Use
+`manage_orchestration` for inspect, resume, deactivate, lane, resource,
+active `steer`, or a durable MCP UI question. Different task contracts may run
 concurrently in one project; an exact duplicate start remains an idempotent
 replay of the existing active task.
 
 `start_orchestration` is called exactly once per task contract. Its response
 contains `replayed`. A fresh start returns the only authorized dispatches; a
 replay returns no dispatches and must never launch a second wave. If the
-original response was lost before dispatch, use `manage_orchestration` inspect
+original successful response was lost before dispatch, use `manage_orchestration` inspect
 once and invoke only its still-awaiting recovery dispatches. Preparing native
 arguments, translating commentary, or recovering an acknowledgement is not a
 reason to restart.
+
+If start returns `ok=false`, `task_created=false`, or no `task_ref`, no task
+from this request exists. Do not call management inspect, list/select a task,
+or reuse an active task from the same project root; stop and report the returned
+blocker. Every task-scoped management call uses the exact `task_ref` from a
+successful lifecycle response.
 
 If a recovery operation reports that the coordinator was deactivated, do not
 copy its internal activation diagnostic into the user response. Keep the

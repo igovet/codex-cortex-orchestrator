@@ -11,8 +11,8 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.0.2` (the current candidate is
-  `9.0.2+codex.20260818210000`; installed builds may carry a cachebuster).
+  `9.0.3` (the current candidate is
+  `9.0.3+codex.20260818210000`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -72,15 +72,15 @@ installation source is available; no guessed package-source command is a
 release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
 for the safe same-user sequence and the bounded stopped-worker recovery.
 
-The 9.0.2 source candidate passed all 506 unit tests on the selected local
-Python runtime, marketplace validation, and the cold-boot smoke test. Composite
-benchmark, fresh-plugin probe, installed-plugin check, full lifecycle live
-scenario, and tracked archive gate remain separate release checks. The
-installed user plugin is out of scope; no installation or `~/.codex` mutation
-is part of this candidate. The evidence-first pipeline,
+The 9.0.3 source candidate requires a fresh full-suite, marketplace, and
+cold-boot run before it can claim those results. Composite benchmark,
+fresh-plugin probe, installed-plugin check, full lifecycle live scenario, and
+tracked archive gate remain separate release checks. The installed user plugin
+is out of scope; no installation or `~/.codex` mutation is part of this
+candidate. The evidence-first pipeline,
 scope artifact, plan-basis digests, v1 resume compatibility, 10 MiB
 tail-preserving error-log cap, and Bash 3.2 launcher compatibility require
-focused regression coverage. The 9.0.2 ledger starts from SQLite only: its
+focused regression coverage. The 9.0.3 ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
 the user MCP approval override. Targeted development validation, full
@@ -92,7 +92,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.0.2 release commit only with explicit authorization.
+- Create the Cortex 9.0.3 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

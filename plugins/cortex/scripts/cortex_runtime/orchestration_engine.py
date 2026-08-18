@@ -282,8 +282,24 @@ def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[
     request_digest = _orchestrate_request_digest(params)
     receipt = db_get_operation(root, submission_id)
     if receipt is not None:
-        if receipt.get("schema") != ORCHESTRATION_TRANSACTION_SCHEMA or receipt.get("request_digest") != request_digest:
+        if receipt.get("schema") != ORCHESTRATION_TRANSACTION_SCHEMA:
             raise ValueError("orchestrate submission_id was reused with different content")
+        retryable_future_correction = (
+            params.get("operation") == "advance"
+            and receipt.get("operation") == "advance"
+            and receipt.get("status") == "failed"
+            and receipt.get("phase") == "gates_recorded"
+        )
+        if receipt.get("request_digest") != request_digest and not retryable_future_correction:
+            raise ValueError("orchestrate submission_id was reused with different content")
+        if receipt.get("request_digest") != request_digest:
+            # Completion and gate recording already committed before a later
+            # future-wave/briefing validation failed.  Resume that durable
+            # transaction with the corrected future contract instead of
+            # forcing a stale payload that the caller was explicitly told to
+            # correct.
+            receipt["request_digest"] = request_digest
+            receipt["corrected_at"] = now()
         if receipt.get("status") == "committed" and isinstance(receipt.get("result"), dict):
             replay = dict(receipt["result"])
             replay["idempotent"] = True
@@ -717,13 +733,13 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             context_report_ids = predecessor_report_ids
         if spec.get("gate") == "plan" and _pipeline_contract_version(state) >= 2:
             required_basis, _ = _verified_plan_predecessor_basis(task_dir, state)
-            required_reports = {item["report_ref"] for item in required_basis}
-            missing_required = sorted(required_reports - set(context_report_ids))
-            if missing_required:
-                raise ValueError(
-                    "final planner must receive every verified scope, discovery, architecture, database_architecture, and ux predecessor report: "
-                    + ", ".join(missing_required)
-                )
+            # The final planner's verified scope/discovery/design basis is a
+            # server-owned safety dependency.  A compact future-wave request
+            # may narrow its ordinary context_gates, but must never make the
+            # coordinator reconstruct or guess these durable report refs.
+            context_report_ids = list(dict.fromkeys(
+                context_report_ids + [item["report_ref"] for item in required_basis]
+            ))
         # The report that triggered corrective work stays readable even though
         # its original gate receipt was invalidated.  Put it first so bounded
         # context cannot silently discard the reason for the rework.

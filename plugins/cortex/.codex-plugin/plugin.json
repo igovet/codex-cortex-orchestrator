@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "9.0.2+codex.20260818210000",
+  "version": "9.0.3+codex.20260818210000",
   "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"

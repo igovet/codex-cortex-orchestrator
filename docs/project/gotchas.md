@@ -87,6 +87,12 @@ brief, context files, and at most eight validated domains.
   identity/digest-scoped
   `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
   public surface is exactly eight tools.
+- Every task-scoped continuation, management, recovery, or report-read call
+  requires the exact `task_ref` returned by a successful lifecycle response.
+  An unscoped management call never inspects or selects a project task and
+  fails with `task_ref_required`. If `start_orchestration` returns `ok=false`,
+  `task_created=false`, or no `task_ref`, no recoverable task exists: stop and
+  report the blocker instead of attaching to an older active task.
 - Every public call requires the exact absolute `project_root`. Start requires
   the user's exact, unexpanded `task.user_request`; the sole host-metadata
   exception is Desktop's injected `$cortex:orchestrator` wrapper, which is
@@ -153,9 +159,9 @@ brief, context files, and at most eight validated domains.
   attempt, coordinator identity, or host metadata. Preserve the returned opaque
   `task_ref` on every later lifecycle and report-read call. Exact duplicate
   active starts replay; changed task/wave contracts create distinct concurrent
-  tasks below the same project root. Omitting the ref while several tasks are
-  selectable returns `needs_selection` with opaque candidates instead of a
-  guessed active task.
+  tasks below the same project root. Omitting the ref always returns
+  `task_ref_required`; no task-scoped call may infer, inspect, list, or select
+  a project task as a fallback.
 - A successful start response includes `replayed`. Once start returns
   dispatches, never call it again for that `task_ref`; a replay is a receipt,
   contains no dispatches, and cannot authorize a duplicate wave. A genuinely
@@ -174,6 +180,11 @@ brief, context files, and at most eight validated domains.
 - Human-readable language names normalize before ledger creation. Repeating a
   semantically unchanged `future_waves` assessment is valid and keeps the next
   relative step monotonic; it must not fail after committing the current gate.
+  When a downstream future-wave validation fails after the gate is recorded,
+  retry the same step/results with only `future_waves`, `reason`, or `rework`
+  corrected; the idempotency receipt must not require the already-rejected
+  payload. Cortex appends the final Planner's required verified predecessor
+  reports itself rather than expecting the coordinator to reconstruct them.
 - Common phase labels are bounded aliases, not new waves: `implement` maps to
   `implementation`, while `build_verification` maps to final `close`. Cortex
   rejects the same canonical phase repeated across later waves, so use the
@@ -271,6 +282,11 @@ brief, context files, and at most eight validated domains.
   Hooks map that key (or its confirmed host alias) back to the canonical
   profile. Use `followup_task` only for that exact resumed worker;
   `host_agent_id` reuse is rejected across attempts.
+- Every coordinator and worker maintains a turn-local evidence index. Each
+  exact skill or file path is read at most once per turn; only explicit
+  truncation/pagination, a post-read edit, or a distinct unread range permits
+  another read. Reuse captured evidence for later lifecycle calls and
+  decisions.
 - A native child that stops before publishing a report or durable question is
   terminal, not follow-up-resumable. After one `manage_orchestration` inspect,
   submit exactly one failed continuation with the stopped attempt's
