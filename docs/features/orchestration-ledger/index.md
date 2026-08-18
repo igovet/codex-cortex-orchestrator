@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 8.1.1 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 8.1.2 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly nine public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -65,8 +65,11 @@ and may advance only with the returned cursor. The server materializes a
 missing report Markdown projection from the canonical artifact before issuing
 its Desktop link. An export is authorized and placed in the SQLite outbox
 before a materializer claims a lease, atomically writes and fsyncs it, verifies
-the digest, and acknowledges it. Full content is only assembled internally for
-state-machine validation, where every chunk and full digest is verified.
+the digest, and acknowledges it. Requested `max_bytes` values above 32768 are
+normalized to the transport bound for briefing, report, and coordinator
+artifact reads, so caller mistakes do not become SQLite export failures. Full
+content is only assembled internally for state-machine validation, where every
+chunk and full digest is verified.
 
 Hook/tool observations are deduplicated by task, attempt, context epoch, and
 normalized fingerprint in the v8 ledger. A successful full-coverage
@@ -196,10 +199,19 @@ bounded `plan_review` containing `report_ref`, `summary`, `findings`,
 the referenced planner report, gives the user a concise main-chat summary,
 and waits for an explicit decision. It resumes with
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`,
-which surfaces the host-native **Approve/Cancel** UI. Approve returns a
-localized plan-approved notice and authorizes dispatch of the next wave;
-Cancel returns no user-facing notice, leaves the plan in `awaiting_user`, and
-waits silently for the next user message. A material future-wave replacement
+which surfaces the host-native **Approve/Cancel** UI. In an initialized stdio
+session, the server sends `elicitation/create` with metadata identifying the
+`cortex/plan-approval/v1` schema and exactly the two decision choices. A direct
+non-stdio caller instead receives a `plan_approval_interaction` containing that
+schema, an opaque `request_id`, localized title/prompt, and the two actions'
+embedded `manage_orchestration` arguments; it must render only those controls
+and submit the selected arguments. Approve requires the request ID bound to the
+current plan basis, returns a localized plan-approved notice, and authorizes
+dispatch of the next wave. Mismatched, stale, or replayed button requests are
+rejected without dispatch. Cancel returns no user-facing notice, leaves the
+plan in `awaiting_user`, and waits silently for the next user message. If a
+host cannot render either interaction, Cortex keeps the plan pending and never
+infers approval. A material future-wave replacement
 or plan rework preserves the previous plan and approval in history, resets the
 status to `pending_plan`, and requires a singleton replacement Planner followed
 by another approval. No-op and transport-only replacements keep approval valid.
@@ -355,6 +367,12 @@ internally resolves task, attempt, profile, and native-thread identity and
 opens native MCP elicitation. Guessed identity fields and prose fallback fail
 closed. After the answer, the coordinator resumes the exact worker through
 `followup_task`; the worker polls the same ref and continues the same attempt.
+Caller/input/schema validation from allowed worker tools is returned as a
+structured correction and retried on that same attempt without consuming the
+three-attempt budget. `get_report_template` and `worker_question` preserve this
+contract instead of turning malformed requests into terminal errors; only
+explicit non-retryable integrity, storage, permission, or unavailable-identity
+failures are terminal.
 Duplicate calls return the durable answer without reopening the UI. Open
 blocking questions reject both report publication and wave
 continuation. This applies to every profile, not only Planner. Repository facts
@@ -641,12 +659,13 @@ during retirement.
 
 ## Verification
 
-The focused 25-test regression set passes with `ResourceWarning` treated as an
-error. Cold boot passes on Python 3.11 and 3.12; marketplace, AST, shell,
-deterministic fixtures, benchmark, and the isolated fresh-plugin probe pass.
-The full unit suites and source-mode live command remain pending. The live
-command uses this checkout as its MCP server and does not install, reinstall,
-update, or verify an installed plugin. Installation-bound checks and
-tracked-release verification remain separate release work. Related commands and boundaries are in
-[verification.md](../../project/verification.md).
+The focused plan-approval regression set passes with 14 tests, covering native
+and direct-fallback controls, approval continuation, silent cancellation,
+request-ID freshness, stale-basis rejection, revision, localization, and
+transport compatibility. The full control suite (285 tests), invariant suite
+(81 tests), and cold-boot smoke also pass. These checks exercise the source
+MCP server and mocked/native JSON-RPC exchanges; this checkout does not include
+a live Codex Desktop renderer, so installed-plugin and live-host button
+rendering remain separate release/integration checks. Related commands and
+boundaries are in [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

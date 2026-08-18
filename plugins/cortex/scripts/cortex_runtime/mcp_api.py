@@ -11,13 +11,13 @@ from typing import Any
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections; no final report is persisted and no worker attempt is consumed.",
+    "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
+    "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
+    "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
     "validate_report_draft": "Worker-only validation operation: validate the existing temporary file identified by draft_ref. Edit draft_path directly, send one complete replacement, or send a small JSON Merge Patch for named corrections. Every invalid draft remains editable and consumes no worker retry budget; success binds validation_digest to the same file.",
     "record_report": "Worker-only atomic operation: pass only worker identity, draft_ref, and validation_digest. Cortex rereads the same temporary file, verifies its digest, revalidates current state, atomically persists the report, and deletes the temporary file only after success. Do not resend the report or paste it into the parent channel.",
-    "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
-    "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
+    "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
+    "read_worker_report": "Read one persisted worker report by report_ref. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
 
 
@@ -527,7 +527,7 @@ def build_public_schemas(
             "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
             "cursor": {"type": "string", "description": "Opaque cursor returned for a large scoped report. It is bound to the report digest, task, and reader scope."},
-            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Bounded UTF-8 report-part size. The server enforces the maximum and never returns a large report body in one result."},
+            "max_bytes": {"type": "integer", "minimum": 1, "description": "Requested UTF-8 report-part size. Values above the safe 32768-byte transport bound are normalized to 32768 and continued with next_cursor."},
         },
         "required": ["project_root", "report_ref"],
     }
@@ -542,7 +542,7 @@ def build_public_schemas(
             "dispatch_ref": {"type": "string", "minLength": 1},
             "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing; task, worker identity, dispatch and digest remain required on every call."},
-            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Bounded UTF-8 briefing-part size. The server enforces the maximum."},
+            "max_bytes": {"type": "integer", "minimum": 1, "description": "Requested UTF-8 briefing-part size. Values above the safe 32768-byte transport bound are normalized to 32768 and continued with next_cursor."},
         },
         "required": [
             "project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest",
@@ -559,8 +559,11 @@ def build_public_schemas(
             "payload": {
                 "type": "object",
                 "description": (
-                    "Rare-operation payload. For intent=plan_approval, decision=prompt opens the native Approve/Cancel "
-                    "UI; approve/revise remain explicit compatibility and feedback paths. For intent=follow_up, use the completed source task_ref and an exact "
+                    "Rare-operation payload. For intent=plan_approval, decision=prompt opens native MCP elicitation "
+                    "with exactly Approve and Cancel controls in an initialized stdio session; direct non-stdio "
+                    "callers receive a cortex/plan-approval/v1 fallback interaction and must submit only its "
+                    "embedded response arguments (including request_id) for approve/cancel, while revise remains "
+                    "the explicit feedback path. For intent=follow_up, use the completed source task_ref and an exact "
                     "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
                     "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
                     "elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
@@ -687,10 +690,12 @@ def v3_response(
     elif outcome == "awaiting_plan_approval":
         next_action = (
             f"{coordinator_lock} Read plan_review.report_ref, publish plan_review.report_markdown_link verbatim in "
-            "the main chat, present a concise plan summary there, then immediately call manage_orchestration with "
-            "intent=plan_approval and payload.decision=prompt so Cortex opens the native Approve/Cancel UI. On "
-            "Approve, announce that the plan was approved and dispatch the next wave. On Cancel, stop silently and "
-            "wait for the user's next message; use decision=revise only after the user supplies feedback."
+            "the main chat, present a concise plan summary there, then call manage_orchestration with "
+            "intent=plan_approval and payload.decision=prompt. An initialized stdio host receives native Approve "
+            "and Cancel controls; a direct non-stdio caller renders the returned cortex/plan-approval/v1 interaction "
+            "as exactly its supplied controls and submits only the selected action's embedded arguments. On Approve, announce that the plan was approved and dispatch the "
+            "next wave. On Cancel, stop silently and wait for the user's next message; use decision=revise only "
+            "after the user supplies feedback."
         )
     elif outcome == "completed":
         next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
@@ -886,6 +891,13 @@ def v3_response(
         response["result"] = old["result"]
         if isinstance(old["result"], dict) and isinstance(old["result"].get("context_handoff"), dict):
             response["context_handoff"] = old["result"]["context_handoff"]
+        if isinstance(old["result"], dict) and old["result"].get("decision") == "cancelled":
+            response["output_policy"] = "silent"
+            response["allowed_visible_events"] = ["user_message"]
+            response["next_action"] = (
+                f"{coordinator_lock} Stop now and wait for the user's next message. Keep the plan pending; do not "
+                "dispatch, revise, or send approval/cancellation commentary."
+            )
     if outcome == "awaiting_plan_approval":
         review = (old.get("result") or {}).get("plan_review") if isinstance(old.get("result"), dict) else None
         if isinstance(review, dict):
@@ -977,6 +989,7 @@ def serve_stdio(
     server_version: str,
     instructions: str,
     set_openai_form: Callable[[bool], None],
+    set_interactive: Callable[[bool], None] | None = None,
     log_tool_error: Callable[[object, object, str, Exception], None],
 ) -> None:
     """Run the narrow JSON-RPC transport without importing orchestration internals."""
@@ -1000,6 +1013,11 @@ def serve_stdio(
                         or (isinstance(extensions, dict) and "openai/form" in extensions)
                     )
                 ))
+                if set_interactive is not None:
+                    # An initialized stdio client is the only transport that
+                    # can receive a nested elicitation/create request. Keep
+                    # direct in-process calls declarative and non-blocking.
+                    set_interactive(True)
                 result: dict[str, Any] = {
                     "protocolVersion": request.get("params", {}).get("protocolVersion", "2025-06-18"),
                     "capabilities": {"tools": {}, "resources": {"subscribe": False, "listChanged": False}},

@@ -316,7 +316,11 @@ call it once.
    reader alone cannot open that exact path, it calls `read_dispatch_briefing`
    with the complete bootstrap identity/digest tuple. If its bounded response
    is incomplete, it continues only with the returned cursor until complete.
-   If the scoped read also fails, it stops with that diagnostic. This is
+   Oversized chunk requests are safely normalized. If the scoped read returns a
+   caller/input/schema diagnostic or `retryable=true`, the worker corrects only
+   the named field and retries the same tool on the same attempt without using
+   recovery budget. It stops only for explicit `retryable=false` or
+   `outcome=blocked`. This is
    its sole direct-read exception below `.codex/cortex`; it must never list or
    inspect the ledger, mutable state, baselines, delegation packages, another
    briefing, or report files. It records the exact bootstrap-provided
@@ -324,6 +328,8 @@ call it once.
    `record_report` revalidates both the marker and immutable file. Predecessor
    reports remain scoped tool reads. The fallback cannot list or select a
    different briefing and grants no general ledger access.
+   The same rule applies to every allowed worker tool: malformed tool arguments
+   are corrected and retried; they are never a reason to finish the worker.
    A read-only worker chooses non-writing verification flags up front:
    `PYTHONDONTWRITEBYTECODE=1` for Python, no pytest/test/build cache, and no
    coverage or snapshot output. It skips a check that cannot be non-mutating

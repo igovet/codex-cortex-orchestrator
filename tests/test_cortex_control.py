@@ -3727,12 +3727,16 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertFalse(rejected_report["ok"])
         self.assertEqual(rejected_report["code"], "worker_output_language_violation")
-        with self.assertRaisesRegex(ValueError, "worker question must be English-only"):
-            control.worker_question({
-                **identity,
-                "action": "ask",
-                "question": "Какой результат нужен пользователю?",
-            })
+        rejected_question = control.worker_question({
+            **identity,
+            "action": "ask",
+            "question": "Какой результат нужен пользователю?",
+        })
+        self.assertFalse(rejected_question["ok"])
+        self.assertEqual(rejected_question["outcome"], "needs_correction")
+        self.assertTrue(rejected_question["retryable"])
+        self.assertFalse(rejected_question["attempt_budget_consumed"])
+        self.assertIn("worker question must be English-only", rejected_question["diagnostics"][0]["message"])
 
         asked = control.worker_question({
             **identity,
@@ -3794,21 +3798,17 @@ class ControlPlaneTests(unittest.TestCase):
             "step": started["step"], "results": self.v3_results(started),
         })
         self.assertEqual(held["outcome"], "awaiting_plan_approval")
-        with mock.patch.object(
-            control,
-            "_request_mcp_elicitation",
-            return_value=("accept", {"decision": "cancel"}, "russian-plan-approval"),
-        ) as elicitation:
+        with mock.patch.object(control, "_request_mcp_elicitation") as elicitation:
             cancelled = control.manage_orchestration({
                 "project_root": str(self.project), "task_ref": started["task_ref"],
                 "intent": "plan_approval", "payload": {"decision": "prompt"},
             })
         self.assertEqual(cancelled["outcome"], "awaiting_plan_approval")
-        prompt, schema = elicitation.call_args.args[:2]
-        self.assertEqual(prompt, "Утвердить завершённый план?")
-        decision = schema["properties"]["decision"]
-        self.assertEqual(decision["title"], "Проверка плана")
-        self.assertEqual([item["title"] for item in decision["oneOf"]], ["Утвердить", "Отмена"])
+        self.assertFalse(elicitation.called)
+        interaction = cancelled["plan_approval_interaction"]
+        self.assertEqual(interaction["prompt"], "Утвердить завершённый план?")
+        self.assertEqual(interaction["title"], "Проверка плана")
+        self.assertEqual([item["label"] for item in interaction["actions"]], ["Утвердить", "Отмена"])
 
     def test_v3_question_ref_opens_native_ui_once_without_coordinator_identity(self):
         started = self.v3_start("underspecified product request", waves=[{"workers": [{"phase": "plan"}]}])
@@ -4460,6 +4460,35 @@ class ControlPlaneTests(unittest.TestCase):
             fallback["review_marker"],
             control.dispatch_briefing_review_marker(dispatch["briefing_digest"]),
         )
+        oversized = control.read_dispatch_briefing({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "dispatch_ref": dispatch["dispatch_ref"],
+            "briefing_digest": dispatch["briefing_digest"],
+            "max_bytes": control.MAX_BRIEFING_BYTES,
+        })
+        self.assertTrue(oversized["ok"], oversized)
+        self.assertTrue(oversized["max_bytes_normalized"])
+        self.assertEqual(oversized["requested_max_bytes"], control.MAX_BRIEFING_BYTES)
+        self.assertEqual(oversized["effective_max_bytes"], control.ARTIFACT_TRANSPORT_MAX_BYTES)
+        invalid_size = control.read_dispatch_briefing({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "dispatch_ref": dispatch["dispatch_ref"],
+            "briefing_digest": dispatch["briefing_digest"],
+            "max_bytes": 0,
+        })
+        self.assertFalse(invalid_size["ok"])
+        self.assertEqual(invalid_size["outcome"], "needs_correction")
+        self.assertEqual(invalid_size["code"], "dispatch_briefing_request_invalid")
+        self.assertEqual(invalid_size["diagnostics"][0]["path"], "max_bytes")
+        self.assertTrue(invalid_size["retryable"])
+        self.assertFalse(invalid_size["attempt_budget_consumed"])
+        self.assertIn("never justify ending the worker", invalid_size["next_action"])
         denied = control.read_dispatch_briefing({
             "project_root": str(self.project),
             "task_id": state["task_id"],
@@ -4469,7 +4498,22 @@ class ControlPlaneTests(unittest.TestCase):
             "briefing_digest": "0" * 64,
         })
         self.assertFalse(denied["ok"])
-        self.assertEqual(denied["code"], "dispatch_briefing_unavailable")
+        self.assertEqual(denied["outcome"], "needs_correction")
+        self.assertEqual(denied["code"], "dispatch_briefing_request_invalid")
+        self.assertTrue(denied["retryable"])
+        briefing_path.chmod(0o600)
+        blocked = control.read_dispatch_briefing({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "dispatch_ref": dispatch["dispatch_ref"],
+            "briefing_digest": dispatch["briefing_digest"],
+        })
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["outcome"], "blocked")
+        self.assertFalse(blocked["retryable"])
+        briefing_path.chmod(0o400)
         package = self.task_document(task_dir, f"dispatch:{attempt['attempt_id']}")
         self.assertNotIn("## Specialist playbook", json.dumps(self.task_state(task_dir)))
         self.assertNotIn("## Specialist playbook", json.dumps(package))
@@ -5064,27 +5108,32 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(blocked["ok"])
         self.assertIn("awaiting explicit user approval", blocked["diagnostics"][0]["message"])
 
-        with mock.patch.object(
-            control,
-            "_request_mcp_elicitation",
-            return_value=("accept", {"decision": "approve"}, "plan-approval-1"),
-        ) as elicitation:
-            approved = control.manage_orchestration({
+        with mock.patch.object(control, "_request_mcp_elicitation") as elicitation:
+            prompt = control.manage_orchestration({
                 "project_root": str(self.project),
                 "task_ref": started["task_ref"],
                 "intent": "plan_approval",
                 "payload": {"decision": "prompt"},
             })
+        self.assertTrue(prompt["ok"])
+        interaction = prompt["plan_approval_interaction"]
+        self.assertEqual(interaction["schema"], "cortex/plan-approval/v1")
+        self.assertEqual([action["id"] for action in interaction["actions"]], ["approve", "cancel"])
+        self.assertEqual(
+            [action["label"] for action in interaction["actions"]],
+            ["Approve", "Cancel"],
+        )
+        self.assertFalse(elicitation.called)
+        approved = control.manage_orchestration(interaction["actions"][0]["arguments"])
         self.assertTrue(approved["ok"])
         self.assertEqual(approved["outcome"], "ready_to_spawn")
         self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
         self.assertEqual(approved["approval_message"], "Plan approved.")
         self.assertIn("Tell the user", approved["next_action"])
-        approval_form = elicitation.call_args.args[1]
-        self.assertEqual(approval_form["properties"]["decision"]["oneOf"], [
-            {"const": "approve", "title": "Approve"},
-            {"const": "cancel", "title": "Cancel"},
-        ])
+        self.assertEqual(
+            approved["result"]["decision"],
+            "approved",
+        )
 
     def test_plan_approval_rejects_a_stale_basis_before_post_plan_dispatch(self):
         started = self.v3_start(
@@ -5106,14 +5155,90 @@ class ControlPlaneTests(unittest.TestCase):
         plan = control._load_orchestrate_plan(task_dir, state)
         plan["semantic_pipeline_version"] = 2
         orchestration_engine._write_orchestrate_plan(task_dir, plan)
-        blocked = control.manage_orchestration({
+        prompt = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
-            "intent": "plan_approval", "payload": {"decision": "approve"},
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
         })
+        approve_args = prompt["plan_approval_interaction"]["actions"][0]["arguments"]
+        blocked = control.manage_orchestration(approve_args)
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["code"], "plan_reapproval_required")
         self.assertTrue(blocked["recoverable"])
         self.assertEqual(self.task_state(task_dir)["plan_approval"]["status"], "awaiting_user")
+
+    def test_plan_approval_rejects_invalid_and_replayed_button_requests(self):
+        started = self.v3_start(
+            "reject invalid plan approval button requests",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": started["step"], "results": self.v3_results(started),
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
+        })
+        approve_args = prompt["plan_approval_interaction"]["actions"][0]["arguments"]
+        invalid = {
+            **approve_args,
+            "payload": {"decision": "approve", "request_id": "plan-approval-invalid"},
+        }
+        rejected = control.manage_orchestration(invalid)
+        self.assertFalse(rejected["ok"])
+        self.assertIn("request_id", rejected["diagnostics"][0]["message"])
+        self.assertEqual(
+            self.task_state(next((self.ledger / "tasks").iterdir()))["plan_approval"]["status"],
+            "awaiting_user",
+        )
+
+        approved = control.manage_orchestration(approve_args)
+        self.assertTrue(approved["ok"])
+        self.assertEqual(approved["outcome"], "ready_to_spawn")
+        replay = control.manage_orchestration(approve_args)
+        self.assertFalse(replay["ok"])
+        self.assertIn("no pending plan approval", replay["diagnostics"][0]["message"])
+
+    def test_plan_approval_cancel_then_revise_requeues_planner(self):
+        started = self.v3_start(
+            "revise the plan after cancelling approval",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": started["step"], "results": self.v3_results(started),
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
+        })
+        cancelled = control.manage_orchestration(prompt["plan_approval_interaction"]["actions"][1]["arguments"])
+        self.assertTrue(cancelled["ok"])
+        self.assertEqual(cancelled["outcome"], "awaiting_plan_approval")
+        self.assertEqual(cancelled["result"]["decision"], "cancelled")
+
+        revised = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "intent": "plan_approval",
+            "payload": {"decision": "revise", "feedback": "Add an explicit rollback scenario."},
+        })
+        self.assertTrue(revised["ok"])
+        self.assertEqual(revised["outcome"], "ready_to_spawn")
+        self.assertEqual(revised["dispatches"][0]["phase"], "plan")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        self.assertEqual(self.task_state(task_dir)["plan_approval"]["status"], "pending_plan")
 
     def test_material_future_change_preserves_approval_history_and_requires_a_replacement_plan(self):
         started = self.v3_start(
@@ -5130,10 +5255,11 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"], "results": self.v3_results(started),
         })
-        approved = control.manage_orchestration({
+        prompt = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
-            "intent": "plan_approval", "payload": {"decision": "approve"},
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
         })
+        approved = control.manage_orchestration(prompt["plan_approval_interaction"]["actions"][0]["arguments"])
         self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
         implementation_results = self.v3_results(approved)
 
@@ -5192,10 +5318,11 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"], "results": self.v3_results(started),
         })
-        approved = control.manage_orchestration({
+        prompt = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
-            "intent": "plan_approval", "payload": {"decision": "approve"},
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
         })
+        approved = control.manage_orchestration(prompt["plan_approval_interaction"]["actions"][0]["arguments"])
         advanced = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": approved["step"], "results": self.v3_results(approved),
@@ -5232,10 +5359,92 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(held["outcome"], "awaiting_plan_approval")
 
-        with mock.patch.object(
+        with mock.patch.object(control, "_request_mcp_elicitation") as elicitation:
+            prompt = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "plan_approval",
+                "payload": {"decision": "prompt"},
+            })
+        self.assertFalse(elicitation.called)
+        cancelled = control.manage_orchestration(prompt["plan_approval_interaction"]["actions"][1]["arguments"])
+        self.assertTrue(cancelled["ok"], cancelled)
+        self.assertEqual(cancelled["outcome"], "awaiting_plan_approval")
+        self.assertEqual(cancelled["dispatches"], [])
+        self.assertEqual(cancelled["result"]["decision"], "cancelled")
+        self.assertEqual(cancelled["output_policy"], "silent")
+        self.assertEqual(cancelled["allowed_visible_events"], ["user_message"])
+        self.assertIn("Stop now and wait", cancelled["next_action"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(state["plan_approval"]["status"], "awaiting_user")
+        self.assertEqual([item["gate"] for item in state["attempts"]], ["plan"])
+
+    def test_v3_plan_approval_uses_native_mcp_controls_when_stdio_is_initialized(self):
+        started = self.v3_start(
+            "use native plan approval controls",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("native approval is pending")),
+        })
+        with mock.patch.object(control, "MCP_INTERACTIVE", True), mock.patch.object(
             control,
             "_request_mcp_elicitation",
-            return_value=("accept", {"decision": "cancel"}, "plan-approval-cancel"),
+            return_value=("accept", {"decision": "approve"}, "native-plan-1"),
+        ) as elicitation:
+            approved = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "plan_approval",
+                "payload": {"decision": "prompt"},
+            })
+        self.assertTrue(approved["ok"], approved)
+        self.assertEqual(approved["outcome"], "ready_to_spawn")
+        self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
+        elicitation.assert_called_once()
+        requested_schema = elicitation.call_args.args[1]
+        self.assertEqual(requested_schema["properties"]["decision"]["oneOf"], [
+            {"const": "approve", "title": "Approve"},
+            {"const": "cancel", "title": "Cancel"},
+        ])
+        self.assertEqual(
+            elicitation.call_args.kwargs["meta"]["schema"],
+            "cortex/plan-approval/v1",
+        )
+        self.assertEqual(
+            elicitation.call_args.kwargs["meta"]["request_id"],
+            self.task_state(next((self.ledger / "tasks").iterdir()))["plan_approval"]["request_id"],
+        )
+
+    def test_v3_plan_approval_native_cancel_stays_pending_and_silent(self):
+        started = self.v3_start(
+            "cancel native plan approval",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("native cancellation is pending")),
+        })
+        with mock.patch.object(control, "MCP_INTERACTIVE", True), mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            return_value=("cancel", None, "native-plan-cancel"),
         ):
             cancelled = control.manage_orchestration({
                 "project_root": str(self.project),
@@ -5248,12 +5457,67 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(cancelled["dispatches"], [])
         self.assertEqual(cancelled["result"]["decision"], "cancelled")
         self.assertEqual(cancelled["output_policy"], "silent")
-        self.assertEqual(cancelled["allowed_visible_events"], ["user_message"])
-        self.assertIn("Stop now and wait", cancelled["next_action"])
         task_dir = next((self.ledger / "tasks").iterdir())
-        state = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual(state["plan_approval"]["status"], "awaiting_user")
-        self.assertEqual([item["gate"] for item in state["attempts"]], ["plan"])
+        self.assertEqual(self.task_state(task_dir)["plan_approval"]["status"], "awaiting_user")
+
+    def test_mcp_process_renders_native_plan_approval_and_stays_pending_after_cancel(self):
+        started = self.v3_start(
+            "nested native plan approval cancellation",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("nested native cancellation is pending")),
+        })
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            def call(payload):
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+                return json.loads(proc.stdout.readline())
+
+            initialized = call({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25", "capabilities": {"extensions": {"openai/form": {}}}},
+            })
+            self.assertEqual(initialized["result"]["serverInfo"]["name"], "cortex")
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "manage_orchestration", "arguments": {
+                    "project_root": str(self.project), "task_ref": started["task_ref"],
+                    "intent": "plan_approval", "payload": {"decision": "prompt"},
+                }},
+            }) + "\n")
+            proc.stdin.flush()
+            elicitation = json.loads(proc.stdout.readline())
+            self.assertEqual(elicitation["method"], "elicitation/create")
+            self.assertEqual(elicitation["params"]["_meta"]["cortex"]["schema"], "cortex/plan-approval/v1")
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "cancel"},
+            }) + "\n")
+            proc.stdin.flush()
+            completed = json.loads(proc.stdout.readline())
+            self.assertEqual(completed["id"], 2)
+            structured = completed["result"]["structuredContent"]
+            self.assertEqual(structured["outcome"], "awaiting_plan_approval")
+            self.assertEqual(structured["dispatches"], [])
+            self.assertEqual(structured["result"]["decision"], "cancelled")
+            self.assertEqual(structured["output_policy"], "silent")
+            task_dir = next((self.ledger / "tasks").iterdir())
+            self.assertEqual(self.task_state(task_dir)["plan_approval"]["status"], "awaiting_user")
+        finally:
+            proc.stdin.close()
+            proc.terminate()
+            proc.wait(timeout=5)
+            proc.stdout.close()
 
     def test_v3_follow_up_creates_a_linked_corrective_task_without_mutating_completed_source(self):
         source = self.v3_start(
@@ -5434,12 +5698,13 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(artifacts["overview_path"], "planning/revisions/plan-report-0001/overview.md")
         self.assertEqual([package["id"] for package in artifacts["work_packages"]], ["api", "ui"])
 
-        approved = control.manage_orchestration({
+        prompt = control.manage_orchestration({
             "project_root": str(self.project),
             "task_ref": started["task_ref"],
             "intent": "plan_approval",
-            "payload": {"decision": "approve"},
+            "payload": {"decision": "prompt"},
         })
+        approved = control.manage_orchestration(prompt["plan_approval_interaction"]["actions"][0]["arguments"])
         self.assertEqual(approved["outcome"], "ready_to_spawn")
         completed = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
@@ -5740,6 +6005,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(first["complete"])
         self.assertLessEqual(first["returned_bytes"], 4096)
         self.assertTrue(first["content_part"].startswith("# Evidence"))
+        oversized = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
+            "payload": {
+                "action": "read", "artifact_ref": artifact["artifact_ref"],
+                "cursor": metadata["read_cursor"], "max_bytes": control.MAX_BRIEFING_BYTES,
+            },
+        })
+        self.assertTrue(oversized["ok"], oversized)
+        self.assertTrue(oversized["max_bytes_normalized"])
+        self.assertEqual(oversized["requested_max_bytes"], control.MAX_BRIEFING_BYTES)
+        self.assertEqual(oversized["effective_max_bytes"], control.ARTIFACT_TRANSPORT_MAX_BYTES)
         denied = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
             "payload": {"action": "read", "artifact_ref": artifact["artifact_ref"], "cursor": first["next_cursor"] + "x"},
@@ -5775,6 +6051,13 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("report", first)
         self.assertFalse(first["complete"])
         self.assertLessEqual(first["returned_bytes"], 4096)
+        oversized = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "report_ref": "report-0099", "max_bytes": control.MAX_BRIEFING_BYTES,
+        })
+        self.assertTrue(oversized["ok"], oversized)
+        self.assertTrue(oversized["max_bytes_normalized"])
+        self.assertEqual(oversized["effective_max_bytes"], control.ARTIFACT_TRANSPORT_MAX_BYTES)
         second = control.read_worker_report({
             "project_root": str(self.project), "task_ref": started["task_ref"], "report_ref": "report-0099", "cursor": first["next_cursor"], "max_bytes": 4096,
         })
@@ -5784,13 +6067,17 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_report_read_returns_recoverable_result_for_missing_identity_or_record(self):
         missing_root = control.read_worker_report({"report_ref": "report-0001"})
         self.assertFalse(missing_root["ok"])
-        self.assertEqual(missing_root["code"], "report_unavailable")
+        self.assertEqual(missing_root["code"], "report_read_request_invalid")
+        self.assertTrue(missing_root["retryable"])
+        self.assertFalse(missing_root["attempt_budget_consumed"])
         started = self.v3_start("missing report", waves=[{"workers": [{"phase": "discover"}]}])
         missing_record = control.read_worker_report({
             "project_root": str(self.project), "task_ref": started["task_ref"], "report_ref": "report-9999",
         })
         self.assertFalse(missing_record["ok"])
-        self.assertEqual(missing_record["code"], "report_unavailable")
+        self.assertEqual(missing_record["code"], "report_read_request_invalid")
+        self.assertTrue(missing_record["retryable"])
+        self.assertFalse(missing_record["attempt_budget_consumed"])
 
     def test_large_baseline_manifest_is_readable_during_handoff_and_reconciliation(self):
         started = self.v3_start("large baseline handoff", waves=[{"workers": [{"phase": "discover"}]}])
@@ -6896,6 +7183,13 @@ class ControlPlaneTests(unittest.TestCase):
             "profile": attempt["profile"],
         }
 
+        invalid_template = control.get_report_template({**identity, "profile": "planner"})
+        self.assertFalse(invalid_template["ok"])
+        self.assertEqual(invalid_template["outcome"], "needs_correction")
+        self.assertTrue(invalid_template["retryable"])
+        self.assertFalse(invalid_template["attempt_budget_consumed"])
+        self.assertEqual(invalid_template["diagnostics"][0]["path"], "profile")
+
         template = control.get_report_template(identity)
         self.assertTrue(template["ok"], template)
         self.assertEqual(template["outcome"], "report_template_ready")
@@ -7229,6 +7523,68 @@ class ControlPlaneTests(unittest.TestCase):
             completed = json.loads(proc.stdout.readline())
             self.assertEqual(completed["id"], 2)
             self.assertEqual(completed["result"]["structuredContent"]["result"]["status"], "answered")
+        finally:
+            proc.stdin.close()
+            proc.terminate()
+            proc.wait(timeout=5)
+            proc.stdout.close()
+
+    def test_mcp_process_renders_native_plan_approval_and_advances_after_approve(self):
+        started = self.v3_start(
+            "nested native plan approval",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("nested native approval is pending")),
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            def call(payload):
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+                return json.loads(proc.stdout.readline())
+
+            initialized = call({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25", "capabilities": {"extensions": {"openai/form": {}}}},
+            })
+            self.assertEqual(initialized["result"]["serverInfo"]["name"], "cortex")
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "manage_orchestration", "arguments": {
+                    "project_root": str(self.project), "task_ref": started["task_ref"],
+                    "intent": "plan_approval", "payload": {"decision": "prompt"},
+                }},
+            }) + "\n")
+            proc.stdin.flush()
+            elicitation = json.loads(proc.stdout.readline())
+            self.assertEqual(elicitation["method"], "elicitation/create")
+            self.assertEqual(elicitation["params"]["mode"], "openai/form")
+            self.assertEqual(elicitation["params"]["requestedSchema"]["required"], ["decision"])
+            self.assertEqual(
+                elicitation["params"]["_meta"]["cortex"]["schema"],
+                "cortex/plan-approval/v1",
+            )
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "id": elicitation["id"],
+                "result": {"action": "accept", "content": {"decision": "approve"}},
+            }) + "\n")
+            proc.stdin.flush()
+            completed = json.loads(proc.stdout.readline())
+            self.assertEqual(completed["id"], 2)
+            structured = completed["result"]["structuredContent"]
+            self.assertEqual(structured["outcome"], "ready_to_spawn")
+            self.assertEqual(structured["dispatches"][0]["phase"], "implementation")
         finally:
             proc.stdin.close()
             proc.terminate()
@@ -8045,7 +8401,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "8.1.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "8.1.2")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

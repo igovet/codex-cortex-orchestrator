@@ -14,7 +14,11 @@ subsystems. Workers use `worker_question`, `get_report_template`,
 host filesystem read cannot open its exact briefing may call
 `read_dispatch_briefing` with the complete identity/digest tuple from its
 bootstrap. If a bounded response is incomplete, it may continue only with the
-returned opaque cursor until `complete=true`. A successor worker may also use `read_worker_report` with its exact attempt/profile only
+returned opaque cursor until `complete=true`. Any worker-tool caller/input/schema
+diagnostic or `retryable=true` result is corrected and retried on the same
+attempt without consuming the recovery budget; it never ends the worker. Only
+an explicit `retryable=false`, `outcome=blocked`, or genuinely unavailable exact
+identity is terminal. A successor worker may also use `read_worker_report` with its exact attempt/profile only
 for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
@@ -93,7 +97,10 @@ signal, never permission for the root to perform the work directly.
    task id, attempt id, profile, dispatch ref, and digest from the bootstrap.
    An incomplete bounded response may continue only with its returned cursor.
    That scoped fallback returns only the same validated briefing and grants no
-   directory or ledger access. If it also fails, stop with its exact diagnostic.
+   directory or ledger access. Values above the chunk bound are normalized and
+   continued with the returned cursor. If it returns a caller/schema diagnostic
+   or `retryable=true`, correct the named field and retry the same tool on this
+   attempt. Stop only for explicit `retryable=false` or `outcome=blocked`.
    After reviewing it, the worker includes the exact bootstrap-supplied `Dispatch
    briefing reviewed: <sha256>` item in `report.evidence`; `record_report`
    verifies the file again and rejects a missing marker or changed artifact.

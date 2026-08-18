@@ -32,7 +32,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete Python 3.12.3 discovery suite passed: 494 tests. Focused
+- The complete Python 3.12.3 discovery suite passed: 497 tests. Focused
   report/schema/read-only regressions and the private-file draft cold boot also
   passed.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
@@ -89,11 +89,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `8.1.1+codex.20260818210000`. These results are
+The source manifest declares `8.1.2+codex.20260818210000`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 8.1.1 source contract
+## Current 8.1.2 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -157,6 +157,13 @@ verification remain separate, explicitly requested actions.
   remains compatible. Host-sandboxed read-only gates record
   ordinary shared-checkout source deltas as concurrency evidence, while
   claimed `changed_files` and generated or ignored side effects still fail.
+- Worker caller/input/schema validation results are structured corrections:
+  fix the named field and retry the same tool on the same attempt without
+  consuming the three-attempt recovery budget. `get_report_template` and
+  `worker_question` return correction envelopes. Briefing, predecessor-report,
+  and coordinator artifact reads clamp oversized `max_bytes` to 32768. Only
+  explicit `retryable: false` integrity, storage, permission, or unavailable
+  identity failures are terminal.
 - Active user corrections use a task revision and resume addressable native
   worker sessions in place; completed-task corrections remain linked
   `follow_up` tasks. Schema v8 stores the revision, session, and atomic
@@ -165,8 +172,16 @@ verification remain separate, explicitly requested actions.
   presenting one native question per step, checkpoints accepted answers, and
   resumes after cancellation at the next unanswered question.
 - Required post-plan review is surfaced through native **Approve/Cancel** UI.
-  Approve emits a localized plan-approved notice and dispatches the next wave;
-  Cancel is silent and leaves the plan pending for the next user message.
+  Initialized stdio transport emits `elicitation/create` with the
+  `cortex/plan-approval/v1` schema and exactly two choices; direct callers
+  receive the same schema as `plan_approval_interaction` with embedded
+  `manage_orchestration` arguments. Approve requires the current opaque request
+  ID, emits a localized plan-approved notice, and dispatches the next wave;
+  stale or replayed requests do not dispatch. Cancel is silent and leaves the
+  plan pending for the next user message, while an unsupported host leaves the
+  approval pending without inferred consent. Focused coverage includes native
+  and fallback prompting, approve continuation, cancel-pending behavior,
+  invalid/replayed button requests, stale-basis rejection, and revision.
 - Prune first commits a tombstone, removes the projection tree outside the
   state lock, and only then deletes canonical task rows in one final SQLite
   transaction. Failed filesystem removal leaves the task recoverable for a
@@ -227,6 +242,8 @@ bounded identifiers.
 ## Authoritative command inventory
 
 - `python3 -m unittest discover -s tests -v` — standard-library regression suite; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
+- The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
+- The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
 - `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for a streamed, sanitized source-mode parent run against the workspace source tree. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.

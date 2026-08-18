@@ -171,8 +171,11 @@ list or inspect ledger state, baselines, delegation JSON, another briefing, or
 report artifacts. If the host file reader alone cannot open that exact file,
 the worker calls `read_dispatch_briefing` with the complete identity and
 digest tuple from its bootstrap; an incomplete bounded response may continue
-only with its returned cursor. Failure of that scoped read is a blocker, not
-permission to browse or substitute another artifact. The coordinator reads each report before advancing and
+only with its returned cursor. Caller/input/schema diagnostics and
+`retryable=true` results are corrected and retried on the same attempt without
+consuming recovery budget. Only explicit non-retryable integrity/storage
+failures are blockers; none grants permission to browse or substitute another
+artifact. The coordinator reads each report before advancing and
 uses `depends_on` when a later worker needs only selected phase handoffs.
 A successor worker reads each supplied handoff through `read_worker_report`
 with the exact project root, task ref, attempt id, profile, and report ref from

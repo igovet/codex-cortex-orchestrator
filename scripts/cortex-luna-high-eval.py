@@ -727,12 +727,17 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
         raise AssertionError(current)
     while current.get("outcome") != "completed":
         if current.get("outcome") == "awaiting_plan_approval":
-            current = cortex.manage_orchestration({
+            prompt = cortex.manage_orchestration({
                 "project_root": str(project),
                 "task_ref": current["task_ref"],
                 "intent": "plan_approval",
-                "payload": {"decision": "approve"},
+                "payload": {"decision": "prompt"},
             })
+            interaction = prompt.get("plan_approval_interaction") or {}
+            approve = next((action for action in interaction.get("actions", []) if action.get("id") == "approve"), None)
+            if not isinstance(approve, dict) or not isinstance(approve.get("arguments"), dict):
+                raise AssertionError(f"plan approval interaction omitted its Approve action: {prompt}")
+            current = cortex.manage_orchestration(approve["arguments"])
             if not current.get("ok"):
                 raise AssertionError(current)
             continue
@@ -999,8 +1004,8 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "Do not add, remove, rename, or reorder packages or microtasks. Read the plan report, close the completed "
             "Planner child, then call "
             "continue_orchestration with that report_ref. Only after it returns outcome=awaiting_plan_approval and "
-            "plan_review, call manage_orchestration intent=plan_approval with decision=approve; never call approval "
-            "before that continue. The user pre-authorized this fixture. Then run implementation, qa, review, "
+            "plan_review, call manage_orchestration intent=plan_approval with decision=prompt, then submit only the "
+            "embedded Approve action arguments; never call approval before that continue. The user pre-authorized this fixture. Then run implementation, qa, review, "
             "documentation, and close in the returned order. Implementation creates result.md. Do not bypass approval "
             "or edit .codex/cortex."
         )

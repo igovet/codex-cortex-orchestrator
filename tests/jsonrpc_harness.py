@@ -6,11 +6,18 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class JsonRpcHarness:
-    def __init__(self, server: Path, project_root: Path, ledger_root: Path):
+    def __init__(
+        self,
+        server: Path,
+        project_root: Path,
+        ledger_root: Path,
+        *,
+        elicitation_responder: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ):
         environment = os.environ.copy()
         environment.pop("CORTEX_ROOT", None)
         environment.pop("CORTEX_PROJECT_ROOT", None)
@@ -26,6 +33,7 @@ class JsonRpcHarness:
             text=True,
             env=environment,
         )
+        self.elicitation_responder = elicitation_responder
         self.next_id = 1
         self._closed = False
         initialized = self.request("initialize", {"protocolVersion": "2025-06-18"})
@@ -45,6 +53,18 @@ class JsonRpcHarness:
             stderr = self.process.stderr.read() if self.process.stderr else ""
             raise RuntimeError(f"MCP server exited without a response: {stderr}")
         response = json.loads(line)
+        while response.get("id") != request_id and response.get("method") == "elicitation/create":
+            if self.elicitation_responder is None:
+                raise RuntimeError(f"unexpected nested elicitation request: {response}")
+            nested_id = response.get("id")
+            nested_result = self.elicitation_responder(response)
+            self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": nested_id, "result": nested_result}) + "\n")
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+            if not line:
+                stderr = self.process.stderr.read() if self.process.stderr else ""
+                raise RuntimeError(f"MCP server exited without a response: {stderr}")
+            response = json.loads(line)
         if response.get("id") != request_id:
             raise RuntimeError(f"unexpected response id: {response}")
         if "error" in response:

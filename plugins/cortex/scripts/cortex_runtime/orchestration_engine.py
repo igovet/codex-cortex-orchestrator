@@ -781,8 +781,10 @@ def _orchestrate_response(
         next_action = "resolve the blocker, then call orchestrate(operation=resume)"
     elif facade_state == "awaiting_plan_approval":
         next_action = (
-            "read the planner report, present a concise main-chat plan summary, and wait for explicit user approval; "
-            "then call orchestrate(operation=plan_approval) with decision approve or revise"
+            "read the planner report, present a concise main-chat plan summary, and call plan_approval with "
+            "decision=prompt. An initialized stdio host receives native Approve/Cancel controls; direct callers "
+            "receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded response "
+            "arguments, or leave the plan pending when the host cannot render it"
         )
     else:
         next_action = "inspect the returned diagnostics or provide the required completion data"
@@ -810,7 +812,34 @@ def _orchestrate_response(
         response["pipeline"] = _orchestrate_pipeline_snapshot(state, plan)
     if result is not None:
         response["result"] = result
+        if result.get("decision") == "cancelled":
+            response["output_policy"] = "silent"
+            response["allowed_visible_events"] = ["user_message"]
+            response["next_action"] = (
+                "keep the plan approval pending and wait for a later user message; do not dispatch, revise, "
+                "or emit cancellation commentary"
+            )
     return response
+
+
+def _plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -> str:
+    """Return the opaque request id bound to one pending plan revision."""
+    pending_basis = approval.get("pending_basis")
+    if not isinstance(pending_basis, dict):
+        pending_basis = {
+            key: approval.get(key)
+            for key in (
+                "pipeline_contract_version", "plan_revision", "plan_report_ref",
+                "verified_predecessor_digest", "semantic_pipeline_version",
+                "semantic_future_pipeline_digest",
+            )
+            if approval.get(key) is not None
+        }
+    seed = {
+        "task_id": str(state.get("task_id") or ""),
+        "pending_basis": pending_basis,
+    }
+    return "plan-approval-" + digest_text(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))[:32]
 
 
 def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
@@ -1171,6 +1200,10 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[st
     if approval.get("status") == "approved":
         return None
     if approval.get("status") == "awaiting_user":
+        if not str(approval.get("request_id") or "").strip():
+            approval["request_id"] = _plan_approval_request_id(state, approval)
+            state["plan_approval"] = approval
+            save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval_request", "bound request id to the pending plan approval")
         return dict(approval.get("review") or {})
     review = _plan_review_payload(task_dir, state, plan)
     history = approval.setdefault("history", [])
@@ -1187,6 +1220,7 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[st
         )},
         "requested_at": now(),
     })
+    approval["request_id"] = _plan_approval_request_id(state, approval)
     state["plan_approval"] = approval
     save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval", "awaiting explicit user approval of the completed plan")
     return review
@@ -1813,16 +1847,25 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
 def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
     """Resolve the explicit user review that follows a completed plan wave."""
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    unknown = sorted(set(payload) - {"decision", "feedback"})
+    unknown = sorted(set(payload) - {"decision", "feedback", "request_id"})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
     decision_raw = str(payload.get("decision") or "").strip().lower().replace("-", "_").replace(" ", "_")
-    decision = {"approve": "approve", "approved": "approve", "accept": "approve", "revise": "revise", "changes": "revise", "request_changes": "revise"}.get(decision_raw)
+    decision = {
+        "approve": "approve", "approved": "approve", "accept": "approve",
+        "cancel": "cancel", "canceled": "cancel", "cancelled": "cancel",
+        "revise": "revise", "changes": "revise", "request_changes": "revise",
+    }.get(decision_raw)
     if not decision:
-        raise ValueError("plan_approval decision must be approve or revise")
+        raise ValueError("plan_approval decision must be approve, cancel, or revise")
     feedback = redact(payload.get("feedback", ""), 2000).strip()
     if decision == "revise" and not feedback:
         raise ValueError("plan_approval revise requires non-empty feedback")
+    request_id = str(payload.get("request_id") or "").strip()
+    if decision in {"approve", "cancel"} and not request_id:
+        raise ValueError("plan_approval button response requires request_id")
+    if decision == "revise" and request_id:
+        raise ValueError("plan_approval revise does not accept request_id")
 
     task_id = safe_id(str(params.get("task_id", "")))
     root = ledger_root(params)
@@ -1834,9 +1877,20 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("this task does not require post-plan approval")
         if approval.get("status") != "awaiting_user":
             raise ValueError("there is no pending plan approval for this task")
+        expected_request_id = str(approval.get("request_id") or _plan_approval_request_id(state, approval))
+        if decision in {"approve", "cancel"} and request_id != expected_request_id:
+            raise ValueError("plan approval request_id does not match the current pending approval")
         plan = _load_orchestrate_plan(task_dir, state)
         history = approval.setdefault("history", [])
         review = dict(approval.get("review") or {})
+
+        if decision == "cancel":
+            return _orchestrate_response(
+                "plan_approval",
+                state,
+                result={"decision": "cancelled", "request_id": request_id, "plan_review": review},
+                plan=plan,
+            )
 
         if decision == "approve":
             report_ref = safe_id(str(approval.get("plan_report_ref") or ""))
@@ -1857,6 +1911,7 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
                 "approved_at": now(),
                 "feedback": None,
                 "approved_basis": current_basis,
+                "request_id": expected_request_id,
             })
             history.append({"event": "approved", "at": now(), "plan_review": review, "approved_basis": current_basis})
             state["plan_approval"] = approval
@@ -1878,7 +1933,7 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
         })
         state = revised["state"]
         approval = _plan_approval(state)
-        for key in ("review", "plan_report_ref", "pending_basis", "approved_basis", "requested_at", "approved_at"):
+        for key in ("review", "plan_report_ref", "pending_basis", "approved_basis", "request_id", "requested_at", "approved_at"):
             approval.pop(key, None)
         approval.update({"policy": "required", "status": "pending_plan", "feedback": feedback})
         history = approval.setdefault("history", [])

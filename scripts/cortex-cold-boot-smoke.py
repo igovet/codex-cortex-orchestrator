@@ -48,6 +48,21 @@ def waves() -> list[dict[str, object]]:
     ]
 
 
+def approve_plan_elicitation(request: dict[str, object]) -> dict[str, object]:
+    """Answer only the native two-button plan-approval interaction."""
+    params = request.get("params")
+    if not isinstance(params, dict) or params.get("_meta", {}).get("cortex", {}).get("schema") != "cortex/plan-approval/v1":
+        raise AssertionError(f"unexpected native elicitation in cold-boot smoke: {request}")
+    schema = params.get("requestedSchema")
+    if not isinstance(schema, dict):
+        raise AssertionError(f"plan approval elicitation omitted its schema: {request}")
+    decision = schema.get("properties", {}).get("decision", {})
+    choices = decision.get("oneOf", []) if isinstance(decision, dict) else []
+    if not any(isinstance(choice, dict) and choice.get("const") == "approve" for choice in choices):
+        raise AssertionError(f"plan approval elicitation omitted its Approve action: {request}")
+    return {"action": "accept", "content": {"decision": "approve"}}
+
+
 def workspace_summary(project: Path) -> dict[str, object]:
     """Return a small, truthful closure-workspace summary.
 
@@ -193,7 +208,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         },
         "waves": waves(),
     }
-    with JsonRpcHarness(server, project, ledger) as rpc:
+    with JsonRpcHarness(server, project, ledger, elicitation_responder=approve_plan_elicitation) as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
         if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "validate_report_draft", "record_report", "read_dispatch_briefing", "read_worker_report"]:
@@ -213,7 +228,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         task_directory = next((ledger / "tasks").iterdir()).name
 
     # A fresh process must reconstruct the active relative step read-only.
-    with JsonRpcHarness(server, project, ledger) as rpc:
+    with JsonRpcHarness(server, project, ledger, elicitation_responder=approve_plan_elicitation) as rpc:
         task_definition = cortex.load_task_definition(ledger / "tasks" / task_directory)
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
@@ -226,11 +241,19 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 if not current.get("plan_review", {}).get("report_ref"):
                     raise AssertionError(f"plan approval omitted its planner report reference: {current}")
                 plan_approval_seen = True
-                current = rpc.tool("manage_orchestration", {
+                prompt = rpc.tool("manage_orchestration", {
                     "intent": "plan_approval",
                     "task_ref": task_ref,
-                    "payload": {"decision": "approve"},
+                    "payload": {"decision": "prompt"},
                 })
+                if prompt.get("outcome") == "ready_to_spawn":
+                    current = prompt
+                    continue
+                interaction = prompt.get("plan_approval_interaction") or {}
+                approve = next((action for action in interaction.get("actions", []) if action.get("id") == "approve"), None)
+                if not isinstance(approve, dict) or not isinstance(approve.get("arguments"), dict):
+                    raise AssertionError(f"plan approval interaction omitted its Approve action: {prompt}")
+                current = rpc.tool("manage_orchestration", approve["arguments"])
                 if not current.get("ok"):
                     raise AssertionError(f"plan approval failed: {current}")
                 continue

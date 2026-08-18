@@ -156,6 +156,7 @@ HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
 PLUGIN_ROOT = PROFILE_CONTRACT_PATH.parent
 PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 MCP_OPENAI_FORM = False
+MCP_INTERACTIVE = False
 _STATE_LOCK_LOCAL = threading.local()
 MCP_SERVER_INSTRUCTIONS = (
     "Cortex is opt-in. Root preserves task_ref, follows exact dispatches, and publishes every read_worker_report "
@@ -250,6 +251,8 @@ if (
     != "template_private_file_direct_or_patch_validate_one_hour_consume"
     or SHARED_WORKER_CONTRACT.get("report_finalization")
     != "identity_draft_ref_validation_digest_same_file_then_delete"
+    or SHARED_WORKER_CONTRACT.get("caller_correctable_tool_errors")
+    != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
     or SHARED_WORKER_CONTRACT.get("read_only_workspace_delta")
     != "ordinary_source_changes_are_concurrency_evidence_generated_or_ignored_side_effects_fail"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
@@ -7711,29 +7714,55 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
     localization_fields = {
         "localized_prompt", "localized_title", "localized_approve", "localized_cancel",
     }
-    unknown = sorted(set(payload) - {"decision", "feedback", *localization_fields})
+    unknown = sorted(set(payload) - {"decision", "feedback", "request_id", *localization_fields})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
     raw = str(payload.get("decision") or "prompt").strip().lower().replace("-", "_").replace(" ", "_")
     decision = {
         "prompt": "prompt", "ask": "prompt", "review": "prompt",
         "approve": "approve", "approved": "approve", "accept": "approve",
+        "cancel": "cancel", "canceled": "cancel", "cancelled": "cancel",
         "revise": "revise", "changes": "revise", "request_changes": "revise",
     }.get(raw)
     if not decision:
-        raise ValueError("plan_approval decision must be prompt, approve, or revise")
+        raise ValueError("plan_approval decision must be prompt, approve, cancel, or revise")
     feedback = str(payload.get("feedback") or "").strip()
-    if decision == "prompt" and feedback:
+    request_id = str(payload.get("request_id") or "").strip()
+    if decision == "prompt" and (feedback or request_id):
         raise ValueError("plan_approval prompt does not accept feedback")
     if decision == "revise" and not feedback:
         raise ValueError("plan_approval revise requires non-empty feedback")
     if decision != "prompt" and any(str(payload.get(field) or "").strip() for field in localization_fields):
         raise ValueError("plan approval localization fields are accepted only with decision=prompt")
-    normalized = {"decision": decision, **({"feedback": feedback} if feedback else {})}
+    normalized = {
+        "decision": decision,
+        **({"feedback": feedback} if feedback else {}),
+        **({"request_id": redact(request_id, 200)} if request_id else {}),
+    }
     for field in localization_fields:
         if str(payload.get(field) or "").strip():
             normalized[field] = redact(str(payload[field]).strip(), 300)
     return normalized
+
+
+def _v3_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -> str:
+    """Derive the opaque id bound to one pending plan approval revision."""
+    pending_basis = approval.get("pending_basis")
+    if not isinstance(pending_basis, dict):
+        pending_basis = {
+            key: approval.get(key)
+            for key in (
+                "pipeline_contract_version", "plan_revision", "plan_report_ref",
+                "verified_predecessor_digest", "semantic_pipeline_version",
+                "semantic_future_pipeline_digest",
+            )
+            if approval.get(key) is not None
+        }
+    seed = {
+        "task_id": str(state.get("task_id") or ""),
+        "pending_basis": pending_basis,
+    }
+    return "plan-approval-" + digest_text(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))[:32]
 
 
 PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str]] = {
@@ -7776,8 +7805,9 @@ def _v3_prompt_plan_approval(
     state: dict[str, Any],
     task_ref: str,
     localization: dict[str, Any],
+    project_root: str = "",
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Open the native Approve/Cancel UI without mutating a cancelled plan."""
+    """Prompt with native MCP controls, or return the declarative fallback."""
     approval = _plan_approval(state)
     if approval.get("policy") != "required":
         raise ValueError("this task does not require post-plan approval")
@@ -7785,6 +7815,7 @@ def _v3_prompt_plan_approval(
         raise ValueError("there is no pending plan approval for this task")
     review = dict(approval.get("review") or {})
     prompt, title, approve_label, cancel_label = _v3_plan_approval_copy(state, localization)
+    request_id = str(approval.get("request_id") or _v3_plan_approval_request_id(state, approval))
     requested_schema = {
         "type": "object",
         "additionalProperties": False,
@@ -7800,49 +7831,88 @@ def _v3_prompt_plan_approval(
         },
         "required": ["decision"],
     }
-    try:
-        action, content, elicitation_id = _request_mcp_elicitation(
-            prompt,
-            requested_schema,
-            thread_id=str(state.get("thread_id") or ""),
-        )
-    except RuntimeError as exc:
-        return None, {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": False,
-            "outcome": "host_plan_approval_unavailable",
-            "code": "host_plan_approval_unavailable",
-            "task_ref": task_ref,
-            "dispatches": [],
-            "plan_review": review,
-            "diagnostics": [{"message": redact(str(exc), 1000)}],
-            "next_action": (
-                f"{COORDINATOR_LOCK} Keep the plan pending and stop. Retry only in a main-chat host that can render "
-                "native MCP elicitation; do not infer approval."
-            ),
-        }
-    selected = ""
-    if action == "accept" and isinstance(content, dict):
-        selected = str(content.get("decision") or "").strip().lower()
-    if action != "accept" or selected == "cancel":
-        return None, {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": True,
-            "outcome": "awaiting_plan_approval",
-            "task_ref": task_ref,
-            "dispatches": [],
-            "plan_review": review,
-            "result": {"decision": "cancelled", "elicitation_id": elicitation_id},
-            "output_policy": "silent",
-            "allowed_visible_events": ["user_message"],
-            "next_action": (
-                f"{COORDINATOR_LOCK} Stop now and wait for the user's next message. Keep the plan pending; do not "
-                "dispatch, revise, or send approval/cancellation commentary."
-            ),
-        }
-    if selected != "approve":
-        raise ValueError("plan approval UI returned an invalid decision")
-    return {"decision": "approve"}, None
+
+    if MCP_INTERACTIVE:
+        try:
+            action, content, _elicitation_id = _request_mcp_elicitation(
+                prompt,
+                requested_schema,
+                thread_id=str(state.get("thread_id") or ""),
+                meta={"schema": "cortex/plan-approval/v1", "request_id": request_id},
+            )
+        except (RuntimeError, OSError) as exc:
+            return None, {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": False,
+                "outcome": "host_plan_approval_unavailable",
+                "code": "host_plan_approval_unavailable",
+                "task_ref": task_ref,
+                "dispatches": [],
+                "plan_review": review,
+                "diagnostics": [{"message": redact(str(exc), 1000)}],
+                "recoverable": True,
+                "next_action": (
+                    f"{COORDINATOR_LOCK} Keep the plan pending and retry only from a host that supports native "
+                    "MCP elicitation; never infer approval from an unavailable or cancelled interaction."
+                ),
+            }
+        selected = str((content or {}).get("decision") or "").strip().lower() if isinstance(content, dict) else ""
+        if action == "accept" and selected == "approve":
+            return {"decision": "approve", "request_id": request_id}, None
+        if action == "accept" and selected == "cancel":
+            action = "cancel"
+        if action in {"cancel", "decline"}:
+            # Route Cancel through the durable engine just like the fallback
+            # interaction does.  This rechecks that the request is still
+            # pending if the plan changed while the nested UI was open.
+            return {"decision": "cancel", "request_id": request_id}, None
+        raise ValueError("native plan approval returned an invalid decision")
+
+    arguments_base = {
+        "project_root": project_root,
+        "task_ref": task_ref,
+        "intent": "plan_approval",
+    }
+    interaction = {
+        "schema": "cortex/plan-approval/v1",
+        "request_id": request_id,
+        "title": title,
+        "prompt": prompt,
+        "actions": [
+            {
+                "id": "approve",
+                "label": approve_label,
+                "tool": "manage_orchestration",
+                "arguments": {
+                    **arguments_base,
+                    "payload": {"decision": "approve", "request_id": request_id},
+                },
+            },
+            {
+                "id": "cancel",
+                "label": cancel_label,
+                "tool": "manage_orchestration",
+                "arguments": {
+                    **arguments_base,
+                    "payload": {"decision": "cancel", "request_id": request_id},
+                },
+            },
+        ],
+    }
+    return None, {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": True,
+        "outcome": "awaiting_plan_approval",
+        "task_ref": task_ref,
+        "dispatches": [],
+        "plan_review": review,
+        "plan_approval_interaction": interaction,
+        "next_action": (
+            f"{COORDINATOR_LOCK} Render plan_approval_interaction.schema=cortex/plan-approval/v1 as exactly "
+            "the supplied Approve and Cancel controls. Submit only the selected action's embedded "
+            "manage_orchestration arguments; if unsupported, leave the plan pending and do not infer approval."
+        ),
+    }
 
 
 def _v3_follow_up_payload(value: object) -> dict[str, Any]:
@@ -8153,7 +8223,12 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         elif intent == "plan_approval":
             normalized_payload = _v3_plan_approval_payload(params.get("payload"))
             if normalized_payload["decision"] == "prompt":
-                normalized_payload, prompt_response = _v3_prompt_plan_approval(state, task_ref, normalized_payload)
+                normalized_payload, prompt_response = _v3_prompt_plan_approval(
+                    state,
+                    task_ref,
+                    normalized_payload,
+                    str(params.get("project_root") or ""),
+                )
                 if prompt_response is not None:
                     return prompt_response
         operation_context: dict[str, Any] = {}
@@ -8512,6 +8587,11 @@ def _set_mcp_openai_form(value: bool) -> None:
     MCP_OPENAI_FORM = value
 
 
+def _set_mcp_interactive(value: bool) -> None:
+    global MCP_INTERACTIVE
+    MCP_INTERACTIVE = value
+
+
 def main() -> None:
     """Keep the executable facade thin; transport lives in cortex_runtime.mcp_api."""
     # Load the complete runtime package before accepting requests. Installed
@@ -8525,6 +8605,7 @@ def main() -> None:
         server_version=SERVER_VERSION,
         instructions=MCP_SERVER_INSTRUCTIONS,
         set_openai_form=_set_mcp_openai_form,
+        set_interactive=_set_mcp_interactive,
         log_tool_error=log_tool_error,
     )
 
