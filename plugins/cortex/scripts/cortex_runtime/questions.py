@@ -669,7 +669,7 @@ def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
     properties["custom_response"] = {
         "type": "string",
         "title": config.get("custom_label") or "Your answer / additional context",
-        "description": "Optional free-form response. Add context, paste a screenshot/path, or explain another choice.",
+        "description": "" if config.get("localized_for_user") else "Optional free-form response. Add context, paste a screenshot/path, or explain another choice.",
     }
     return {"type": "object", "properties": properties}
 
@@ -774,9 +774,14 @@ def _batch_record_for_main(params: dict[str, Any], batch_id: str) -> dict[str, A
 def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     """Build a localized form view without changing canonical batch values."""
     questions = [dict(item) for item in record.get("questions") or []]
+    requires_localization = not str(params.get("user_language") or "en").lower().startswith("en")
     raw_localized = params.get("localized_questions")
     if raw_localized is None and isinstance(params.get("localized_batch"), dict):
         raw_localized = params["localized_batch"].get("questions")
+    if raw_localized is None and requires_localization:
+        raise ValueError(
+            "non-English user questions require localized_questions in the task's user_language"
+        )
     if raw_localized is None:
         return {**record, "questions": questions}
     if not isinstance(raw_localized, list) or len(raw_localized) != len(questions):
@@ -795,12 +800,22 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
     for question in questions:
         localized = by_key[question["question_key"]]
         localized_question = localized.get("localized_question", localized.get("question"))
+        if requires_localization and not str(localized_question or "").strip():
+            raise ValueError("every localized batch item requires localized_question")
         if localized_question is not None:
             question["localized_question"] = redact(str(localized_question).strip(), 4000) or question["canonical_question"]
-        if localized.get("header") is not None:
-            question["localized_header"] = redact(str(localized["header"]).strip(), 200) or question["header"]
-        if localized.get("custom_label") is not None:
-            question["localized_custom_label"] = redact(str(localized["custom_label"]).strip(), 160) or question["custom_label"]
+        localized_header = localized.get("header")
+        if requires_localization and not str(localized_header or "").strip():
+            localized_header = localized_question
+        if localized_header is not None:
+            question["localized_header"] = redact(str(localized_header).strip(), 200) or question["localized_question"]
+        localized_custom_label = localized.get("custom_label")
+        if requires_localization and not str(localized_custom_label or "").strip():
+            localized_custom_label = localized_question
+        if localized_custom_label is not None:
+            question["localized_custom_label"] = redact(str(localized_custom_label).strip(), 160) or question["localized_question"]
+        if "options" not in localized and requires_localization and question.get("question_type") != "text":
+            raise ValueError("localized choice questions require localized options")
         if "options" not in localized:
             continue
         raw_options = localized["options"]
@@ -1189,7 +1204,7 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
         position = int(current_progress["answered"]) + 1
         try:
             action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
-                f"Question {position} of {total}",
+                f"{position} / {total}",
                 _batch_form_schema(question),
                 thread_id=str(params.get("thread_id") or ""),
                 turn_id=str(params.get("turn_id") or ""),
@@ -1278,10 +1293,20 @@ def _question_record_for_main(params: dict[str, Any], question_id: str) -> dict[
 
 def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Allow the coordinator to localize only the user-facing projection."""
+    requires_localization = not str(params.get("user_language") or "en").lower().startswith("en")
+    if requires_localization and not str(params.get("localized_question") or "").strip():
+        raise ValueError(
+            "non-English user questions require localized_question in the task's user_language"
+        )
     question = redact(params.get("localized_question") or record["question"], 4000)
     config = _question_config(record)
-    if params.get("localized_header"):
-        config["header"] = redact(params["localized_header"], 200)
+    localized_header = params.get("localized_header")
+    if requires_localization and not str(localized_header or "").strip():
+        localized_header = question
+    if localized_header:
+        config["header"] = redact(localized_header, 200)
+    if requires_localization and config.get("options") and not isinstance(params.get("localized_options"), list):
+        raise ValueError("non-English choice questions require localized_options")
     if isinstance(params.get("localized_options"), list):
         localized = _question_options(params["localized_options"])
         canonical_options = list(config.get("options") or [])
@@ -1295,8 +1320,12 @@ def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> 
                 raise ValueError("localized option_id must match the canonical option_id")
             merged.append({**canonical, "label_localized": display["label"]})
         config["options"] = merged
-    if params.get("localized_custom_label"):
-        config["custom_label"] = redact(params["localized_custom_label"], 200)
+    localized_custom_label = params.get("localized_custom_label")
+    if requires_localization and not str(localized_custom_label or "").strip():
+        localized_custom_label = question
+    if localized_custom_label:
+        config["custom_label"] = redact(localized_custom_label, 200)
+    config["localized_for_user"] = requires_localization
     return question, config
 
 

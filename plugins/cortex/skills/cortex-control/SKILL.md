@@ -401,10 +401,18 @@ durable record. A corrective `follow_up` inherits the completed source task's
 user language, but workers retain the same English-only protocol.
 
 Generated worker briefings carry a bounded Codebase Memory contract. When the
-`mcp__codebase_memory__*` tools are actually available, workers resolve the
-project through `list_projects` by exact `project_root`, prefer graph,
-architecture, trace, and impact tools for non-trivial discovery, and confirm
-consequential facts in current source or tests. Designated read-only discovery
+`mcp__codebase_memory__*` tools are actually available, each briefing supplies
+the exact project key precomputed from canonical `project_root` using Codebase
+Memory's `cbm_project_name_from_path` rule: preserve ASCII
+`[A-Za-z0-9._-]`, replace other ASCII with `-`, hex-encode non-ASCII UTF-8
+bytes, collapse repeated dashes/dots, trim invalid edges, use `root` when
+empty, and cap at 200 bytes with an eight-hex FNV-1a suffix. Workers use that
+key directly and must not call `list_projects` before the first indexed query.
+Only direct not-found, ambiguity, or apparent key drift/collision permits one
+`list_projects` fallback, whose entry must match the exact canonical root;
+basename matching is forbidden. Workers prefer graph, architecture, trace, and
+impact tools for non-trivial discovery and confirm consequential facts in
+current source or tests. Designated read-only discovery
 profiles may refresh one missing or stale index; other profiles fall back to
 repository-native tools. One failed MCP attempt is enough: record the
 limitation and do not loop. The coordinator never calls repository-intelligence
@@ -423,7 +431,7 @@ schemas, or executable configuration. Every worker report must include one
 additional knowledge page actually used. The report tool rejects an omitted
 index acknowledgement.
 
-Canonical phases are `plan`, `discover`, `architecture`,
+Canonical phases are `scope`, `plan`, `discover`, `architecture`,
 `database_architecture`, `implementation`, `qa`, `security`, `performance`,
 `accessibility`, `ux`, `review`, `documentation`, and `close`. One phase may
 appear in only one wave; multiple owners for a phase share that wave. Generic
@@ -449,3 +457,49 @@ captures again to detect external changes. Terminal close persists completed
 state before removing database manifest records;
 final receipts retain digest/change proof. `allow_rework` reopening captures a
 fresh active baseline before replacement dispatches.
+
+## Ownership, safety, and verification
+
+Parallelize read-only exploration, review, testing, and analysis when their
+dependencies permit it. Assign exactly one writer to an overlapping code or documentation area.
+Independent write streams require separate worktrees and
+must still reconcile predecessor evidence before integration.
+
+Never place secrets, credentials, private tokens, personal data, raw private
+reports, or sensitive operational detail in task inputs, worker prompts,
+questions, reports, handoffs, logs, or user-visible summaries. Redaction is a
+defense in depth measure, not permission to transmit sensitive input.
+
+Before completion, run the smallest non-destructive verification set that
+proves the affected acceptance and verification contract, then broaden checks
+in proportion to risk. Read-only workers select non-writing modes before they
+run: disable bytecode and test/build caches and skip checks that require
+cleanup. Never create an artifact and then delete it to simulate read-only
+verification. Report every unrun required check, environmental limitation, and
+remaining uncertainty plainly. Current source, tests, schemas, and executable
+configuration outrank generated documentation.
+
+## Private tool-error diagnostics
+
+Cortex appends raised MCP exceptions and legacy error-shaped tool results as
+JSONL to `~/.codex/logs/cortex-tool-errors.jsonl`, where `~` is the home of the
+user running the MCP process. This is private per-user diagnostic data, not the
+project ledger. The writer keeps the file at or below 10 MiB by dropping the
+oldest complete records and retaining the newest complete records before each
+append. Expected public validation and recovery responses with `ok: false` are
+not exceptions and are not written to this log.
+
+Records contain bounded correlation metadata such as timestamp, method, tool,
+error type, `chat_session_id`/`thread_id`, request id, and supplied durable ids.
+Common credential shapes are redacted, nested values are bounded, the parent
+directory is mode `0700`, the file is mode `0600`, and symlink paths are
+rejected. These controls do not guarantee arbitrary input is non-sensitive:
+never put secrets in tool inputs, relax permissions, commit the log, or copy
+raw records into a prompt, chat, issue, ticket, or external system.
+
+For local read-only diagnosis, inspect only a small tail and project an
+allowlist such as `timestamp`, `event`, `method`, `tool`, `error_type`,
+`error`, `chat_session_id`, `thread_id`, `request_id`, and `ids`. If `jq` is
+unavailable, parse UTF-8 JSONL locally with the same allowlist. A request
+rejected by the host before it reaches the MCP server cannot appear here; use
+the host or session diagnostics for that boundary.

@@ -30,6 +30,7 @@ class LazyFilesystemTests(unittest.TestCase):
             "project_root": str(self.project),
             "task": {
                 "user_request": objective,
+                "plan_approval": "auto",
                 "acceptance_criteria": ["Persist the result canonically."],
                 "verification": ["Run the focused regression."],
             },

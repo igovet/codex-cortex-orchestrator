@@ -7,6 +7,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/cortex-luna-high-eval.py
 # Uses this checkout as the MCP source; it does not install, reinstall, or update Cortex.
+# Fast source-mode transport/follow-up probe used during development.
+python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
+# Full lifecycle live scenario for a release gate.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Optional per-scenario timeout override (10..7200 seconds; default 1800).
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --live-timeout-seconds 900
@@ -29,32 +32,24 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- Full discovery passed on Python 3.11 and 3.12: 476 tests on each interpreter.
-  The 20 focused JSON-RPC lifecycle and host-preflight tests also passed on
-  Python 3.11 with `ResourceWarning` promoted to an error.
-- Cold boot passed on Python 3.11 and 3.12 (8 reports and 7 continuation calls).
-- Marketplace validation, Python AST parsing, Bash syntax, and
+- The full Python 3.12.3 discovery run passed all 485 tests. Focused question,
+  lazy-filesystem, approval-freshness, pipeline-order, briefing-completeness,
+  log-cap, compatibility, and evaluator-contract regressions also passed.
+- Cold boot passed with 9 reports, 9 worker attempts, 8 continuation calls,
+  plan approval, and a parallel wave.
+- Marketplace and plugin validation, Python compilation, Bash syntax, and
   `git diff --check` passed. Deterministic evaluator fixtures for
   `automatic_sequential`, `compact_parallel`, and `blocked_resume` completed.
-- The composite benchmark passed (22 calls versus a 50-call baseline,
-  reduction `0.56`, `target_met=true`). The isolated fresh-plugin probe passed
-  for `7.1.2+codex.20260818103113` in temporary `HOME`/`CODEX_HOME`.
-- Source-mode live `automatic_sequential`, `compact_parallel`, and
-  `blocked_resume` passed, including strict reports, native child cleanup,
-  continuation, terminal close evidence, handoff, and manifest-snapshot
-  cleanup. `compact_parallel` exercised a real parallel wave and
-  `blocked_resume` exercised one future-wave reassessment. The
-  `planner_work_breakdown` run completed its plan approval and all terminal
-  lifecycle checks, but the evaluator rejected its non-deterministic package
-  graph. The fixture now supplies an exact two-package DAG and has terminal
-  persistence regression coverage; that scenario has not been rerun live, so
-  a complete four-scenario live PASS is not claimed.
-- Live source-mode evidence uses this workspace's source tree in an isolated
-  temporary project and does **not** install, reinstall, update, or otherwise
-  verify a user's installed Cortex plugin. A skipped run is never pass evidence.
-- Read-only host preflight remains `BLOCKED` because the same user has Cortex
-  6.6.0 installed rather than this 7.1.2 candidate. No installation or
-  `~/.codex` mutation was performed.
+- The isolated fresh-plugin probe passed for
+  `8.0.0+codex.20260818180000` in temporary `HOME`/`CODEX_HOME`.
+- The targeted source-mode `follow_up_partial` live scenario passed in 22
+  seconds: it created exactly one linked v2 corrective task, preserved the
+  completed source task, prepared the first dispatch, and made no failed public
+  calls. The longer `automatic_sequential` scenario was not run to completion
+  after the user requested faster targeted validation; it is still a separate
+  release-only gate. Both modes use this workspace's source tree in an isolated
+  temporary project and do **not** install, reinstall, update, or otherwise
+  verify a user's installed Cortex plugin.
 - The reportless-stop recovery coverage includes terminal failed-stop handling,
   exact failed receipts, mixed-wave slot preservation, bounded retry failure,
   and the ordering-sensitive PostToolUse case where an earlier reportless
@@ -109,11 +104,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `7.1.2+codex.20260818103113`. These results are
+The source manifest declares `8.0.0+codex.20260818180000`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 7.1.2 source contract
+## Current 8.0.0 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both

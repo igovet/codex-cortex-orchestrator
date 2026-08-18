@@ -42,6 +42,12 @@ Ordinary work never activates Cortex. The normal route uses
 `manage_orchestration` with intent `deactivate` only when a Cortex task is
 active.
 
+For every activated orchestration or harvest route, read and apply
+`../cortex-control/SKILL.md` before the first lifecycle call. That bundled
+skill is the authoritative runtime protocol for root isolation, dispatch,
+questions, evidence, recovery, ownership, verification, and private diagnostic
+handling. No project-local `AGENTS.md` is part of the installed contract.
+
 The `prune` route is maintenance, not a coding pipeline. After explicit user
 selection, call `manage_orchestration` once with exact absolute `project_root`,
 intent `prune`, no `task_ref`, and
@@ -67,8 +73,11 @@ For exact `harvest` or `harvest-refresh`, read
 define the mandatory inventory, coverage matrix, feature-page depth, and
 completeness gates. Do not substitute a generic documentation task.
 
-Both routes start with the canonical phases `plan`, `discover`, `architecture`,
-`documentation`, `review`, and `close`. After reading the planner report, the
+Both routes start with the canonical phases `scope`, `discover`, `architecture`,
+`plan`, `documentation`, `review`, and `close`. Planner Scope first publishes a
+discovery brief, relevant context, and up to eight non-overlapping domains; the
+final Planner consumes all predecessor reports after architecture. After
+reading the scoping report, the
 coordinator must decide whether the repository is large enough to split the
 single discovery placeholder into 2–8 parallel `explorer` workers with
 non-overlapping domain ownership. A repository with several applications,
@@ -152,7 +161,7 @@ hard capability boundary, not a suggestion.
 | `general` | automatic | workspace-write | The work is bounded but no specialist profile has a justified capability match. | A narrower supported specialist clearly owns the task. |
 | `mobile_dev` | manual | workspace-write | An iOS, Android, React Native, Flutter, or native mobile change must be implemented. | The task is browser web UI or a platform-neutral backend. |
 | `performance_engineer` | automatic | read-only | Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis. | The bottleneck is already proven and only an approved implementation remains. |
-| `planner` | automatic | read-only | A decision-complete plan, dependency order, ownership map, or acceptance matrix is needed. | The task is a simple bounded execution step or requires editing project files. |
+| `planner` | automatic | read-only | Early discovery domains or a decision-complete final plan, dependency order, ownership map, or acceptance matrix is needed. | The task is a simple bounded execution step or requires editing project files. |
 | `qa_engineer` | automatic | workspace-write | Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created. | Only a non-mutating final command run or source-code review is needed. |
 | `refactorer` | manual | workspace-write | The explicit goal is behavior-preserving structural improvement with regression proof. | New behavior, unresolved defects, or architecture decisions dominate the task. |
 | `security_auditor` | automatic | read-only | Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review. | The task is to implement a known security fix rather than audit it. |
@@ -235,13 +244,13 @@ contradictions, partial coverage, or missing links. Each persisted report must
 contain one `Knowledge reviewed:` evidence entry naming both available indexes
 and every additional page used; Cortex rejects a missing index acknowledgement.
 
-Canonical phases are `plan`, `discover`, `architecture`,
+Canonical phases are `scope`, `plan`, `discover`, `architecture`,
 `database_architecture`, `implementation`, `qa`, `security`, `performance`,
 `accessibility`, `ux`, `review`, `documentation`, and `close`. A phase may
 appear in only one wave; multiple valid owners for the same phase belong in
 the same wave. `build_verification` is a profile and is also accepted as a
 human alias for the final `close` phase. Generic `verification` maps to `qa`.
-Cortex normalizes common aliases such as `implement`, but the coordinator
+Cortex normalizes common aliases such as `scoping` → `scope` and `implement`, but the coordinator
 should use canonical phases from the returned snapshot rather than guessing.
 
 ## Relative one-call-per-wave workflow
@@ -465,10 +474,14 @@ its own wave. After a successful plan wave, Cortex returns
 `outcome: awaiting_plan_approval`, sends no successor dispatch, and provides
 `plan_review` with the planner `report_ref`, derived absolute
 `report_markdown_path`, `summary`, `findings`,
-`uncertainty`, and `remaining_phases`. Read the referenced
+`uncertainty`, and `remaining_phases`. It also binds the plan revision, planner
+report ref, verified predecessor-report digest, and semantic future-pipeline
+digest. Read the referenced
 report, present a concise plan summary in the main chat, then immediately call
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
-Cortex opens a native `Approve` / `Cancel` choice. On `Approve`, tell the user
+Cortex opens a native `Approve` / `Cancel` choice. The root must provide the
+question, title, and options in the user's original language; worker questions
+remain English in durable state. On `Approve`, tell the user
 in their language that the plan was approved and dispatch the returned next
 wave. On `Cancel`, stop silently, keep the approval pending, and wait for the
 user's next message. To request changes after that message, call
@@ -476,6 +489,15 @@ user's next message. To request changes after that message, call
 with non-empty feedback; Cortex reruns the Planner and presents a new review.
 Do not turn this into a second worker-question flow: material questions remain
 distinct and are resolved through `worker_question` during planning.
+
+Only Planner Scope may publish the additive `scoping` sibling with exactly
+`overview`, `context_files`, and up to eight validated discovery domains; only
+Planner Plan may publish `planning`. A material future-wave replacement or
+plan rework preserves the previous plan and approval in history, resets
+approval to `pending_plan`, and requires a singleton replacement Planner plus
+fresh approval. No-op and transport-only replacements do not invalidate
+approval. A stale basis blocks post-plan dispatch with recoverable
+`plan_reapproval_required`.
 
 The Planner's same-call public `record_report` may include a separate
 `planning` object with exactly `overview` and `work_packages`; the strict
@@ -580,9 +602,17 @@ user intent. A `follow_up` task inherits the
 completed source task's user language while preserving this English-only
 worker boundary.
 
-When Codebase Memory tools are present, generated worker briefings require an
-exact-root `list_projects` match and prefer indexed architecture, graph search,
-call/data-flow tracing, and impact analysis before broad filesystem search.
+When Codebase Memory tools are present, Cortex precomputes the project key from
+the canonical task root and includes it in every generated worker briefing.
+Workers use that key directly instead of calling `list_projects` before routine
+queries. The derivation mirrors `cbm_project_name_from_path`: preserve ASCII
+`[A-Za-z0-9._-]`, map other ASCII to `-`, hex-encode non-ASCII UTF-8 bytes,
+collapse repeated dashes/dots, trim unsafe edges, use `root` when empty, and
+cap at 200 bytes with an eight-hex FNV-1a suffix. Only a direct not-found,
+ambiguity, or apparent key drift/collision permits one `list_projects` call;
+the worker then accepts only an exact canonical-root match, never a basename.
+Workers prefer indexed architecture, graph search, call/data-flow tracing, and
+impact analysis before broad filesystem search.
 Workers confirm consequential indexed facts in current source or tests.
 Planner, explorer, architect, and database architect may refresh one missing or
 stale index; other profiles use a bounded fallback without setup loops. This is

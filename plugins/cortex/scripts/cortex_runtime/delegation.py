@@ -6,7 +6,7 @@ from typing import Any
 
 
 DEFAULT_GATE_PROFILES = {
-    "plan": "planner", "discover": "explorer", "architecture": "architect",
+    "scope": "planner", "plan": "planner", "discover": "explorer", "architecture": "architect",
     "database_architecture": "database_architect", "implementation": "general",
     "qa": "qa_engineer", "security": "security_auditor",
     "performance": "performance_engineer", "accessibility": "accessibility_engineer",
@@ -15,7 +15,7 @@ DEFAULT_GATE_PROFILES = {
 }
 
 DEFAULT_GATE_TASK_KINDS = {
-    "plan": "planning", "discover": "discovery", "architecture": "architecture",
+    "scope": "scoping", "plan": "planning", "discover": "discovery", "architecture": "architecture",
     "database_architecture": "database", "implementation": "implementation",
     "qa": "testing", "security": "security", "review": "review",
     "documentation": "documentation", "close": "verification",
@@ -59,7 +59,7 @@ def task_kind_and_risk(params: Mapping[str, Any], gate: str) -> tuple[str, str]:
     task_kind = str(params.get("task_kind") or "").strip() or DEFAULT_GATE_TASK_KINDS.get(gate, gate)
     risk = str(params.get("risk") or "").strip().lower()
     if not risk:
-        risk = "high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate"
+        risk = "high" if gate == "security" else "low" if gate in {"scope", "plan", "discover", "documentation"} else "moderate"
     return task_kind, risk
 
 
@@ -83,7 +83,7 @@ def dispatch_context(
         **params,
         "agent": agent,
         "task_kind": task_kind,
-        "risk": str(params.get("risk") or "").strip().lower() or ("high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate"),
+        "risk": str(params.get("risk") or "").strip().lower() or ("high" if gate == "security" else "low" if gate in {"scope", "plan", "discover", "documentation"} else "moderate"),
         "complexity": complexity,
         "_security_gate": gate == "security",
     }

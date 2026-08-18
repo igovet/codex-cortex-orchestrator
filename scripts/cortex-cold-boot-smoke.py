@@ -39,8 +39,9 @@ def fixture(base: Path) -> tuple[Path, Path]:
 
 def waves() -> list[dict[str, object]]:
     return [
+        {"workers": [{"phase": "research"}]},
+        {"workers": [{"phase": "architecture"}, {"phase": "database_architecture"}]},
         {"workers": [{"phase": "planning"}]},
-        {"workers": [{"phase": "research"}, {"phase": "architecture"}]},
         {"workers": [{"phase": "implementation"}]},
         {"workers": [{"phase": "testing"}]},
         {"workers": [{"phase": "code_review"}]},

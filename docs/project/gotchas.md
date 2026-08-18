@@ -1,5 +1,20 @@
 # Gotchas
 
+## Evidence-first scope and approval freshness
+
+The `scope` gate is a read-only discovery partition, not the final plan and
+not an intent-closing phase. C3 and harvest begin with Planner Scope; C2 begins
+with Explorer discovery. The final Planner runs only after discovery and every
+pre-implementation design gate, then receives all verified predecessor reports.
+Required approval is bound to the resulting plan revision, report reference,
+predecessor evidence digest, and semantic future-pipeline digest. A material
+future-wave change must explicitly rework the plan and obtain approval again;
+no-op and transport-only changes retain approval.
+
+The strict seven-field `cortex/report/v1` remains unchanged. Scope's additive
+`scoping` sibling is owned only by Planner Scope and is limited to a discovery
+brief, context files, and at most eight validated domains.
+
 ## Canonical runtime artifacts
 
 - New tasks use the SQLite-backed `cortex/v8` ledger and public
@@ -268,14 +283,17 @@
   update, start a fresh Codex thread; an existing thread may retain retired
   cachebusted hook paths and will not load updated skills, hooks, or MCP tools
   automatically.
-- Codebase Memory is worker-only and conditional. When its tools are present,
-  call `list_projects` first and use only the project whose root exactly matches
-  the task root; prefer graph, architecture, and trace operations, then confirm
-  consequential facts in source/tests. `planner`, `explorer`, `architect`, and
-  `database_architect` may refresh one missing or stale index; other profiles
-  fall back to repository-native tools after one failed attempt. Never guess a
-  project id or loop. An indexed repository never authorizes the root
-  coordinator to inspect the project.
+- Codebase Memory is worker-only and conditional. Every briefing contains the
+  project key precomputed from canonical task root with the current upstream
+  safe-ASCII/UTF-8-hex/FNV-1a-200 path rule. Use it directly; do not call
+  `list_projects` before routine queries. Only a direct not-found, ambiguity,
+  or apparent drift/collision permits one list fallback, and its root must
+  exactly match the task root rather than only its basename. Prefer graph,
+  architecture, and trace operations, then confirm consequential facts in
+  source/tests. `planner`, `explorer`, `architect`, and `database_architect`
+  may refresh one missing or stale index; other profiles fall back to
+  repository-native tools after one failed attempt. Never loop. An indexed
+  repository never authorizes the root coordinator to inspect the project.
 
 ## Internal ledger invariants
 

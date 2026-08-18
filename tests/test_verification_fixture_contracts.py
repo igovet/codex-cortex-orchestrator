@@ -97,7 +97,9 @@ class VerificationFixtureContractTests(unittest.TestCase):
     def test_planner_live_prompt_uses_exact_schema_safe_work_breakdown(self) -> None:
         prompt = LUNA_EVAL.live_prompt("planner_work_breakdown", Path("/workspace/cortex-live"))
         self.assertIn('"plan_approval":"required"', prompt)
-        self.assertIn('waves exactly [{"workers":[{"phase":"plan"}]}', prompt)
+        self.assertIn('waves exactly [{"workers":[{"phase":"discover"}]}', prompt)
+        self.assertIn('{"workers":[{"phase":"plan"}]}', prompt)
+        self.assertIn('{"workers":[{"phase":"implementation"}]}', prompt)
         self.assertIn('"id":"inspect_source"', prompt)
         self.assertIn('"id":"deliver_result"', prompt)
         self.assertIn('"depends_on":["inspect_source"]', prompt)
@@ -105,6 +107,22 @@ class VerificationFixtureContractTests(unittest.TestCase):
         self.assertIn("decision=approve", prompt)
         self.assertIn("Only after it returns outcome=awaiting_plan_approval", prompt)
         self.assertIn("never call approval before that continue", prompt)
+
+    def test_targeted_live_prompts_carry_complete_start_and_follow_up_contracts(self) -> None:
+        compact = LUNA_EVAL.live_prompt("compact_parallel", Path("/workspace/cortex-live"))
+        self.assertIn('<cortex_task_contract>{"user_request":', compact)
+        self.assertIn('"complexity":"C1"', compact)
+        self.assertIn('"plan_approval":"auto"', compact)
+        self.assertIn('these exact waves: [{"workers":[{"phase":"discover"', compact)
+        self.assertEqual(compact.count('"phase":"discover"'), 2)
+
+        follow_up = LUNA_EVAL.live_prompt(
+            "follow_up_partial", Path("/workspace/cortex-live"), "task-source-ref",
+        )
+        self.assertIn('payload exactly {"user_request":', follow_up)
+        self.assertIn('"acceptance_criteria"', follow_up)
+        self.assertIn('"verification"', follow_up)
+        self.assertIn('"plan_approval":"auto"', follow_up)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ SAFE_LEDGER_EVENTS = {
     "task_started", "task_completed", "task_blocked", "task_resumed",
 }
 SAFE_GATE_NAMES = {
-    "plan", "discover", "architecture", "implementation", "qa", "security", "performance",
+    "scope", "plan", "discover", "architecture", "implementation", "qa", "security", "performance",
     "accessibility", "ux", "review", "documentation", "close",
 }
 SAFE_TASK_STATUSES = {"active", "blocked", "completed", "failed", "unknown"}
@@ -705,6 +705,23 @@ def planning(label: str) -> dict[str, object]:
     }
 
 
+def scoping(label: str) -> dict[str, object]:
+    return {
+        "overview": f"Deterministic discovery brief for {label}.",
+        "context_files": [],
+        "discovery_domains": [{
+            "id": "fixture_runtime",
+            "title": "Fixture runtime",
+            "objective": "Trace the deterministic fixture lifecycle and evidence boundaries.",
+            "paths": ["."],
+            "context": ["Current source, tests, and executable fixture configuration are authoritative."],
+            "depends_on": [],
+            "acceptance_criteria": ["The discovery report maps the complete fixture lifecycle."],
+            "verification": ["Confirm the lifecycle against current fixture source and tests."],
+        }],
+    }
+
+
 def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
     if not current.get("ok"):
         raise AssertionError(current)
@@ -767,6 +784,8 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                 publication["closure"] = passing_closure(project, str(attempt["gate"]))
             if attempt.get("gate") == "plan":
                 publication["planning"] = planning(label)
+            if attempt.get("gate") == "scope":
+                publication["scoping"] = scoping(label)
             published = cortex.publish_worker_report(publication)
             if not published.get("ok"):
                 raise AssertionError(published)
@@ -796,8 +815,9 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     parallel = base / "parallel"
     parallel.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(parallel), "task": task("parallel Luna fixture", "standard"),
-        "waves": [{"workers": [{"phase": "research"}, {"phase": "architecture"}]}],
+        "project_root": str(parallel),
+        "task": {**task("parallel Luna fixture", "standard"), "plan_approval": "auto"},
+        "waves": [{"workers": [{"phase": "research"}, {"phase": "discover", "profile": "explorer"}]}],
     })
     if len(current.get("dispatches") or []) != 2:
         raise AssertionError("parallel fixture did not return two relative worker slots")
@@ -807,7 +827,8 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     blocked = base / "blocked"
     blocked.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(blocked), "task": task("blocked resume Luna fixture", "C2"),
+        "project_root": str(blocked),
+        "task": {**task("blocked resume Luna fixture", "C2"), "plan_approval": "auto"},
         "waves": [{"workers": [{"phase": "discover"}]}],
     })
     blocked_result = cortex.continue_orchestration({
@@ -883,8 +904,11 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         return (
             "Use only the public Cortex tools for this isolated partial smoke test. "
             f"The exact project_root is {project}. The completed source task_ref is {source_task_ref!r}. "
-            "Call manage_orchestration exactly once with intent=follow_up, that task_ref, and payload.user_request exactly "
-            "'Correct the fixture result because the completed task produced the wrong behavior.' with complexity C1. "
+            "Call manage_orchestration exactly once with intent=follow_up, that task_ref, and payload exactly "
+            "{\"user_request\":\"Correct the fixture result because the completed task produced the wrong behavior.\","
+            "\"complexity\":\"C1\",\"acceptance_criteria\":[\"The linked corrective task is created without "
+            "mutating the completed source task.\"],\"verification\":[\"Inspect the returned follow-up linkage and "
+            "the unchanged source-task state.\"],\"plan_approval\":\"auto\"}. "
             "Do not call start_orchestration, continue_orchestration, or any private Cortex tool. Do not execute the returned "
             "worker dispatch: this test must stop after Cortex has created the linked corrective task. You may inspect that new task "
             "once with manage_orchestration to confirm it is awaiting its first worker."
@@ -927,7 +951,23 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "</cortex_task_contract>"
         )
     if scenario == "compact_parallel":
-        return common + "Use an explicit compact first wave with parallel discovery and architecture workers, then complete objective: create result.md summarizing the fixture."
+        return common + (
+            "<cortex_task_contract>"
+            "{\"user_request\":\"Inspect README.md, then create result.md containing exactly one line: Parallel discovery fixture completed.\","
+            "\"complexity\":\"C1\","
+            "\"acceptance_criteria\":[\"Two independent discovery workers inspect README.md in the first wave.\","
+            "\"result.md contains exactly one line: Parallel discovery fixture completed.\","
+            "\"Close evidence and the final handoff verify the intended file change.\"],"
+            "\"verification\":[\"Read README.md and both discovery reports before implementation.\","
+            "\"Read result.md and inspect the resulting diff or equivalent file evidence.\"],"
+            "\"plan_approval\":\"auto\"}"
+            "</cortex_task_contract> "
+            "Call start_orchestration exactly once with that exact task and these exact waves: "
+            "[{\"workers\":[{\"phase\":\"discover\",\"profile\":\"explorer\",\"objective\":\"Confirm the README heading and relevant context.\"},"
+            "{\"phase\":\"discover\",\"profile\":\"explorer\",\"objective\":\"Independently verify the required result.md content and constraints.\"}]},"
+            "{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"review\"}]},"
+            "{\"workers\":[{\"phase\":\"documentation\"}]},{\"workers\":[{\"phase\":\"close\"}]}]."
+        )
     if scenario == "planner_work_breakdown":
         return common + (
             "Exercise the Planner work-breakdown contract deterministically. "
@@ -938,10 +978,12 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "\"verification\":[\"Read README.md and result.md and verify the exact result.md content.\"],"
             "\"plan_approval\":\"required\"}"
             "</cortex_task_contract> "
-            "Call start_orchestration with that exact task and waves exactly "
-            "[{\"workers\":[{\"phase\":\"plan\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
-            "{\"workers\":[{\"phase\":\"close\"}]}]. "
-            "The Planner must publish the strict report plus this exact planning sibling: "
+            "Call start_orchestration exactly once with that exact task and waves exactly "
+            "[{\"workers\":[{\"phase\":\"discover\"}]},{\"workers\":[{\"phase\":\"plan\"}]},"
+            "{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"qa\"}]},"
+            "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
+            "{\"workers\":[{\"phase\":\"close\"}]}]. Complete discovery before the singleton final Planner. "
+            "The Planner must read its supplied discovery report and publish the strict report plus this exact planning sibling: "
             "{\"overview\":\"Inspect the source before producing and verifying the requested result.\","
             "\"work_packages\":[{\"id\":\"inspect_source\",\"title\":\"Inspect source\","
             "\"objective\":\"Inspect README.md.\",\"allowed_paths\":[\"README.md\"],\"microtasks\":[{"
@@ -951,15 +993,16 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "\"id\":\"deliver_result\",\"title\":\"Deliver result\",\"objective\":\"Create and verify result.md.\","
             "\"depends_on\":[\"inspect_source\"],\"allowed_paths\":[\"result.md\"],\"microtasks\":[{"
             "\"id\":\"write_result\",\"title\":\"Write result\",\"objective\":\"Create the exact result.md line.\","
-            "\"profile\":\"documentation_writer\",\"allowed_paths\":[\"result.md\"],"
-            "\"acceptance_criteria\":[\"result.md has the exact required line.\"],"
+            "\"profile\":\"general\",\"allowed_paths\":[\"result.md\"],"
+            "\"acceptance_criteria\":[\"result.md contains exactly the required Planner fixture line.\"],"
             "\"verification\":[\"Read result.md and compare its exact content.\"]}]}]}. "
             "Do not add, remove, rename, or reorder packages or microtasks. Read the plan report, close the completed "
             "Planner child, then call "
             "continue_orchestration with that report_ref. Only after it returns outcome=awaiting_plan_approval and "
             "plan_review, call manage_orchestration intent=plan_approval with decision=approve; never call approval "
-            "before that continue. The user pre-authorized this fixture. Then run documentation and close. "
-            "Documentation creates result.md. Do not bypass approval or edit .codex/cortex."
+            "before that continue. The user pre-authorized this fixture. Then run implementation, qa, review, "
+            "documentation, and close in the returned order. Implementation creates result.md. Do not bypass approval "
+            "or edit .codex/cortex."
         )
     return common + (
         "Exercise a deterministic future-wave reassessment without manufacturing a blocker. "
