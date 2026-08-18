@@ -579,6 +579,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("top-level `gate_result`", review_prompt)
         self.assertIn("needs matching top-level `gate_result` and `closure`", review_prompt)
         self.assertIn("outside the 7-key report", review_prompt)
+        self.assertIn("findings is the literal empty array [] in both", review_prompt)
+        self.assertIn("never strings or informational entries", review_prompt)
+        self.assertIn("fingerprint/severity/status/blocking/summary", review_prompt)
         package["gate"] = "close"
         close_prompt = control.host_spawn_prompt("build_verification", package)
         self.assertIn("needs matching top-level `gate_result` and `closure`", close_prompt)

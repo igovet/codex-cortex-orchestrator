@@ -155,11 +155,16 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     if package.get("gate") in {"review", "close"}:
         closure_contract = (
             f"This {package.get('gate')} report needs matching top-level `gate_result` and `closure`; keep both "
-            f"outside the {len(REPORT_FIELDS)}-key report."
+            f"outside the {len(REPORT_FIELDS)}-key report. `gate_result` has exactly decision/failure_class/findings/"
+            "verification/workspace; `closure` omits only failure_class. On pass, findings is the literal empty "
+            "array [] in both—never strings or informational entries. Both verification objects have exactly "
+            "executed/not_executed/required_missing/limitations arrays; both workspace objects have exactly "
+            "modified/untracked/staged arrays and committed boolean or `not_required`. Shared values must match. "
+            "A non-pass finding is an object with exactly fingerprint/severity/status/blocking/summary."
         )
     else:
         closure_contract = (
-            "Optional `gate_result` stays top-level; never add `closure` outside review/close."
+            "Optional `gate_result`: pass findings=[]; no info entries or `closure` except review/close."
         )
     briefing_transport_contract = (
         "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "
