@@ -32,9 +32,10 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete Python 3.12.3 discovery suite passed: 497 tests. Focused
-  report/schema/read-only regressions and the private-file draft cold boot also
-  passed.
+- The complete Python 3.12.3 discovery suite previously passed: 497 tests.
+  Focused report/schema/read-only regressions and the private-file draft cold
+  boot also passed for that prior candidate; the current ephemeral-artifact
+  behavior has not yet been re-run in this worktree.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
   syntax checks, `git diff --check`, and the 8-worker/5-wave call-count
   benchmark passed. The installed-plugin check, full lifecycle live scenario,
@@ -89,11 +90,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `8.1.2+codex.20260818210000`. These results are
+The source manifest declares `9.0.2+codex.20260818210000`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 8.1.2 source contract
+## Current 9.0.2 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -145,18 +146,19 @@ verification remain separate, explicitly requested actions.
   or blocking findings, and missing required verification, reopen the recorded
   target gate for rework; resolved or auditable non-self waivers are retained
   in SQLite rather than inferred from prose.
-- Report drafts use a private pre-validation file. `get_report_template` creates
-  a fully structured JSON file with mode `0600` and returns `draft_ref`,
-  `draft_path`, and expiry without returning the body. Writers edit that exact
-  file; read-only workers may send a small RFC 7396 merge patch. Invalid drafts
-  leave the same file in place and consume no worker attempt. Successful
-  validation binds its digest to the same file; a new template supersedes an
-  old or expired draft. Normal finalization sends only worker identity,
-  `draft_ref`, and digest; `record_report` rereads/revalidates and deletes the
-  file and metadata only after commit. Legacy full-payload `record_report`
-  remains compatible. Host-sandboxed read-only gates record
-  ordinary shared-checkout source deltas as concurrency evidence, while
-  claimed `changed_files` and generated or ignored side effects still fail.
+- Report drafts use one private file. `get_report_template` creates a fully
+  structured JSON file with mode `0600` and returns `draft_ref`, `draft_path`,
+  and expiry without returning the body. Writers edit that exact file;
+  read-only workers may send a small RFC 7396 merge patch or complete
+  replacement through `record_report`. Invalid records leave the same file in
+  place and consume no worker attempt; a new template supersedes an old or
+  expired draft. `record_report` rereads/revalidates current state, atomically
+  persists, then deletes the file and metadata only after commit. Legacy
+  full-payload `record_report` remains compatible. Host-sandboxed read-only
+  gates record ordinary shared-checkout source deltas as concurrency evidence;
+  claimed `changed_files`, arbitrary ignored output, and unrecognized artifacts
+  still fail, while recognized conventional test/build/cache residue is
+  retained in the audit receipt.
 - Worker caller/input/schema validation results are structured corrections:
   fix the named field and retry the same tool on the same attempt without
   consuming the three-attempt recovery budget. `get_report_template` and
@@ -217,10 +219,10 @@ close evidence. They also cover human-readable `Profile Module` labels and
 attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
-Public API tests require exactly nine MCP tools: coordinator lifecycle
+Public API tests require exactly eight MCP tools: coordinator lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`; worker `worker_question`, `get_report_template`,
-`validate_report_draft`, `record_report`, and
+`record_report`, and
 identity/digest-scoped `read_dispatch_briefing`; plus scoped predecessor
 `read_worker_report`. Native worker prompts carry a compact bootstrap with the
 exact immutable briefing path/digest; the worker cannot enumerate the ledger.
@@ -250,8 +252,8 @@ bounded identifiers.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host
   diagnostic for Codex CLI, Python 3.11+/`tomllib`, plugin launcher, same-user
-  cache, exact `cortex@cortex` registration, MCP approval configuration, and
-  lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
+  cache, exact `cortex@cortex` registration, MCP approval and elicitation
+  configuration, and lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
   `BLOCKED`) and `mcp.blocking_checks`; `READY` requires every emitted check to
   pass. A nonzero result identifies the failed prerequisite; it never installs
   software or changes Codex configuration. See the [SSH host troubleshooting

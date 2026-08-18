@@ -111,6 +111,8 @@ class CortexHostPreflightTests(unittest.TestCase):
         config = codex_home / "config.toml"
         config.parent.mkdir(parents=True, exist_ok=True)
         config_lines = [
+            'approval_policy = { granular = { mcp_elicitations = true } }\n',
+            '\n',
             '[plugins."cortex@cortex"]\n',
             'enabled = true\n',
             '\n',
@@ -229,6 +231,29 @@ class CortexHostPreflightTests(unittest.TestCase):
                 "detail": "Cortex MCP host prerequisites, same-user registration, approval configuration, and hook trust passed; start a new Codex thread after installation or update.",
                 "status": "READY",
             })
+
+    def test_blocks_granular_policy_that_disables_mcp_elicitations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            plugin = base / "plugin"
+            self.make_plugin(plugin)
+            environment, codex_home = self.make_aligned_host(base, plugin)
+            config_path = codex_home / "config.toml"
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8").replace(
+                    "mcp_elicitations = true", "mcp_elicitations = false"
+                ),
+                encoding="utf-8",
+            )
+
+            completed = self.run_preflight(environment, "--plugin-root", str(plugin))
+
+            self.assertEqual(completed.returncode, 1)
+            payload = json.loads(completed.stdout)
+            checks = {item["name"]: item for item in payload["checks"]}
+            self.assertEqual(checks["cortex_mcp_config"]["status"], "FAIL")
+            self.assertIn("mcp_elicitations = true", checks["cortex_mcp_config"]["detail"])
+            self.assertIn("cortex_mcp_config", payload["mcp"]["blocking_checks"])
 
     def test_reports_missing_codex_independently_when_other_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

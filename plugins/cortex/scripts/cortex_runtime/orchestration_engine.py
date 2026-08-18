@@ -1,6 +1,6 @@
 """SQLite-native orchestration state machine behind the public facade.
 
-The nine public MCP handlers stay composed by :mod:`cortex`. This module owns
+The eight public MCP handlers stay composed by :mod:`cortex`. This module owns
 orchestration transactions, waves, recovery and management operations, and is
 loaded lazily by the facade after the entrypoint has completed initialization.
 """

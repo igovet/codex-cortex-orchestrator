@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.1.2":
-        fail("plugin manifest must identify cortex at release version 8.1.2")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.0.2":
+        fail("plugin manifest must identify cortex at release version 9.0.2")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -230,16 +230,16 @@ def main() -> int:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
     expected_public_operations = {
         "start_orchestration", "continue_orchestration", "manage_orchestration",
-        "worker_question", "get_report_template", "validate_report_draft", "record_report",
+        "worker_question", "get_report_template", "record_report",
         "read_dispatch_briefing", "read_worker_report",
     }
     if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the nine public Cortex operations")
+        fail("shared worker contract must declare the eight public Cortex operations")
     if shared.get("worker_operations") != [
         "read_dispatch_briefing", "read_worker_report", "worker_question",
-        "get_report_template", "validate_report_draft", "record_report",
+        "get_report_template", "record_report",
     ]:
-        fail("workers must receive scoped reads, question, draft validation, and atomic report operations")
+        fail("workers must receive scoped reads, question, draft creation, and atomic report operations")
     if (
         shared.get("dispatch_briefing_fallback")
         != "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable"
@@ -253,13 +253,13 @@ def main() -> int:
         fail("worker final response must be compact and must not contain report JSON")
     if (
         shared.get("report_draft_lifecycle")
-        != "template_private_file_direct_or_patch_validate_one_hour_consume"
+        != "template_private_file_direct_or_patch_atomic_record_one_hour_consume"
         or shared.get("report_finalization")
-        != "identity_draft_ref_validation_digest_same_file_then_delete"
+        != "identity_draft_ref_same_file_validate_commit_then_delete"
         or shared.get("caller_correctable_tool_errors")
         != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
         or shared.get("read_only_workspace_delta")
-        != "ordinary_source_changes_are_concurrency_evidence_generated_or_ignored_side_effects_fail"
+        != "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail"
     ):
         fail("shared worker contract must define staged draft finalization and read-only concurrency semantics")
     if (

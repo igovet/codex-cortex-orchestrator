@@ -35,7 +35,8 @@ output emits one record for each check:
 - `cortex_mcp_config` — the same user's regular `config.toml` enables
   `cortex@cortex` and sets
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode =
-  "approve"`.
+  "approve"`. If the user selects a granular approval policy, it also sets
+  `approval_policy.granular.mcp_elicitations = true`.
 - `cortex_hook_trust` — `hooks/list` reports exactly five enabled, trusted
   `cortex@cortex` hooks from the matching cache, with valid hashes matching the
   persisted hook-state table.
@@ -53,7 +54,7 @@ it is not a passing registration result.
 | `plugin_root` | The checked plugin source has a trusted manifest, route, launcher, and entrypoint. | The source/cache contents cannot be trusted. |
 | `codex_home` | The same-user cache is version- and content-aligned with the checked plugin. | Codex may load stale or incomplete package content. |
 | `cortex_registration` | The same user has one enabled matching `cortex@cortex` registration. | MCP registration is not proven for this user. |
-| `cortex_mcp_config` | The same-user Cortex MCP table is enabled and approval is `approve`. | Tool calls may be blocked before orchestration starts. |
+| `cortex_mcp_config` | The same-user Cortex MCP table is enabled, approval is `approve`, and a granular policy permits MCP elicitation. | Tool calls or worker questions may be blocked before orchestration starts. |
 | `cortex_hook_trust` | All five lifecycle hooks are enabled, trusted, cache-backed, and hash-matched. | Worker binding and stopped-worker recovery are not trusted. |
 
 The script returns exit code `0` only for `READY`; an expected negative result

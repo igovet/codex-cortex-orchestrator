@@ -1,7 +1,7 @@
 """Scoped report and immutable-briefing operations.
 
 The public facade supplies durable ledger helpers while this module owns
-the worker-facing report transport and keeps the public v4 surface narrow.
+the worker-facing report transport and keeps the public v5 surface narrow.
 """
 from __future__ import annotations
 
@@ -89,7 +89,8 @@ from cortex_runtime.ledger_db import (
 )
 from cortex_runtime.record_report import build_compatibility_facade
 
-_REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v1"
+_REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v2"
+_LEGACY_REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v1"
 _REPORT_DRAFT_TTL = timedelta(hours=1)
 _REPORT_DRAFT_PAYLOAD_FIELDS = {"report", "scoping", "planning", "gate_result", "closure"}
 
@@ -156,8 +157,6 @@ def _stage_report_draft_file(
         "attempt_id": attempt_id,
         "profile": profile,
         "relative_path": relative_path.as_posix(),
-        "validation_digest": None,
-        "validated_at": None,
         "created_at": created_at.isoformat(),
         "expires_at": (created_at + _REPORT_DRAFT_TTL).isoformat(),
     }
@@ -204,9 +203,13 @@ def _load_report_draft_file(
         )
     required = {
         "schema", "draft_ref", "project_root", "task_id", "attempt_id", "profile", "relative_path",
-        "validation_digest", "validated_at", "created_at", "expires_at",
+        "created_at", "expires_at",
     }
-    if set(metadata) != required or metadata.get("schema") != _REPORT_DRAFT_SCHEMA:
+    legacy_required = required | {"validation_digest", "validated_at"}
+    if not (
+        (set(metadata) == required and metadata.get("schema") == _REPORT_DRAFT_SCHEMA)
+        or (set(metadata) == legacy_required and metadata.get("schema") == _LEGACY_REPORT_DRAFT_SCHEMA)
+    ):
         raise ValueError("report draft metadata is invalid")
     if any(str(metadata.get(field) or "") != value for field, value in (
         ("draft_ref", normalized_ref),
@@ -437,11 +440,8 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         draft_document_key = None
         draft_path = None
         supplied_draft_ref = str(params.get("_draft_ref") or "").strip()
-        validation_digest = str(params.get("_validation_digest") or "").strip().lower()
         if supplied_draft_ref:
-            if not validation_digest:
-                raise ValueError("validation_digest is required with draft_ref")
-            draft_envelope, draft_metadata, draft_document_key, draft_path = _load_report_draft_file(
+            draft_envelope, _draft_metadata, draft_document_key, draft_path = _load_report_draft_file(
                 root,
                 task_dir,
                 project_root=str(select_project_root(params)),
@@ -450,15 +450,6 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 profile=str(attempt.get("profile") or ""),
                 draft_ref=supplied_draft_ref,
             )
-            if not re.fullmatch(r"[0-9a-f]{64}", validation_digest):
-                raise ValueError("validation_digest is invalid; copy it exactly from validate_report_draft")
-            if (
-                draft_metadata.get("validation_digest") != validation_digest
-                or not draft_metadata.get("validated_at")
-            ):
-                raise ValueError(
-                    "report draft is not validated at this digest; call validate_report_draft again before record_report"
-                )
             params = {**params, **draft_envelope}
         open_questions = _open_blocking_questions(task_dir, state, attempt_id)
         if open_questions:
@@ -528,20 +519,6 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if closure is not None:
             digest_payload["closure"] = closure
         content_digest = digest_text(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        if validation_digest and validation_digest != content_digest:
-            raise ValueError(
-                "validation_digest does not match the current report draft; call validate_report_draft again with "
-                "the complete updated payload before record_report"
-            )
-        if params.get("_validate_only"):
-            return {
-                "validated": True,
-                "validation_digest": content_digest,
-                "attempt_id": attempt_id,
-                "gate": attempt.get("gate"),
-                "profile": attempt.get("profile"),
-                "state": state,
-            }
         raw_submission_id = str(params.get("submission_id") or "").strip()
         submission_id = safe_id(raw_submission_id) if raw_submission_id else f"submission-{attempt_id}-report-{content_digest[:16]}"
         paths = report_bus_paths(task_dir)
@@ -793,12 +770,12 @@ def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
     return {"schema": REPORT_SCHEMA, "task_id": state["task_id"], "reports": index.get("reports", [])}
 
 
-def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> dict[str, Any]:
-    """Run the shared public report adapter in validation or persistence mode."""
+def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
+    """Run the shared public report adapter as one atomic validation and persistence operation."""
     try:
         unknown = sorted(set(params) - {
             "project_root", "task_id", "attempt_id", "profile", "report", "scoping", "planning",
-            "gate_result", "closure", "draft_ref", "validation_digest",
+            "gate_result", "closure", "draft_ref",
         })
         if unknown:
             raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
@@ -810,9 +787,7 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             raise ValueError("profile must be an exact Cortex worker profile")
         draft_ref = str(params.get("draft_ref") or "").strip()
         payload_fields = {"report", "scoping", "planning", "gate_result", "closure"} & set(params)
-        if validate_only and draft_ref:
-            raise ValueError("internal draft validation accepts the loaded file payload, not draft_ref")
-        if not validate_only and draft_ref and payload_fields:
+        if draft_ref and payload_fields:
             raise ValueError(
                 "record_report with draft_ref must not resend report, scoping, planning, gate_result, or closure"
             )
@@ -827,8 +802,6 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             "gate_result": params.get("gate_result"),
             "closure": params.get("closure"),
             "_draft_ref": draft_ref,
-            "_validation_digest": params.get("validation_digest"),
-            "_validate_only": validate_only,
             "_require_predecessor_review": True,
             "_require_knowledge_review": True,
             "_require_harvest_manifest": True,
@@ -937,10 +910,7 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             "report findings must", "report questions must", "report tests must", "report evidence must",
             "report uncertainty must", "report exceeds the", "report count quota exhausted",
             "report aggregate byte quota exhausted", "idempotent report submission_id",
-            "validation_digest does not match", "validation_digest is required with draft_ref",
-            "validation_digest is invalid",
             "draft_ref is invalid", "report draft", "record_report with draft_ref",
-            "internal draft validation accepts",
             "project_root is required", "project_root must be an absolute path", "CORTEX_ROOT is not supported",
             "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
@@ -966,24 +936,6 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
             "next_action": next_action,
             "retryable": outcome == "needs_correction",
             "attempt_budget_consumed": False,
-        }
-    if result.get("validated"):
-        return {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": True,
-            "outcome": "report_draft_valid",
-            "draft_valid": True,
-            "validation_digest": result["validation_digest"],
-            "attempt_id": result["attempt_id"],
-            "gate": result["gate"],
-            "profile": result["profile"],
-            "persisted": False,
-            "draft_persisted": False,
-            "attempt_budget_consumed": False,
-            "next_action": (
-                "The loaded report payload is valid. The public draft adapter will bind this digest to its existing "
-                "temporary file before record_report is allowed to finalize it."
-            ),
         }
     if result.get("recorded") is False:
         return {
@@ -1012,8 +964,15 @@ def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> di
 
 
 def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
-    """Public worker adapter: atomically promote a validated draft and return a compact receipt."""
-    return _publish_worker_report(params, validate_only=False)
+    """Public worker adapter: update, validate, and atomically persist one report draft."""
+    draft_ref = str(params.get("draft_ref") or "").strip()
+    if not draft_ref:
+        return _publish_worker_report(params)
+    prepared, invalid = _prepare_draft_for_record(params)
+    if invalid is not None:
+        return invalid
+    assert prepared is not None
+    return _draft_record_failure(_publish_worker_report(prepared), draft_ref=draft_ref)
 
 
 def _draft_diagnostic_path(message: str) -> str:
@@ -1032,7 +991,6 @@ def _draft_diagnostic_path(message: str) -> str:
             return f"report.tests[{index}].exit_code"
         return f"report.tests[{index}]"
     for marker, path in (
-        ("validation_digest", "validation_digest"),
         ("changed_files", "report.changed_files"),
         ("report summary", "report.summary"),
         ("report findings", "report.findings"),
@@ -1154,6 +1112,7 @@ def _draft_invalid_result(
     *,
     draft_ref: str | None = None,
     draft_path: Path | None = None,
+    draft_persisted: bool | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -1162,14 +1121,14 @@ def _draft_invalid_result(
         "code": "report_validation_failed",
         "draft_valid": False,
         "persisted": False,
-        "draft_persisted": bool(draft_ref and draft_path),
+        "draft_persisted": bool(draft_ref and draft_path) if draft_persisted is None else draft_persisted,
         "diagnostics": diagnostics,
         "retryable": True,
         "attempt_budget_consumed": False,
         "next_action": (
             "Apply only the diagnostic fixes to the existing draft file or send a small JSON Merge Patch, then "
-            "call validate_report_draft again with the same draft_ref. Repeat until draft_valid=true; draft "
-            "validation never consumes worker attempts."
+            "call record_report again with the same draft_ref. Draft validation and rejected record attempts never "
+            "consume worker attempts."
         ),
     }
     if draft_ref:
@@ -1179,8 +1138,8 @@ def _draft_invalid_result(
     return result
 
 
-def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
-    """Edit and validate the scoped temporary report file without final persistence."""
+def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Apply an optional update and preflight the private draft before atomic recording."""
     draft_ref = str(params.get("draft_ref") or "").strip()
     draft_path: Path | None = None
     try:
@@ -1189,7 +1148,7 @@ def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
         } | _REPORT_DRAFT_PAYLOAD_FIELDS
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported validate_report_draft fields: " + ", ".join(unknown))
+            raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
         for field in ("project_root", "task_id", "attempt_id", "profile", "draft_ref"):
             if not str(params.get(field) or "").strip():
                 raise ValueError(f"{field} is required; copy it exactly from get_report_template")
@@ -1203,7 +1162,7 @@ def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
         }
         with state_lock(root):
             task_dir, state, attempt, profile = _public_worker_template_context(identity)
-            envelope, metadata, document_key, draft_path = _load_report_draft_file(
+            envelope, _metadata, _document_key, draft_path = _load_report_draft_file(
                 root,
                 task_dir,
                 project_root=project_root,
@@ -1236,50 +1195,34 @@ def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
             diagnostics = _draft_shape_diagnostics(envelope)
             diagnostics.extend(_draft_placeholder_diagnostics(envelope))
             if diagnostics:
-                metadata["validation_digest"] = None
-                metadata["validated_at"] = None
-                db_put_task_document(root, state["task_id"], document_key, metadata)
-                return _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
-
-            result = _publish_worker_report(envelope, validate_only=True)
-            if not result.get("ok"):
-                metadata["validation_digest"] = None
-                metadata["validated_at"] = None
-                db_put_task_document(root, state["task_id"], document_key, metadata)
-                diagnostics = []
-                for item in result.get("diagnostics", []):
-                    message = str(item.get("message") or "Report draft validation failed.")
-                    diagnostics.append({
-                        "code": item.get("code") or result.get("code") or "report_validation_failed",
-                        "path": _draft_diagnostic_path(message),
-                        "message": message,
-                        "fix": result.get("next_action") or "Correct the named field in the existing draft file.",
-                    })
-                return _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
-
-            metadata["validation_digest"] = result["validation_digest"]
-            metadata["validated_at"] = datetime.now(timezone.utc).isoformat()
-            db_put_task_document(root, state["task_id"], document_key, metadata)
-            return {
-                **result,
-                "draft_ref": draft_ref,
-                "draft_path": str(draft_path),
-                "draft_expires_at": metadata["expires_at"],
-                "draft_persisted": True,
-                "next_action": (
-                    "Call record_report once with only this worker identity, draft_ref, and validation_digest. "
-                    "Cortex will read this same temporary file, revalidate current state atomically, persist the "
-                    "report, and delete the draft file only after success."
-                ),
-            }
+                return None, _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
+            return {**identity, "draft_ref": draft_ref}, None
     except ValueError as exc:
         message = redact(str(exc), 1000)
-        return _draft_invalid_result([{
+        return None, _draft_invalid_result([{
             "code": "report_validation_failed",
             "path": _draft_diagnostic_path(message),
             "message": message,
             "fix": "Use the exact draft_ref and worker identity from get_report_template, then correct only the named field.",
         }], draft_ref=draft_ref or None, draft_path=draft_path)
+
+
+def _draft_record_failure(result: dict[str, Any], *, draft_ref: str) -> dict[str, Any]:
+    """Keep a rejected draft mutable while preserving the normal report diagnostics."""
+    if result.get("outcome") != "needs_correction":
+        return result
+    diagnostics = []
+    for item in result.get("diagnostics", []):
+        message = str(item.get("message") or "Report draft validation failed.")
+        diagnostics.append({
+            "code": item.get("code") or result.get("code") or "report_validation_failed",
+            "path": _draft_diagnostic_path(message),
+            "message": message,
+            "fix": result.get("next_action") or "Correct the named field in the existing draft file.",
+        })
+    # _prepare_draft_for_record loaded this exact draft and no rejected record
+    # path removes it, so callers can safely retry against the same ref.
+    return _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_persisted=True)
 
 
 def _public_worker_template_context(params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any], str]:
@@ -1433,8 +1376,8 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
             "attempt_budget_consumed": False,
             "next_action": (
                 "Open draft_path and replace every angle-bracket placeholder with observed data while keeping all "
-                "required keys, then call validate_report_draft with this worker identity and draft_ref only. If "
-                "the worker sandbox cannot edit the file, send one full replacement once or a small patch instead."
+                "required keys, then call record_report with this worker identity and draft_ref only. If the worker "
+                "sandbox cannot edit the file, send one full replacement once or a small patch instead."
             ),
         }
     except (ValueError, OSError) as exc:

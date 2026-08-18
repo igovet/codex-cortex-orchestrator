@@ -9,12 +9,12 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative nine-tool public facade
+## Relative eight-tool public facade
 
-The public API exposes exactly nine tools. Coordinators use the three lifecycle
+The public API exposes exactly eight tools. Coordinators use the three lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`; workers use `worker_question`, `get_report_template`,
-`validate_report_draft`, and `record_report`, may
+and `record_report`, may
 recover only their exact immutable briefing through `read_dispatch_briefing`, and may
 read only explicitly supplied predecessor refs with scoped `read_worker_report`.
 A coordinator starts a task with
@@ -23,15 +23,15 @@ The active-wave cursor is a relative `step`; parallel results use only
 relative worker slots. Start owns classification, ledger initialization,
 full-plan persistence, and first-wave preparation. Every worker persists its
 exact seven-field `cortex/report/v1` through one atomic `record_report` after
-building from `get_report_template` and repeating `validate_report_draft`
-until valid. `get_report_template` creates a fully structured private JSON draft
-file with mode `0600` and returns `draft_ref`, `draft_path`, and expiry without
-returning its body. Writers edit that exact file; read-only workers may submit a
-small RFC 7396 merge patch. Invalid drafts leave the same file in place and
-consume no attempt. Successful validation binds its digest to that file; a new
-template supersedes an old or expired draft. `record_report` receives only
-identity, `draft_ref`, and digest, rereads/revalidates the file, and deletes the
-file and metadata only after commit. A legacy full payload remains compatible. The worker returns only
+building from `get_report_template`. `get_report_template` creates a fully
+structured private JSON draft file with mode `0600` and returns `draft_ref`,
+`draft_path`, and expiry without returning its body. Writers edit that exact
+file; read-only workers may submit a small RFC 7396 merge patch or complete
+replacement through `record_report`. Invalid records leave the same file in
+place and consume no attempt. A new template supersedes an old or expired
+draft. `record_report` receives worker identity and `draft_ref`, validates the
+current file and state, and deletes the file and metadata only after an atomic
+commit. A legacy full payload remains compatible. The worker returns only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary (or
 the exact report-tool error), and never sends the report body in its native
 final. The coordinator reads each ref, then Continue validates all parallel
@@ -109,7 +109,7 @@ ownership, dependencies, risk, sequencing, or validation. Planner and explorer
 recommendations are advisory, and every replacement carries the coordinator's
 concise reason. Changing a completed gate requires explicit rework.
 Semantically unchanged future-wave reassessment records an unchanged receipt
-and continues, while v4 future waves are internally renumbered so public
+and continues, while v5 future waves are internally renumbered so public
 relative steps never move backward or collide.
 
 A final close report may itself reveal bounded work that invalidates terminal
@@ -285,8 +285,10 @@ diagnostic emits seven prerequisite checks: `codex_cli`, `cortex_python`,
 registration check requires exactly one enabled, installed `cortex@cortex`
 entry at the checked version for the same Codex user; the MCP check requires a
 regular, non-symlink `config.toml` with Cortex enabled and
-`default_tools_approval_mode = "approve"`; hook trust requires all five
-enabled, trusted, cache-backed hooks and matching persisted hashes. The script
+`default_tools_approval_mode = "approve"`, plus
+`mcp_elicitations = true` when a granular approval policy is selected; hook
+trust requires all five enabled, trusted, cache-backed hooks and matching
+persisted hashes. The script
 does not install or mutate anything, so remote provisioning remains an
 operator-authorized step and an unavailable approved runtime is reported as a
 blocker. This closes the false-positive class where source or cache evidence
@@ -416,9 +418,9 @@ the route, and never present either bare token as a required user recovery
 step. Classification, task creation, delegation, gates, lanes, and claims
 cannot mutate state before activation.
 
-## Documented v4 lifecycle identity
+## Documented v5 lifecycle identity
 
-New v4 tasks keep their generated authorization identity immutable. A
+New v5 tasks keep their generated authorization identity immutable. A
 synchronous `PostToolUse` hook binds the returned opaque `task_ref` to the
 documented hook `session_id` in a separate private registry, so identities
 already embedded in a dispatch response remain valid. `SessionStart` uses that
@@ -469,7 +471,7 @@ deliberate trade-off and requires serializing writers.
 ## Project-local runtime state
 
 Production orchestration is fail-closed for each supplied absolute
-`project_root`; one MCP server process can serve multiple roots. The v4 public
+`project_root`; one MCP server process can serve multiple roots. The v5 public
 tools validate the selected root before preparing work, and an unavailable server
 or failed, unwritable, or mismatched root ends that task's workflow with a
 blocker. Ordinary/unledgered subagent work is not a substitute.
@@ -521,7 +523,7 @@ fallback is not part of model routing.
 
 Workers build a strict seven-field `cortex/report/v1` payload from the private
 JSON file created by `get_report_template`, correct it through
-`validate_report_draft`, and publish the validated file once through atomic
+and publish the file once through atomic
 `record_report`; the v8 report primitive stores the canonical
 sanitized JSON record, which is task- and attempt-bound; server-owned receipts
 make retries idempotent. A receipt links one report to one C2/C3

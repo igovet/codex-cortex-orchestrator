@@ -11,8 +11,8 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `8.1.2` (the current candidate is
-  `8.1.2+codex.20260818210000`; installed builds may carry a cachebuster).
+  `9.0.2` (the current candidate is
+  `9.0.2+codex.20260818210000`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -36,18 +36,19 @@ MCP approval override, and creates a collision-safe private backup only before
 changing a configured global default-subagent model. It never inspects or
 removes previous orchestration state or unrelated plugin files.
 
-Report finalization uses a private pre-validation file: `get_report_template`
+Report finalization uses a private draft file: `get_report_template`
 creates a fully structured JSON file with mode `0600` and returns `draft_ref`,
 `draft_path`, and expiry without returning the body. Writers edit that exact
-file; read-only workers may send a small RFC 7396 merge patch. Invalid
-`validate_report_draft` calls leave the same file in place and consume no
-attempt; successful validation binds its digest to that file. A new template
+file; read-only workers may send a small RFC 7396 merge patch or complete
+replacement through `record_report`. Invalid `record_report` calls leave the
+same file in place and consume no attempt. A new template
 supersedes an old or expired draft. `record_report` rereads/revalidates and
 deletes the file and metadata only after commit. Normal callers send only
-identity, ref, and digest; legacy full-payload recording remains compatible.
+identity and ref; legacy full-payload recording remains compatible.
 Host-sandboxed read-only gates treat ordinary shared-checkout source deltas as
-concurrency evidence, while claimed changes and generated or ignored side
-effects remain failures.
+concurrency evidence. Recognized cross-language test, build, and cache residue
+is retained in the audit receipt; claimed changes, unknown artifacts, and
+arbitrary `.gitignore` outputs remain failures.
 Worker input/schema validation is retryable on the same attempt and consumes no
 three-attempt recovery budget. Bounded briefing, report, and coordinator
 artifact reads clamp oversized `max_bytes` to 32768; explicit non-retryable
@@ -64,22 +65,22 @@ tracked-release archive validation.
 The read-only host gate is separate from source and archive evidence:
 `cortex-host-preflight.py --json` must report `mcp.status=READY` only for the
 same Codex user with a matching enabled `cortex@cortex` registration, approval
-configuration, cache-backed hook trust, and all other prerequisite checks.
+configuration (including MCP elicitation for granular policy), cache-backed
+hook trust, and all other prerequisite checks.
 The named `Hetzner_Bots` host remains blocked until an approved Node >=16
 installation source is available; no guessed package-source command is a
 release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
 for the safe same-user sequence and the bounded stopped-worker recovery.
 
-The 8.1.2 source candidate has passed all 497 unit tests on Python 3.12.3,
-focused report/schema/read-only tests, cold boot, marketplace validation,
-Python and shell syntax checks, `git diff --check`, the composite benchmark,
-and an isolated fresh-plugin probe. The installed-plugin check, full lifecycle
-live scenario, and tracked archive gate have not been run. The installed user plugin is out
-of scope; no installation or `~/.codex` mutation is part of this candidate. The evidence-first pipeline,
+The 9.0.2 source candidate passed all 506 unit tests on the selected local
+Python runtime, marketplace validation, and the cold-boot smoke test. Composite
+benchmark, fresh-plugin probe, installed-plugin check, full lifecycle live
+scenario, and tracked archive gate remain separate release checks. The
+installed user plugin is out of scope; no installation or `~/.codex` mutation
+is part of this candidate. The evidence-first pipeline,
 scope artifact, plan-basis digests, v1 resume compatibility, 10 MiB
 tail-preserving error-log cap, and Bash 3.2 launcher compatibility require
-focused regression coverage. The 8.1.2
-ledger starts from SQLite only: its
+focused regression coverage. The 9.0.2 ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
 the user MCP approval override. Targeted development validation, full
@@ -91,7 +92,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 8.1.2 release commit only with explicit authorization.
+- Create the Cortex 9.0.2 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

@@ -13,7 +13,7 @@ The plugin wires session, subagent, and agent-tool lifecycle events to privacy-p
 
 ## Behavior and status
 
-After a v4 start or corrective follow-up, the synchronous `PostToolUse` hook
+After a v5 start or corrective follow-up, the synchronous `PostToolUse` hook
 binds the returned task to the documented event `session_id` without changing
 task authorization. It resolves the project from MCP `tool_input.project_root`
 or event `cwd`; explicitly forwarded session environment values are only

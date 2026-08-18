@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `8.1.2`. This
+The current source manifest and server are intended for plugin version `9.0.2`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -34,15 +34,16 @@ load a valid source plugin contract, and see matching Cortex metadata in
 launcher is reported as a failure rather than treated as proof of installation.
 `mcp.status=READY` additionally requires exactly one enabled same-version
 `cortex@cortex` registration from `codex plugin list --json`, a regular
-`config.toml` with `default_tools_approval_mode = "approve"`, and all five
-enabled, trusted, cache-backed lifecycle hooks with matching persisted hashes.
+`config.toml` with `default_tools_approval_mode = "approve"` and, for a
+granular approval policy, `mcp_elicitations = true`, plus all five enabled,
+trusted, cache-backed lifecycle hooks with matching persisted hashes.
 The JSON expands these requirements into the seven check names documented in
 the [SSH host troubleshooting runbook](../../project/ssh-hetzner-troubleshooting.md).
 The [SSH host troubleshooting runbook](../../project/ssh-hetzner-troubleshooting.md)
 records the failure signatures and same-user recovery sequence; it does not
 install software or mutate Codex configuration.
 
-The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, an executable launcher, 21 registered profile files with structured playbooks, scope/plan-aware validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, sandbox parity, and the machine-validated execution contract. The tracked-release archive validator is blocking in CI and rejects runtime state and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the exact nine-tool v4 public surface—the three coordinator lifecycle operations plus worker `worker_question`, `get_report_template`, `validate_report_draft`, and `record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped predecessor `read_worker_report`—and aligned plugin/server versions. Briefings and reports are returned only in scoped, server-bounded cursor pages; oversized `max_bytes` requests are clamped to 32768. Worker caller/schema validation errors are structured same-attempt corrections and do not consume recovery attempts; only explicit non-retryable integrity/storage blockers terminate the worker. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
+The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, an executable launcher, 21 registered profile files with structured playbooks, scope/plan-aware validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, sandbox parity, and the machine-validated execution contract. The tracked-release archive validator is blocking in CI and rejects runtime state and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the exact eight-tool v5 public surface—the three coordinator lifecycle operations plus worker `worker_question`, `get_report_template`, `record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped predecessor `read_worker_report`—and aligned plugin/server versions. Briefings and reports are returned only in scoped, server-bounded cursor pages; oversized `max_bytes` requests are clamped to 32768. Worker caller/schema validation errors are structured same-attempt corrections and do not consume recovery attempts; only explicit non-retryable integrity/storage blockers terminate the worker. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
 
 The current start contract requires `start_orchestration.task.user_request` and
 preserves the exact user-authored text. If `task.objective` is supplied, request
@@ -65,7 +66,7 @@ effective setting is missing or weaker.
 
 The marketplace validator also enforces the machine-readable shared worker
 contract: one strict seven-field report, worker `worker_question`,
-`get_report_template`, `validate_report_draft`, and `record_report`, the three
+`get_report_template`, `record_report`, the three
 coordinator lifecycle operations, and scoped predecessor `read_worker_report`,
 compact native acknowledgement, exact-root Codebase
 Memory resolution, the four profiles allowed one index refresh, and bounded
@@ -79,5 +80,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 8.1.2 results are recorded there, and remaining gates are not implied by this page. The 8.1.2 source candidate requires resolver, launcher, marketplace, shell, cold-boot, deterministic fixtures, benchmark, fresh-plugin, full lifecycle live, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
+Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 9.0.2 results are recorded there, and remaining gates are not implied by this page. The 9.0.2 source candidate requires resolver, launcher, marketplace, shell, cold-boot, deterministic fixtures, benchmark, fresh-plugin, full lifecycle live, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-8.1.2-7c3aed" alt="Cortex 8.1.2" />
+        <img src="https://img.shields.io/badge/Cortex-9.0.2-7c3aed" alt="Cortex 9.0.2" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -22,13 +22,56 @@
   </tr>
 </table>
 
+## Install with Codex — recommended
+
+> [!IMPORTANT]
+> **⚡ Copy the prompt below into a new Codex task.** It tells Codex to read this
+> repository's current installation guide, install Cortex from the GitHub
+> Marketplace `main` branch, install missing prerequisites, configure Codex,
+> and verify the result.
+
+```text
+Install and configure the Cortex plugin for this Codex environment.
+
+First, read the complete installation instructions and requirements in this
+repository's README. Treat it as authoritative:
+https://github.com/igovet/codex-cortex-orchestrator/blob/main/README.md
+
+Then complete the setup end to end:
+
+1. Check every prerequisite required by that README (including Codex plugin and
+   multi-agent support, Python 3.11+ with tomllib, Git, and Bash). Install every
+   missing prerequisite with the supported package manager for this operating
+   system. Do not install unnecessary packages or Python dependencies.
+2. For a fresh installation, add the Cortex Marketplace from the main branch
+   exactly with:
+   codex plugin marketplace add https://github.com/igovet/codex-cortex-orchestrator --ref main --json
+   If the `cortex` Marketplace is already registered, refresh it with the
+   documented update flow instead of adding a duplicate. Then install the
+   plugin (or use the README's documented remove/reinstall update flow) with:
+   codex plugin add cortex@cortex --json
+3. Preserve existing ~/.codex/config.toml settings and add or correct every
+   Cortex-required setting documented in the README: multi_agent_v2 = true,
+   agents.default_subagent_model = "gpt-5.6-luna", and, if this installation
+   uses granular approvals, approval_policy.granular.mcp_elicitations = true.
+   Keep user approval review enabled; do not enable Ask for me / Approve for me.
+4. Complete the required Cortex hook-trust flow and run the README's relevant
+   verification checks. Start a new Codex task if the README requires it.
+
+Use only the instructions and commands documented in that README. If an
+elevated system permission, an interactive desktop confirmation, or a material
+choice is required, explain exactly what is needed and ask me before proceeding.
+```
+
 > Cortex is activated only when you explicitly select it. An ordinary complex
 > request—or merely mentioning orchestration—does not create a Cortex session.
 
 ## Table of contents
 
+- [Install with Codex — recommended](#install-with-codex--recommended)
 - [Installation](#installation)
   - [System requirements](#1-system-requirements)
+  - [Choose a project root](#choose-a-project-root)
   - [macOS-specific notes](#macos-specific-installation-notes)
   - [Required Codex configuration](#required-codex-configuration)
   - [Required hook trust](#required-post-install-hook-trust)
@@ -65,6 +108,21 @@ python3 -c 'import tomllib; print("tomllib: ok")'
 git --version
 codex --version
 ```
+
+### Choose a project root
+
+> [!WARNING]
+> **Use a specific repository or worktree as `project_root`; never use an OS
+> root or a broad system/home directory.** Do not start Cortex from `/`, your
+> home directory, or directories such as `/home`, `/usr`, `/etc`, `/var`,
+> `/opt`, `/tmp`, `/System`, `/Library`, or `/Users`.
+>
+> Before orchestration starts, Cortex recursively creates a
+> content-addressed hash manifest of the selected root. On a system-wide or
+> home-wide tree that can take a long time, consume substantial I/O, and make
+> Codex or the terminal appear to hang. Select the actual project instead, for
+> example `/workspace/my-service`. Cortex rejects the broad roots above
+> before manifest capture.
 
 If the correct Python interpreter is not the default `python3`, provide its
 absolute path:
@@ -151,7 +209,7 @@ multi_agent_v2 = true
 default_subagent_model = "gpt-5.6-luna"
 ```
 
-Both settings are required:
+The two settings above are required in every configuration:
 
 - `multi_agent_v2 = true` enables explicit model and reasoning-effort routing
   for each subagent. An already-open task retains the adapter selected when it
@@ -164,6 +222,18 @@ Both settings are required:
 Marketplace installation does not replace these global Codex settings. Verify
 both values yourself before starting the first Cortex task and after changing
 Codex configuration.
+
+If you choose Codex's granular approval policy, this additional setting is
+also required for Cortex:
+
+```toml
+approval_policy = { granular = { mcp_elicitations = true } }
+```
+
+Keep any other granular approval settings in the same table. Cortex uses
+host-native MCP elicitation for durable worker questions; when this value is
+`false` or missing, Cortex host-preflight and `sync-cortex.sh --check` report
+the configuration as not ready.
 
 You may also approve all tools exposed by the local Cortex MCP server:
 
@@ -613,7 +683,7 @@ The public MCP surface is deliberately small. The coordinator uses
 `start_orchestration`, `continue_orchestration`, `manage_orchestration`, and
 reads predecessor reports with `read_worker_report`. Workers use
 `read_dispatch_briefing`, `worker_question`, `get_report_template`,
-`validate_report_draft`, and `record_report`.
+and `record_report`.
 
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
@@ -626,26 +696,29 @@ unrelated `.codex/cortex` coordination data. Canonical state is stored in the
 local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
 tasks without that field resume their persisted pipeline unchanged.
 
-The nine public MCP tools remain the v4 surface. Workers build from
+The eight public MCP tools are the v5 surface. Workers build from
 `get_report_template`, which creates a private fully structured JSON file and
 returns its short `draft_ref` and absolute `draft_path` without echoing the
-body. A worker fills that file and repeats `validate_report_draft` on the same
-ref until valid; read-only workers can apply a small JSON Merge Patch through
-the validator when their sandbox cannot edit the file. Invalid validations
-keep the draft and consume no worker attempt. Caller/input/schema validation
+body. A worker fills that file and calls `record_report` with the same
+`draft_ref`; read-only workers can provide a small JSON Merge Patch or a
+complete replacement through `record_report` when their sandbox cannot edit
+the file. Invalid records keep the draft and consume no worker attempt. Caller/input/schema validation
 from any allowed worker tool is also corrected and retried on the same attempt
 without consuming recovery budget; only explicit `retryable: false` integrity
-or storage blockers are terminal. Successful validation binds a
-digest to the same file, after which the worker sends only `draft_ref` and
-`validation_digest` in one atomic `record_report` call. Finalization rereads
-and revalidates the exact file, commits the durable report, and deletes the
+or storage blockers are terminal. Successful finalization revalidates the
+current draft and state, commits the durable report atomically, and deletes the
 draft post-commit. Bounded briefing, report, and coordinator artifact reads
 clamp oversized `max_bytes` requests to 32768 and continue with cursors.
 Drafts expire after one hour and a new template supersedes
 the prior attempt draft. Read-only
 workers do not claim source changes observed in the shared checkout as their
 own; Cortex records those paths as concurrency evidence while still rejecting
-claimed writes and generated or ignored side effects. Tool-side questions and
+claimed writes and arbitrary `.gitignore` outputs. The read-only result check
+tolerates only manifest-recognized cross-language ephemeral outputs—
+conventional generated directories/roots/files, virtual environments,
+recognized build-output directories, and bytecode suffixes, including matching
+conventional paths listed in `.gitignore`—so unrecognized generated, cache,
+coverage, snapshot, or ignored artifacts remain failures. Tool-side questions and
 approval prompts are projected into the original user language by the root
 coordinator; worker protocol messages and durable reports remain English.
 Sensitive MCP exceptions are appended to
@@ -785,7 +858,9 @@ compatibility.
 - Do not embed complete worker prompts in mutable task state.
 - Synchronize changes to behavior, architecture, interfaces, or verification
   commands with `docs/project/` and `docs/features/`.
-- Read-only checks must not leave caches, bytecode, or generated artifacts.
+- Read-only checks must prefer non-writing modes and never use cleanup
+  commands. Recognized cross-language test/build/cache residue is tolerated
+  and recorded; unknown output remains a validation failure.
 - Never commit `.codex/cortex`, runtime ledgers, diagnostic logs, credentials,
   or private data.
 
