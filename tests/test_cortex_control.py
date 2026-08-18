@@ -3500,11 +3500,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(validation["status"], "passed")
         self.assertEqual(validation["artifacts"]["reported_change_count"], 2)
 
-    def test_public_result_validation_rejects_unstructured_checks_and_read_only_writes(self):
+    def test_public_result_validation_rejects_unstructured_checks_and_claimed_read_only_writes_but_tolerates_concurrency(self):
         review = self.v3_start(
             "review the current behavior",
             complexity="C1",
-            waves=[{"workers": [{"phase": "review"}]}],
+            waves=[{"workers": [{"phase": "discover"}]}],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
         state = control.load_task_state_for_artifact(task_dir)
@@ -3523,12 +3523,18 @@ class ControlPlaneTests(unittest.TestCase):
         changed_path.write_text("unexpected review write\n", encoding="utf-8")
         stealth_report = self.v3_report("review concealed a forbidden write")
         stealth_report = self._report_with_briefing(attempt, stealth_report)
-        rejected_stealth_write = control.publish_worker_report({
+        concurrent_change = control.publish_worker_report({
             "project_root": str(self.project), "task_id": state["task_id"],
             "attempt_id": attempt["attempt_id"], "profile": attempt["profile"], "report": stealth_report,
         })
-        self.assertFalse(rejected_stealth_write["ok"])
-        self.assertIn("project files changed during read-only result gate", rejected_stealth_write["diagnostics"][0]["message"])
+        self.assertTrue(concurrent_change["ok"], concurrent_change)
+        concurrent_record, _ = control.read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{concurrent_change['report_ref']}.json",
+            kinds={"worker_report"},
+        )
+        self.assertEqual(concurrent_record["result_validation"]["artifacts"]["concurrent_change_count"], 1)
 
         write_report = self.v3_report("review reported a forbidden write")
         write_report["changed_files"] = ["review-write.txt"]
@@ -4703,9 +4709,14 @@ class ControlPlaneTests(unittest.TestCase):
                 attempt, self.v3_report("verifier must remain read-only")
             ),
         })
-        self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["code"], "report_validation_failed")
-        self.assertIn("project files changed during read-only", rejected["diagnostics"][0]["message"])
+        self.assertTrue(rejected["ok"], rejected)
+        record, _ = control.read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{rejected['report_ref']}.json",
+            kinds={"worker_report"},
+        )
+        self.assertEqual(record["result_validation"]["artifacts"]["concurrent_change_count"], 1)
 
     def test_completion_report_rejects_every_nonzero_executed_check(self):
         started = self.v3_start(
@@ -6710,7 +6721,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(len(started["spawn_requests"]), 1)
         briefing = self.briefing_from_request(started["spawn_requests"][0])
         self.assertIn("call the public `get_report_template` tool", briefing)
-        self.assertIn("submit the complete payload to `validate_report_draft`", briefing)
+        self.assertIn("returns draft_path plus draft_ref", briefing)
+        self.assertIn("small JSON Merge Patch", briefing)
         self.assertIn("call record_report once", briefing)
         self.assertIn("consume no worker attempt", briefing)
         self.assertIn("do not paste or reproduce that JSON", briefing)
@@ -6887,9 +6899,24 @@ class ControlPlaneTests(unittest.TestCase):
         template = control.get_report_template(identity)
         self.assertTrue(template["ok"], template)
         self.assertEqual(template["outcome"], "report_template_ready")
-        self.assertEqual(template["template"]["report"]["questions"], [])
-        self.assertIn("Dispatch briefing reviewed:", template["template"]["report"]["evidence"][0])
+        self.assertNotIn("template", template)
+        self.assertRegex(template["draft_ref"], r"^draft-[0-9a-f]{32}$")
+        draft_path = Path(template["draft_path"])
+        self.assertTrue(draft_path.is_file())
+        self.assertEqual(draft_path.stat().st_mode & 0o777, 0o600)
+        template_envelope = json.loads(draft_path.read_text(encoding="utf-8"))
+        self.assertEqual(template_envelope["report"]["questions"], [])
+        self.assertIn("Dispatch briefing reviewed:", template_envelope["report"]["evidence"][0])
         self.assertFalse(template["persisted"])
+        self.assertTrue(template["draft_persisted"])
+
+        unfilled = control.validate_report_draft({
+            **identity, "draft_ref": template["draft_ref"],
+        })
+        self.assertFalse(unfilled["ok"])
+        self.assertEqual(unfilled["diagnostics"][0]["code"], "report_placeholder_unresolved")
+        self.assertEqual(unfilled["diagnostics"][0]["path"], "report.summary")
+        self.assertTrue(draft_path.exists())
 
         hidden_mode = control.publish_worker_report({
             **identity,
@@ -6909,13 +6936,25 @@ class ControlPlaneTests(unittest.TestCase):
             report["next_action"] = f"unsupported report field {index + 1}"
             invalid_reports.append(report)
 
-        for report in invalid_reports:
-            rejected = control.validate_report_draft({**identity, "report": report})
+        for index, report in enumerate(invalid_reports):
+            request_payload = (
+                {**identity, "draft_ref": template["draft_ref"], "report": report}
+                if index == 0
+                else {
+                    **identity,
+                    "draft_ref": template["draft_ref"],
+                    "patch": {"report": {"next_action": report["next_action"]}},
+                }
+            )
+            rejected = control.validate_report_draft(request_payload)
             self.assertFalse(rejected["ok"])
             self.assertEqual(rejected["outcome"], "report_draft_invalid")
             self.assertEqual(rejected["code"], "report_validation_failed")
             self.assertTrue(rejected["retryable"])
             self.assertFalse(rejected["attempt_budget_consumed"])
+            self.assertEqual(rejected["draft_ref"], template["draft_ref"])
+            self.assertEqual(Path(rejected["draft_path"]), draft_path)
+            self.assertTrue(draft_path.exists())
             self.assertEqual(rejected["diagnostics"][0]["path"], "report.next_action")
             self.assertTrue(rejected["diagnostics"][0]["fix"])
 
@@ -6934,11 +6973,21 @@ class ControlPlaneTests(unittest.TestCase):
         valid_report = self._report_with_briefing(
             attempt, self.v3_report("report accepted after four draft corrections")
         )
-        validated = control.validate_report_draft({**identity, "report": valid_report})
+        validated = control.validate_report_draft({
+            **identity,
+            "draft_ref": template["draft_ref"],
+            "patch": {"report": {**valid_report, "next_action": None}},
+        })
         self.assertTrue(validated["ok"], validated)
         self.assertTrue(validated["draft_valid"])
         self.assertFalse(validated["persisted"])
+        self.assertTrue(validated["draft_persisted"])
+        self.assertRegex(validated["draft_ref"], r"^draft-[0-9a-f]{32}$")
         self.assertRegex(validated["validation_digest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(validated["draft_ref"], template["draft_ref"])
+        self.assertEqual(Path(validated["draft_path"]), draft_path)
+        draft_key = f"report_draft:{attempt['attempt_id']}:{validated['draft_ref']}"
+        self.assertIsNotNone(control.db_get_task_document(self.ledger, state["task_id"], draft_key))
         self.assertEqual(
             control.list_task_reports({
                 "project_root": str(self.project), "task_id": state["task_id"], "principal": "thread-a",
@@ -6946,23 +6995,74 @@ class ControlPlaneTests(unittest.TestCase):
             [],
         )
 
-        changed_report = {**valid_report, "summary": "changed after draft validation"}
+        changed_envelope = json.loads(draft_path.read_text(encoding="utf-8"))
+        changed_envelope["report"]["summary"] = "changed directly after draft validation"
+        control.write_json(draft_path, changed_envelope)
         stale = control.publish_worker_report({
             **identity,
-            "report": changed_report,
+            "draft_ref": validated["draft_ref"],
             "validation_digest": validated["validation_digest"],
         })
         self.assertFalse(stale["ok"])
         self.assertEqual(stale["code"], "report_validation_failed")
         self.assertFalse(stale["attempt_budget_consumed"])
+        self.assertTrue(draft_path.exists())
 
+        revalidated = control.validate_report_draft({
+            **identity, "draft_ref": validated["draft_ref"],
+        })
+        self.assertTrue(revalidated["ok"], revalidated)
+        self.assertNotEqual(revalidated["validation_digest"], validated["validation_digest"])
+
+        patched = control.validate_report_draft({
+            **identity,
+            "draft_ref": validated["draft_ref"],
+            "patch": {"report": {"summary": "small read-only fallback patch accepted"}},
+        })
+        self.assertTrue(patched["ok"], patched)
+        self.assertEqual(patched["draft_ref"], validated["draft_ref"])
+
+        mixed = control.publish_worker_report({
+            **identity,
+            "draft_ref": patched["draft_ref"],
+            "validation_digest": patched["validation_digest"],
+            "report": valid_report,
+        })
+        self.assertFalse(mixed["ok"])
+        self.assertIn("must not resend report", mixed["diagnostics"][0]["message"])
+
+        expired_record = control.db_get_task_document(self.ledger, state["task_id"], draft_key)
+        expired_record["expires_at"] = "2000-01-01T00:00:00+00:00"
+        control.db_put_task_document(self.ledger, state["task_id"], draft_key, expired_record)
+        expired = control.publish_worker_report({
+            **identity,
+            "draft_ref": patched["draft_ref"],
+            "validation_digest": patched["validation_digest"],
+        })
+        self.assertFalse(expired["ok"])
+        self.assertIn("has expired", expired["diagnostics"][0]["message"])
+        self.assertTrue(draft_path.exists())
+
+        replacement_template = control.get_report_template(identity)
+        self.assertFalse(draft_path.exists())
+        self.assertIsNone(control.db_get_task_document(self.ledger, state["task_id"], draft_key))
+        replacement = control.validate_report_draft({
+            **identity,
+            "draft_ref": replacement_template["draft_ref"],
+            "report": valid_report,
+        })
+        self.assertTrue(replacement["ok"], replacement)
+        replacement_path = Path(replacement["draft_path"])
+        replacement_key = f"report_draft:{attempt['attempt_id']}:{replacement['draft_ref']}"
         accepted = control.publish_worker_report({
             **identity,
-            "report": valid_report,
-            "validation_digest": validated["validation_digest"],
+            "draft_ref": replacement["draft_ref"],
+            "validation_digest": replacement["validation_digest"],
         })
         self.assertTrue(accepted["ok"], accepted)
         self.assertRegex(accepted["report_ref"], r"^report-[0-9]{4}$")
+        self.assertIsNone(control.db_get_task_document(self.ledger, state["task_id"], replacement_key))
+        self.assertFalse(replacement_path.exists())
         reports = control.list_task_reports({
             "project_root": str(self.project), "task_id": state["task_id"], "principal": "thread-a",
         })["reports"]
@@ -7690,8 +7790,18 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(by_name["continue_orchestration"]["inputSchema"]["required"], ["project_root", "step", "results"])
         self.assertEqual(by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
         self.assertEqual(by_name["get_report_template"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile"])
-        self.assertEqual(by_name["validate_report_draft"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "report"])
+        self.assertEqual(by_name["validate_report_draft"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "draft_ref"])
+        self.assertIn("patch", by_name["validate_report_draft"]["inputSchema"]["properties"])
         self.assertNotIn("additionalProperties", by_name["validate_report_draft"]["inputSchema"]["properties"]["report"])
+        self.assertEqual(
+            by_name["record_report"]["inputSchema"]["required"],
+            ["project_root", "task_id", "attempt_id", "profile"],
+        )
+        self.assertEqual(
+            by_name["record_report"]["inputSchema"]["oneOf"],
+            [{"required": ["draft_ref", "validation_digest"]}, {"required": ["report"]}],
+        )
+        self.assertIn("draft_ref", by_name["record_report"]["inputSchema"]["properties"])
         self.assertIn("validation_digest", by_name["record_report"]["inputSchema"]["properties"])
         forbidden = {"operation", "submission_id", "task_id", "wave_id", "attempt_id", "host_tool", "host_model", "host_reasoning_effort"}
         for name in ("start_orchestration", "continue_orchestration"):
@@ -7935,7 +8045,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "8.1.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "8.1.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

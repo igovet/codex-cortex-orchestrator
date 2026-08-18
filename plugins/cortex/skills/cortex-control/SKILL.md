@@ -126,13 +126,17 @@ signal, never permission for the root to perform the work directly.
    resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
    continuing. Never replace the worker or advance the wave for a question.
-   After work completes, the worker gets its exact gate-specific skeleton from
-   `get_report_template`, replaces every placeholder, and repeats
-   `validate_report_draft` until `draft_valid=true`. Draft validation persists
-   nothing and consumes no worker attempt; only failed worker attempts count
-   toward the three-attempt recovery budget. It then publishes the exact
-   unchanged strict `cortex/report/v1` once through `record_report` with the
-   returned `validation_digest` and returns only
+   After work completes, `get_report_template` creates one private temporary
+   JSON file already filled with the exact gate-specific skeleton and returns
+   its `draft_path` and `draft_ref`. The worker edits that file, replaces every
+   placeholder, and repeats `validate_report_draft` with the same ref until
+   `draft_valid=true`; a host-sandboxed read-only worker instead sends a small
+   JSON Merge Patch through validation. Invalid validations keep the file and
+   consume no worker attempt. Only failed worker attempts count toward the
+   three-attempt recovery budget. It then calls `record_report` once with only
+   its exact worker identity, `draft_ref`, and `validation_digest`; the tool
+   rereads and deletes that same file only after successful persistence. The
+   worker never resends, reconstructs, or reconsiders the strict report payload. It returns only
    `REPORT_RECORDED report_ref=<value>` plus at most a
    two-sentence summary. They must never paste the report JSON into the parent
    channel. When predecessor handoffs are supplied, they review all of them and
@@ -156,10 +160,15 @@ signal, never permission for the root to perform the work directly.
    requires a non-empty concrete summary of observed output or behavior. Concise
    summaries are valid; no arbitrary word count applies, and completion
    assertions without observed output or behavior are rejected.
+   Read-only profiles run in a host-enforced read-only sandbox. Source changes
+   that appear in their shared checkout during the attempt are recorded as
+   concurrent workspace evidence and are not attributed to that worker.
+   `changed_files` must still be empty, and generated, cache, coverage, or
+   ignored artifacts remain a hard report failure.
    Every invalid draft returns field paths and fixes. Correct every named field
-   and validate the complete payload again on the same task and attempt. A
-   changed payload invalidates the prior digest; `record_report` atomically
-   revalidates before persistence. Stop only for a non-retryable error or when
+   in the same file or with a small merge patch and validate the same ref again
+   on the same task and attempt. `record_report` loads that exact file and
+   atomically revalidates current state before persistence. Stop only for a non-retryable error or when
    exact report identity is unavailable.
    `followup_task` resumes the same addressable native worker for an answered
    durable question or an explicit active steer. Active steer is recorded as a

@@ -23,9 +23,15 @@ The active-wave cursor is a relative `step`; parallel results use only
 relative worker slots. Start owns classification, ledger initialization,
 full-plan persistence, and first-wave preparation. Every worker persists its
 exact seven-field `cortex/report/v1` through one atomic `record_report` after
-building from `get_report_template` and repeating side-effect-free
-`validate_report_draft` until valid. The validation digest binds the unchanged
-draft while atomic persistence revalidates current state. The worker returns only
+building from `get_report_template` and repeating `validate_report_draft`
+until valid. `get_report_template` creates a fully structured private JSON draft
+file with mode `0600` and returns `draft_ref`, `draft_path`, and expiry without
+returning its body. Writers edit that exact file; read-only workers may submit a
+small RFC 7396 merge patch. Invalid drafts leave the same file in place and
+consume no attempt. Successful validation binds its digest to that file; a new
+template supersedes an old or expired draft. `record_report` receives only
+identity, `draft_ref`, and digest, rereads/revalidates the file, and deletes the
+file and metadata only after commit. A legacy full payload remains compatible. The worker returns only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary (or
 the exact report-tool error), and never sends the report body in its native
 final. The coordinator reads each ref, then Continue validates all parallel
@@ -496,10 +502,10 @@ fallback is not part of model routing.
 
 ## Scoped worker report bus
 
-Workers build a strict seven-field `cortex/report/v1` payload from public
-`get_report_template`, correct it through side-effect-free
-`validate_report_draft`, and publish the unchanged valid payload once through
-atomic `record_report`; the v8 report primitive stores the canonical
+Workers build a strict seven-field `cortex/report/v1` payload from the private
+JSON file created by `get_report_template`, correct it through
+`validate_report_draft`, and publish the validated file once through atomic
+`record_report`; the v8 report primitive stores the canonical
 sanitized JSON record, which is task- and attempt-bound; server-owned receipts
 make retries idempotent. A receipt links one report to one C2/C3
 evidence record and is consumed once. Its `reports/consumptions/` tombstone is

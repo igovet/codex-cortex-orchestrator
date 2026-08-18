@@ -1048,6 +1048,18 @@ def put_task_document(root: Path, task_id: str, document_key: str, value: dict[s
         )
 
 
+def delete_task_document(root: Path, task_id: str, document_key: str) -> bool:
+    """Delete one exact mutable task document without widening task scope."""
+    if not task_id or not document_key or len(document_key) > 160:
+        raise ValueError("SQLite task document identity is invalid")
+    with _connection(root, write=True) as connection:
+        cursor = connection.execute(
+            "DELETE FROM task_documents WHERE task_id = ? AND document_key = ?",
+            (task_id, document_key),
+        )
+    return bool(cursor.rowcount)
+
+
 def list_task_documents(root: Path, task_id: str, prefix: str = "") -> list[tuple[str, dict[str, Any]]]:
     ensure_database(root)
     query = "SELECT document_key, payload_json FROM task_documents WHERE task_id = ?"

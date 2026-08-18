@@ -112,10 +112,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_public_mcp_schemas_match_runtime_start_report_and_planning_contracts(self):
         self.assertIn("ordinary task needs non-empty task.acceptance_criteria", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
-        self.assertIn("Every report.tests item has exactly command, cwd, exit_code, and evidence", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
-        self.assertIn("profile and the required acceptance_criteria/verification belong on each microtask", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
-        self.assertIn("persists nothing", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["validate_report_draft"])
-        self.assertIn("exact report skeleton", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["get_report_template"])
+        self.assertIn("pass only worker identity, draft_ref, and validation_digest", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
+        self.assertIn("rereads the same temporary file", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
+        self.assertIn("small JSON Merge Patch", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["validate_report_draft"])
+        self.assertIn("temporary JSON file already filled", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["get_report_template"])
         task_schema = control.START_ORCHESTRATION_SCHEMA["properties"]["task"]
         ordinary_contract = task_schema["anyOf"][0]
         self.assertEqual(
@@ -1718,7 +1718,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "8.1.0")
+        self.assertEqual(base_version, "8.1.1")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

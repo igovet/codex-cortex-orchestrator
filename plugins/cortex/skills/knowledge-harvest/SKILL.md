@@ -155,15 +155,18 @@ facts. Preserve text outside generated blocks and do not overwrite a manual
 ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
-Every Cortex worker builds the strict seven-field report from
-`get_report_template`, repeats `validate_report_draft` until valid, then records
-the exact unchanged payload once through `record_report` with its validation
-digest, acknowledges all supplied predecessor handoffs, and identifies
-its inventory counts, mapped surfaces, exclusions, unknowns, evidence, and
-coverage gaps. It must also review only the exact immutable briefing
+Every Cortex worker edits the private temporary report file created by
+`get_report_template`, repeats `validate_report_draft` on the same `draft_ref`
+until valid, then records it once through `record_report` using only that ref
+and validation digest. A read-only worker uses a small validation merge patch;
+successful recording deletes the temporary file. The worker acknowledges all
+supplied predecessor handoffs and identifies its inventory counts, mapped
+surfaces, exclusions, unknowns, evidence, and coverage gaps. It must also
+review only the exact immutable briefing
 issued by its compact dispatch bootstrap, verify the supplied SHA-256, and add
 the exact `Dispatch briefing reviewed: <sha256>` evidence marker. That briefing
-is the sole direct filesystem read allowed below `.codex/cortex`; workers never
+and its exact returned report `draft_path` are the only direct filesystem
+access allowed below `.codex/cortex`; workers never
 list or inspect ledger state, baselines, delegation JSON, another briefing, or
 report artifacts. If the host file reader alone cannot open that exact file,
 the worker calls `read_dispatch_briefing` with the complete identity and

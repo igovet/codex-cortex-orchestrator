@@ -287,13 +287,30 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 })
                 if not template.get("ok") or template.get("persisted") is not False:
                     raise AssertionError(f"get_report_template failed: {template}")
-                validated = rpc.tool("validate_report_draft", publication)
-                if not validated.get("draft_valid") or validated.get("persisted") is not False:
+                draft_path = Path(str(template["draft_path"]))
+                if not draft_path.is_file():
+                    raise AssertionError(f"get_report_template did not create its draft file: {template}")
+                validated = rpc.tool("validate_report_draft", {
+                    **publication,
+                    "draft_ref": template["draft_ref"],
+                })
+                if (
+                    not validated.get("draft_valid")
+                    or validated.get("persisted") is not False
+                    or validated.get("draft_persisted") is not True
+                ):
                     raise AssertionError(f"validate_report_draft failed: {validated}")
-                publication["validation_digest"] = validated["validation_digest"]
-                published = rpc.tool("record_report", publication)
+                published = rpc.tool("record_report", {
+                    "task_id": state["task_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "profile": dispatch["profile"],
+                    "draft_ref": validated["draft_ref"],
+                    "validation_digest": validated["validation_digest"],
+                })
                 if not published.get("ok"):
                     raise AssertionError(f"record_report failed: {published}")
+                if draft_path.exists():
+                    raise AssertionError("record_report did not delete the successfully persisted draft file")
                 read = rpc.tool("read_worker_report", {"task_ref": task_ref, "report_ref": published["report_ref"]})
                 if not read.get("ok") or read.get("report", {}).get("summary") != published.get("summary"):
                     raise AssertionError(f"read_worker_report failed: {read}")
