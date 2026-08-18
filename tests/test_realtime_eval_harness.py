@@ -257,6 +257,70 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         self.assertEqual(calls[0]["tool"], "start_orchestration")
         self.assertEqual(calls[0]["ok"], False)
 
+    def test_native_collaboration_events_expose_only_safe_tool_status(self) -> None:
+        line = json.dumps({
+            "type": "item",
+            "item": {
+                "type": "collab_tool_call",
+                "tool": "spawn_agent",
+                "status": "completed",
+                "prompt": "SECRET_PROMPT",
+                "agents_states": {"child": {"message": "SECRET_REPORT"}},
+            },
+        })
+        event = self.harness.sanitize_codex_stream_line(line)
+        self.assertEqual(event, {
+            "event": "native_tool_call",
+            "tool": "spawn_agent",
+            "status": "completed",
+            "outcome": "other_terminal_message",
+            "agent_statuses": {"unknown": 1},
+        })
+        self.assertNotIn("SECRET_PROMPT", json.dumps(event))
+        self.assertNotIn("SECRET_REPORT", json.dumps(event))
+
+        closed = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {"type": "collab_tool_call", "tool": "close_agent", "status": "completed"},
+        }))
+        self.assertEqual(closed["tool"], "close_agent")
+
+    def test_stream_classifies_native_report_and_known_lifecycle_failure(self) -> None:
+        native = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {
+                "type": "collab_tool_call",
+                "tool": "wait",
+                "status": "completed",
+                "agents_states": {
+                    "child": {
+                        "status": "completed",
+                        "message": "REPORT_RECORDED report_ref=SECRET_REF\nSECRET_SUMMARY",
+                    },
+                },
+            },
+        }))
+        self.assertEqual(native["outcome"], "report_recorded")
+        self.assertEqual(native["agent_statuses"], {"completed": 1})
+        self.assertNotIn("SECRET_REF", json.dumps(native))
+        validation = self.harness.classified_native_outcome({
+            "child": {"message": "record_report returned report_validation_failed for SECRET_PATH"},
+        })
+        self.assertEqual(validation, "report_validation_failed")
+        lifecycle = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {
+                "type": "mcp_tool_call",
+                "tool": "mcp__cortex__continue_orchestration",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "error": "passed completion requires report_ref from SECRET_REPORT",
+                    },
+                },
+            },
+        }))
+        self.assertEqual(lifecycle["failure_class"], "reportless_success")
+        self.assertNotIn("SECRET_REPORT", json.dumps(lifecycle))
+
     def test_isolated_codex_runtime_uses_minimal_private_environment_and_cleans_up(self) -> None:
         base = self.root / "runtime-base"
         base.mkdir()

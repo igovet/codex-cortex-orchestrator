@@ -2395,7 +2395,8 @@ class ControlPlaneTests(unittest.TestCase):
         briefing = self.briefing_from_request(delegated["spawn_request"])
         self.assertIn("Use attempt_id='discover-01' exactly", briefing)
         self.assertIn("stable lowercase submission_id", briefing)
-        self.assertIn("exactly these seven keys", briefing)
+        report_fields = ", ".join(control.REPORT_FIELDS)
+        self.assertIn(f"exactly {len(control.REPORT_FIELDS)} keys: {report_fields}", briefing)
         self.assertIn("byte-identical retry", briefing)
         self.assertIn("Do not activate or initialize Cortex", briefing)
         confirmed = control.confirm_host_spawn({
@@ -3178,6 +3179,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Task-level success criteria: Every agent receives the overall outcome", prompt)
         self.assertIn("Gate success criteria: Separate repository-discoverable facts", prompt)
         self.assertIn("Task-level validation: Run prompt contract tests", prompt)
+        self.assertIn("Judge only this gate; unfinished downstream task outcomes are not blockers", prompt)
+        self.assertIn("Optional `gate_result` stays top-level", prompt)
+        self.assertIn("never add `closure` outside review/close", prompt)
         self.assertIn("Pause conditions: A public schema change becomes necessary", prompt)
         self.assertIn("Budget or operating limit: No external writes", prompt)
         self.assertNotIn("Complete and report the discover gate", prompt)
@@ -4190,6 +4194,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertLess(len(serialized.encode("utf-8")), 8_000)
         self.assertLess(serialized.index("NEXT REQUIRED ACTION"), serialized.index("You are the internal Cortex worker"))
         self.assertIn("Never claim it was sent or call wait without the returned child target", started["next_action"])
+        self.assertIn("NEXT REQUIRED ACTION: FIRST", started["next_action"])
+        self.assertIn("exact failed result Cortex already accepted", started["next_action"])
+        self.assertIn("use list_agents defensively", started["next_action"])
+        self.assertIn("THEN call every dispatch.call", started["next_action"])
+        self.assertIn("close that exact completed native child with close_agent", started["next_action"])
         self.assertEqual(prompt.count(request), 1)
         self.assertNotIn(request, serialized)
         self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
@@ -5880,6 +5889,8 @@ class ControlPlaneTests(unittest.TestCase):
         result_schema = control.CONTINUE_ORCHESTRATION_SCHEMA["properties"]["results"]["items"]
         self.assertNotIn("report", result_schema["properties"])
         self.assertIn("report_ref", result_schema["properties"])
+        self.assertIn("dispatch_ref", result_schema["properties"])
+        self.assertIn("non-success", result_schema["properties"]["dispatch_ref"]["description"])
         self.assertIn("never an inline report body", result_schema["properties"]["report_ref"]["description"])
         self.assertIn("depends_on", control.V3_WORKER_SCHEMA["properties"])
         self.assertIn("context_files", control.V3_WORKER_SCHEMA["properties"])
@@ -6722,6 +6733,31 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(recovered["report"]["report_id"], "report-0001")
                 self.assertEqual(control.reconcile_report_bus({"task_id": task_id, "principal": "thread-a"})["report_count"], 1)
 
+    def test_report_reconciliation_rejects_planning_for_non_planner_attempt(self):
+        task_id = "reconcile-non-planner-planning"
+        state = self.init(task_id=task_id, complexity="C2")["state"]
+        delegation = self.delegate(state, task_id, "discover", "explorer")
+        recorded = self.report(task_id, delegation["attempt_id"])
+        report_id = recorded["report"]["report_id"]
+        task_dir = self.ledger / "tasks" / f"0001-{task_id}"
+        record, metadata = control.read_immutable_json_artifact(
+            task_dir,
+            task_id,
+            f"reports/records/{report_id}.json",
+            kinds={"worker_report", "report_record"},
+        )
+        invalid_record = {**record, "planning": self.v3_planning()}
+        with mock.patch.object(
+            control,
+            "read_immutable_json_artifact",
+            return_value=(invalid_record, metadata),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                rf"report record '{report_id}'.*planning is allowed only for planner plan reports",
+            ):
+                control.reconcile_report_bus({"task_id": task_id, "principal": "thread-a"})
+
     def test_report_allocation_ignores_orphaned_markdown_projections(self):
         state = self.init(task_id="orphan-markdown", complexity="C2")["state"]
         delegation = self.delegate(state, "orphan-markdown", "plan", "planner")
@@ -7173,7 +7209,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "7.1.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "7.1.2")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

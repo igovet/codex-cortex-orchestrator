@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-7.1.1-7c3aed" alt="Cortex 7.1.1" />
+        <img src="https://img.shields.io/badge/Cortex-7.1.2-7c3aed" alt="Cortex 7.1.2" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -52,9 +52,9 @@
 | --- | --- | --- |
 | Codex | Desktop or CLI with Plugins and multi-agent v2 support | Loads the plugin, skills, MCP server, and internal agents |
 | Python | **3.11+**, with the standard-library `tomllib` module | Runs the local Cortex MCP server, hooks, and validators |
-| Git | A current version | Required for the local Marketplace and development installation |
-| Bash | **4.2+** | Used by the launcher and `sync-cortex.sh`; the macOS system Bash 3.2 is too old |
-| Operating system | macOS or Linux; WSL is recommended on Windows | The current launcher and installer are Bash-based |
+| Git | A current version | Fetches and refreshes the GitHub Marketplace source |
+| Bash | **4.2+** | Used by the Cortex runtime launcher; the macOS system Bash 3.2 is too old |
+| Operating system | macOS or Linux; WSL is recommended on Windows | The current runtime launcher is Bash-based |
 
 No additional Python packages are required through `pip`: the Cortex runtime
 uses the Python standard library. Confirm that the required tools are available:
@@ -83,8 +83,8 @@ The Plugins Marketplace workflow is the same on macOS, but the local runtime
 requires additional preparation:
 
 - macOS does not guarantee a suitable Python 3.11+ installation.
-- macOS ships `/bin/bash` 3.2. The current Cortex installer and launcher use
-  Bash features introduced in 4.2, so the system Bash is not sufficient.
+- macOS ships `/bin/bash` 3.2. The Cortex runtime launcher uses Bash features
+  introduced in 4.2, so the system Bash is not sufficient.
 - Homebrew uses `/opt/homebrew` on Apple Silicon and `/usr/local` on Intel.
   Use `brew --prefix` instead of hard-coding either location.
 - Apps opened from Finder or the Dock do not necessarily inherit shell startup
@@ -108,12 +108,6 @@ export CORTEX_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
 "$CORTEX_BASH" --version
 "$CORTEX_PYTHON" --version
 "$CORTEX_PYTHON" -c 'import tomllib; print("tomllib: ok")'
-```
-
-Run the repository installer explicitly with the Homebrew Bash:
-
-```bash
-"$CORTEX_BASH" ./scripts/sync-cortex.sh
 ```
 
 For Codex CLI sessions, make sure Homebrew is initialized before running
@@ -140,11 +134,6 @@ Fully quit and reopen Codex afterward, then start a new task. `launchctl setenv`
 is scoped to the current login session and may need to be repeated after a
 logout or restart. If your app launcher or device-management system already
 provides environment variables, configure the same values there instead.
-
-> [!TIP]
-> Run `python3 scripts/cortex-host-preflight.py` from the checkout before
-> installation. It reports the Codex CLI, selected Python runtime, manifest,
-> launcher, and same-user plugin cache without changing Codex configuration.
 
 ### Required Codex configuration
 
@@ -174,10 +163,9 @@ Both settings are required:
   override. Cortex still selects Terra and Sol explicitly when policy requires
   them.
 
-When installing from a checkout, `./scripts/sync-cortex.sh` atomically sets and
-verifies `agents.default_subagent_model`. Before replacing a different value,
-it creates a private configuration backup. For a manual Marketplace install,
-verify the setting yourself.
+Marketplace installation does not replace these global Codex settings. Verify
+both values yourself before starting the first Cortex task and after changing
+Codex configuration.
 
 You may also approve all tools exposed by the local Cortex MCP server:
 
@@ -249,22 +237,6 @@ after installing or enabling Cortex. Before approving it, confirm that:
 Do not approve a hook whose plugin ID, source path, command, or hook set differs
 from this contract. Resolve the mismatch or reinstall the plugin first.
 
-When installing from this repository, `./scripts/sync-cortex.sh` performs the
-same trust operation automatically. It queries Codex `hooks/list`, validates
-the exact enabled five-hook set against the installed cache, and stores each
-current SHA-256 content hash in the global Codex hook-state configuration.
-Confirm the result with:
-
-```bash
-./scripts/sync-cortex.sh --check
-```
-
-The check must report:
-
-```text
-ok      Cortex lifecycle hook trust (5 content hashes)
-```
-
 If trust is missing, stale, rejected, or cannot be verified, do not start
 Cortex orchestration. Untrusted hooks can prevent durable worker binding,
 coordinator isolation, report recovery, and compaction-safe resume from working
@@ -276,48 +248,60 @@ Codex Desktop and Codex CLI use the Plugins Marketplace system. The general
 user workflow is documented in the
 [official OpenAI plugin documentation](https://developers.openai.com/codex/plugins).
 
-#### Install from an available Marketplace
+#### Add the GitHub Marketplace and install Cortex
+
+> [!IMPORTANT]
+> **Cortex is not published in the public plugin directory.** Add this GitHub
+> repository as a Marketplace source before looking for Cortex in Desktop.
 
 1. Open the **Plugins** tab in Codex Desktop.
-2. Open the catalog where Cortex is published: **Personal**, your team's
-   Marketplace, or the public directory.
-3. Find **Cortex**, open its details, and select **+ / Install**.
-4. Review the requested permissions and bundled hooks/MCP server.
-5. Approve the exact five Cortex hooks described in
-   [Required post-install hook trust](#required-post-install-hook-trust).
-6. Verify the [required configuration](#required-codex-configuration).
-7. Start a **new Codex task**. Existing tasks do not load newly installed
-   skills, hooks, MCP tools, or a different multi-agent adapter.
-8. Open **Skills**, select **Cortex Orchestrator**, and describe your goal.
+2. Select **Manage** in the upper-right corner of the Plugins page.
+3. Open the **Marketplace** tab under **Manage extensions**.
+4. Select **Add marketplace**.
+5. Complete the **Add plugin marketplace** dialog:
 
-> [!NOTE]
-> Until this repository version is published in the universal directory, use
-> its local Marketplace. Clone the repository and run
-> `./scripts/sync-cortex.sh`. The script registers
-> `.agents/plugins/marketplace.json` and installs `cortex@cortex` in the current
-> Codex environment.
+   | Field | Value |
+   | --- | --- |
+   | **Source** | `https://github.com/igovet/codex-cortex-orchestrator` |
+   | **Git ref** | `main` |
+   | **Sparse paths** | Leave empty; the Marketplace manifest is at the repository root |
+
+6. Select **Add marketplace** and wait for the confirmation. The new source
+   should appear in **Manage → Marketplace** as **cortex**.
+7. Return to the Plugins directory, open **Personal**, and find **Cortex**. Do
+   not search for it in the public directory.
+8. Open the Cortex details page and select **+ / Install**.
+9. Review the requested permissions and bundled hooks/MCP server.
+10. Approve the exact five Cortex hooks described in
+   [Required post-install hook trust](#required-post-install-hook-trust).
+11. Verify the [required configuration](#required-codex-configuration).
+12. Start a **new Codex task**. Existing tasks do not load newly installed
+   skills, hooks, MCP tools, or a different multi-agent adapter.
+13. Open **Skills**, select **Cortex Orchestrator**, and describe your goal.
 
 #### Update on Desktop
 
-1. Open **Plugins → Installed → Cortex**.
-2. Install the available newer version from the same Marketplace. If the UI
-   offers only uninstall and install actions, uninstall Cortex and install it
-   again.
-3. For the local repository version, run:
-
-   ```bash
-   git pull
-   ./scripts/sync-cortex.sh
-   ```
-
-4. Reapprove or verify trust for the updated five hook content hashes.
-5. Recheck `multi_agent_v2` and the Luna default.
-6. Start a **new Codex task**. An existing task may retain absolute paths to the
+1. Open **Plugins → Manage → Marketplace**.
+2. Find **cortex** and select **Upgrade marketplace**. To refresh every
+   configured Git Marketplace, use **Upgrade all marketplaces**.
+3. Return to **Plugins → Installed → Cortex**.
+4. Install the available newer Cortex version. If the UI offers only uninstall
+   and install actions, uninstall Cortex and install it again from **Personal**.
+5. Reapprove or verify trust for the updated five hook content hashes.
+6. Recheck `multi_agent_v2` and the Luna default.
+7. Start a **new Codex task**. An existing task may retain absolute paths to the
    previous cachebusted plugin installation.
 
 ### 3. Install on Codex CLI
 
-Start the interactive Codex CLI:
+Register the GitHub Marketplace first. Cortex is not available in the public
+plugin directory:
+
+```bash
+codex plugin marketplace add https://github.com/igovet/codex-cortex-orchestrator --ref main --json
+```
+
+Then start the interactive Codex CLI:
 
 ```bash
 codex
@@ -331,7 +315,7 @@ Open the plugin browser:
 
 Then:
 
-1. Switch to the required Marketplace tab.
+1. Switch to the newly added **cortex** Marketplace tab.
 2. Open **Cortex** and install it.
 3. If needed, press `Space` to enable the installed plugin.
 4. Approve the exact five Cortex hooks described in
@@ -340,32 +324,21 @@ Then:
 6. Exit the current CLI session and start `codex` again.
 7. In the new session, invoke `$cortex:orchestrator` or open `/skills`.
 
-For the local Marketplace version, registration and reinstallation are
-automated:
+For a direct, non-interactive installation after adding the Marketplace, run:
 
 ```bash
-git clone https://github.com/igovet/codex-cortex-orchestrator.git codex-orchestration
-cd codex-orchestration
-./scripts/sync-cortex.sh
-```
-
-These are the equivalent low-level commands used by the script:
-
-```bash
-codex plugin marketplace add /absolute/path/to/codex-orchestration --json
-codex plugin remove cortex@cortex --json   # only when already installed
 codex plugin add cortex@cortex --json
 ```
 
 #### Update on CLI
 
-For a published version, open `/plugins`, select the same Marketplace, and
-install the newer Cortex version. For the checkout version, run:
+Open `/plugins`, select the **cortex** Marketplace, and install the newer
+version. To refresh and reinstall it entirely from the terminal, run:
 
 ```bash
-git pull
-./scripts/sync-cortex.sh
-./scripts/sync-cortex.sh --check
+codex plugin marketplace upgrade cortex --json
+codex plugin remove cortex@cortex --json
+codex plugin add cortex@cortex --json
 ```
 
 After every update, reapprove or verify the new hook content hashes, exit the
@@ -664,6 +637,11 @@ mistake would be expensive.
 
 ## Developing Cortex
 
+> [!CAUTION]
+> The shell workflow below is for contributors testing a source checkout only.
+> End users must install and update Cortex through the GitHub Marketplace as
+> described in [Installation](#installation); they should not run these scripts.
+
 ### Runtime boundary
 
 The complete installable product lives under `plugins/cortex/`: the manifest,
@@ -686,15 +664,18 @@ Important entry points:
 ### Recommended development loop
 
 ```bash
-# 1. Preview the update without writing
+# 1. Inspect the checkout and host without changing Codex configuration
+python3 scripts/cortex-host-preflight.py
+
+# 2. Preview the update without writing
 ./scripts/sync-cortex.sh --dry-run
 
-# 2. Install or reinstall the current checkout
+# 3. Install or reinstall the current checkout
 ./scripts/sync-cortex.sh
 
-# 3. Open a new Codex task and test the changed behavior
+# 4. Open a new Codex task and test the changed behavior
 
-# 4. Confirm that the installed copy matches the checkout
+# 5. Confirm that the installed copy matches the checkout
 ./scripts/sync-cortex.sh --check
 ```
 

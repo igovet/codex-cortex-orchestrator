@@ -16,6 +16,7 @@ bind_symbols(
         "EXECUTED_CHECK_RESULT_GATES",
         "PROFILE_EXECUTION_CONTRACTS",
         "PROFILE_INSTRUCTIONS",
+        "REPORT_FIELDS",
         "WRITE_REQUIRED_RESULT_GATES",
         "_predecessor_review_marker",
         "_result_contract_markers",
@@ -62,6 +63,8 @@ def host_spawn_bootstrap(
 
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     """Build the exact bounded briefing for a native Codex worker dispatch."""
+    report_field_names = ", ".join(REPORT_FIELDS)
+    report_contract = f"exactly {len(REPORT_FIELDS)} keys: {report_field_names}"
     instructions = PROFILE_INSTRUCTIONS[agent]
     execution_contract = PROFILE_EXECUTION_CONTRACTS[agent]
     team_context = (
@@ -97,8 +100,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Return `QUESTION_RECORDED question_ref=<value>` plus a concise summary, publish no report, and end idle "
             "and resumable. Never busy-wait or use local UI. The coordinator uses followup_task to resume this worker; "
             "poll via poll_batch or poll, then call the "
-            "public `record_report` tool exactly once. Its report has exactly seven keys: summary, findings, questions, "
-            "changed_files, tests, evidence, uncertainty; use [] when empty. Never route work; coordinator routes. "
+            f"public `record_report` tool exactly once. Its report has {report_contract}; use [] when empty. "
+            "Never route work; coordinator routes. "
             "Every "
             "changed_files item must be a safe project-relative path, never absolute, `..`, URI, or prose. After "
             "success, do not paste or reproduce that JSON; return only "
@@ -123,8 +126,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
             f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
             f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
-            "The report object must contain exactly these seven keys: summary, findings, questions, changed_files, "
-            "tests, evidence, and uncertainty. Never route work; the coordinator owns routing. Use [] when empty; "
+            f"The report object must contain {report_contract}. Never route work; the coordinator owns routing. "
+            "Use [] when empty; "
             "never "
             "omit evidence or any other key. Every changed_files item must be a safe project-relative path such as "
             "`docs/features/trading/index.md`; never use an absolute path, `..`, a URI, or prose in changed_files. "
@@ -149,10 +152,15 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "plus at most a two-sentence summary. If report publication fails, return only the exact error and a "
             "short blocker description."
         )
-    closure_contract = (
-        "`record_report` needs top-level `gate_result` (not inside the eight-key report); "
-        "follow the tool schema. Top-level `closure` remains review/close compatibility only."
-    )
+    if package.get("gate") in {"review", "close"}:
+        closure_contract = (
+            f"This {package.get('gate')} report needs matching top-level `gate_result` and `closure`; keep both "
+            f"outside the {len(REPORT_FIELDS)}-key report."
+        )
+    else:
+        closure_contract = (
+            "Optional `gate_result` stays top-level; never add `closure` outside review/close."
+        )
     briefing_transport_contract = (
         "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "
         f"dispatch_ref={package.get('dispatch_ref')!r}. The native bootstrap authorized reading this exact briefing "
@@ -330,6 +338,10 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "use worker_question. Treat requirements as user intent only when supported by the exact request, a "
             "durable user answer, or verified external authority."
         )
+    if package.get("gate") == "close":
+        phase_completion_contract = "Final close evaluates both gate-level and task-level contracts."
+    else:
+        phase_completion_contract = "Judge only this gate; unfinished downstream task outcomes are not blockers."
 
     return "\n".join((
         f"You are the internal Cortex worker with profile `{agent}`.",
@@ -367,6 +379,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         prompt_list("Gate success criteria", package["acceptance_criteria"]),
         prompt_list("Task-level validation", package.get("task_verification", [])),
         prompt_list("Required gate verification", package["verification"]),
+        phase_completion_contract,
         prompt_list("Pause conditions", package.get("pause_conditions", [])),
         f"Budget or operating limit: {package.get('budget') or 'none supplied'}",
         "",

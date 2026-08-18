@@ -74,8 +74,10 @@
   `worker`; a parallel wave must return every unique integer worker slot once.
   Stale, duplicate, missing, foreign, or changed retries fail before task-state
   writes.
-- Successful results carry a compact `report_ref`. Workers persist all eight
-  `cortex/report/v1` sections through the scoped public `record_report` tool,
+- Successful results carry a compact `report_ref`. Workers persist exactly
+  these ordered seven `cortex/report/v1` fields through the scoped public
+  `record_report` tool: `summary`, `findings`, `questions`, `changed_files`,
+  `tests`, `evidence`, and `uncertainty`.
   then return only `REPORT_RECORDED report_ref=<value>` plus at most a
   two-sentence summary. The coordinator reads the full report through
   `read_worker_report`; successor workers may use that tool only for explicitly
@@ -446,7 +448,9 @@ and v8 ledger. They are not caller-facing request envelopes.
   independent completeness review. Refreshes rebuild the inventory, preserve
   manual text outside generated blocks, require zero unexplained unmapped
   surfaces, and finish only after a no-change second documentation plan.
-- A worker report must contain exactly the eight `cortex/report/v1` fields.
+- A worker report must contain exactly the seven ordered `cortex/report/v1`
+  fields: `summary`, `findings`, `questions`, `changed_files`, `tests`,
+  `evidence`, and `uncertainty`.
   Reports are size/item bounded, sanitized, task-bound, and tied to a real
   delegation attempt. Use an empty list rather than omitting a field; reuse a
   `submission_id` only for an identical payload and mint a new id for a

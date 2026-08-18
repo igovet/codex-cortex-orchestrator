@@ -136,7 +136,7 @@ class CortexHostPreflightTests(unittest.TestCase):
         environment = os.environ.copy()
         environment.update(
             {
-                "PATH": os.pathsep.join([str(bin_dir), str(Path(sys.executable).parent)]),
+                "PATH": str(bin_dir),
                 "HOME": str(home),
                 "CODEX_HOME": str(codex_home),
                 "CORTEX_PYTHON": sys.executable,

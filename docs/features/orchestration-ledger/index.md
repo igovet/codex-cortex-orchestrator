@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 7.1.1 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 7.1.2 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -598,12 +598,12 @@ during retirement.
 
 ## Verification
 
-The complete source-tree suite passes all 463 tests. Focused plan-approval,
-sequential-question, dynamic-rework, report-contract, host-preflight, and
-control-plane regressions pass, as do marketplace validation and cold boot.
-The live command uses this checkout as its MCP server
-and does not install, reinstall, update, or verify an installed plugin.
-Installation-bound checks and tracked-release verification remain separate
-release work. Related commands and boundaries are in
+The focused 25-test regression set passes with `ResourceWarning` treated as an
+error. Cold boot passes on Python 3.11 and 3.12; marketplace, AST, shell,
+deterministic fixtures, benchmark, and the isolated fresh-plugin probe pass.
+The full unit suites and source-mode live command remain pending. The live
+command uses this checkout as its MCP server and does not install, reinstall,
+update, or verify an installed plugin. Installation-bound checks and
+tracked-release verification remain separate release work. Related commands and boundaries are in
 [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

@@ -2307,9 +2307,13 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         select_project_root=select_project_root,
     )
 
-REPORT_FIELDS = set(PROFILE_CONTRACT.get("shared_worker_contract", {}).get("required_report_fields", []))
-if REPORT_FIELDS != {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"}:
+REPORT_FIELDS = tuple(PROFILE_CONTRACT.get("shared_worker_contract", {}).get("required_report_fields", []))
+EXPECTED_REPORT_FIELDS = (
+    "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
+)
+if REPORT_FIELDS != EXPECTED_REPORT_FIELDS:
     raise RuntimeError("bundled Cortex shared worker report contract is invalid")
+REPORT_FIELD_SET = frozenset(REPORT_FIELDS)
 
 
 INTENT_CLOSURE_GATES = AVAILABLE_GATES - {"discover"}
@@ -2408,9 +2412,9 @@ def _safe_project_relative_path(value: Any) -> str:
 
 
 def sanitize_report_payload(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != REPORT_FIELDS:
-        missing = sorted(REPORT_FIELDS - set(value) if isinstance(value, dict) else REPORT_FIELDS)
-        unknown = sorted(set(value) - REPORT_FIELDS) if isinstance(value, dict) else []
+    if not isinstance(value, dict) or set(value) != REPORT_FIELD_SET:
+        missing = sorted(REPORT_FIELD_SET - set(value) if isinstance(value, dict) else REPORT_FIELD_SET)
+        unknown = sorted(set(value) - REPORT_FIELD_SET) if isinstance(value, dict) else []
         detail = []
         if missing:
             detail.append("missing: " + ", ".join(missing))
@@ -4805,7 +4809,10 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
             raw_planning = record.get("planning")
             if raw_planning is not None:
                 if attempt.get("gate") != "plan" or attempt.get("profile") != "planner":
-                    raise ValueError(f"report record failed reconciliation: {path.name}")
+                    raise ValueError(
+                        f"report record {report_id!r} failed reconciliation: "
+                        "planning is allowed only for planner plan reports"
+                    )
                 planning = sanitize_planning_payload(raw_planning, persisted=True)
                 digest_input: Any = {"report": sanitized, "planning": planning}
             else:
@@ -8232,7 +8239,7 @@ TOOLS = {
     "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string", "minLength": 1, "description": "Native child id; for create_thread pass the returned threadId here."}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
     "finalize_attempt": (finalize_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "status"]}),
     "complete_attempt": (complete_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string"}, "host_task_name": {"type": "string"}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}, "submission_id": {"type": "string"}, "report": {"type": "object"}}, "required": ["task_id", "principal", "attempt_id"]}),
-    "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}}, "required": sorted(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
+    "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}}, "required": list(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
     "cortex.question": (cortex_question, QUESTION_TOOL_SCHEMA),
     "publish_worker_question": (publish_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "submission_id": {"type": "string"}, "question": {"type": "string", "minLength": 1}, "header": {"type": "string"}, "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA}, "multiple": {"type": "boolean"}, "custom_label": {"type": "string"}, "context": {}, "blocking": {"type": "boolean"}}, "required": ["task_id", "principal", "attempt_id", "submission_id", "question"]}),
     "list_worker_questions": (list_worker_questions, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": ["open", "answered"]}}, "required": ["task_id", "principal"]}),

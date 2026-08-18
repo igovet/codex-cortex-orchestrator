@@ -542,6 +542,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_public_report_contract_keeps_closure_as_top_level_review_sibling(self):
         schema = control.WORKER_RECORD_REPORT_SCHEMA
+        contract = json.loads(
+            (Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8")
+        )
+        required_report_fields = contract["shared_worker_contract"]["required_report_fields"]
+        self.assertEqual(list(control.REPORT_FIELDS), required_report_fields)
+        self.assertEqual(schema["properties"]["report"]["required"], required_report_fields)
         self.assertEqual(
             set(schema["properties"]["report"]["properties"]),
             {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"},
@@ -571,10 +577,19 @@ class OrchestrationInvariantTests(unittest.TestCase):
         }
         review_prompt = control.host_spawn_prompt("code_reviewer", package)
         self.assertIn("top-level `gate_result`", review_prompt)
-        self.assertIn("Top-level `closure` remains review/close compatibility only", review_prompt)
+        self.assertIn("needs matching top-level `gate_result` and `closure`", review_prompt)
+        self.assertIn("outside the 7-key report", review_prompt)
         package["gate"] = "close"
         close_prompt = control.host_spawn_prompt("build_verification", package)
-        self.assertIn("top-level `gate_result`", close_prompt)
+        self.assertIn("needs matching top-level `gate_result` and `closure`", close_prompt)
+
+    def test_installable_orchestrator_releases_completed_native_agent_slots(self):
+        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Before every new native", skill)
+        self.assertIn("use `list_agents` defensively", skill)
+        self.assertIn("exact failed result Cortex already accepted", skill)
+        self.assertIn("close that exact completed native child", skill)
+        self.assertIn("Never close a running child", skill)
 
     def test_sync_detects_and_repairs_same_version_plugin_content_drift(self):
         if not shutil.which("codex"):
@@ -1638,6 +1653,62 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_server_and_manifest_versions_match(self):
         manifest = json.loads((Path(__file__).parents[1] / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], control.SERVER_VERSION)
+
+    def test_release_version_is_synchronized_across_current_contract_sources(self):
+        repository = Path(__file__).parents[1]
+        manifest = json.loads(
+            (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        base_version = manifest["version"].split("+", 1)[0]
+        self.assertEqual(base_version, "7.1.2")
+        expected_markers = {
+            "README.md": f"Cortex-{base_version}",
+            "CHANGELOG.md": f"## [{base_version}]",
+            "docs/release-readiness.md": base_version,
+            "docs/project/verification.md": base_version,
+            "docs/features/plugin-packaging/index.md": base_version,
+            "docs/features/orchestration-ledger/index.md": base_version,
+            "scripts/validate-cortex-marketplace.py": f'base_version != "{base_version}"',
+            "scripts/sync-cortex.sh": f'base_version != "{base_version}"',
+        }
+        for relative, marker in expected_markers.items():
+            self.assertIn(marker, (repository / relative).read_text(encoding="utf-8"), relative)
+
+    def test_current_contract_sources_reject_stale_report_and_tool_counts(self):
+        repository = Path(__file__).parents[1]
+        stale_contract = re.compile(
+            r"\beight(?:[- ](?:field|key|sections?)| report sections?)\b|\bsix tools\b",
+            re.IGNORECASE,
+        )
+        roots = [repository / name for name in ("AGENTS.md", "CHANGELOG.md", "docs", "scripts", "plugins")]
+        for root in roots:
+            paths = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
+            for path in paths:
+                if path.suffix not in {"", ".md", ".py", ".json", ".toml", ".sh"}:
+                    continue
+                self.assertIsNone(
+                    stale_contract.search(path.read_text(encoding="utf-8", errors="ignore")),
+                    str(path.relative_to(repository)),
+                )
+
+    def test_ci_runs_complete_cross_version_release_gates(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/cortex.yml").read_text(encoding="utf-8")
+        for marker in (
+            'python-version: ["3.11", "3.12"]',
+            "unittest discover -s tests -v",
+            "error::ResourceWarning",
+            "validate-cortex-marketplace.py",
+            "ast.parse",
+            "bash -n plugins/cortex/scripts/cortex-launcher scripts/sync-cortex.sh",
+            "git diff --check",
+            "cortex-cold-boot-smoke.py",
+            "cortex-luna-high-eval.py",
+            "cortex-composite-benchmark.py --workers 8 --waves 5",
+            "probe-fresh-cortex-plugin.py",
+            "verify-cortex-release.py --require-tracked",
+        ):
+            self.assertIn(marker, workflow)
+        self.assertNotIn("tests.test_ledger_db", workflow)
 
     def test_user_requested_model_schema_is_explicit_and_sol_escalation_is_removed(self):
         for tool_name in ("resolve_dispatch_route", "record_delegation"):

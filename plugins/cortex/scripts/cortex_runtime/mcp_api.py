@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 
@@ -13,7 +13,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
     "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "record_report": "Worker-only operation: validate and persist the strict seven-field report. Every report.tests item has exactly command, cwd, exit_code, and evidence. Planner planning packages allow id/title/objective/microtasks plus optional allowed_paths/depends_on; profile and the required acceptance_criteria/verification belong on each microtask. gate_result is top-level. Do not paste the report body into the parent channel after success.",
+    "record_report": "Worker-only operation: validate and persist the strict seven-field report. Every report.tests item has exactly command, cwd, exit_code, and evidence. Planner planning packages allow id/title/objective/microtasks plus optional allowed_paths/depends_on; profile and the required acceptance_criteria/verification belong on each microtask. Optional gate_result is top-level; review/close require gate_result or compatible closure. Do not paste the report body into the parent channel after success.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -23,7 +23,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
 def build_public_schemas(
     *,
     agents: Mapping[str, Any],
-    report_fields: set[str],
+    report_fields: Sequence[str],
     max_report_items: int,
     max_work_packages: int,
     max_microtasks_per_package: int,
@@ -56,7 +56,7 @@ def build_public_schemas(
     V3_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Strict cortex/report/v1 object with exactly seven fields. Review and close closure belongs beside this object, never inside it.",
+        "description": f"Strict cortex/report/v1 object with exactly {len(report_fields)} fields. Review and close closure belongs beside this object, never inside it.",
         "properties": {
             "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
             "findings": {"type": "array", "maxItems": max_report_items},
@@ -91,7 +91,7 @@ def build_public_schemas(
             },
             "uncertainty": {"type": "array", "maxItems": max_report_items},
         },
-        "required": sorted(report_fields),
+        "required": list(report_fields),
     }
     CLOSURE_FINDING_SCHEMA = {
         "type": "object",
@@ -355,6 +355,7 @@ def build_public_schemas(
                     "properties": {
                         "worker": {"type": "integer", "minimum": 1, "description": "Required only for a parallel wave."},
                         "report_ref": {"type": "string", "minLength": 1, "description": "Compact ref returned by the worker's record_report call. Successful public continuation uses this field, never an inline report body."},
+                        "dispatch_ref": {"type": "string", "minLength": 1, "description": "Exact dispatch ref returned by Cortex; required only for a non-success result so stale failures cannot target a replacement attempt."},
                         "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
                         "reason": {"type": "string", "description": "Required for a non-success result."},
                     },
@@ -369,7 +370,7 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Worker report request. report remains exactly seven fields; gate_result is the canonical result envelope for every gate and closure is the temporary review/close alias.",
+        "description": f"Worker report request. report remains exactly {len(report_fields)} fields; optional gate_result is a top-level canonical result envelope, while review/close require gate_result or the temporary closure alias.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
@@ -570,15 +571,21 @@ def v3_response(
             if start_replayed is not None else ""
         )
         next_action = (
-            f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: call every dispatch.call once with its exact "
-            "dispatch.arguments in one model turn when the host supports parallel tool calls. Exact task_name and "
-            "dispatch identity bind out-of-order SubagentStart events; ordinal correlation is forbidden. A worker is "
-            "dispatched only after that native call returns a child id. Never claim "
+            f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: FIRST, with close_agent when available, close "
+            "every known completed child whose durable report was read or whose exact failed result Cortex already "
+            "accepted; never close a running or question-paused child. If recovery may have missed a terminal child, "
+            "use list_agents defensively and apply the same eligibility rule. THEN call "
+            "every dispatch.call once with its exact dispatch.arguments in one model turn when the host supports "
+            "parallel tool calls. Exact task_name and dispatch identity bind out-of-order SubagentStart events; "
+            "ordinal correlation is forbidden. "
+            "A worker is dispatched only after that native call returns a child id. Never claim "
             "it was sent or call wait without the returned child target; if the native call is unavailable or fails, "
             "stop and report the blocker. Keep the returned child targets, then remain idle and wait only for them. Do not repeat a "
             "completed lifecycle call while dispatching. Each worker publishes through record_report and returns only "
             "a report_ref plus a short summary. Read every ref with read_worker_report and immediately publish its "
-            "report_markdown_link verbatim before another lifecycle call. Reassess the pipeline, then call "
+            "report_markdown_link verbatim before another lifecycle call. After the durable report was read and no "
+            "question or follow-up remains, close that exact completed native child with close_agent when available; "
+            "the Cortex report remains authoritative after native cleanup. Reassess the pipeline, then call "
             f"continue_orchestration with task_ref={task_ref}, the report_ref values, and this step."
         )
     elif outcome == "awaiting_plan_approval":

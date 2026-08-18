@@ -29,17 +29,21 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -q`
-  passed all **463 tests**. The focused host-preflight and reportless-stop
-  recovery suites listed below also passed.
-- `python3 scripts/cortex-cold-boot-smoke.py` passed.
-- `python3 scripts/validate-cortex-marketplace.py` and
-  `bash -n scripts/sync-cortex.sh` passed.
-- `python3 scripts/cortex-luna-high-eval.py --live --scenario
-  automatic_sequential` passed against this workspace's source tree. This is
-  live source-mode validation in an isolated temporary project: it points its
-  MCP server at the checkout and does **not** install, reinstall, update, or
-  otherwise verify a user's installed Cortex plugin.
+- The focused 25-test regression set passed with `ResourceWarning` treated as
+  an error. The full Python 3.11 discovery run executed 469 tests; two new
+  documentation/version invariant tests failed because the candidate docs had
+  not yet been synchronized. The full Python 3.12 result is pending.
+- Cold boot passed on Python 3.11 and 3.12 (8 reports and 7 continuation calls).
+- Marketplace validation, AST parsing of 57 Python files, Bash syntax, and
+  `git diff --check` passed. Deterministic evaluator fixtures for
+  `automatic_sequential`, `compact_parallel`, and `blocked_resume` completed.
+- The composite benchmark passed (22 calls versus a 50-call baseline,
+  reduction `0.56`, `target_met=true`). The isolated fresh-plugin probe passed
+  for `7.1.2+codex.20260818103113` in temporary `HOME`/`CODEX_HOME`.
+- Source-mode live validation is pending; a skipped live run is not evidence of
+  a pass. When run, it uses this workspace's source tree in an isolated
+  temporary project and does **not** install, reinstall, update, or otherwise
+  verify a user's installed Cortex plugin.
 - The reportless-stop recovery coverage includes terminal failed-stop handling,
   exact failed receipts, mixed-wave slot preservation, bounded retry failure,
   and the ordering-sensitive PostToolUse case where an earlier reportless
@@ -94,11 +98,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `7.1.1`. These results are evidence for
-the checked-out source only; release publication and installed-plugin
+The source manifest declares `7.1.2+codex.20260818103113`. These results are
+evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 7.1.1 source contract
+## Current 7.1.2 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -117,8 +121,7 @@ verification remain separate, explicitly requested actions.
   launcher-based MCP and five-hook configuration, marketplace validation, and
   fresh-plugin probing. A release candidate must pass the full regression,
   cold-boot, fresh-plugin, and tracked-archive checks before publication.
-- The public executable was reduced from 11,831 to 7,576 lines. It is a small
-  public composition and stdio entrypoint; focused runtime modules own the
+- The public executable is a composition and stdio entrypoint; focused runtime modules own the
   orchestration engine, SQLite ledger/migrations, artifact transport,
   delegation persistence, gate transitions, harvest validation, reports,
   questions, briefings, and MCP schema transport. Behavioral tests import the

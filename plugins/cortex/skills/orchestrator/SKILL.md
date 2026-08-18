@@ -368,6 +368,15 @@ call it once.
    after the reported cause is actually repaired; resume starts a fresh bounded
    recovery cycle.
 
+   Native agent slots have their own lifecycle. Before every new native
+   `spawn_agent`, use `close_agent` when available to release every known
+   completed child whose durable report was already read and consumed, or whose
+   exact failed result Cortex already accepted. Never close a running child or
+   one paused on a durable question. If recovery may have missed a terminal
+   child, use `list_agents` defensively and apply the same eligibility rule.
+   This collection recovers cleanup missed by a prior error or recovery path;
+   increasing the host slot limit is not a substitute for cleanup.
+
    Every gate report must publish a separate top-level `gate_result` envelope with
    `decision`, `failure_class`, `findings`, `verification`, and `workspace`.
    It is canonical for all gates, including QA and implementation. The older
@@ -382,7 +391,11 @@ call it once.
    call or additional report read. This is mandatory coordinator output, not
    optional metadata. The link supplements—not replaces—the concise summary
    and full report review. Never guess, substitute, or use the path to browse
-   unrelated files. Then decide whether the coordinator-owned pipeline still fits, then call
+   unrelated files. After the durable report is read and no question or
+   follow-up remains, close that exact completed native child with
+   `close_agent` when the host exposes it. The Cortex ledger/report bus is then
+   authoritative and the released child slot must not be used as state. Then
+   decide whether the coordinator-owned pipeline still fits, then call
    `continue_orchestration` once with `project_root`, the returned opaque
    `task_ref`, relative `step`, and results containing `report_ref`. A
    single-worker result may omit its slot; parallel results repeat the returned

@@ -60,6 +60,25 @@ class VerificationFixtureContractTests(unittest.TestCase):
         self.assertTrue(luna)
         self.assertTrue(all(item["outcome"] == "completed" for item in luna))
 
+    def test_live_prompt_uses_the_ordered_profile_report_contract(self) -> None:
+        fields = list(cortex.REPORT_FIELDS)
+        prompt = LUNA_EVAL.live_prompt("automatic_sequential", Path("/workspace/cortex-live"))
+        self.assertIn(
+            f"exactly {len(fields)} report fields: {', '.join(fields)}",
+            prompt,
+        )
+        self.assertIn("separate compatible top-level closure sibling", prompt)
+        self.assertIn("both a top-level gate_result", prompt)
+        self.assertIn(f"strict {len(fields)}-key report", prompt)
+        self.assertIn("Treat a native child as successful only", prompt)
+        self.assertIn("status=failed, the exact dispatch_ref", prompt)
+        self.assertIn("never submit an empty result or a reportless success", prompt)
+        self.assertIn("close the completed native child with close_agent", prompt)
+        self.assertIn("Before every new spawn, FIRST close every known leftover completed child", prompt)
+        self.assertIn("use list_agents defensively", prompt)
+        self.assertIn('"complexity":"C2"', prompt)
+        self.assertIn("Verified note: README heading is Luna high Cortex fixture.", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

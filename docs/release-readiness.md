@@ -11,7 +11,8 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `7.1.1` (an installed build may carry a `+codex.<build>` suffix).
+  `7.1.2` (the current candidate is
+  `7.1.2+codex.20260818103113`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -51,15 +52,16 @@ installation source is available; no guessed package-source command is a
 release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
 for the safe same-user sequence and the bounded stopped-worker recovery.
 
-The 7.1.1 source candidate must be verified by the full test suite,
-marketplace validation, Python compilation, shell syntax, the isolated
-fresh-plugin probe, and installed-content verification at
-`7.1.1+codex.20260818124805`. The final Luna-high automatic-sequential live
-run for that installed build must be recorded with close evidence, handoff,
-and snapshot cleanup. File-size hardening covers the 8 MiB ordinary-JSON
-bound with fail-before-replace diagnostics, the separate 64 MiB manifest
-bound, bounded handoff/reconciliation snapshots, and fail-closed diagnostics
-for oversized artifacts. The 7.1.1 ledger starts from SQLite only: its
+The 7.1.2 source candidate has passed the focused regression set, marketplace
+validation, AST and shell checks, cold boot on Python 3.11/3.12, deterministic
+fixtures, benchmark, and an isolated fresh-plugin probe. Full unit suites and
+source-mode live validation remain pending; a skipped live run is not evidence
+of a pass. The installed user plugin remains 6.6.0 and is out of scope; no
+installation or `~/.codex` mutation is part of this candidate. File-size
+hardening covers the 8 MiB ordinary-JSON bound with fail-before-replace
+diagnostics, the separate 64 MiB manifest bound, bounded handoff/reconciliation
+snapshots, and fail-closed diagnostics for oversized artifacts. The 7.1.2
+ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
 the user MCP approval override. Live-model and tracked-release validation are
@@ -70,7 +72,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 7.1.1 release commit only with explicit authorization.
+- Create the Cortex 7.1.2 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or
