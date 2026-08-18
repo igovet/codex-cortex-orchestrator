@@ -2746,6 +2746,8 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         raise ValueError(f"planning work_packages must contain 1..{MAX_WORK_PACKAGES} items")
     packages: list[dict[str, Any]] = []
     package_ids: set[str] = set()
+    microtask_ids: set[str] = set()
+    microtask_dependencies: dict[str, list[str]] = {}
     total_microtasks = 0
     for index, raw_package in enumerate(raw_packages, 1):
         if not isinstance(raw_package, dict):
@@ -2763,8 +2765,6 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         if not isinstance(raw_microtasks, list) or not raw_microtasks or len(raw_microtasks) > MAX_MICROTASKS_PER_PACKAGE:
             raise ValueError(f"planning package {package_id!r} must contain 1..{MAX_MICROTASKS_PER_PACKAGE} microtasks")
         microtasks: list[dict[str, Any]] = []
-        microtask_ids: set[str] = set()
-        microtask_dependencies: dict[str, list[str]] = {}
         for micro_index, raw_microtask in enumerate(raw_microtasks, 1):
             if not isinstance(raw_microtask, dict):
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} must be an object")
@@ -2776,7 +2776,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} is invalid (" + "; ".join(details) + ")")
             microtask_id = _planning_identifier(raw_microtask.get("id"), "planning microtask id")
             if microtask_id in microtask_ids:
-                raise ValueError(f"planning package {package_id!r} microtask ids must be unique")
+                raise ValueError("planning microtask ids must be unique across work packages")
             microtask_ids.add(microtask_id)
             profile = str(raw_microtask.get("profile") or "").strip()
             if profile:
@@ -2812,7 +2812,6 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 "acceptance_criteria": microtask_acceptance,
                 "verification": microtask_verification,
             })
-        _validate_planning_dependency_graph(microtask_ids, microtask_dependencies, f"planning package {package_id!r} microtask")
         total_microtasks += len(microtasks)
         if total_microtasks > MAX_MICROTASKS_PER_PLAN:
             raise ValueError(f"planning may contain at most {MAX_MICROTASKS_PER_PLAN} microtasks")
@@ -2831,6 +2830,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             "microtasks": microtasks,
         })
     _validate_planning_dependency_graph(package_ids, {item["id"]: item["depends_on"] for item in packages}, "planning package")
+    _validate_planning_dependency_graph(microtask_ids, microtask_dependencies, "planning microtask")
     result = {"schema": PLANNING_SCHEMA, "overview": overview, "work_packages": packages}
     if len(json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")) > MAX_PLANNING_BYTES:
         raise ValueError(f"planning exceeds the {MAX_PLANNING_BYTES}-byte limit")
@@ -2888,6 +2888,7 @@ def materialize_planning_artifacts(
         "source_attempt_id": attempt["attempt_id"],
         "summary": report["summary"],
         "overview": planning["overview"],
+        "overview_artifact_path": f"planning/revisions/{revision}/overview.md",
         "work_packages": [
             {
                 "id": package["id"], "title": package["title"], "objective": package["objective"],
@@ -2937,13 +2938,14 @@ def materialize_planning_artifacts(
     )
     db_put_task_document(root, state["task_id"], "planning_current", manifest)
     overview = _planning_overview_markdown({**manifest, "work_packages": packages})
+    overview_path = str(manifest["overview_artifact_path"])
     overview_artifact = store_immutable_artifact(
-        task_dir, state["task_id"], kind="planning_overview", title="planning/overview.md",
-        mime_type="text/markdown", content=overview, export_path="planning/overview.md",
+        task_dir, state["task_id"], kind="planning_overview", title=overview_path,
+        mime_type="text/markdown", content=overview, export_path=overview_path,
     )
     enqueue_projection(
         root=root, task_id=state["task_id"], artifact_id=overview_artifact["artifact_ref"],
-        projection_type="planning_overview", export_path="planning/overview.md",
+        projection_type="planning_overview", export_path=overview_path,
     )
     return manifest
 
@@ -3773,7 +3775,7 @@ def _validate_gate_result_report(
                     )
             if isinstance(exit_code, bool) or not isinstance(exit_code, int):
                 raise ValueError(f"{gate} result test {index} exit_code must be an integer")
-            if len(re.findall(r"[A-Za-z0-9]+", check_evidence)) < 5:
+            if not check_evidence:
                 raise ValueError(f"{gate} result test {index} needs a concrete observed output summary")
             if exit_code == 0:
                 successful_checks += 1
@@ -3808,7 +3810,7 @@ def _validate_gate_result_report(
             missing_markers.append(prefix.rstrip())
             continue
         detail = matching[0][len(prefix):].strip()
-        if len(re.findall(r"[A-Za-z0-9]+", detail)) < 5 or any(marker in detail.lower() for marker in weak_detail):
+        if not detail or any(marker in detail.lower() for marker in weak_detail):
             invalid_markers.append(prefix.rstrip())
     if missing_markers:
         raise ValueError("result evidence is missing required contract markers: " + "; ".join(missing_markers))
@@ -8237,12 +8239,14 @@ from cortex_runtime.questions import (
     worker_question,
 )
 from cortex_runtime.reports import (
+    get_report_template,
     get_delegation_reports,
     list_task_reports,
     publish_worker_report,
     read_dispatch_briefing,
     read_worker_report,
     record_report,
+    validate_report_draft,
 )
 
 
@@ -8414,6 +8418,8 @@ START_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["start_orchestration"]
 CONTINUE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["continue_orchestration"]
 MANAGE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["manage_orchestration"]
 WORKER_QUESTION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_question"]
+WORKER_GET_REPORT_TEMPLATE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["get_report_template"]
+WORKER_VALIDATE_REPORT_DRAFT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["validate_report_draft"]
 WORKER_RECORD_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["record_report"]
 READ_DISPATCH_BRIEFING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_dispatch_briefing"]
 READ_WORKER_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_worker_report"]
@@ -8476,6 +8482,10 @@ PUBLIC_TOOLS = build_public_tools(
     TOOLS,
     worker_question=worker_question,
     worker_question_schema=WORKER_QUESTION_SCHEMA,
+    get_report_template=get_report_template,
+    get_report_template_schema=WORKER_GET_REPORT_TEMPLATE_SCHEMA,
+    validate_report_draft=validate_report_draft,
+    validate_report_draft_schema=WORKER_VALIDATE_REPORT_DRAFT_SCHEMA,
     record_report=publish_worker_report,
     record_report_schema=WORKER_RECORD_REPORT_SCHEMA,
     read_dispatch_briefing=read_dispatch_briefing,

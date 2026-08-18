@@ -4,6 +4,20 @@ All notable public changes to Cortex are recorded here. Release entries use
 semantic versions; the plugin manifest adds a unique Codex cachebuster to the
 same base version.
 
+## [8.1.0] - 2026-08-18
+
+- Add side-effect-free `get_report_template` and `validate_report_draft` worker
+  tools. Draft validation returns field paths, concrete fixes, and a digest for
+  one unchanged atomically persisted `record_report` payload without consuming
+  the three-failed-attempt recovery budget.
+- Keep revised Planner reports collision-free by storing every overview under
+  its immutable `planning/revisions/plan-<report-ref>/overview.md` revision;
+  `planning_current` remains the current-plan pointer.
+- Accept globally unique cross-package microtask dependencies while preserving
+  unknown-reference and whole-plan cycle rejection.
+- Accept concise, non-empty executed-check evidence instead of requiring an
+  arbitrary minimum word count that could discard valid QA reports.
+
 ## [8.0.0] - 2026-08-18
 
 - Separate evidence-first `scope` from the final `plan`; C2 starts with

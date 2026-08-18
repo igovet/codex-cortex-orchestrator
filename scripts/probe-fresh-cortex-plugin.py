@@ -145,9 +145,17 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: configured Cortex launcher failed to start")
         rows = [json.loads(line) for line in rpc.stdout.splitlines() if line.strip()]
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
-        expected_tools = {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report"}
+        expected_tools = {
+            "start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question",
+            "get_report_template", "validate_report_draft", "record_report",
+            "read_dispatch_briefing", "read_worker_report",
+        }
         if set(tools) != expected_tools:
             raise SystemExit("fresh plugin probe: Cortex public tool set is incomplete")
+        if "validation_digest" not in tools["record_report"]["inputSchema"]["properties"]:
+            raise SystemExit("fresh plugin probe: atomic report schema lacks validation_digest")
+        if tools["validate_report_draft"]["inputSchema"]["properties"]["report"] != {"type": "object"}:
+            raise SystemExit("fresh plugin probe: draft validator does not accept malformed report objects")
         workspace = base / "workspace"
         workspace.mkdir()
         rejected = mcp_tool(launcher, entrypoint, environment, workspace, "start_orchestration", {

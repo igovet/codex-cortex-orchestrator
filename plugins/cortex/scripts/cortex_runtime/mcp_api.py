@@ -13,7 +13,9 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
     "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "record_report": "Worker-only operation: validate and persist the strict seven-field report. Planner Scope requires a top-level scoping discovery brief. Planner Plan requires a top-level planning work breakdown; profile and the required acceptance_criteria/verification belong on each microtask. Every report.tests item has exactly command, cwd, exit_code, and evidence. Optional gate_result is top-level; review/close require gate_result or compatible closure. Do not paste the report body into the parent channel after success.",
+    "get_report_template": "Worker-only read operation: return the exact report skeleton, required top-level envelopes, generated evidence markers, and gate-specific placeholders for this active task and attempt. It persists nothing and consumes no worker attempt.",
+    "validate_report_draft": "Worker-only read operation: validate the complete report payload through the same canonical checks as record_report; it persists nothing and consumes no worker retry budget. Repeat until draft_valid=true, then pass validation_digest with the unchanged payload to record_report.",
+    "record_report": "Worker-only atomic operation: revalidate and persist one strict seven-field report after validate_report_draft succeeds. Planner Scope requires a top-level scoping discovery brief. Planner Plan requires a top-level planning work breakdown; profile and the required acceptance_criteria/verification belong on each microtask. Every report.tests item has exactly command, cwd, exit_code, and evidence. Optional gate_result is top-level; review/close require gate_result or compatible closure. Do not paste the report body into the parent channel after success.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -30,7 +32,7 @@ def build_public_schemas(
     max_discovery_domains: int,
     question_option_schema: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Build the seven public contracts independently of internal handlers."""
+    """Build the nine public contracts independently of internal handlers."""
     EXECUTED_TEST_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -411,6 +413,11 @@ def build_public_schemas(
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Exact attempt_id from this worker's Cortex briefing; never substitute a phase or profile."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Exact canonical profile from this worker's Cortex briefing."},
+            "validation_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Digest returned by validate_report_draft for this exact unchanged complete payload.",
+            },
             "report": V3_REPORT_SCHEMA,
             "gate_result": GATE_RESULT_SCHEMA,
             "closure": CLOSURE_SCHEMA,
@@ -418,6 +425,34 @@ def build_public_schemas(
             "planning": V3_PLANNING_SCHEMA,
         },
         "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
+    }
+    WORKER_VALIDATE_REPORT_DRAFT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Permissive draft envelope; semantic validation returns field paths and fixes without persistence.",
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1},
+            "task_id": {"type": "string", "minLength": 1},
+            "attempt_id": {"type": "string", "minLength": 1},
+            "profile": {"type": "string", "enum": sorted(agents)},
+            "report": {"type": "object"},
+            "gate_result": {"type": "object"},
+            "closure": {"type": "object"},
+            "scoping": {"type": "object"},
+            "planning": {"type": "object"},
+        },
+        "required": ["project_root", "task_id", "attempt_id", "profile", "report"],
+    }
+    WORKER_GET_REPORT_TEMPLATE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1},
+            "task_id": {"type": "string", "minLength": 1},
+            "attempt_id": {"type": "string", "minLength": 1},
+            "profile": {"type": "string", "enum": sorted(agents)},
+        },
+        "required": ["project_root", "task_id", "attempt_id", "profile"],
     }
     WORKER_QUESTION_SCHEMA = {
         "type": "object",
@@ -530,6 +565,8 @@ def build_public_schemas(
         "continue_orchestration": CONTINUE_ORCHESTRATION_SCHEMA,
         "manage_orchestration": MANAGE_ORCHESTRATION_SCHEMA,
         "worker_question": WORKER_QUESTION_SCHEMA,
+        "get_report_template": WORKER_GET_REPORT_TEMPLATE_SCHEMA,
+        "validate_report_draft": WORKER_VALIDATE_REPORT_DRAFT_SCHEMA,
         "record_report": WORKER_RECORD_REPORT_SCHEMA,
         "read_dispatch_briefing": READ_DISPATCH_BRIEFING_SCHEMA,
         "read_worker_report": READ_WORKER_REPORT_SCHEMA,
@@ -890,6 +927,10 @@ def public_tools(
     *,
     worker_question: Callable[..., Any],
     worker_question_schema: dict[str, Any],
+    get_report_template: Callable[..., Any],
+    get_report_template_schema: dict[str, Any],
+    validate_report_draft: Callable[..., Any],
+    validate_report_draft_schema: dict[str, Any],
     record_report: Callable[..., Any],
     record_report_schema: dict[str, Any],
     read_dispatch_briefing: Callable[..., Any],
@@ -897,12 +938,14 @@ def public_tools(
     read_worker_report: Callable[..., Any],
     read_worker_report_schema: dict[str, Any],
 ) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
-    """Return the only seven MCP operations exposed to hosts and workers."""
+    """Return the only nine MCP operations exposed to hosts and workers."""
     return {
         "start_orchestration": internal_handlers["start_orchestration"],
         "continue_orchestration": internal_handlers["continue_orchestration"],
         "manage_orchestration": internal_handlers["manage_orchestration"],
         "worker_question": (worker_question, worker_question_schema),
+        "get_report_template": (get_report_template, get_report_template_schema),
+        "validate_report_draft": (validate_report_draft, validate_report_draft_schema),
         "record_report": (record_report, record_report_schema),
         "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
         "read_worker_report": (read_worker_report, read_worker_report_schema),

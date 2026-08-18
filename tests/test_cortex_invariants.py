@@ -114,6 +114,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("ordinary task needs non-empty task.acceptance_criteria", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
         self.assertIn("Every report.tests item has exactly command, cwd, exit_code, and evidence", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
         self.assertIn("profile and the required acceptance_criteria/verification belong on each microtask", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
+        self.assertIn("persists nothing", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["validate_report_draft"])
+        self.assertIn("exact report skeleton", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["get_report_template"])
         task_schema = control.START_ORCHESTRATION_SCHEMA["properties"]["task"]
         ordinary_contract = task_schema["anyOf"][0]
         self.assertEqual(
@@ -1216,7 +1218,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("internal worker, never user-facing", context)
         self.assertIn("native parent channel", context)
         self.assertIn("public worker_question when needed", context)
-        self.assertIn("public record_report once after all blocking questions are answered", context)
+        self.assertIn("public record_report after all blocking questions are answered", context)
+        self.assertIn("public get_report_template", context)
+        self.assertIn("public validate_report_draft", context)
+        self.assertIn("draft_valid=true", context)
+        self.assertIn("consume no worker attempt", context)
         self.assertIn("REPORT_RECORDED report_ref=<value>", context)
         self.assertIn("never paste the report JSON", context)
         self.assertIn("Never call Cortex lifecycle", context)
@@ -1299,7 +1305,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("The public Cortex API exposes three coordinator lifecycle operations plus scoped worker", skill)
+        self.assertIn("The public Cortex API exposes exactly nine tools: three coordinator lifecycle", skill)
+        self.assertIn("operations plus scoped worker question/report transport", skill)
         self.assertIn("Coordinators use `start_orchestration`", skill)
         self.assertIn("`continue_orchestration` for normal work", skill)
         self.assertIn("Invoke every returned dispatch", skill)
@@ -1578,7 +1585,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         shared = contract["shared_worker_contract"]
         self.assertEqual(
             shared["worker_operations"],
-            ["read_dispatch_briefing", "read_worker_report", "worker_question", "record_report"],
+            ["read_dispatch_briefing", "read_worker_report", "worker_question", "get_report_template", "validate_report_draft", "record_report"],
         )
         self.assertEqual(
             shared["dispatch_briefing_fallback"],
@@ -1711,7 +1718,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "8.0.0")
+        self.assertEqual(base_version, "8.1.0")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

@@ -9,11 +9,12 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative seven-tool public facade
+## Relative nine-tool public facade
 
-The public API exposes exactly seven tools. Coordinators use the three lifecycle
+The public API exposes exactly nine tools. Coordinators use the three lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; workers use `worker_question`, `record_report`, may
+`manage_orchestration`; workers use `worker_question`, `get_report_template`,
+`validate_report_draft`, and `record_report`, may
 recover only their exact immutable briefing through `read_dispatch_briefing`, and may
 read only explicitly supplied predecessor refs with scoped `read_worker_report`.
 A coordinator starts a task with
@@ -21,7 +22,10 @@ the compact task contract, then continues once per completed wave.
 The active-wave cursor is a relative `step`; parallel results use only
 relative worker slots. Start owns classification, ledger initialization,
 full-plan persistence, and first-wave preparation. Every worker persists its
-exact seven-field `cortex/report/v1` through `record_report`, returns only
+exact seven-field `cortex/report/v1` through one atomic `record_report` after
+building from `get_report_template` and repeating side-effect-free
+`validate_report_draft` until valid. The validation digest binds the unchanged
+draft while atomic persistence revalidates current state. The worker returns only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary (or
 the exact report-tool error), and never sends the report body in its native
 final. The coordinator reads each ref, then Continue validates all parallel
@@ -151,7 +155,7 @@ MCP schema/transport adapter. The record-report vertical slice is separated
 into domain policy, ports, a SQLite unit-of-work adapter, projection port, and
 use case; `core/runtime_bindings.py` is the explicit composition binding, not a
 bidirectional facade import. The public adapter owns the declarative
-seven-tool contract and JSON-RPC stdio loop; the facade passes the current
+nine-tool contract and JSON-RPC stdio loop; the facade passes the current
 business handlers into it. Gate transitions are further separated into active-
 gate resolution, evidence/C2-C3 validation, durable state mutation, and
 terminal manifest cleanup, so routing changes cannot accidentally weaken
@@ -492,8 +496,10 @@ fallback is not part of model routing.
 
 ## Scoped worker report bus
 
-Workers publish a strict seven-field `cortex/report/v1` payload through public
-`record_report`; the v8 report primitive stores the canonical
+Workers build a strict seven-field `cortex/report/v1` payload from public
+`get_report_template`, correct it through side-effect-free
+`validate_report_draft`, and publish the unchanged valid payload once through
+atomic `record_report`; the v8 report primitive stores the canonical
 sanitized JSON record, which is task- and attempt-bound; server-owned receipts
 make retries idempotent. A receipt links one report to one C2/C3
 evidence record and is consumed once. Its `reports/consumptions/` tombstone is

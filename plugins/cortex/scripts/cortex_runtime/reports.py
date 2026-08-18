@@ -22,7 +22,10 @@ from cortex import (
     MAX_REPORTS_PER_TASK,
     MAX_REPORT_AGGREGATE_BYTES,
     PUBLIC_ORCHESTRATION_SCHEMA,
+    REPORT_FIELDS,
     REPORT_SCHEMA,
+    EXECUTED_CHECK_RESULT_GATES,
+    WRITE_REQUIRED_RESULT_GATES,
     _attempt,
     _attempt_identity_aliases,
     _contained_path,
@@ -35,6 +38,8 @@ from cortex import (
     _write_report_index,
     _report_markdown,
     _report_metadata,
+    _predecessor_review_marker,
+    _result_contract_markers,
     _v3_resolve_task,
     _validate_close_report,
     _validate_gate_result_report,
@@ -220,6 +225,21 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if closure is not None:
             digest_payload["closure"] = closure
         content_digest = digest_text(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        validation_digest = str(params.get("_validation_digest") or "").strip().lower()
+        if validation_digest and validation_digest != content_digest:
+            raise ValueError(
+                "validation_digest does not match the current report draft; call validate_report_draft again with "
+                "the complete updated payload before record_report"
+            )
+        if params.get("_validate_only"):
+            return {
+                "validated": True,
+                "validation_digest": content_digest,
+                "attempt_id": attempt_id,
+                "gate": attempt.get("gate"),
+                "profile": attempt.get("profile"),
+                "state": state,
+            }
         raw_submission_id = str(params.get("submission_id") or "").strip()
         submission_id = safe_id(raw_submission_id) if raw_submission_id else f"submission-{attempt_id}-report-{content_digest[:16]}"
         paths = report_bus_paths(task_dir)
@@ -435,10 +455,13 @@ def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
     return {"schema": REPORT_SCHEMA, "task_id": state["task_id"], "reports": index.get("reports", [])}
 
 
-def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
-    """Public worker adapter: persist a report and return only a compact receipt."""
+def _publish_worker_report(params: dict[str, Any], *, validate_only: bool) -> dict[str, Any]:
+    """Run the shared public report adapter in validation or persistence mode."""
     try:
-        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "scoping", "planning", "gate_result", "closure"})
+        unknown = sorted(set(params) - {
+            "project_root", "task_id", "attempt_id", "profile", "report", "scoping", "planning",
+            "gate_result", "closure", "validation_digest",
+        })
         if unknown:
             raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
         for field in ("project_root", "task_id", "attempt_id", "profile"):
@@ -457,6 +480,8 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "planning": params.get("planning"),
             "gate_result": params.get("gate_result"),
             "closure": params.get("closure"),
+            "_validation_digest": params.get("validation_digest"),
+            "_validate_only": validate_only,
             "_require_predecessor_review": True,
             "_require_knowledge_review": True,
             "_require_harvest_manifest": True,
@@ -499,7 +524,9 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             outcome = "needs_correction"
             next_action = (
                 "Complete the required review, copy the exact generated acknowledgement from the diagnostic into "
-                "report.evidence as one string item, then retry record_report once on this same attempt."
+                "report.evidence as one string item, then retry record_report on this same attempt. If another "
+                "caller-correctable validation diagnostic is returned, correct it and retry again without ending "
+                "the worker or changing the attempt."
             )
         elif "dispatch briefing" in message:
             code = "dispatch_briefing_invalid"
@@ -513,14 +540,16 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             outcome = "needs_correction"
             next_action = (
                 "Rewrite every worker-authored report field in English. Keep the durable worker protocol in English; "
-                "only the main coordinator may localize content for the user, then retry record_report once."
+                "only the main coordinator may localize content for the user, then retry record_report on this same "
+                "attempt. Continue correcting caller-correctable validation diagnostics until the report is accepted."
             )
         elif "changed_files" in message:
             code = "report_changed_files_invalid"
             outcome = "needs_correction"
             next_action = (
                 "Keep only safe project-relative file paths in report.changed_files, move explanatory prose to "
-                "findings or evidence, then retry record_report once on this same attempt."
+                "findings or evidence, then retry record_report on this same attempt. Continue correcting any later "
+                "caller-correctable validation diagnostic until the report is accepted."
             )
         elif any(fragment in message for fragment in (
             "does not exist", "does not belong to this task", "owned by a different principal",
@@ -561,6 +590,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "report findings must", "report questions must", "report tests must", "report evidence must",
             "report uncertainty must", "report exceeds the", "report count quota exhausted",
             "report aggregate byte quota exhausted", "idempotent report submission_id",
+            "validation_digest does not match",
             "project_root is required", "project_root must be an absolute path", "CORTEX_ROOT is not supported",
             "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
@@ -570,9 +600,10 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             code = "report_validation_failed"
             outcome = "needs_correction"
             next_action = (
-                "Correct only the report fields named by the diagnostic and retry record_report once on this same "
-                "task and attempt. Do not guess identity, remove required evidence, or paste the report into the "
-                "parent channel."
+                "Correct only the report fields named by the diagnostic and retry record_report on this same task "
+                "and attempt. Repeat for every later caller-correctable validation diagnostic until the report is "
+                "accepted; rejected validation calls do not consume the three-attempt recovery budget. Do not guess "
+                "identity, remove required evidence, end the worker, or paste the report into the parent channel."
             )
         else:
             raise
@@ -583,6 +614,25 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "code": code,
             "diagnostics": [{"code": code, "message": redact(message, 1000)}],
             "next_action": next_action,
+            "retryable": outcome == "needs_correction",
+            "attempt_budget_consumed": False,
+        }
+    if result.get("validated"):
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "report_draft_valid",
+            "draft_valid": True,
+            "validation_digest": result["validation_digest"],
+            "attempt_id": result["attempt_id"],
+            "gate": result["gate"],
+            "profile": result["profile"],
+            "persisted": False,
+            "attempt_budget_consumed": False,
+            "next_action": (
+                "Call record_report once with this exact unchanged payload and validation_digest. record_report "
+                "revalidates inside its atomic write transaction before persisting."
+            ),
         }
     if result.get("recorded") is False:
         return {
@@ -608,6 +658,321 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
         "idempotent": bool(result.get("idempotent")),
         "next_action": "Return only REPORT_RECORDED, report_ref, and at most a two-sentence summary to the parent coordinator.",
     }
+
+
+def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
+    """Public worker adapter: atomically persist a validated report and return a compact receipt."""
+    return _publish_worker_report(params, validate_only=False)
+
+
+def _draft_diagnostic_path(message: str) -> str:
+    """Map a bounded validation message to the most actionable payload path."""
+    lowered = message.lower()
+    match = re.search(r"result test (\d+)", lowered)
+    if match:
+        index = max(int(match.group(1)) - 1, 0)
+        if "evidence" in lowered or "observed output" in lowered:
+            return f"report.tests[{index}].evidence"
+        if "command" in lowered:
+            return f"report.tests[{index}].command"
+        if "cwd" in lowered:
+            return f"report.tests[{index}].cwd"
+        if "exit_code" in lowered or "unsuccessful" in lowered:
+            return f"report.tests[{index}].exit_code"
+        return f"report.tests[{index}]"
+    for marker, path in (
+        ("validation_digest", "validation_digest"),
+        ("changed_files", "report.changed_files"),
+        ("report summary", "report.summary"),
+        ("report findings", "report.findings"),
+        ("report questions", "report.questions"),
+        ("final report questions", "report.questions"),
+        ("report tests", "report.tests"),
+        ("report evidence", "report.evidence"),
+        ("result evidence", "report.evidence"),
+        ("report uncertainty", "report.uncertainty"),
+        ("planning package", "planning.work_packages"),
+        ("planning ", "planning"),
+        ("planner reports require", "planning"),
+        ("scoping ", "scoping"),
+        ("planner scope reports require", "scoping"),
+        ("gate_result", "gate_result"),
+        ("closure", "closure"),
+        ("profile", "profile"),
+        ("attempt_id", "attempt_id"),
+        ("task_id", "task_id"),
+        ("project_root", "project_root"),
+    ):
+        if marker in lowered:
+            return path
+    if "report must contain exactly" in lowered or "unsupported record_report fields" in lowered:
+        return "report"
+    return "$"
+
+
+def _draft_shape_diagnostics(params: dict[str, Any]) -> list[dict[str, str]]:
+    """Collect independent JSON-shape errors before dependent semantic checks."""
+    diagnostics: list[dict[str, str]] = []
+    report = params.get("report")
+    if not isinstance(report, dict):
+        return [{
+            "code": "report_field_invalid",
+            "path": "report",
+            "message": "report must be one JSON object containing the complete cortex/report/v1 draft",
+            "fix": "Set report to one object with exactly: " + ", ".join(REPORT_FIELDS) + ".",
+        }]
+    expected = set(REPORT_FIELDS)
+    for field in sorted(expected - set(report)):
+        diagnostics.append({
+            "code": "report_field_missing",
+            "path": f"report.{field}",
+            "message": f"required report field is missing: {field}",
+            "fix": f"Add report.{field}; use [] only when this array field has no observed items.",
+        })
+    for field in sorted(set(report) - expected):
+        diagnostics.append({
+            "code": "report_field_unknown",
+            "path": f"report.{field}",
+            "message": f"unsupported report field: {field}",
+            "fix": f"Remove report.{field}; move relevant observed detail into findings, evidence, or uncertainty.",
+        })
+    if "summary" in report and (not isinstance(report["summary"], str) or not report["summary"].strip()):
+        diagnostics.append({
+            "code": "report_field_invalid",
+            "path": "report.summary",
+            "message": "report.summary must be a non-empty string",
+            "fix": "Replace report.summary with a concise English result summary grounded in completed work.",
+        })
+    for field in ("findings", "questions", "changed_files", "tests", "evidence", "uncertainty"):
+        if field in report and not isinstance(report[field], list):
+            diagnostics.append({
+                "code": "report_field_invalid",
+                "path": f"report.{field}",
+                "message": f"report.{field} must be an array",
+                "fix": f"Replace report.{field} with a JSON array; use [] only when no items are required.",
+            })
+    tests = report.get("tests")
+    if isinstance(tests, list):
+        required_test_fields = {"command", "cwd", "exit_code", "evidence"}
+        for index, item in enumerate(tests):
+            if not isinstance(item, dict):
+                diagnostics.append({
+                    "code": "report_test_invalid",
+                    "path": f"report.tests[{index}]",
+                    "message": "each report.tests item must be one object",
+                    "fix": "Use exactly command, cwd, exit_code, and evidence for this test item.",
+                })
+                continue
+            for field in sorted(required_test_fields - set(item)):
+                diagnostics.append({
+                    "code": "report_test_field_missing",
+                    "path": f"report.tests[{index}].{field}",
+                    "message": f"required test field is missing: {field}",
+                    "fix": f"Add report.tests[{index}].{field} with the exact observed value.",
+                })
+            for field in sorted(set(item) - required_test_fields):
+                diagnostics.append({
+                    "code": "report_test_field_unknown",
+                    "path": f"report.tests[{index}].{field}",
+                    "message": f"unsupported test field: {field}",
+                    "fix": f"Remove report.tests[{index}].{field}; each test has exactly four fields.",
+                })
+    return diagnostics
+
+
+def validate_report_draft(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate a complete worker report through the canonical path without persistence."""
+    shape_diagnostics = _draft_shape_diagnostics(params)
+    if shape_diagnostics:
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "report_draft_invalid",
+            "code": "report_validation_failed",
+            "draft_valid": False,
+            "persisted": False,
+            "diagnostics": shape_diagnostics,
+            "retryable": True,
+            "attempt_budget_consumed": False,
+            "next_action": (
+                "Apply every field-specific fix, then call validate_report_draft again with the complete draft on "
+                "this same task and attempt. Draft validation persists nothing and consumes no worker attempt."
+            ),
+        }
+    result = _publish_worker_report(params, validate_only=True)
+    if result.get("ok"):
+        return result
+    diagnostics = []
+    for item in result.get("diagnostics", []):
+        message = str(item.get("message") or "Report draft validation failed.")
+        diagnostics.append({
+            "code": item.get("code") or result.get("code") or "report_validation_failed",
+            "path": _draft_diagnostic_path(message),
+            "message": message,
+            "fix": result.get("next_action") or "Correct the named field and validate the complete draft again.",
+        })
+    return {
+        **result,
+        "outcome": "report_draft_invalid",
+        "draft_valid": False,
+        "persisted": False,
+        "diagnostics": diagnostics,
+        "next_action": (
+            "Apply every diagnostic fix to the complete draft, then call validate_report_draft again on this same "
+            "task and attempt. Repeat until draft_valid=true; draft validation never consumes worker attempts."
+        ),
+        "attempt_budget_consumed": False,
+    }
+
+
+def _public_worker_template_context(params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any], str]:
+    allowed = {"project_root", "task_id", "attempt_id", "profile"}
+    unknown = sorted(set(params) - allowed)
+    if unknown:
+        raise ValueError("unsupported get_report_template fields: " + ", ".join(unknown))
+    for field in allowed:
+        if not str(params.get(field) or "").strip():
+            raise ValueError(f"{field} is required; copy the exact value from this worker's Cortex briefing")
+    project = select_project_root(params)
+    task_id = safe_id(str(params["task_id"]))
+    attempt_id = safe_id(str(params["attempt_id"]))
+    profile = canonical_profile(params["profile"])
+    if profile not in AGENTS:
+        raise ValueError("profile must be an exact Cortex worker profile")
+    _, task_dir, state = load_state(task_id, {"project_root": str(project)})
+    attempt = _attempt(state, attempt_id)
+    if attempt.get("invalidated") or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running"}:
+        raise ValueError("get_report_template requires an active, non-invalidated worker attempt")
+    if attempt.get("profile") != profile:
+        raise ValueError("profile does not match the exact dispatched worker")
+    return task_dir, state, attempt, profile
+
+
+def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the exact report skeleton and requirements for one active worker attempt."""
+    try:
+        task_dir, state, attempt, profile = _public_worker_template_context(params)
+        gate = str(attempt.get("gate") or "")
+        task = load_task_definition(task_dir, state)
+        evidence = [dispatch_briefing_review_marker(str(attempt.get("briefing_digest") or ""))]
+        predecessor_refs = sorted(str(item) for item in attempt.get("context_report_ids") or [])
+        if predecessor_refs:
+            evidence.append(_predecessor_review_marker(predecessor_refs))
+        knowledge_indexes = sorted(str(item) for item in attempt.get("knowledge_index_files") or [])
+        if knowledge_indexes:
+            evidence.append("Knowledge reviewed: " + ", ".join(knowledge_indexes))
+        evidence.extend(
+            prefix + "<replace with concrete observed proof>"
+            for prefix, _criterion in _result_contract_markers(attempt, task)
+        )
+        report = {
+            "summary": "<replace with concise result summary>",
+            "findings": [],
+            "questions": [],
+            "changed_files": (
+                ["<replace with each changed project-relative path>"]
+                if gate in WRITE_REQUIRED_RESULT_GATES else []
+            ),
+            "tests": (
+                [{
+                    "command": "<replace with exact executed command>",
+                    "cwd": "<replace with project root or safe relative directory>",
+                    "exit_code": 0,
+                    "evidence": "<replace with concrete observed output or behavior>",
+                }]
+                if gate in EXECUTED_CHECK_RESULT_GATES else []
+            ),
+            "evidence": evidence,
+            "uncertainty": [],
+        }
+        template: dict[str, Any] = {
+            "project_root": str(select_project_root(params)),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": profile,
+            "report": report,
+        }
+        required_top_level = ["project_root", "task_id", "attempt_id", "profile", "report"]
+        if gate == "scope" and profile == "planner":
+            template["scoping"] = {
+                "overview": "<replace with evidence-backed scope overview>",
+                "context_files": [],
+                "discovery_domains": [{
+                    "id": "<stable_domain_id>",
+                    "title": "<domain title>",
+                    "objective": "<domain objective>",
+                    "paths": ["<project-relative path>"],
+                    "context": ["<verified context>"],
+                    "depends_on": [],
+                    "acceptance_criteria": ["<observable acceptance criterion>"],
+                    "verification": ["<exact verification>"],
+                }],
+            }
+            required_top_level.append("scoping")
+        if gate == "plan" and profile == "planner":
+            template["planning"] = {
+                "overview": "<replace with implementation plan overview>",
+                "work_packages": [{
+                    "id": "<stable_package_id>",
+                    "title": "<package title>",
+                    "objective": "<package objective>",
+                    "depends_on": [],
+                    "microtasks": [{
+                        "id": "<globally_unique_microtask_id>",
+                        "title": "<microtask title>",
+                        "objective": "<microtask objective>",
+                        "depends_on": [],
+                        "acceptance_criteria": ["<observable acceptance criterion>"],
+                        "verification": ["<exact verification>"],
+                    }],
+                }],
+            }
+            required_top_level.append("planning")
+        if gate in {"review", "close"}:
+            template["gate_result"] = {
+                "decision": "pass",
+                "failure_class": "product",
+                "findings": [],
+                "verification": {
+                    "executed": [], "not_executed": [], "required_missing": [], "limitations": [],
+                },
+                "workspace": {
+                    "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+                },
+            }
+            required_top_level.append("gate_result")
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "report_template_ready",
+            "gate": gate,
+            "required_top_level": required_top_level,
+            "template": template,
+            "placeholders_must_be_replaced": True,
+            "persisted": False,
+            "attempt_budget_consumed": False,
+            "next_action": (
+                "Replace every angle-bracket placeholder with observed data, keep all required keys, then call "
+                "validate_report_draft with the complete payload."
+            ),
+        }
+    except ValueError as exc:
+        message = redact(str(exc), 1000)
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "report_template_unavailable",
+            "code": "report_template_unavailable",
+            "diagnostics": [{
+                "code": "report_template_unavailable",
+                "path": _draft_diagnostic_path(message),
+                "message": message,
+                "fix": "Use the exact project_root, task_id, attempt_id, and profile from the active briefing.",
+            }],
+            "persisted": False,
+            "attempt_budget_consumed": False,
+            "next_action": "Correct the identity fields from the active worker briefing; do not guess them.",
+        }
 
 
 def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:

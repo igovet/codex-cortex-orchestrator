@@ -18,6 +18,10 @@ jobs:
       # standard library and must not leave bytecode or test caches behind.
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
+      # Keep set/dict iteration deterministic when the aggregate suite runs
+      # across hosted runners; this makes order-sensitive regressions
+      # reproducible from the same checked-out commit.
+      PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,6 +41,10 @@ jobs:
           PY
           bash -n plugins/cortex/scripts/cortex-launcher scripts/sync-cortex.sh
           git diff --check
+      - name: Run reportless plan-stop regression in isolation
+        run: |
+          python -B -W error::ResourceWarning -m unittest -v \
+            tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry
       - name: Run the complete offline regression suite
         run: |
           python -B -W error::ResourceWarning -m unittest discover -s tests -v

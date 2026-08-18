@@ -133,19 +133,24 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Forbidden: coordinator lifecycle/pipeline/gate/delegation operations. Allowed Cortex operations only: "
             "read_dispatch_briefing only after exact host-file failure (continue only its supplied cursor if its "
             "bounded response is incomplete), supplied read_worker_report refs, "
-            "worker_question, and one final record_report. "
+            "worker_question, get_report_template, validate_report_draft, and record_report for the final report. "
             "Batch known material decisions with worker_question(action=ask_batch); for one use action=ask. "
             "Keep question_key/option_id stable; batch UI is sequential. "
             "Return `QUESTION_RECORDED question_ref=<value>` plus a concise summary, publish no report, and end idle "
             "and resumable. Never busy-wait or use local UI. The coordinator uses followup_task to resume this worker; "
             "poll via poll_batch or poll, then call the "
-            f"public `record_report` tool exactly once. Its report has {report_contract}; use [] when empty. "
+            f"public `get_report_template` tool with this exact identity, replace every placeholder, and submit the "
+            f"complete payload to `validate_report_draft`. Its report has {report_contract}; use [] when empty. "
             "Never route work; coordinator routes. "
             "Every "
             "changed_files item must be a safe project-relative path, never absolute, `..`, URI, or prose. After "
             "success, do not paste or reproduce that JSON; return only "
-            "`REPORT_RECORDED report_ref=<value>` plus at most two summary sentences. Fix one "
-            "report_validation_failed once; otherwise return its exact error and blocker. Never subdelegate."
+            "`REPORT_RECORDED report_ref=<value>` plus at most two summary sentences. Repeat validate_report_draft "
+            "for every caller-correctable diagnostic until draft_valid=true; draft checks persist nothing and consume "
+            "no worker attempt. Then call record_report once with the exact unchanged payload and returned "
+            "validation_digest. If atomic revalidation reports a caller-correctable state change, return to draft "
+            "validation on this same attempt. Stop only for a non-retryable error or unavailable exact identity. "
+            "Never subdelegate."
         )
     else:
         task_context_line = f"Cortex task: {package['task_id']}; gate: {package['gate']}; attempt: {package['attempt_id']}."
@@ -162,7 +167,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "commit_gate, or create_handoff. The main coordinator owns those calls. You may publish your own "
             "question/report and poll your own question updates with the exact attempt context above. "
             "Do not subdelegate. Return questions and blockers to the main chat. "
-            "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
+            "Before finishing, call get_report_template, replace every placeholder, and validate the complete draft "
+            "repeatedly until draft_valid=true; draft validation persists nothing and consumes no worker attempt. "
+            "Then publish exactly one cortex/report/v1 report for this attempt with the returned validation_digest. "
             f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
             f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
             f"The report object must contain {report_contract}. Never route work; the coordinator owns routing. "
@@ -341,7 +348,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         }
         proof_lines = []
         for prefix, _criterion in _result_contract_markers(package, task_contract):
-            proof_lines.append(f"`{prefix}<5+ word observed proof>`")
+            proof_lines.append(f"`{prefix}<concrete observed proof>`")
         proof_contract = (
             "Add each proof as a separate report.evidence string: "
             + "; ".join(proof_lines)

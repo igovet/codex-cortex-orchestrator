@@ -32,7 +32,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The full Python 3.12.3 discovery run passed all 485 tests. Focused question,
+- The full Python 3.12.3 discovery run passed all 494 tests. Focused question,
   lazy-filesystem, approval-freshness, pipeline-order, briefing-completeness,
   log-cap, compatibility, and evaluator-contract regressions also passed.
 - Cold boot passed with 9 reports, 9 worker attempts, 8 continuation calls,
@@ -41,7 +41,7 @@ it validates `git archive HEAD`, not the mutable worktree.
   `git diff --check` passed. Deterministic evaluator fixtures for
   `automatic_sequential`, `compact_parallel`, and `blocked_resume` completed.
 - The isolated fresh-plugin probe passed for
-  `8.0.0+codex.20260818180000` in temporary `HOME`/`CODEX_HOME`.
+  `8.1.0+codex.20260818200000` in temporary `HOME`/`CODEX_HOME`.
 - The targeted source-mode `follow_up_partial` live scenario passed in 22
   seconds: it created exactly one linked v2 corrective task, preserved the
   completed source task, prepared the first dispatch, and made no failed public
@@ -104,11 +104,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `8.0.0+codex.20260818180000`. These results are
+The source manifest declares `8.1.0+codex.20260818200000`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 8.0.0 source contract
+## Current 8.1.0 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -205,9 +205,10 @@ close evidence. They also cover human-readable `Profile Module` labels and
 attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
-Public API tests require exactly seven MCP tools: coordinator lifecycle
+Public API tests require exactly nine MCP tools: coordinator lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; worker `worker_question`, `record_report`, and
+`manage_orchestration`; worker `worker_question`, `get_report_template`,
+`validate_report_draft`, `record_report`, and
 identity/digest-scoped `read_dispatch_briefing`; plus scoped predecessor
 `read_worker_report`. Native worker prompts carry a compact bootstrap with the
 exact immutable briefing path/digest; the worker cannot enumerate the ledger.

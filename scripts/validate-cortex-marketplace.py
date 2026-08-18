@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.0.0":
-        fail("plugin manifest must identify cortex at release version 8.0.0")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.1.0":
+        fail("plugin manifest must identify cortex at release version 8.1.0")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -230,12 +230,16 @@ def main() -> int:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
     expected_public_operations = {
         "start_orchestration", "continue_orchestration", "manage_orchestration",
-        "worker_question", "record_report", "read_dispatch_briefing", "read_worker_report",
+        "worker_question", "get_report_template", "validate_report_draft", "record_report",
+        "read_dispatch_briefing", "read_worker_report",
     }
     if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the seven public Cortex operations")
-    if shared.get("worker_operations") != ["read_dispatch_briefing", "read_worker_report", "worker_question", "record_report"]:
-        fail("workers must receive scoped briefing/predecessor reads, question, and report operations")
+        fail("shared worker contract must declare the nine public Cortex operations")
+    if shared.get("worker_operations") != [
+        "read_dispatch_briefing", "read_worker_report", "worker_question",
+        "get_report_template", "validate_report_draft", "record_report",
+    ]:
+        fail("workers must receive scoped reads, question, draft validation, and atomic report operations")
     if (
         shared.get("dispatch_briefing_fallback")
         != "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable"

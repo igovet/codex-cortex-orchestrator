@@ -32,7 +32,7 @@ without asking for another activation.
 Do not guess unknown arguments. Show help and ask the user to choose.
 
 The help route explains invocation, opt-in behavior, the project-local
-`.codex/cortex` ledger, the seven public v4 lifecycle/report tools, internal workers, and that
+`.codex/cortex` ledger, the nine public v4 lifecycle/report tools, internal workers, and that
 source/tests outrank generated docs. Help performs no activation, dispatch, or
 write.
 
@@ -353,10 +353,18 @@ call it once.
    dispatch a replacement or advance the wave. If native elicitation is
    unavailable, keep the durable question open and report the host limitation
    without asking the question as prose. Once
-   complete, each worker publishes its strict seven-field
-   `cortex/report/v1` through the scoped public `record_report` tool, then
+   complete, each worker calls `get_report_template`, replaces every
+   placeholder, and repeats `validate_report_draft` until `draft_valid=true`.
+   Draft validation persists nothing and consumes no worker attempt; only failed
+   worker attempts count toward the three-attempt recovery budget. The worker
+   then publishes the exact unchanged strict seven-field `cortex/report/v1`
+   once through scoped public `record_report` with the returned
+   `validation_digest`, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
+   Invalid drafts return field paths and concrete fixes; the still-running
+   worker corrects every named field and validates the complete payload again
+   on the same task and attempt. A changed payload requires a new digest.
    When the dispatch supplies predecessor report refs, that successor worker
    first reads each ref through `read_worker_report` with the exact project
    root, task ref, attempt id, and profile from its briefing. It may not read
@@ -507,13 +515,16 @@ seven-field `cortex/report/v1` report is unchanged. Each package requires
 Each microtask requires `id`, `title`, `objective`, non-empty
 `acceptance_criteria`, and non-empty `verification`, with optional `profile`,
 `allowed_paths`, and `depends_on`. Use explicit ownership and
-dependencies; Cortex validates package and per-package microtask DAGs and
-enforces limits of 32 packages, 32 microtasks per package, and 128 total.
-Remain read-only: Cortex—not the Planner—materializes
-`.codex/cortex/tasks/<task>/planning/manifest.json`, `overview.md`, and
-immutable `revisions/plan-<report-ref>/packages/<id>.json` artifacts. The
-manifest is the current pointer/source of truth and revisions preserve prior
-approved or revised plans. `plan_review.planning_artifacts` is the compact
+dependencies; Cortex requires globally unique microtask IDs, allows
+`depends_on` to reference microtasks in another work package, rejects unknown
+references, and validates the combined microtask dependency graph as acyclic.
+It enforces limits of 32 packages, 32 microtasks per package, and 128 total.
+Remain read-only: Cortex—not the Planner—materializes immutable,
+revision-scoped `.codex/cortex/tasks/<task>/planning/revisions/plan-<report-ref>/overview.md`
+and `packages/<id>.json` artifacts. The SQLite task document
+`planning_current` is the sole current-plan pointer; there are no
+`planning/manifest.json` or `planning/overview.md` latest aliases.
+`plan_review.planning_artifacts` is the compact
 approval-review projection. This durable catalog supports
 ownership/dependency-aware scheduling; it does not authorize an unconstrained
 auto-executor beyond the canonical phase/wave safety model.
@@ -638,6 +649,10 @@ The final `questions` list is always empty: material questions use the durable
 `worker_question` lifecycle before report publication, while genuinely
 non-blocking evidence limitations belong in `uncertainty`. Cortex rejects a
 report that uses `questions` as an escape hatch.
+For C2/C3 close attempts, each executed test or verification result must include
+a non-empty concrete summary of observed output or behavior. Concise summaries
+are valid; no arbitrary word count applies. Completion assertions without
+observed output or behavior are rejected.
 `record_report` returns a compact `report_ref`; `read_worker_report` is the
 coordinator's bounded read path and returns the derived absolute
 `report_markdown_path` for the persisted Markdown artifact. After reading each

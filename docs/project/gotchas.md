@@ -74,9 +74,10 @@ brief, context files, and at most eight validated domains.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
   lane/resource/durable-question work. Earlier orchestration entrypoints are
   not public runtime interfaces. Together with worker
-  `worker_question`/`record_report`, identity/digest-scoped
+  `worker_question`, `get_report_template`, `validate_report_draft`, and
+  `record_report`, identity/digest-scoped
   `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
-  public surface is exactly seven tools.
+  public surface is exactly nine tools.
 - Every public call requires the exact absolute `project_root`. Start requires
   the user's exact, unexpanded `task.user_request`; the sole host-metadata
   exception is Desktop's injected `$cortex:orchestrator` wrapper, which is
@@ -353,8 +354,14 @@ and v8 ledger. They are not caller-facing request envelopes.
   They are caller-correctable protocol outcomes and are not written to
   `~/.codex/logs/cortex-tool-errors.jsonl`; only raised MCP-boundary exceptions
   enter that private redacted log. Public v4 validation occurs before lifecycle
-  writes where possible. Correct every diagnostic and retry according to the
-  returned action.
+  writes where possible. `validate_report_draft` writes nothing and returns
+  every independent shape error with `path`, `message`, and `fix`; correct all
+  named fields and validate the complete payload again until `draft_valid=true`.
+  Draft checks explicitly consume no worker attempt; only failed worker
+  attempts count toward the three-attempt recovery budget. Pass the returned
+  digest with the exact unchanged payload to one atomic `record_report`; a
+  changed payload must be validated again. Stop only for a non-retryable result or
+  unavailable exact identity.
 - Preflight aggregates independent request mistakes into one `ok: false`
   response. Each diagnostic has `path`, `message`, and `expected`; repair every
   listed path before retrying. Do not treat the first diagnostic as the only
@@ -476,6 +483,10 @@ and v8 ledger. They are not caller-facing request envelopes.
   `running`/`passed` attempts on the current gate may receive it. Do not send
   late reports after an attempt is terminal or reworked. Listing returns
   metadata; report bodies require explicit context grants.
+- Test evidence must include a non-empty, concrete summary of the observed
+  output or behavior. Concise summaries are valid; the contract does not impose
+  an arbitrary word count. A completion assertion without observed output or
+  behavior is rejected.
 - Report JSON records are authoritative and Markdown is an escaped generated
   view. A consumed report receipt has an irreversible
   `reports/consumptions/` tombstone. Writes are atomic per file, not across the

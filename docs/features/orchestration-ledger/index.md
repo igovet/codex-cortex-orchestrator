@@ -3,12 +3,13 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 8.0.0 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 8.1.0 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
-worker questions/reports, maintenance, and optional execution lanes through exactly seven public
+worker questions/reports, maintenance, and optional execution lanes through exactly nine public
 tools: coordinator lifecycle operations `start_orchestration`,
 `continue_orchestration`, and `manage_orchestration`, worker
-`worker_question`, `record_report`, exact identity/digest-scoped immutable
+`worker_question`, `get_report_template`, `validate_report_draft`,
+`record_report`, exact identity/digest-scoped immutable
 briefing fallback `read_dispatch_briefing`, and scoped predecessor
 `read_worker_report`.
 Pre-SQLite ledgers and facades are unsupported and must be recreated. Cortex
@@ -216,9 +217,10 @@ at seven fields; `planning` must contain exactly `overview` and
 microtask requires `id`, `title`, `objective`, non-empty
 `acceptance_criteria`, and non-empty `verification`, with optional `profile`,
 `allowed_paths`, and `depends_on`; package-level `profile` is forbidden.
-Package and per-package microtask dependencies are validated as acyclic DAGs,
-with bounded limits of 32 packages, 32 microtasks per package, and 128 total
-microtasks.
+Microtask IDs are globally unique across the plan. `depends_on` may reference
+microtasks in another work package; the combined microtask dependency graph is
+validated as an acyclic DAG, and unknown references are rejected. Bounds are
+32 packages, 32 microtasks per package, and 128 total microtasks.
 
 Only Planner Scope may publish the additive top-level `scoping` sibling. It
 contains exactly `overview`, `context_files`, and `discovery_domains`. Each
@@ -229,12 +231,12 @@ eight domains, or incomplete criteria. Scope is read-only and evidence-
 gathering; it does not close intent questions.
 
 The read-only Planner only proposes this durable planning catalog. Cortex
-authorizes and queues optional projections under
-`.codex/cortex/tasks/<task>/planning/`: `manifest.json`, `overview.md`, and
-immutable revisions at `revisions/plan-<report-ref>/packages/<id>.json`.
-The SQLite task document is the current planning source of truth; the
-materialized `manifest.json` is a convenience projection and revisions preserve
-prior approved or revised plans. When a required approval hold is reached,
+authorizes and queues immutable, revision-scoped projections under
+`.codex/cortex/tasks/<task>/planning/revisions/plan-<report-ref>/`, including
+`overview.md` and `packages/<id>.json`. The SQLite task document
+`planning_current` is the sole current-plan pointer; there are no
+`planning/manifest.json` or `planning/overview.md` latest aliases. When a
+required approval hold is reached,
 `plan_review.planning_artifacts` exposes compact manifest and package metadata
 for user review. The catalog supports ownership- and dependency-aware
 scheduling; it does not create an unconstrained auto-executor outside the
@@ -368,17 +370,26 @@ starts at the next unanswered question. Localized UI is a transient
 projection, and localized free text requires canonical English translation
 before resumption. A task revision supersedes an unresolved batch.
 
-After questions are resolved, every worker uses `record_report` to persist exactly seven
-fields: `summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`,
+After questions are resolved, every worker calls `get_report_template`, replaces
+its gate-specific placeholders, and submits the complete payload to
+`validate_report_draft` until `draft_valid=true`. Draft validation uses the same
+canonical content checks as persistence, returns field paths and fixes, writes
+nothing, and consumes no failed-worker attempt; only failed worker attempts
+count toward the three-attempt recovery budget. The worker then sends the
+unchanged payload and returned `validation_digest` to one atomic
+`record_report`, which revalidates and persists exactly seven fields:
+`summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`,
 and `uncertainty`. A worker report has no `next_action`; findings contain observed
 facts and evidence, not remediation instructions or target-gate decisions. Final `questions` must be `[]`: material decisions complete
 the durable question lifecycle first, while genuinely non-blocking evidence
 limitations belong in `uncertainty`. Public report intake rejects a non-empty
 questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
-tool failure returns only the exact error. For a caller-correctable
-`report_validation_failed`, the worker may make exactly one corrected retry;
-otherwise it returns the exact error and blocker. The coordinator
+tool failure returns only the exact error. Independent draft-shape mistakes are
+returned together as `{path, message, fix}` diagnostics; later semantic
+diagnostics use the same structure. A changed payload requires another draft
+validation and digest. A non-retryable error or unavailable exact identity
+remains a blocker. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
 never an inline report body. That read also returns Cortex's derived absolute
 `report_markdown_path` and the exact `report_markdown_link` for
@@ -398,7 +409,8 @@ review/close compatibility alias; neither envelope is nested in the strict
 seven-field report.
 
 For C2/C3 close attempts, Cortex additionally requires at least one executed
-test or verification result and observed evidence. Completion markers such as
+test or verification result and a non-empty concrete summary of the observed
+output or behavior. Completion markers such as
 “not run” or “unverified” fail closed, and the report must map every task-level
 acceptance and verification criterion to the observed evidence; a bare
 completion assertion is insufficient.
