@@ -410,7 +410,7 @@ def _poll_worker_question_batch(
     }
 
 
-def worker_question(params: dict[str, Any]) -> dict[str, Any]:
+def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Public facade adapter for durable ask/poll on one exact worker attempt."""
     action = str(params.get("action") or "").strip().lower()
     if action not in {"ask", "poll", "ask_batch", "poll_batch"}:
@@ -438,7 +438,7 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
             attempt.get("invalidated")
             or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running"}
         ):
-            raise ValueError("worker question identity does not match an active facade-managed attempt")
+            raise ValueError("worker question attempt is no longer active")
         if action == "ask_batch":
             if str(params.get("question_ref") or "").strip() or str(params.get("batch_ref") or "").strip():
                 raise ValueError("ask_batch must omit question_ref and batch_ref")
@@ -528,6 +528,64 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "answer_option_ids": record.get("answer_option_ids") or [],
             "resume_context": record.get("resume_context"),
             "next_action": "Resume this same worker attempt with the user's answer; record the report only after the mission is complete.",
+        }
+
+
+def _worker_question_error_path(message: str) -> str:
+    lowered = message.lower()
+    for marker, path in (
+        ("question_ref", "question_ref"), ("batch_ref", "batch_ref"),
+        ("question_key", "batch.questions"), ("batch", "batch"),
+        ("question", "question"), ("action", "action"),
+        ("profile", "profile"), ("attempt", "attempt_id"),
+        ("task", "task_id"), ("project_root", "project_root"),
+    ):
+        if marker in lowered:
+            return path
+    return "$"
+
+
+def worker_question(params: dict[str, Any]) -> dict[str, Any]:
+    """Run durable ask/poll while keeping caller mistakes on the same attempt."""
+    try:
+        return _worker_question_impl(params)
+    except (ValueError, OSError) as exc:
+        message = redact(str(exc), 1000)
+        lowered = message.lower()
+        terminal = isinstance(exc, OSError) or any(fragment in lowered for fragment in (
+            "attempt is no longer active",
+            "invalidated or terminal attempt",
+            "question batch record failed validation",
+            "question batch task identity is invalid",
+            "answered batch has no canonical answer",
+            "question count quota exhausted",
+        ))
+        code = "worker_question_unavailable" if terminal else "worker_question_request_invalid"
+        path = _worker_question_error_path(message)
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "blocked" if terminal else "needs_correction",
+            "code": code,
+            "diagnostics": [{
+                "code": code,
+                "path": path,
+                "message": message,
+                "fix": (
+                    "The worker attempt is no longer active; do not create a replacement or guess another identity."
+                    if terminal else
+                    "Correct only this field from the active briefing or the last worker_question response, then "
+                    "retry worker_question on this same worker attempt."
+                ),
+            }],
+            "retryable": not terminal,
+            "attempt_budget_consumed": False,
+            "next_action": (
+                "Stop this worker call because the response is explicitly non-retryable."
+                if terminal else
+                "Correct the diagnostic field and retry worker_question on this same attempt; rejected caller "
+                "validation does not consume an attempt and must not end the worker."
+            ),
         }
 
 
@@ -674,7 +732,14 @@ def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
     return {"type": "object", "properties": properties}
 
 
-def _request_mcp_elicitation(message: str, requested_schema: dict[str, Any], *, thread_id: str = "", turn_id: str = "") -> tuple[str, dict[str, Any] | None, str]:
+def _request_mcp_elicitation(
+    message: str,
+    requested_schema: dict[str, Any],
+    *,
+    thread_id: str = "",
+    turn_id: str = "",
+    meta: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any] | None, str]:
     """Ask the Codex host to render its native MCP elicitation UI."""
     request_id = f"cortex-question-{secrets.token_hex(12)}"
     respond({
@@ -689,7 +754,14 @@ def _request_mcp_elicitation(message: str, requested_schema: dict[str, Any], *, 
             # standards-compliant with MCP form mode.
             "mode": "openai/form" if bound_symbol("questions", "MCP_OPENAI_FORM") else "form",
             "requestedSchema": requested_schema,
-            "_meta": {"cortex": {"schema": QUESTION_SCHEMA, "thread_id": thread_id, "turn_id": turn_id or None}},
+            "_meta": {
+                "cortex": {
+                    "schema": QUESTION_SCHEMA,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id or None,
+                    **(meta if isinstance(meta, dict) else {}),
+                },
+            },
         },
     })
     while True:

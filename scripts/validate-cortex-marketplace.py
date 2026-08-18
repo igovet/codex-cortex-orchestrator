@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.1.1":
-        fail("plugin manifest must identify cortex at release version 8.1.1")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "8.1.2":
+        fail("plugin manifest must identify cortex at release version 8.1.2")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -256,6 +256,8 @@ def main() -> int:
         != "template_private_file_direct_or_patch_validate_one_hour_consume"
         or shared.get("report_finalization")
         != "identity_draft_ref_validation_digest_same_file_then_delete"
+        or shared.get("caller_correctable_tool_errors")
+        != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
         or shared.get("read_only_workspace_delta")
         != "ordinary_source_changes_are_concurrency_evidence_generated_or_ignored_side_effects_fail"
     ):

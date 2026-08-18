@@ -4,6 +4,22 @@ All notable public changes to Cortex are recorded here. Release entries use
 semantic versions; the plugin manifest adds a unique Codex cachebuster to the
 same base version.
 
+## [8.1.2] - 2026-08-18
+
+- Keep caller/input/schema failures from every public worker tool retryable on
+  the same worker attempt without consuming the three-attempt recovery budget;
+  only explicit non-retryable integrity, storage, permission, or unavailable-
+  identity failures end the worker.
+- Normalize oversized dispatch-briefing, worker-report, and coordinator
+  artifact `max_bytes` requests to the safe 32768-byte SQLite transport bound
+  and continue through opaque cursors instead of returning an MCP error.
+- Return structured field diagnostics from `worker_question`,
+  `get_report_template`, and `read_worker_report`, and recover report numbering
+  from the immutable artifact catalog so interrupted index writes do not reuse
+  an export path.
+- Bind required plan approval to an opaque request ID and expose the pending
+  plan through the canonical Approve/Cancel interaction before dispatch.
+
 ## [8.1.1] - 2026-08-18
 
 - Make `get_report_template` create one private, fully structured temporary

@@ -11,6 +11,15 @@ predecessor evidence digest, and semantic future-pipeline digest. A material
 future-wave change must explicitly rework the plan and obtain approval again;
 no-op and transport-only changes retain approval.
 
+The approval prompt has two transport forms. An initialized stdio session can
+answer the native `elicitation/create` request; direct callers must render the
+returned `cortex/plan-approval/v1` interaction's exactly supplied Approve and
+Cancel actions and submit their embedded arguments. Button responses require
+the opaque request ID for the current plan basis, so copying an old action or
+inventing a free-form approval is rejected. A cancelled or unsupported
+interaction keeps the plan pending and must not be treated as approval; use a
+later non-empty `revise` feedback request to rerun the Planner.
+
 The strict seven-field `cortex/report/v1` remains unchanged. Scope's additive
 `scoping` sibling is owned only by Planner Scope and is limited to a discovery
 brief, context files, and at most eight validated domains.
@@ -133,6 +142,13 @@ brief, context files, and at most eight validated domains.
   payload) return structured `ok: false` diagnostics and do not enter the
   private exception journal. Genuine ledger/server corruption remains an
   exception and is logged for diagnosis.
+- The same correction contract applies to every allowed worker tool, including
+  `worker_question`, `get_report_template`, `read_dispatch_briefing`, and
+  `read_worker_report`: fix the named diagnostic and retry on the same attempt;
+  rejected calls do not consume the three-attempt recovery budget. Briefing,
+  report, and coordinator artifact reads normalize `max_bytes` above 32768 to
+  the server bound. Stop only for `retryable: false` or an explicit integrity,
+  storage, permission, or unavailable-identity blocker.
 - Idempotency is server-owned. Callers do not send submission, task, wave,
   attempt, coordinator identity, or host metadata. Preserve the returned opaque
   `task_ref` on every later lifecycle and report-read call. Exact duplicate

@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-8.1.1-7c3aed" alt="Cortex 8.1.1" />
+        <img src="https://img.shields.io/badge/Cortex-8.1.2-7c3aed" alt="Cortex 8.1.2" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -559,7 +559,13 @@ flowchart LR
    digest. A material future-wave change or plan rework preserves history,
    resets approval to `pending_plan`, and requires a replacement Planner plus a
    new approval. No-op and transport-only changes do not invalidate approval;
-   stale basis digests block dispatch with recoverable reapproval guidance.
+   stale basis digests block dispatch with recoverable reapproval guidance. The
+   approval decision is an interactive **Approve/Cancel** control: initialized
+   stdio hosts receive native MCP elicitation, while direct callers receive a
+   `cortex/plan-approval/v1` interaction containing exactly those two actions
+   and their embedded `manage_orchestration` arguments. Button submissions are
+   bound to an opaque request ID; cancellation stays silent and pending, and a
+   host that cannot render the interaction never implies approval.
 8. **Automatic documentation sync.** When completed work changes durable
    behavior, interfaces, architecture, commands, decisions, or ownership,
    Cortex dispatches a technical writer to update the affected project and
@@ -626,11 +632,16 @@ returns its short `draft_ref` and absolute `draft_path` without echoing the
 body. A worker fills that file and repeats `validate_report_draft` on the same
 ref until valid; read-only workers can apply a small JSON Merge Patch through
 the validator when their sandbox cannot edit the file. Invalid validations
-keep the draft and consume no worker attempt. Successful validation binds a
+keep the draft and consume no worker attempt. Caller/input/schema validation
+from any allowed worker tool is also corrected and retried on the same attempt
+without consuming recovery budget; only explicit `retryable: false` integrity
+or storage blockers are terminal. Successful validation binds a
 digest to the same file, after which the worker sends only `draft_ref` and
 `validation_digest` in one atomic `record_report` call. Finalization rereads
 and revalidates the exact file, commits the durable report, and deletes the
-draft post-commit. Drafts expire after one hour and a new template supersedes
+draft post-commit. Bounded briefing, report, and coordinator artifact reads
+clamp oversized `max_bytes` requests to 32768 and continue with cursors.
+Drafts expire after one hour and a new template supersedes
 the prior attempt draft. Read-only
 workers do not claim source changes observed in the shared checkout as their
 own; Cortex records those paths as concurrency evidence while still rejecting

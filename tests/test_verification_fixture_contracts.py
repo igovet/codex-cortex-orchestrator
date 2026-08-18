@@ -104,7 +104,8 @@ class VerificationFixtureContractTests(unittest.TestCase):
         self.assertIn('"id":"deliver_result"', prompt)
         self.assertIn('"depends_on":["inspect_source"]', prompt)
         self.assertIn("Do not add, remove, rename, or reorder packages or microtasks", prompt)
-        self.assertIn("decision=approve", prompt)
+        self.assertIn("decision=prompt", prompt)
+        self.assertIn("embedded Approve action arguments", prompt)
         self.assertIn("Only after it returns outcome=awaiting_plan_approval", prompt)
         self.assertIn("never call approval before that continue", prompt)
 

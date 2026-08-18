@@ -107,9 +107,12 @@ def manage_task_artifacts(
             "next_action": "Use the opaque read_cursor to request a bounded artifact part; its digest and task scope are checked on every read.",
         }
 
-    max_bytes = payload.get("max_bytes", DEFAULT_ARTIFACT_READ_BYTES)
-    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int):
+    requested_max_bytes = payload.get("max_bytes", DEFAULT_ARTIFACT_READ_BYTES)
+    if isinstance(requested_max_bytes, bool) or not isinstance(requested_max_bytes, int):
         raise ValueError("artifact max_bytes must be an integer")
+    if requested_max_bytes < 1:
+        raise ValueError("artifact max_bytes must be at least 1")
+    max_bytes = min(requested_max_bytes, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES)
     byte_offset = 0
     if payload.get("cursor"):
         decoded = _cursor(root, cursor=payload["cursor"], expected={
@@ -127,12 +130,15 @@ def manage_task_artifacts(
         "ok": True,
         "outcome": "artifact_part",
         "task_ref": task_ref,
+        "requested_max_bytes": requested_max_bytes,
+        "effective_max_bytes": max_bytes,
+        "max_bytes_normalized": max_bytes != requested_max_bytes,
         **part,
     }
     if part["next_byte_offset"] is not None:
         result["next_cursor"] = _read_cursor(root, metadata, byte_offset=part["next_byte_offset"])
     result["next_action"] = (
         "If complete is false, use next_cursor with the same artifact_ref to fetch only the next bounded part; "
-        "do not widen max_bytes beyond the server limit."
+        "larger max_bytes values are safely normalized to the server limit."
     )
     return result

@@ -39,6 +39,23 @@ refs before state writes, records evidence and gates, and returns the next
 step. Interrupted native acknowledgement is recoverable because inspect lists
 persisted `available_reports`.
 
+## Interactive post-plan approval
+
+Required approval is a state-machine hold after the singleton final Planner
+wave, not a prose convention. The pending review is bound to the plan revision,
+planner report, verified predecessor digest, semantic future-pipeline digest,
+and an opaque request ID. An initialized stdio host receives MCP
+`elicitation/create` with the versioned `cortex/plan-approval/v1` schema and
+exactly Approve and Cancel choices. Direct callers receive a declarative
+`plan_approval_interaction` with the same schema and embedded
+`manage_orchestration` arguments, allowing a host to render buttons without
+inventing a second tool or changing the nine-tool surface. Approve and Cancel
+button submissions must carry the current request ID; stale, replayed, or
+mismatched submissions fail closed. Approve advances the next wave, whereas
+Cancel records no dispatch and keeps `awaiting_user` silent so a later user
+message can revise the plan. Hosts that support neither interaction cannot
+advance the task by inference.
+
 ## Chunked immutable artifact transport
 
 Large coordination evidence is stored as immutable SQLite artifacts, not as a

@@ -1532,6 +1532,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 self.assertIn(digest, bootstrap)
                 self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
                 self.assertIn("read_dispatch_briefing", bootstrap)
+                self.assertIn("caller/schema error", bootstrap)
+                self.assertIn("No attempt is consumed", bootstrap)
+                self.assertIn("retryable=false or outcome=blocked", bootstrap)
                 self.assertIn(control.dispatch_briefing_review_marker(digest), bootstrap)
 
     def test_installable_orchestration_contract_forbids_root_project_work(self):
@@ -1718,7 +1721,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "8.1.1")
+        self.assertEqual(base_version, "8.1.2")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

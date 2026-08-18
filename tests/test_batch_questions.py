@@ -8,6 +8,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
+from cortex_runtime import questions as runtime_questions
 
 
 class BatchQuestionTests(unittest.TestCase):
@@ -19,6 +20,18 @@ class BatchQuestionTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_worker_question_distinguishes_caller_correction_from_durable_integrity_failure(self):
+        with mock.patch.object(
+            runtime_questions,
+            "_worker_question_impl",
+            side_effect=ValueError("question batch record failed validation"),
+        ):
+            blocked = control.worker_question({})
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["outcome"], "blocked")
+        self.assertFalse(blocked["retryable"])
+        self.assertFalse(blocked["attempt_budget_consumed"])
 
     def _start(self, *, user_language="ru"):
         started = control.start_orchestration({
@@ -238,14 +251,18 @@ class BatchQuestionTests(unittest.TestCase):
 
     def test_batch_persistence_is_atomic_and_poll_rejects_superseded_revision(self):
         started, _, state, attempt = self._start()
-        with self.assertRaisesRegex(ValueError, "question_key values must be unique"):
-            invalid = self._batch()
-            invalid["questions"].append(dict(invalid["questions"][0]))
-            control.worker_question({
-                **self._identity(state, attempt, self.project),
-                "action": "ask_batch",
-                "batch": invalid,
-            })
+        invalid = self._batch()
+        invalid["questions"].append(dict(invalid["questions"][0]))
+        rejected = control.worker_question({
+            **self._identity(state, attempt, self.project),
+            "action": "ask_batch",
+            "batch": invalid,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["outcome"], "needs_correction")
+        self.assertTrue(rejected["retryable"])
+        self.assertFalse(rejected["attempt_budget_consumed"])
+        self.assertIn("question_key values must be unique", rejected["diagnostics"][0]["message"])
         documents = control.db_list_task_documents(self.ledger, state["task_id"], "question_batch:")
         self.assertEqual(documents, [])
 

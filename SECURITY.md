@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `8.1.1` source line. The public
+Security fixes are prepared for the current `8.1.2` source line. The public
 contract remains `cortex/orchestration/v4` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -53,6 +53,12 @@ Reports retain the strict seven-field
 first. Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
+Worker-facing caller, input, and schema validation failures are structured as
+same-attempt corrections and do not consume the three-attempt recovery budget.
+Only explicit non-retryable integrity, storage, permission, or unavailable
+identity failures terminate that worker attempt. Bounded briefing, report, and
+coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
+
 Required plan approval is bound to a specific plan revision, planner report,
 verified predecessor evidence digest, and semantic future-pipeline digest. A
 material replan preserves the prior approval in history and requires a new
@@ -69,6 +75,6 @@ working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This working tree is a source candidate only. The 8.1.1+codex.20260818210000
+This working tree is a source candidate only. The 8.1.2+codex.20260818210000
 changes are not installed into a user's plugin, published, committed, or
 tagged by this task.

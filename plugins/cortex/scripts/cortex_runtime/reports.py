@@ -265,6 +265,99 @@ def _merge_patch(target: Any, patch: Any) -> Any:
     return result
 
 
+def _bounded_artifact_max_bytes(value: Any, *, label: str) -> tuple[int, int | None, bool]:
+    """Normalize a caller chunk request without widening the transport bound."""
+    if value is None:
+        return 16 * 1024, None, False
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} max_bytes must be an integer")
+    if value < 1:
+        raise ValueError(f"{label} max_bytes must be at least 1")
+    effective = min(value, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES)
+    return effective, value, effective != value
+
+
+def _dispatch_briefing_error_path(message: str) -> str:
+    lowered = message.lower()
+    for marker, path in (
+        ("max_bytes", "max_bytes"),
+        ("cursor", "cursor"),
+        ("briefing_digest", "briefing_digest"),
+        ("digest does not match", "briefing_digest"),
+        ("dispatch_ref", "dispatch_ref"),
+        ("attempt_id", "attempt_id"),
+        ("task_id", "task_id"),
+        ("profile", "profile"),
+        ("project_root", "project_root"),
+    ):
+        if marker in lowered:
+            return path
+    return "$"
+
+
+def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
+    """Keep caller request mistakes retryable and reserve blockers for integrity/storage failures."""
+    message = redact(str(exc), 1000)
+    lowered = message.lower()
+    caller_correctable = isinstance(exc, ValueError) and any(fragment in lowered for fragment in (
+        "unsupported read_dispatch_briefing fields",
+        "is required; copy the exact value",
+        "profile must be an exact cortex worker profile",
+        "profile does not match",
+        "dispatch_ref does not match",
+        "briefing_digest must be",
+        "briefing_digest does not match",
+        "briefing cursor",
+        "briefing max_bytes",
+    ))
+    if caller_correctable:
+        path = _dispatch_briefing_error_path(message)
+        fix = (
+            "Omit max_bytes or use an integer from 1 through 32768, then retry read_dispatch_briefing on this same "
+            "worker attempt."
+            if path == "max_bytes"
+            else "Copy the exact field from the native dispatch bootstrap or the last returned next_cursor, then "
+            "retry read_dispatch_briefing on this same worker attempt."
+        )
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "needs_correction",
+            "code": "dispatch_briefing_request_invalid",
+            "diagnostics": [{
+                "code": "dispatch_briefing_request_invalid",
+                "path": path,
+                "message": message,
+                "fix": fix,
+            }],
+            "retryable": True,
+            "attempt_budget_consumed": False,
+            "next_action": (
+                "Apply the diagnostic fix and retry read_dispatch_briefing now on this same attempt. Caller or "
+                "schema validation errors never justify ending the worker. Stop only if a later response explicitly "
+                "returns retryable=false or outcome=blocked."
+            ),
+        }
+    return {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": False,
+        "outcome": "blocked",
+        "code": "dispatch_briefing_unavailable",
+        "diagnostics": [{
+            "code": "dispatch_briefing_unavailable",
+            "path": "$",
+            "message": message,
+            "fix": "Preserve this integrity or storage diagnostic; it cannot be repaired by changing tool arguments.",
+        }],
+        "retryable": False,
+        "attempt_budget_consumed": False,
+        "next_action": (
+            "Stop before project work and return this exact non-retryable diagnostic to the parent coordinator. "
+            "Never list the Cortex ledger, substitute another briefing, or guess task identity."
+        ),
+    }
+
+
 def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
@@ -1344,22 +1437,35 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                 "the worker sandbox cannot edit the file, send one full replacement once or a small patch instead."
             ),
         }
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         message = redact(str(exc), 1000)
+        terminal = isinstance(exc, OSError) or "requires an active, non-invalidated worker attempt" in message.lower()
+        code = "report_template_unavailable" if terminal else "report_template_request_invalid"
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": False,
-            "outcome": "report_template_unavailable",
-            "code": "report_template_unavailable",
+            "outcome": "blocked" if terminal else "needs_correction",
+            "code": code,
             "diagnostics": [{
-                "code": "report_template_unavailable",
+                "code": code,
                 "path": _draft_diagnostic_path(message),
                 "message": message,
-                "fix": "Use the exact project_root, task_id, attempt_id, and profile from the active briefing.",
+                "fix": (
+                    "The worker attempt is no longer active; do not substitute another identity."
+                    if terminal else
+                    "Correct only the named field using the exact active briefing identity, then retry "
+                    "get_report_template on this same worker attempt."
+                ),
             }],
             "persisted": False,
+            "retryable": not terminal,
             "attempt_budget_consumed": False,
-            "next_action": "Correct the identity fields from the active worker briefing; do not guess them.",
+            "next_action": (
+                "Stop because this response is explicitly non-retryable."
+                if terminal else
+                "Correct the diagnostic field and retry get_report_template on this same attempt; rejected caller "
+                "validation does not consume an attempt and must not end the worker."
+            ),
         }
 
 
@@ -1441,9 +1547,9 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
             byte_offset = decoded.get("byte_offset")
             if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
                 raise ValueError("briefing cursor byte offset is invalid")
-        requested_max = params.get("max_bytes")
-        if requested_max is not None and (isinstance(requested_max, bool) or not isinstance(requested_max, int)):
-            raise ValueError("briefing max_bytes must be an integer")
+        effective_max, requested_max, max_bytes_normalized = _bounded_artifact_max_bytes(
+            params.get("max_bytes"), label="briefing",
+        )
         chunked = bool(raw_cursor) or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
         base = {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -1460,13 +1566,17 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
         if chunked:
             part = _runtime.db_read_artifact_range(
                 root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset,
-                max_bytes=requested_max or 16 * 1024,
+                max_bytes=effective_max,
             )
             result = {
                 **base,
                 "content_part": part.get("content_part"), "encoding": part["encoding"],
                 "byte_offset": part["byte_offset"], "returned_bytes": part["returned_bytes"], "complete": part["complete"],
+                "effective_max_bytes": effective_max,
+                "max_bytes_normalized": max_bytes_normalized,
             }
+            if requested_max is not None:
+                result["requested_max_bytes"] = requested_max
             if part.get("content_base64") is not None:
                 result["content_base64"] = part["content_base64"]
             if part["next_byte_offset"] is not None:
@@ -1489,20 +1599,7 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
             ),
         }
     except (ValueError, OSError, json.JSONDecodeError) as exc:
-        return {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": False,
-            "outcome": "blocked",
-            "code": "dispatch_briefing_unavailable",
-            "diagnostics": [{
-                "code": "dispatch_briefing_unavailable",
-                "message": redact(str(exc), 1000),
-            }],
-            "next_action": (
-                "Stop before project work and return this exact diagnostic to the parent coordinator. Never list "
-                "the Cortex ledger, substitute another briefing, or guess task identity."
-            ),
-        }
+        return _dispatch_briefing_failure(exc)
 
 
 def ensure_report_markdown_path(
@@ -1558,6 +1655,19 @@ def ensure_report_markdown_path(
             pass
         raise
     return report_markdown_path(task_dir, report_id)
+
+
+def _worker_report_error_path(message: str) -> str:
+    lowered = message.lower()
+    for marker, path in (
+        ("max_bytes", "max_bytes"), ("cursor", "cursor"),
+        ("report_ref", "report_ref"), ("attempt_id", "attempt_id"),
+        ("profile", "profile"), ("task", "task_ref"),
+        ("project_root", "project_root"),
+    ):
+        if marker in lowered:
+            return path
+    return "$"
 
 
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
@@ -1619,14 +1729,14 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             byte_offset = decoded.get("byte_offset")
             if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
                 raise ValueError("report cursor byte offset is invalid")
-        requested_max = params.get("max_bytes")
-        if requested_max is not None and (isinstance(requested_max, bool) or not isinstance(requested_max, int)):
-            raise ValueError("report max_bytes must be an integer")
+        effective_max, requested_max, max_bytes_normalized = _bounded_artifact_max_bytes(
+            params.get("max_bytes"), label="report",
+        )
         chunked = bool(raw_cursor) or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
         if chunked:
             part = _runtime.db_read_artifact_range(
                 root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset,
-                max_bytes=requested_max or 16 * 1024,
+                max_bytes=effective_max,
             )
             result = {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -1641,7 +1751,11 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "byte_offset": part["byte_offset"],
                 "returned_bytes": part["returned_bytes"],
                 "complete": part["complete"],
+                "effective_max_bytes": effective_max,
+                "max_bytes_normalized": max_bytes_normalized,
             }
+            if requested_max is not None:
+                result["requested_max_bytes"] = requested_max
             if part.get("content_base64") is not None:
                 result["content_base64"] = part["content_base64"]
             if part["next_byte_offset"] is not None:
@@ -1685,13 +1799,41 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             })
         return result
     except (ValueError, OSError, json.JSONDecodeError) as exc:
+        message = redact(str(exc), 1000)
+        lowered = message.lower()
+        terminal = isinstance(exc, (OSError, json.JSONDecodeError)) or any(fragment in lowered for fragment in (
+            "active, non-invalidated attempt",
+            "artifact content is not utf-8 json",
+            "artifact does not belong",
+            "artifact content is invalid",
+            "markdown projection is not ready",
+            "markdown projection digest is invalid",
+        ))
+        code = "report_unavailable" if terminal else "report_read_request_invalid"
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": False,
-            "outcome": "needs_correction",
-            "code": "report_unavailable",
-            "diagnostics": [{"code": "report_unavailable", "message": redact(str(exc), 1000)}],
-            "next_action": "Supply the exact project_root and persisted report_ref from the active task; do not guess report or task identifiers.",
+            "outcome": "blocked" if terminal else "needs_correction",
+            "code": code,
+            "diagnostics": [{
+                "code": code,
+                "path": _worker_report_error_path(message),
+                "message": message,
+                "fix": (
+                    "The selected persisted artifact cannot be read safely; do not substitute or guess another report."
+                    if terminal else
+                    "Correct only this field using the active task, predecessor grant, or last next_cursor, then "
+                    "retry read_worker_report on this same worker attempt."
+                ),
+            }],
+            "retryable": not terminal,
+            "attempt_budget_consumed": False,
+            "next_action": (
+                "Stop because this response is explicitly non-retryable."
+                if terminal else
+                "Correct the diagnostic field and retry read_worker_report on this same attempt; rejected caller "
+                "validation does not consume an attempt and must not end the worker."
+            ),
         }
 
 
