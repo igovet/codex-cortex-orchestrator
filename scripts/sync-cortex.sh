@@ -76,13 +76,13 @@ resolve_cortex_python() {
     return 1
   fi
   if ! diagnostics="$("${resolved}" -c 'import sys
+if sys.version_info < (3, 11):
+    print(f"Python {sys.version.split()[0]} is too old; Python 3.11 or newer is required")
+    raise SystemExit(1)
 try:
     import tomllib
 except ImportError:
     print("tomllib is unavailable")
-    raise SystemExit(1)
-if sys.version_info < (3, 11):
-    print(f"Python {sys.version.split()[0]} is too old; Python 3.11 or newer is required")
     raise SystemExit(1)
 print(sys.executable)' 2>&1)"; then
     [[ -n "${diagnostics}" ]] || diagnostics="runtime validation failed"
@@ -180,8 +180,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "6.6.0":
-    raise SystemExit("plugin/server version must match the 6.6.0 release manifest")
+if module.SERVER_VERSION != version or base_version != "7.1.1":
+    raise SystemExit("plugin/server version must match the 7.1.1 release manifest")
 PY
 }
 

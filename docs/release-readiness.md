@@ -11,7 +11,7 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `6.5.0` (an installed build may carry a `+codex.<build>` suffix).
+  `7.1.1` (an installed build may carry a `+codex.<build>` suffix).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -42,15 +42,24 @@ pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
 tracked-release archive validation.
 
-The 6.5.0 source candidate must be verified by the full test suite,
+The read-only host gate is separate from source and archive evidence:
+`cortex-host-preflight.py --json` must report `mcp.status=READY` only for the
+same Codex user with a matching enabled `cortex@cortex` registration, approval
+configuration, cache-backed hook trust, and all other prerequisite checks.
+The named `Hetzner_Bots` host remains blocked until an approved Node >=16
+installation source is available; no guessed package-source command is a
+release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
+for the safe same-user sequence and the bounded stopped-worker recovery.
+
+The 7.1.1 source candidate must be verified by the full test suite,
 marketplace validation, Python compilation, shell syntax, the isolated
 fresh-plugin probe, and installed-content verification at
-`6.5.0+codex.20260816170348`. The final Luna-high automatic-sequential live
+`7.1.1+codex.20260818124805`. The final Luna-high automatic-sequential live
 run for that installed build must be recorded with close evidence, handoff,
 and snapshot cleanup. File-size hardening covers the 8 MiB ordinary-JSON
 bound with fail-before-replace diagnostics, the separate 64 MiB manifest
 bound, bounded handoff/reconciliation snapshots, and fail-closed diagnostics
-for oversized artifacts. The 6.5.0 ledger starts from SQLite only: its
+for oversized artifacts. The 7.1.1 ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
 the user MCP approval override. Live-model and tracked-release validation are
@@ -61,7 +70,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 6.5.0 release commit only with explicit authorization.
+- Create the Cortex 7.1.1 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

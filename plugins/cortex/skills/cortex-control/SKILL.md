@@ -40,7 +40,12 @@ signal, never permission for the root to perform the work directly.
    complexity only when the user supplied them or they are established facts.
    Do not make an abstract request look decision-complete by inventing product
    intent, audience, design direction, behavior, or acceptance. Complexity
-   defaults to C2 and accepts aliases.
+   defaults to C2 and accepts aliases. Before the one start call, verify that
+   ordinary tasks have non-empty `task.acceptance_criteria` and
+   `task.verification`, derived only from the exact request or verified
+   authority. If either list cannot be grounded without inventing material
+   intent, ask the user before calling Cortex. Exact harvest routes are the
+   sole exception because Cortex supplies their exhaustive census contract.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
    returns, and validates that plan and enforces documentation and close. An override uses only
@@ -103,16 +108,20 @@ signal, never permission for the root to perform the work directly.
    produce no heartbeat or status commentary. Visible output is limited to a
    worker question, worker completion/failure, or a blocking error.
 
-   Any worker may call
-   `worker_question(action="ask")` when repository evidence cannot resolve a
-   material user decision. It returns a compact `question_ref`; the worker
-   sends only that ref and a concise question summary through the native parent
+   Any worker may call `worker_question` when repository evidence cannot
+   resolve a material user decision. Before pausing, it collects every
+   currently known material decision: use `action="ask_batch"` when there is
+   more than one, and `action="ask"` only when exactly one is known. It returns
+   a compact `question_ref`; the worker sends only that ref and a concise
+   question summary through the native parent
    channel, publishes no report, and finishes its native turn into an
    idle/resumable state rather than busy-waiting. The coordinator calls
    `manage_orchestration(intent="question", payload={"question_ref": "<exact
    ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
-   the host-native question UI. Never ask the question in commentary/final
-   prose or guess an internal identity. After the answer is durably recorded,
+   the host-native question UI. A batch is rendered sequentially, one native
+   question at a time, and every accepted answer is checkpointed before the
+   next appears. Never ask the question in commentary/final prose or guess an
+   internal identity. After the answer is durably recorded,
    resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
    continuing. Never replace the worker or advance the wave for a question.
@@ -136,7 +145,7 @@ signal, never permission for the root to perform the work directly.
    This is the canonical result envelope for implementation, QA, review, close,
    and every other gate. The older top-level `closure` sibling is retained only
    as a temporary compatibility alias for review/close and must not be placed
-   inside the strict eight-field report; when both are supplied they must agree.
+   inside the strict seven-field report; when both are supplied they must agree.
    `followup_task` resumes the same addressable native worker for an answered
    durable question or an explicit active steer. Active steer is recorded as a
    new task revision and delivered to the existing `host_agent_id`; it does
@@ -205,11 +214,13 @@ exact `report_markdown_link` before the next lifecycle or report-read call.
 user confirmation. A required plan must be its own wave. Once that plan
 completes, the lifecycle result is `awaiting_plan_approval` with no successor
 dispatch and a bounded `plan_review` containing `report_ref`, `summary`,
-`findings`, `uncertainty`, `next_action`, and `remaining_phases`. The
-coordinator reads the report, summarizes the plan in the main chat, and waits
-for explicit user approval. Resume with
-`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`.
-For requested changes, use
+`findings`, `uncertainty`, and `remaining_phases`. The
+coordinator reads the report, summarizes the plan in the main chat, then calls
+`manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
+Cortex opens the native `Approve` / `Cancel` UI. On `Approve`, announce in the
+user's language that the plan was approved and dispatch the returned wave. On
+`Cancel`, stop silently, keep the plan pending, and wait for the user's next
+message. For requested changes after that message, use
 `manage_orchestration(intent="plan_approval", payload={"decision":"revise", "feedback":"..."})`;
 feedback is required and the Planner runs again before approval. This gate is
 separate from `worker_question`: material questions are resolved through that
@@ -217,11 +228,13 @@ lifecycle during planning rather than through a duplicate approval question.
 
 The Planner may attach a separate `planning` object to its public
 `record_report`. It contains exactly `overview` and `work_packages`; the
-strict eight-field `cortex/report/v1` contract remains unchanged. Each package
+strict seven-field `cortex/report/v1` contract remains unchanged. Each package
 has `id`, `title`, `objective`, optional `allowed_paths`/`depends_on`, and
-non-empty microtasks. Each microtask has `id`, `title`, `objective`, and
-optional `profile`, `allowed_paths`, `depends_on`, `acceptance_criteria`, and
-`verification`. Cortex validates package and per-package microtask dependency
+non-empty microtasks; `profile` is forbidden at package level. Each microtask
+requires `id`, `title`, `objective`, non-empty `acceptance_criteria`, and
+non-empty `verification`, with optional `profile`, `allowed_paths`, and
+`depends_on`.
+Cortex validates package and per-package microtask dependency
 DAGs and enforces 32 packages, 32 microtasks per package, and 128 total
 microtasks. The Planner remains read-only; Cortex materializes
 `.codex/cortex/tasks/<task>/planning/manifest.json`, `overview.md`, and
@@ -317,9 +330,11 @@ question remains canonical English. Answers preserve the user's original
 value and language and require `answer_en` for localized free text before the
 worker receives the canonical English answer. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
-same `batch_ref` with `action="poll_batch"`; the host form answers every item
-in one atomic batch. A task revision supersedes an unresolved batch rather
-than resuming stale user intent. Every
+same `batch_ref` with `action="poll_batch"`; the host renders one question per
+native step and durably checkpoints each accepted answer before showing the
+next. Cancellation preserves completed steps and resumes at the next unanswered
+item. A task revision supersedes an unresolved batch rather than resuming stale
+user intent. Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;
 existing code is current-state evidence, not evidence of desired product

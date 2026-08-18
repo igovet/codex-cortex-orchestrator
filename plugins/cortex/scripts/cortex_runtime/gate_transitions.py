@@ -345,7 +345,15 @@ def _apply_transition(
         state["status"] = "blocked"
     else:
         for attempt in state["attempts"]:
-            if attempt["gate"] == gate and attempt["status"] in {"running", AWAITING_HOST_SPAWN}:
+            # A gate can fail after a worker submitted a syntactically valid
+            # pass report: for example, when its inherited corrective finding
+            # remains open.  Retire that report with the failed gate so the
+            # next bounded attempt is a new worker, never the same stale pass.
+            if (
+                attempt["gate"] == gate
+                and not attempt.get("invalidated")
+                and attempt["status"] in {"running", AWAITING_HOST_SPAWN, "passed"}
+            ):
                 attempt["status"] = "failed"
     operations = params.get("pipeline_operations", [])
     if operations:
@@ -417,25 +425,29 @@ def _closure_rework_target(
     gate: str,
     findings: list[dict[str, Any]],
 ) -> str:
-    """Choose a durable remediation gate without accepting a worker verdict.
+    """Choose the corrective gate from canonical state and observed impact.
 
-    A finding may nominate a target gate, but a closure cannot send work to a
-    gate outside the canonical pipeline.  Documentation is the conservative
-    fallback because C2/C3 tasks always have that gate and it is the last
-    writer before review and close.
+    Worker reports carry findings, not instructions.  The control plane owns
+    wave selection: environment/policy conditions block upstream, documented
+    impact returns to documentation, and product/review debt fails back to
+    implementation when that gate exists.
     """
     pipeline = list(state.get("current_pipeline", []))
-    requested = next(
-        (
-            str((item.get("next_action") or {}).get("target_gate") or "").strip()
-            for item in findings
-            if str((item.get("next_action") or {}).get("target_gate") or "").strip()
-        ),
-        "",
-    )
     gate_index = pipeline.index(gate) if gate in pipeline else len(pipeline) - 1
-    if requested in pipeline and pipeline.index(requested) <= gate_index:
-        return requested
+    affected_paths: list[str] = []
+    for finding in findings:
+        details = finding.get("details")
+        if isinstance(details, dict) and isinstance(details.get("affected_paths"), list):
+            affected_paths.extend(str(path).replace("\\", "/") for path in details["affected_paths"])
+    if (
+        affected_paths
+        and all(path.startswith("docs/") for path in affected_paths)
+        and "documentation" in pipeline
+        and pipeline.index("documentation") <= gate_index
+    ):
+        return "documentation"
+    if gate == "documentation" and "documentation" in pipeline:
+        return "documentation"
     if gate == "qa" and "implementation" in pipeline:
         return "implementation"
     if gate in {"review", "close", "security", "performance"} and "implementation" in pipeline:
@@ -451,6 +463,7 @@ def _activate_closure_rework(
     *,
     gate: str,
     findings: list[dict[str, Any]],
+    source_report_refs: list[str],
 ) -> str:
     """Make canonical closure debt an executable non-terminal rework chain.
 
@@ -485,14 +498,26 @@ def _activate_closure_rework(
     invalidate_reworked_report_receipts(task_dir, state)
     state["status"] = "active"
     fingerprints = sorted({str(item["fingerprint"]) for item in findings})
+    report_refs = list(dict.fromkeys(
+        str(item).strip() for item in source_report_refs if str(item).strip()
+    ))
     rework = state.setdefault("closure_rework", {})
     prior = rework.get(gate)
-    if not isinstance(prior, dict) or prior.get("finding_fingerprints") != fingerprints:
+    if (
+        not isinstance(prior, dict)
+        or prior.get("finding_fingerprints") != fingerprints
+        or prior.get("source_report_refs") != report_refs
+    ):
         rework[gate] = {
             "status": "rework_required",
             "target_gate": target_gate,
             "rerun_gates": [item for item in ("review", "close") if item in reordered],
             "finding_fingerprints": fingerprints,
+            # Rework invalidates the review/close receipt that raised the
+            # finding.  Keep its immutable report reference in durable state
+            # so the corrective worker receives the exact defect rather than
+            # a generic implementation assignment.
+            "source_report_refs": report_refs,
             "at": now(),
         }
     sync_current_wave(state)
@@ -540,14 +565,20 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             gate in {"review", "close"} or bool(params.get("enforce_canonical_findings"))
         ):
             blockers = db_task_findings_blockers(root, state["task_id"])
-            missing = [item for item in db_list_task_findings(root, state["task_id"], include_resolved=False) if item.get("status") == "open" and (item.get("next_action") or {}).get("required")]
-            if blockers or missing:
-                actionable = blockers + [item for item in missing if item not in blockers]
+            if blockers:
+                actionable = blockers
+                source_report_refs = list(dict.fromkeys(
+                    str(report_ref)
+                    for attempt in inputs[4]
+                    for report_ref in attempt.get("report_ids", [])
+                    if str(report_ref).strip()
+                ))
                 target_gate = _activate_closure_rework(
                     task_dir,
                     state,
                     gate=gate,
                     findings=actionable,
+                    source_report_refs=source_report_refs,
                 )
                 save_state(task_dir, task_dir / "state.sqlite", state, "gate_rework", f"{gate}: canonical gate blockers require rework")
                 # Returning a normal transition shape lets the v3 adapter

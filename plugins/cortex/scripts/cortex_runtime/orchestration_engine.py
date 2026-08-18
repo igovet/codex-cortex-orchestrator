@@ -69,6 +69,7 @@ bind_symbols(
         "current_planning_manifest",
         "db_get_classification",
         "db_get_operation",
+        "db_list_task_findings",
         "db_load_task",
         "db_put_operation",
         "db_update_task_plan",
@@ -534,6 +535,67 @@ def _predecessor_context_report_ids(
     return selected
 
 
+def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[str]:
+    """Keep the report that opened an active corrective wave in its context.
+
+    A closure rework invalidates its predecessor gate, so ordinary predecessor
+    selection intentionally excludes that report.  The corrective worker still
+    needs it: otherwise it receives a generic implementation task with no
+    durable statement of the defect it must resolve.
+    """
+    selected: list[str] = []
+    for source_gate, rework in (state.get("closure_rework") or {}).items():
+        if not isinstance(rework, dict):
+            continue
+        if rework.get("status") != "rework_required" or not (
+            rework.get("target_gate") in gates or source_gate in gates
+        ):
+            continue
+        for report_ref in rework.get("source_report_refs") or []:
+            value = str(report_ref).strip()
+            if value and value not in selected:
+                selected.append(value)
+    return selected
+
+
+def _unresolved_rework_findings(
+    root: Path,
+    state: dict[str, Any],
+    gate: str,
+) -> list[dict[str, Any]]:
+    """Return findings that their originating verification gate still has to close."""
+    findings = {
+        str(item.get("fingerprint")): item
+        for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
+    }
+    unresolved: list[dict[str, Any]] = []
+    for source_gate, rework in (state.get("closure_rework") or {}).items():
+        # A corrective implementation/documentation worker may perform the
+        # change, but the gate that found the defect must verify it.  Holding
+        # the source gate rather than the writer preserves the canonical
+        # implementation -> QA or documentation -> review route and prevents
+        # a generic writer report from being treated as proof of a fix.
+        if (
+            not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+            or source_gate != gate
+        ):
+            continue
+        fingerprints = [str(item) for item in rework.get("finding_fingerprints") or []]
+        open_findings = [
+            findings[fingerprint]
+            for fingerprint in fingerprints
+            if findings.get(fingerprint, {}).get("status") == "open"
+        ]
+        if open_findings:
+            unresolved.extend(open_findings)
+        elif rework.get("status") == "rework_required":
+            rework["status"] = "resolved"
+            rework["resolved_at"] = now()
+            rework["resolved_by_gate"] = gate
+    return unresolved
+
+
 def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     current_gates = active_gates(state)
     if not current_gates:
@@ -562,6 +624,7 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
         )
     prepared_attempts: list[dict[str, Any]] = []
     predecessor_report_ids = _predecessor_context_report_ids(state)
+    rework_report_ids = _rework_context_report_ids(state, set(current_gates))
     for spec in wave["delegations"]:
         key = spec["orchestration_delegation_key"]
         existing = next(
@@ -596,6 +659,10 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             )
         else:
             context_report_ids = predecessor_report_ids
+        # The report that triggered corrective work stays readable even though
+        # its original gate receipt was invalidated.  Put it first so bounded
+        # context cannot silently discard the reason for the rework.
+        context_report_ids = list(dict.fromkeys(rework_report_ids + context_report_ids))[:MAX_CONTEXT_REPORTS]
         delegated = record_delegation({
             **params,
             **spec,
@@ -842,7 +909,6 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any
         "summary": redact(report["summary"], 2400),
         "findings": [redact(item, 1000) for item in report.get("findings", [])][:12],
         "uncertainty": [redact(item, 1000) for item in report.get("uncertainty", [])][:12],
-        "next_action": redact(report["next_action"], 1200),
         "remaining_phases": list(active_gates(state)),
         **({"planning_artifacts": artifact_summary} if artifact_summary else {}),
     }
@@ -1353,6 +1419,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             statuses = {item.get("status") for item in gate_attempts}
             default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
             gate_decision = _canonical_gate_decision(task_dir, state, gate)
+            unresolved_rework = _unresolved_rework_findings(root, state, gate)
             if gate_decision == "blocked":
                 default_outcome = "blocked"
             elif gate_decision == "fail":
@@ -1361,6 +1428,12 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 # record_gate consults canonical blockers and performs the
                 # fail-back transition instead of completing this gate.
                 default_outcome = "passed"
+            elif unresolved_rework:
+                # A corrective worker cannot advance the pipeline merely by
+                # completing unrelated work.  Treat an unclosed inherited
+                # finding as a failed attempt; normal bounded retry handling
+                # will either dispatch another corrective worker or block.
+                default_outcome = "failed"
             outcome = str(gate_outcomes.get(gate, default_outcome))
             failure_counts = state.setdefault("orchestrate_gate_failure_counts", {})
             failure_count_changed = False
@@ -1401,6 +1474,10 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     raise ValueError("automatic handoff manifest reconciliation failed")
                 state = handed["state"]
             gate_summary = f"Unified facade recorded {gate} as {outcome}."
+            if unresolved_rework and outcome == "failed":
+                gate_summary += " Required corrective findings remain open: " + ", ".join(
+                    str(item["fingerprint"]) for item in unresolved_rework
+                ) + "."
             if outcome == "blocked" and state.get("blocked_reason"):
                 gate_summary += " " + str(state["blocked_reason"])
             recorded = record_gate({

@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "6.6.0":
-        fail("plugin manifest must identify cortex at release version 6.6.0")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "7.1.1":
+        fail("plugin manifest must identify cortex at release version 7.1.1")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -223,7 +223,7 @@ def main() -> int:
         if not all(isinstance(briefing.get(key), list) and briefing[key] for key in ("acceptance", "verification")):
             fail(f"gate briefing lacks acceptance or verification: {gate}")
     shared = profile_contract.get("shared_worker_contract", {})
-    required_report_fields = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
+    required_report_fields = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"}
     if shared.get("report_schema") != "cortex/report/v1" or set(shared.get("required_report_fields", [])) != required_report_fields:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
     expected_public_operations = {

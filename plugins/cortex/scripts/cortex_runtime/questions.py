@@ -62,10 +62,9 @@ def _batch_document_key(batch_id: str) -> str:
 def _batch_records(task_dir: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
     """Read validated batch records from their SQLite task-document projection.
 
-    Batch records deliberately share the existing task-document store.  Every
-    caller mutates them while holding ``state_lock``, whose transaction is the
-    atomic boundary for the complete batch (including supersession and every
-    answer), rather than committing one question at a time.
+    Batch records deliberately share the existing task-document store. Every
+    accepted slide is checkpointed under ``state_lock`` so cancellation can
+    resume at the next unanswered question without losing prior decisions.
     """
     root = _task_document_root(task_dir, str(state["task_id"]))
     records: list[dict[str, Any]] = []
@@ -205,6 +204,22 @@ def _batch_answer_view(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
         }
     return result
 
+
+def _batch_progress(record: dict[str, Any]) -> dict[str, Any]:
+    """Return bounded durable progress for the sequential batch UI."""
+    questions = list(record.get("questions") or [])
+    answers = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+    remaining = [
+        str(item.get("question_key") or "")
+        for item in questions
+        if str(item.get("question_key") or "") not in answers
+    ]
+    return {
+        "answered": len(questions) - len(remaining),
+        "total": len(questions),
+        "next_question_key": remaining[0] if remaining else None,
+    }
+
 def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
@@ -328,6 +343,9 @@ def _publish_worker_question_batch(
         "status": "open",
         "questions": batch["questions"],
         "answers": {},
+        "answered_count": 0,
+        "total_questions": len(batch["questions"]),
+        "next_question_key": batch["questions"][0]["question_key"],
         "content_digest": content_digest,
         "created_at": timestamp,
         "answered_at": None,
@@ -809,93 +827,173 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
     return {**record, "questions": questions}
 
 
-def _batch_form_schema(record: dict[str, Any]) -> dict[str, Any]:
-    """Render every material ambiguity in one native elicitation form."""
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-    for question in record.get("questions") or []:
-        key = question["question_key"]
-        question_type = question["question_type"]
-        title = question.get("localized_question") or question["canonical_question"]
-        description = question.get("localized_header") or question.get("header") or ""
-        if question_type == "text":
-            properties[key] = {
-                "type": "string",
-                "minLength": 1,
+def _batch_form_schema(question: dict[str, Any]) -> dict[str, Any]:
+    """Render exactly one batch item in the native question UI."""
+    key = question["question_key"]
+    question_type = question["question_type"]
+    title = question.get("localized_question") or question["canonical_question"]
+    description = question.get("localized_header") or question.get("header") or ""
+    if question_type == "text":
+        field = {
+            "type": "string",
+            "minLength": 1,
+            "title": title,
+            "description": description or question.get("localized_custom_label") or question.get("custom_label"),
+        }
+    else:
+        choices = [
+            {
+                "const": option["option_id"],
+                "title": option.get("label_localized") or option.get("label_en") or option["option_id"],
+            }
+            for option in question.get("options") or []
+        ]
+        if question_type == "multi_select":
+            field = {
+                "type": "array",
+                "minItems": 1,
                 "title": title,
-                "description": description or question.get("localized_custom_label") or question.get("custom_label"),
+                "description": description,
+                "items": {"anyOf": choices},
             }
         else:
-            choices = [
-                {
-                    "const": option["option_id"],
-                    "title": option.get("label_localized") or option.get("label_en") or option["option_id"],
-                }
-                for option in question.get("options") or []
-            ]
-            if question_type == "multi_select":
-                properties[key] = {
-                    "type": "array",
-                    "minItems": 1,
-                    "title": title,
-                    "description": description,
-                    "items": {"anyOf": choices},
-                }
-            else:
-                properties[key] = {
-                    "type": "string",
-                    "title": title,
-                    "description": description,
-                    "oneOf": choices,
-                }
-        required.append(key)
+            field = {
+                "type": "string",
+                "title": title,
+                "description": description,
+                "oneOf": choices,
+            }
     return {
         "type": "object",
         "additionalProperties": False,
-        "properties": properties,
-        "required": required,
+        "properties": {key: field},
+        "required": [key],
     }
 
 
-def _batch_answers_from_content(content: dict[str, Any] | None, record: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _batch_answer_from_content(
+    content: dict[str, Any] | None,
+    question: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate one native step without accepting answers for later slides."""
     if not isinstance(content, dict):
         raise ValueError("MCP elicitation returned an invalid batch response")
-    questions = record.get("questions") or []
-    expected = {str(item["question_key"]) for item in questions}
-    if set(content) != expected:
-        raise ValueError("MCP elicitation must answer every batch question exactly once")
-    answers: dict[str, dict[str, Any]] = {}
-    for question in questions:
-        key = str(question["question_key"])
-        raw = content[key]
-        question_type = question["question_type"]
-        if question_type == "text":
-            original = redact(str(raw or "").strip(), 8000)
-            if not original:
-                raise ValueError("batch text answers must be non-empty")
-            option_ids: list[str] = []
+    key = str(question["question_key"])
+    if set(content) != {key}:
+        raise ValueError("MCP elicitation must answer only the current batch question")
+    raw = content[key]
+    question_type = question["question_type"]
+    if question_type == "text":
+        original = redact(str(raw or "").strip(), 8000)
+        if not original:
+            raise ValueError("batch text answers must be non-empty")
+        option_ids: list[str] = []
+    else:
+        option_map = {
+            option["option_id"]: option.get("label_en") or option.get("label") or option["option_id"]
+            for option in question.get("options") or []
+        }
+        if question_type == "multi_select":
+            raw_ids = raw if isinstance(raw, list) else [raw]
+            option_ids = [safe_id(str(item)) for item in raw_ids if str(item).strip()]
         else:
+            option_ids = [safe_id(str(raw))] if str(raw or "").strip() else []
+        if not option_ids or len(option_ids) != len(set(option_ids)) or any(item not in option_map for item in option_ids):
+            raise ValueError("MCP elicitation returned an unknown or empty batch option")
+        original = option_ids if question_type == "multi_select" else option_ids[0]
+    return {
+        "answer_original": original,
+        "answer_option_ids": option_ids,
+        "answer_original_text": (
+            json.dumps(original, ensure_ascii=False, sort_keys=True)
+            if isinstance(original, list) else str(original)
+        ),
+    }
+
+
+def _refresh_batch_answer_state(record: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+    """Derive canonical answers and terminal state from durable slide progress."""
+    stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+    language = str(record.get("answer_original_language") or params.get("user_language") or "en")
+    supplied = params.get("canonical_answers")
+    if supplied is None:
+        supplied = {}
+    if not isinstance(supplied, dict):
+        raise ValueError("canonical_answers must be an object keyed by text question_key")
+    question_by_key = {str(item["question_key"]): item for item in record.get("questions") or []}
+    unknown = sorted(set(supplied) - set(question_by_key))
+    if unknown:
+        raise ValueError("canonical_answers contains an unknown question_key: " + ", ".join(unknown))
+    pending_translation: list[str] = []
+    for key, answer in stored.items():
+        question = question_by_key.get(key)
+        if not isinstance(question, dict) or not isinstance(answer, dict):
+            raise ValueError("batch answer record is invalid")
+        option_ids = list(answer.get("answer_option_ids") or [])
+        if question["question_type"] != "text":
             option_map = {
                 option["option_id"]: option.get("label_en") or option.get("label") or option["option_id"]
                 for option in question.get("options") or []
             }
-            if question_type == "multi_select":
-                raw_ids = raw if isinstance(raw, list) else [raw]
-                option_ids = [safe_id(str(item)) for item in raw_ids if str(item).strip()]
-            else:
-                option_ids = [safe_id(str(raw))] if str(raw or "").strip() else []
-            if not option_ids or len(option_ids) != len(set(option_ids)) or any(item not in option_map for item in option_ids):
-                raise ValueError("MCP elicitation returned an unknown or empty batch option")
-            original = option_ids if question_type == "multi_select" else option_ids[0]
-        answers[key] = {
-            "answer_original": original,
-            "answer_option_ids": option_ids,
-            "answer_original_text": (
-                json.dumps(original, ensure_ascii=False, sort_keys=True)
-                if isinstance(original, list) else str(original)
-            ),
-        }
-    return answers
+            if not option_ids or any(item not in option_map for item in option_ids):
+                raise ValueError("batch answer record has an invalid canonical option_id")
+            answer["answer_en"] = "\n".join(str(option_map[item]) for item in option_ids)
+            answer["translation_status"] = "not_required"
+            continue
+        original = redact(str(answer.get("answer_original") or "").strip(), 8000)
+        if not original:
+            raise ValueError("batch answer record has an empty free-text answer")
+        if language.lower().startswith("en"):
+            require_internal_english(original, "free-text batch answer")
+            answer["answer_en"] = original
+            answer["translation_status"] = "not_required"
+        elif key in supplied:
+            translated = redact(str(supplied[key] or "").strip(), 8000)
+            if not translated:
+                raise ValueError("canonical_answers translations must be non-empty")
+            require_internal_english(translated, "canonical batch answer translation")
+            answer["answer_en"] = translated
+            answer["translation_status"] = "translated"
+            answer["translated_by"] = redact(str(params.get("translated_by") or "coordinator"), 160)
+            answer["translated_at"] = now()
+        elif answer.get("translation_status") == "translated" and str(answer.get("answer_en") or "").strip():
+            continue
+        else:
+            answer["translation_status"] = "awaiting_translation"
+            pending_translation.append(key)
+
+    missing = [key for key in question_by_key if key not in stored]
+    record["answers"] = stored
+    record["answered_count"] = len(stored)
+    record["total_questions"] = len(question_by_key)
+    record["next_question_key"] = missing[0] if missing else None
+    record["answer_original"] = {key: item["answer_original"] for key, item in stored.items()}
+    record["answer_option_ids"] = {key: list(item.get("answer_option_ids") or []) for key, item in stored.items()}
+    record["answer_en"] = {
+        key: str(item["answer_en"])
+        for key, item in stored.items()
+        if str(item.get("answer_en") or "").strip()
+    }
+    if pending_translation:
+        record["translation_status"] = "awaiting_translation"
+    elif stored and all(item.get("translation_status") == "not_required" for item in stored.values()):
+        record["translation_status"] = "not_required"
+    elif stored:
+        record["translation_status"] = "translated"
+    else:
+        record["translation_status"] = "pending"
+    record["translation_required_for"] = pending_translation
+    if missing:
+        record["status"] = "open"
+        record["answered_at"] = None
+    elif pending_translation:
+        record["status"] = "awaiting_translation"
+        record["translation_requested_at"] = now()
+        record["answered_at"] = None
+    else:
+        record["status"] = "answered"
+        record["answered_at"] = now()
+    return record
 
 
 def _persist_batch_answers(
@@ -905,7 +1003,7 @@ def _persist_batch_answers(
     *,
     elicitation_id: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Commit all answers/translations in one state-lock SQLite transaction."""
+    """Persist a complete compatibility answer set or canonical translations."""
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -922,88 +1020,79 @@ def _persist_batch_answers(
             return record, False
         if record.get("status") == "answered":
             return record, True
-        if record.get("status") == "open":
-            if answers is None:
-                raise ValueError("open batch requires native form answers")
-            record["answers"] = answers
-            record["answer_original_language"] = str(params.get("user_language") or "en")
-            record["elicitation_id"] = elicitation_id
-        elif answers is not None:
-            # A second native form answer cannot replace a durable original
-            # while a coordinator is translating it.
-            raise ValueError("batch is awaiting translation; submit canonical_answers without reopening the form")
-
-        stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
-        language = str(record.get("answer_original_language") or params.get("user_language") or "en")
-        supplied = params.get("canonical_answers")
-        if supplied is None:
-            supplied = {}
-        if not isinstance(supplied, dict):
-            raise ValueError("canonical_answers must be an object keyed by text question_key")
-        question_by_key = {str(item["question_key"]): item for item in record.get("questions") or []}
-        unknown = sorted(set(supplied) - set(question_by_key))
-        if unknown:
-            raise ValueError("canonical_answers contains an unknown question_key: " + ", ".join(unknown))
-        pending_translation: list[str] = []
-        for key, question in question_by_key.items():
-            answer = stored.get(key)
-            if not isinstance(answer, dict):
-                raise ValueError("batch answer record is incomplete")
-            option_ids = list(answer.get("answer_option_ids") or [])
-            if question["question_type"] != "text":
-                option_map = {
-                    option["option_id"]: option.get("label_en") or option.get("label") or option["option_id"]
-                    for option in question.get("options") or []
-                }
-                if not option_ids or any(item not in option_map for item in option_ids):
-                    raise ValueError("batch answer record has an invalid canonical option_id")
-                answer["answer_en"] = "\n".join(str(option_map[item]) for item in option_ids)
-                answer["translation_status"] = "not_required"
-                continue
-            original = redact(str(answer.get("answer_original") or "").strip(), 8000)
-            if not original:
-                raise ValueError("batch answer record has an empty free-text answer")
-            if language.lower().startswith("en"):
-                require_internal_english(original, "free-text batch answer")
-                answer["answer_en"] = original
-                answer["translation_status"] = "not_required"
-            elif key in supplied:
-                translated = redact(str(supplied[key] or "").strip(), 8000)
-                if not translated:
-                    raise ValueError("canonical_answers translations must be non-empty")
-                require_internal_english(translated, "canonical batch answer translation")
-                answer["answer_en"] = translated
-                answer["translation_status"] = "translated"
-                answer["translated_by"] = redact(str(params.get("translated_by") or "coordinator"), 160)
-                answer["translated_at"] = now()
-            else:
-                answer["translation_status"] = "awaiting_translation"
-                pending_translation.append(key)
-        record["answers"] = stored
-        record["answer_original"] = {key: item["answer_original"] for key, item in stored.items()}
-        record["answer_option_ids"] = {key: list(item.get("answer_option_ids") or []) for key, item in stored.items()}
-        record["answer_en"] = {
-            key: str(item["answer_en"])
-            for key, item in stored.items()
-            if str(item.get("answer_en") or "").strip()
-        }
-        if pending_translation:
-            record["translation_status"] = "awaiting_translation"
-        elif all(item.get("translation_status") == "not_required" for item in stored.values()):
-            record["translation_status"] = "not_required"
-        else:
-            record["translation_status"] = "translated"
-        if pending_translation:
-            record["status"] = "awaiting_translation"
-            record["translation_required_for"] = pending_translation
-            record["translation_requested_at"] = now()
-        else:
-            record["status"] = "answered"
-            record["translation_required_for"] = []
-            record["answered_at"] = now()
+        if answers is not None:
+            if record.get("status") != "open":
+                raise ValueError("batch is awaiting translation; submit canonical_answers without reopening the form")
+            stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+            for key, answer in answers.items():
+                if key in stored and stored[key] != answer:
+                    raise ValueError("a durable batch answer cannot be replaced")
+                stored[key] = answer
+            record["answers"] = stored
+            record["answer_original_language"] = str(
+                record.get("answer_original_language") or params.get("user_language") or "en"
+            )
+            if elicitation_id:
+                record["elicitation_id"] = elicitation_id
+        elif record.get("status") == "open":
+            raise ValueError("open batch requires native question answers")
+        _refresh_batch_answer_state(record, params)
         _write_batch_record(task_dir, state, record)
         append_journal_best_effort(task_dir, "worker_question_batch_answer", f"{batch_id} {record['status']}")
         return record, False
+
+
+def _persist_batch_step_answer(
+    params: dict[str, Any],
+    batch_id: str,
+    question_key: str,
+    answer: dict[str, Any],
+    *,
+    elicitation_id: str,
+) -> dict[str, Any]:
+    """Checkpoint one accepted slide so cancellation resumes at the next item."""
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize(state, params)
+        record = _batch_record(task_dir, state, batch_id)
+        if record is None:
+            raise ValueError("batch_ref does not belong to this task")
+        attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        if _batch_is_stale(record, state):
+            _supersede_batch(task_dir, state, record, reason="task revision superseded this unresolved batch")
+        if attempt.get("invalidated"):
+            _supersede_batch(task_dir, state, record, reason="worker attempt was superseded before its batch was answered")
+        if record.get("status") == "superseded":
+            return record
+        if record.get("status") != "open":
+            raise ValueError("the question batch is not accepting another slide answer")
+        question_keys = {str(item.get("question_key") or "") for item in record.get("questions") or []}
+        if question_key not in question_keys:
+            raise ValueError("question_key does not belong to this batch")
+        stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+        if question_key in stored:
+            if stored[question_key] != answer:
+                raise ValueError("a durable batch answer cannot be replaced")
+            return record
+        answer = dict(answer)
+        answer["elicitation_id"] = elicitation_id
+        answer["answered_at"] = now()
+        stored[question_key] = answer
+        record["answers"] = stored
+        record["answer_original_language"] = str(
+            record.get("answer_original_language") or params.get("user_language") or "en"
+        )
+        record.setdefault("elicitation_ids", {})[question_key] = elicitation_id
+        record["last_elicitation_id"] = elicitation_id
+        _refresh_batch_answer_state(record, params)
+        _write_batch_record(task_dir, state, record)
+        append_journal_best_effort(
+            task_dir,
+            "worker_question_batch_step",
+            f"{batch_id} {question_key} {record['answered_count']}/{record['total_questions']}",
+        )
+        return record
 
 
 def _supersede_batch_for_main(params: dict[str, Any], batch_id: str) -> dict[str, Any]:
@@ -1020,7 +1109,7 @@ def _supersede_batch_for_main(params: dict[str, Any], batch_id: str) -> dict[str
 
 
 def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, Any]:
-    """Surface one durable batch in a single localized native form."""
+    """Surface a durable batch as one native question at a time."""
     record = _supersede_batch_for_main(params, batch_id)
     if record.get("status") == "superseded":
         return {
@@ -1073,69 +1162,93 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
         }
 
     view = _localized_batch_view(record, params)
+    stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+    unanswered = [
+        item for item in view.get("questions") or []
+        if str(item.get("question_key") or "") not in stored
+    ]
+    progress = _batch_progress(record)
     if not bool(params.get("interactive", True)):
+        current = unanswered[0] if unanswered else None
         return {
             "schema": QUESTION_SCHEMA,
             "status": "pending_user_input",
             "question_id": batch_id,
             "batch_ref": batch_id,
-            "batch": view,
-            "ui": _batch_form_schema(view),
+            "question": current,
+            "ui": _batch_form_schema(current) if current else None,
+            "progress": progress,
             "next_action": "invoke cortex.question with interactive=true from the main Codex chat",
             "recoverable": True,
             "durable": {"batch": record},
         }
-    try:
-        action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
-            "Please answer every question in this batch.",
-            _batch_form_schema(view),
-            thread_id=str(params.get("thread_id") or ""),
-            turn_id=str(params.get("turn_id") or ""),
-        )
-    except RuntimeError as exc:
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "elicitation_unavailable",
-            "question_id": batch_id,
-            "batch_ref": batch_id,
-            "error": redact(str(exc), 1000),
-            "recoverable": True,
-            "durable": {"batch": record},
-        }
-    if action != "accept":
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": action if action in {"decline", "cancel"} else "cancel",
-            "question_id": batch_id,
-            "batch_ref": batch_id,
-            "elicitation_id": elicitation_id,
-            "durable": {"batch": record},
-        }
-    try:
-        answers = _batch_answers_from_content(content, view)
-        record, _ = _persist_batch_answers(params, batch_id, answers, elicitation_id=elicitation_id)
-    except ValueError as exc:
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "invalid_answer",
-            "question_id": batch_id,
-            "batch_ref": batch_id,
-            "error": redact(str(exc), 1000),
-            "recoverable": True,
-            "durable": {"batch": record},
-        }
-    if record.get("status") == "superseded":
-        return {
-            "schema": QUESTION_SCHEMA, "status": "superseded", "question_id": batch_id,
-            "batch_ref": batch_id, "resume": False, "durable": {"batch": record},
-        }
+    last_elicitation_id = str(record.get("last_elicitation_id") or "") or None
+    total = len(view.get("questions") or [])
+    for question in unanswered:
+        current_progress = _batch_progress(record)
+        position = int(current_progress["answered"]) + 1
+        try:
+            action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
+                f"Question {position} of {total}",
+                _batch_form_schema(question),
+                thread_id=str(params.get("thread_id") or ""),
+                turn_id=str(params.get("turn_id") or ""),
+            )
+        except RuntimeError as exc:
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "elicitation_unavailable",
+                "question_id": batch_id,
+                "batch_ref": batch_id,
+                "error": redact(str(exc), 1000),
+                "progress": current_progress,
+                "recoverable": True,
+                "durable": {"batch": record},
+            }
+        if action != "accept":
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": action if action in {"decline", "cancel"} else "cancel",
+                "question_id": batch_id,
+                "batch_ref": batch_id,
+                "elicitation_id": elicitation_id,
+                "progress": current_progress,
+                "durable": {"batch": record},
+            }
+        try:
+            answer = _batch_answer_from_content(content, question)
+            record = _persist_batch_step_answer(
+                params,
+                batch_id,
+                str(question["question_key"]),
+                answer,
+                elicitation_id=elicitation_id,
+            )
+        except ValueError as exc:
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "invalid_answer",
+                "question_id": batch_id,
+                "batch_ref": batch_id,
+                "error": redact(str(exc), 1000),
+                "progress": _batch_progress(record),
+                "recoverable": True,
+                "durable": {"batch": record},
+            }
+        last_elicitation_id = elicitation_id
+        if record.get("status") == "superseded":
+            return {
+                "schema": QUESTION_SCHEMA, "status": "superseded", "question_id": batch_id,
+                "batch_ref": batch_id, "resume": False, "durable": {"batch": record},
+            }
     if record.get("status") == "awaiting_translation":
         return {
             "schema": QUESTION_SCHEMA,
             "status": "awaiting_translation",
             "question_id": batch_id,
             "batch_ref": batch_id,
-            "elicitation_id": elicitation_id,
+            "elicitation_id": last_elicitation_id,
+            "progress": _batch_progress(record),
             "answer_original": record.get("answer_original"),
             "answer_original_language": record.get("answer_original_language"),
             "answer_option_ids": record.get("answer_option_ids"),
@@ -1148,7 +1261,8 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
         "status": "answered",
         "question_id": batch_id,
         "batch_ref": batch_id,
-        "elicitation_id": elicitation_id,
+        "elicitation_id": last_elicitation_id,
+        "progress": _batch_progress(record),
         "answers": _batch_answer_view(record),
         "durable": {"batch": record},
     }

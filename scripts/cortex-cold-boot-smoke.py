@@ -154,7 +154,7 @@ def report(
         "findings": [], "questions": [], "changed_files": changed_files,
         "tests": checks,
         "evidence": evidence,
-        "uncertainty": [], "next_action": "advance",
+        "uncertainty": [],
     }
 
 

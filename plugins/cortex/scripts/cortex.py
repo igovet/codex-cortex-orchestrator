@@ -1896,7 +1896,7 @@ def bind_host_worker_from_hook(
     existing = attempt.get("host_spawn") or {}
     if attempt.get("status") == "running":
         if existing.get("agent_id") == host_agent_id and existing.get("task_name") == host_task_name:
-            if attempt.get("host_stop_outcome") in {"awaiting_user", "native_worker_stopped_recoverable"}:
+            if attempt.get("host_stop_outcome") == "awaiting_user":
                 with state_lock(root):
                     resumed_loaded = _v3_task_state(root, task_id)
                     if resumed_loaded is None:
@@ -1972,8 +1972,10 @@ def finalize_host_worker_stop_from_hook(
 
     A worker that has already published a report remains eligible for the
     coordinator's normal ``continue_orchestration`` receipt. A worker paused
-    on a durable question, or stopped before recording either a question or a
-    report, remains addressable through the exact persisted host identity.
+    on a durable question remains addressable through the exact persisted host
+    identity. A worker stopped without either a report or question is terminal
+    failed; the coordinator must submit that exact dispatch's failure receipt
+    so the bounded gate retry policy can decide whether to re-dispatch.
     """
     project = select_project_root({"project_root": str(project_root_value or "")})
     task_id = safe_id(str(task_id_value or ""))
@@ -2024,9 +2026,15 @@ def finalize_host_worker_stop_from_hook(
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         if report_refs:
             attempt["host_stop_outcome"] = "report_recorded"
+            # The report is the durable completion signal.  Do not retain the
+            # provisional resumability flag written when the native worker
+            # started; doing so would make compaction handoff advertise a
+            # follow-up target instead of consuming the persisted report.
+            attempt["host_resumable"] = False
             attempt["host_report_refs"] = report_refs
             package["spawn_status"] = "stopped_after_report"
             package["host_stopped_at"] = stopped_at
+            package["resumable"] = False
             package["report_refs"] = report_refs
             event = "host_stop_after_report"
             detail = f"{attempt_id}: {', '.join(report_refs)}"
@@ -2034,34 +2042,41 @@ def finalize_host_worker_stop_from_hook(
         elif open_questions:
             question_refs = [str(item.get("question_id")) for item in open_questions]
             attempt["host_stop_outcome"] = "awaiting_user"
+            attempt["host_resumable"] = True
             attempt["host_question_refs"] = question_refs
             package["spawn_status"] = "paused_for_question"
             package["host_stopped_at"] = stopped_at
+            package["resumable"] = True
             package["question_refs"] = question_refs
             event = "host_stop_for_question"
             detail = f"{attempt_id}: {', '.join(question_refs)}"
             outcome = "awaiting_user"
         else:
-            reason = "native_worker_stopped_recoverable"
+            reason = "native_worker_stopped_without_report"
+            attempt["status"] = "failed"
+            attempt["finalized_at"] = stopped_at
+            attempt["finalization_reason"] = reason
             attempt["host_stop_outcome"] = reason
-            attempt["host_resumable"] = True
-            package["spawn_status"] = "stopped_recoverable"
+            attempt["host_resumable"] = False
+            package["spawn_status"] = "stopped_without_report"
             package["host_stopped_at"] = stopped_at
-            package["resumable"] = True
-            event = "host_stop_recoverable"
+            package["resumable"] = False
+            package["failure_reason"] = reason
+            package["dispatch_ref"] = str(attempt.get("dispatch_ref") or "")
+            event = "host_stop_without_report"
             detail = f"{attempt_id}: {reason}"
             outcome = reason
         session_status = (
-            "completed" if report_refs else "idle_resumable" if open_questions else "stopped_recoverable"
+            "completed" if report_refs else "idle_resumable" if open_questions else "terminated_unavailable"
         )
         db_put_worker_session(root, {
             "task_id": state["task_id"], "attempt_id": attempt_id,
             "host_agent_id": host_agent_id,
             "host_task_name": str((attempt.get("host_spawn") or {}).get("task_name") or ""),
             "host_tool": str((attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
-            "status": session_status, "resumable": not bool(report_refs),
+            "status": session_status, "resumable": bool(open_questions),
             "started_at": (attempt.get("host_spawn") or {}).get("confirmed_at"),
-            **({"terminated_at": stopped_at} if report_refs else {}),
+            **({"terminated_at": stopped_at} if report_refs or not open_questions else {}),
         })
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
         save_state(task_dir, task_dir / "state.sqlite", state, event, detail)
@@ -2293,7 +2308,7 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 REPORT_FIELDS = set(PROFILE_CONTRACT.get("shared_worker_contract", {}).get("required_report_fields", []))
-if REPORT_FIELDS != {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}:
+if REPORT_FIELDS != {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"}:
     raise RuntimeError("bundled Cortex shared worker report contract is invalid")
 
 
@@ -2403,9 +2418,8 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
             detail.append("unknown: " + ", ".join(unknown))
         raise ValueError("report must contain exactly the cortex/report/v1 fields" + (" (" + "; ".join(detail) + ")" if detail else ""))
     summary = str(value["summary"]).strip()
-    next_action = str(value["next_action"]).strip()
-    if not summary or not next_action:
-        raise ValueError("report summary and next_action are required")
+    if not summary:
+        raise ValueError("report summary is required")
     result: dict[str, Any] = {"summary": redact(summary, 4000)}
     for field in ("findings", "questions", "evidence", "uncertainty"):
         items = value[field]
@@ -2425,8 +2439,7 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
     if not isinstance(changed_files, list) or len(changed_files) > MAX_REPORT_ITEMS:
         raise ValueError(f"report changed_files must be an array with at most {MAX_REPORT_ITEMS} items")
     result["changed_files"] = [_safe_project_relative_path(item) for item in changed_files]
-    result["next_action"] = redact(next_action, 4000)
-    for field in ("summary", "findings", "questions", "tests", "evidence", "uncertainty", "next_action"):
+    for field in ("summary", "findings", "questions", "tests", "evidence", "uncertainty"):
         require_internal_english(result[field], f"report {field}")
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_REPORT_BYTES:
@@ -2455,7 +2468,7 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
     for item in raw_findings:
         if not isinstance(item, dict):
             raise ValueError("closure finding must be an object")
-        allowed = {"fingerprint", "severity", "status", "blocking", "summary", "details", "next_action", "waiver_reason", "waived_by", "waived_at", "resolved_at"}
+        allowed = {"fingerprint", "severity", "status", "blocking", "summary", "details", "waiver_reason", "waived_by", "waived_at", "resolved_at"}
         if set(item) - allowed:
             raise ValueError("closure finding contains unknown fields")
         fingerprint = str(item.get("fingerprint") or "").strip()
@@ -2477,15 +2490,7 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
                 raise ValueError("workers cannot self-waive closure findings")
         elif any(item.get(field) is not None for field in ("waiver_reason", "waived_by", "waived_at")):
             raise ValueError("waiver metadata is only valid for waived closure findings")
-        action = item.get("next_action")
-        if action is not None:
-            if not isinstance(action, dict) or not isinstance(action.get("required"), bool):
-                raise ValueError("closure next_action requires boolean required")
-            unknown = set(action) - {"required", "target_gate", "description"}
-            if unknown or (action.get("required") and not str(action.get("description") or "").strip()):
-                raise ValueError("closure next_action metadata is invalid")
-            action = {"required": bool(action["required"]), **({"target_gate": str(action["target_gate"]).strip()} if action.get("target_gate") else {}), **({"description": redact(str(action["description"]).strip(), 2000)} if action.get("description") else {})}
-        finding = {"fingerprint": fingerprint, "severity": severity, "status": status, "blocking": item["blocking"], "summary": redact(summary, 4000), **({"details": details} if details is not None else {}), "next_action": action}
+        finding = {"fingerprint": fingerprint, "severity": severity, "status": status, "blocking": item["blocking"], "summary": redact(summary, 4000), **({"details": details} if details is not None else {})}
         if status == "waived":
             finding.update({"waiver_reason": redact(waiver_reason, 4000), "waived_by": redact(waived_by, 400), "waived_at": redact(waived_at, 200)})
         if item.get("resolved_at") is not None:
@@ -2531,14 +2536,13 @@ def sanitize_gate_result_payload(value: Any, *, actor_ids: set[str] | None = Non
     )
     if decision in {"rework", "fail", "blocked"} and not (
         any(
-            item.get("status") == "open"
-            and (item.get("blocking") or (item.get("next_action") or {}).get("required"))
+            item.get("status") == "open" and item.get("blocking")
             for item in closure["findings"]
         )
         or closure["verification"]["required_missing"]
     ):
         raise ValueError(
-            "non-pass gate_result requires an open blocking finding, a required next action, or required_missing verification"
+            "non-pass gate_result requires an open blocking finding or required_missing verification"
         )
     return {**closure, "decision": decision, "failure_class": failure_class}
 
@@ -2993,9 +2997,9 @@ def _open_blocking_questions(
         and bool(item.get("blocking", True))
         and (attempt_id is None or item.get("attempt_id") == attempt_id)
     ]
-    # Localized batch questions are persisted atomically as one SQLite task
-    # document.  Treat an unsubmitted translation exactly like an unanswered
-    # single question: neither state may allow a worker report or wave advance.
+    # Localized batch questions use one SQLite task document with per-slide
+    # checkpoints. Treat an unfinished sequence or translation exactly like an
+    # unanswered single question: neither may allow a report or wave advance.
     document_root = _task_document_root(task_dir, str(state["task_id"]))
     for document_key, batch in db_list_task_documents(document_root, str(state["task_id"]), "question_batch:"):
         batch_id = str(batch.get("batch_id") or "")
@@ -3081,7 +3085,6 @@ def _report_markdown(record: dict[str, Any]) -> str:
                     lines.extend(["```json", json.dumps(item, ensure_ascii=False, sort_keys=True, indent=2), "```"])
                 else:
                     lines.append(f"- {scalar_item(item)}")
-    lines.extend(["", "## Next Action", "", prose(report["next_action"]), ""])
     validation = record.get("result_validation")
     if isinstance(validation, dict):
         lines.extend([
@@ -3331,7 +3334,6 @@ def _compact_report_context(record: dict[str, Any]) -> dict[str, Any]:
         "tests": compact_list("tests"),
         "evidence": compact_list("evidence"),
         "uncertainty": compact_list("uncertainty", items=8),
-        "next_action": redact(report.get("next_action", ""), 2400),
     }
 
 
@@ -3719,7 +3721,7 @@ def _validate_close_report(task_dir: Path, state: dict[str, Any], attempt: dict[
         raise ValueError("C2/C3 close report requires observed evidence, not only a completion assertion")
     task = load_task_definition(task_dir, state)
     combined = "\n".join(
-        str(item) for field in ("summary", "findings", "evidence", "uncertainty", "next_action")
+        str(item) for field in ("summary", "findings", "evidence", "uncertainty")
         for item in (report.get(field) if isinstance(report.get(field), list) else [report.get(field)])
     ).lower()
     weak_markers = ("not run", "not tested", "unverified", "todo", "tbd", "blocked")
@@ -7163,7 +7165,37 @@ def _v3_active_wave_context(
         and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
         and not item.get("invalidated")
     ]
-    attempt_ids = active_attempt_ids or list(wave.get("attempt_ids") or [])
+    # A SubagentStop without a report is terminalized before recovery, but a
+    # mixed wave still contains live workers.  Keep that exact failed slot in
+    # the relative result contract; otherwise the handoff asks the
+    # coordinator to submit a failed receipt that this adapter rejects as an
+    # unknown slot.  Other terminal attempts (notably passed attempts kept
+    # during bounded gate rework) remain omitted when a live retry exists.
+    reportless_failure_ids = {
+        str(item.get("attempt_id") or "")
+        for item in state.get("attempts", [])
+        if item.get("gate") in wave.get("gates", [])
+        and item.get("status") == "failed"
+        and item.get("host_stop_outcome") == "native_worker_stopped_without_report"
+        and not item.get("invalidated")
+    }
+    wave_attempt_ids = [
+        str(attempt_id)
+        for attempt_id in (wave.get("attempt_ids") or [])
+        if str(attempt_id or "").strip()
+    ]
+    if active_attempt_ids:
+        eligible = set(active_attempt_ids) | reportless_failure_ids
+        attempt_ids = [attempt_id for attempt_id in wave_attempt_ids if attempt_id in eligible]
+        if not attempt_ids:
+            attempt_ids = active_attempt_ids + [
+                attempt_id for attempt_id in reportless_failure_ids
+                if attempt_id not in active_attempt_ids
+            ]
+    else:
+        attempt_ids = wave_attempt_ids
+    if not attempt_ids:
+        attempt_ids = active_attempt_ids
     return wave, attempt_ids, expected_step
 
 
@@ -7492,7 +7524,8 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
     elif status_value in {"decline", "cancel", "invalid_answer", "pending_user_input"}:
         response["outcome"] = "awaiting_user"
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the same worker and question open. Translate the durable English question into "
+            f"{COORDINATOR_LOCK} Keep the same worker and question or batch open. Accepted batch steps are durable, "
+            "so retrying resumes at the next unanswered item. Translate the durable English question into "
             "the task's original user language only through localized_question, localized_header, localized_options, "
             "and localized_custom_label, then retry the native question UI when the user is ready; do not replace the "
             "worker, alter the durable worker record, fabricate an answer, or advance the wave."
@@ -7501,23 +7534,99 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
+    if value is None:
+        value = {}
     if not isinstance(value, dict):
-        raise ValueError("plan_approval requires payload with decision approve or revise")
+        raise ValueError("plan_approval requires a payload object")
     payload = dict(value)
     unknown = sorted(set(payload) - {"decision", "feedback"})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
-    raw = str(payload.get("decision") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    raw = str(payload.get("decision") or "prompt").strip().lower().replace("-", "_").replace(" ", "_")
     decision = {
+        "prompt": "prompt", "ask": "prompt", "review": "prompt",
         "approve": "approve", "approved": "approve", "accept": "approve",
         "revise": "revise", "changes": "revise", "request_changes": "revise",
     }.get(raw)
     if not decision:
-        raise ValueError("plan_approval decision must be approve or revise")
+        raise ValueError("plan_approval decision must be prompt, approve, or revise")
     feedback = str(payload.get("feedback") or "").strip()
+    if decision == "prompt" and feedback:
+        raise ValueError("plan_approval prompt does not accept feedback")
     if decision == "revise" and not feedback:
         raise ValueError("plan_approval revise requires non-empty feedback")
     return {"decision": decision, **({"feedback": feedback} if feedback else {})}
+
+
+def _v3_prompt_plan_approval(
+    state: dict[str, Any],
+    task_ref: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Open the native Approve/Cancel UI without mutating a cancelled plan."""
+    approval = _plan_approval(state)
+    if approval.get("policy") != "required":
+        raise ValueError("this task does not require post-plan approval")
+    if approval.get("status") != "awaiting_user":
+        raise ValueError("there is no pending plan approval for this task")
+    review = dict(approval.get("review") or {})
+    requested_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "decision": {
+                "type": "string",
+                "title": "Plan review",
+                "oneOf": [
+                    {"const": "approve", "title": "Approve"},
+                    {"const": "cancel", "title": "Cancel"},
+                ],
+            },
+        },
+        "required": ["decision"],
+    }
+    try:
+        action, content, elicitation_id = _request_mcp_elicitation(
+            "Approve the completed plan?",
+            requested_schema,
+            thread_id=str(state.get("thread_id") or ""),
+        )
+    except RuntimeError as exc:
+        return None, {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "host_plan_approval_unavailable",
+            "code": "host_plan_approval_unavailable",
+            "task_ref": task_ref,
+            "dispatches": [],
+            "plan_review": review,
+            "diagnostics": [{"message": redact(str(exc), 1000)}],
+            "next_action": (
+                f"{COORDINATOR_LOCK} Keep the plan pending and stop. Retry only in a main-chat host that can render "
+                "native MCP elicitation; do not infer approval."
+            ),
+        }
+    selected = ""
+    if action == "accept" and isinstance(content, dict):
+        selected = str(content.get("decision") or "").strip().lower()
+    if action != "accept" or selected == "cancel":
+        return None, {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "awaiting_plan_approval",
+            "task_ref": task_ref,
+            "dispatches": [],
+            "plan_review": review,
+            "result": {"decision": "cancelled", "elicitation_id": elicitation_id},
+            "output_policy": "silent",
+            "allowed_visible_events": ["user_message"],
+            "next_action": (
+                f"{COORDINATOR_LOCK} Stop now and wait for the user's next message. Keep the plan pending; do not "
+                "dispatch, revise, or send approval/cancellation commentary."
+            ),
+        }
+    if selected != "approve":
+        raise ValueError("plan approval UI returned an invalid decision")
+    return {"decision": "approve"}, None
 
 
 def _v3_follow_up_payload(value: object) -> dict[str, Any]:
@@ -7827,7 +7936,25 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             normalized_payload = _v3_question_management_payload(params.get("payload"))
         elif intent == "plan_approval":
             normalized_payload = _v3_plan_approval_payload(params.get("payload"))
-        submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload")}, sort_keys=True, default=str))[:16])
+            if normalized_payload["decision"] == "prompt":
+                normalized_payload, prompt_response = _v3_prompt_plan_approval(state, task_ref)
+                if prompt_response is not None:
+                    return prompt_response
+        operation_context: dict[str, Any] = {}
+        if intent == "question" and str((normalized_payload or {}).get("question_id") or "").startswith("batch-"):
+            batch_id = str(normalized_payload["question_id"])
+            batch = db_get_task_document(
+                _task_document_root(task_dir, str(state["task_id"])),
+                str(state["task_id"]),
+                "question_batch:" + batch_id,
+            )
+            if isinstance(batch, dict):
+                operation_context["batch_progress"] = {
+                    "status": batch.get("status"),
+                    "answered_keys": sorted((batch.get("answers") or {}).keys()),
+                    "translation_required_for": sorted(batch.get("translation_required_for") or []),
+                }
+        submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload"), **operation_context}, sort_keys=True, default=str))[:16])
         if intent in {"resume", "deactivate"}:
             old = orchestrate({
                 **common,
@@ -7846,7 +7973,15 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "payload": payload,
             })
         response = _v3_response(old, task_ref, include_result=True)
-        return _v3_question_response(response) if intent == "question" else response
+        if intent == "question":
+            return _v3_question_response(response)
+        if intent == "plan_approval" and (old.get("result") or {}).get("decision") == "approved":
+            response["approval_message"] = "Plan approved."
+            response["next_action"] = (
+                f"{COORDINATOR_LOCK} Tell the user in their language that the plan was approved, then execute every "
+                "returned dispatch exactly once and continue the normal Cortex wave workflow."
+            )
+        return response
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         error = _v3_error("management_failed", exc)
         if resolved_task_ref:
@@ -8061,7 +8196,9 @@ ORCHESTRATE_TOOL_SCHEMA = {
 PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
     agents=AGENTS,
     report_fields=REPORT_FIELDS,
+    max_report_items=MAX_REPORT_ITEMS,
     max_work_packages=MAX_WORK_PACKAGES,
+    max_microtasks_per_package=MAX_MICROTASKS_PER_PACKAGE,
     question_option_schema=QUESTION_OPTION_SCHEMA,
 )
 V3_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_report"]
@@ -8095,7 +8232,7 @@ TOOLS = {
     "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string", "minLength": 1, "description": "Native child id; for create_thread pass the returned threadId here."}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
     "finalize_attempt": (finalize_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "status"]}),
     "complete_attempt": (complete_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string"}, "host_task_name": {"type": "string"}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}, "submission_id": {"type": "string"}, "report": {"type": "object"}}, "required": ["task_id", "principal", "attempt_id"]}),
-    "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}, "next_action": {"type": "string"}}, "required": sorted(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
+    "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}}, "required": sorted(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
     "cortex.question": (cortex_question, QUESTION_TOOL_SCHEMA),
     "publish_worker_question": (publish_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "submission_id": {"type": "string"}, "question": {"type": "string", "minLength": 1}, "header": {"type": "string"}, "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA}, "multiple": {"type": "boolean"}, "custom_label": {"type": "string"}, "context": {}, "blocking": {"type": "boolean"}}, "required": ["task_id", "principal", "attempt_id", "submission_id", "question"]}),
     "list_worker_questions": (list_worker_questions, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": ["open", "answered"]}}, "required": ["task_id", "principal"]}),

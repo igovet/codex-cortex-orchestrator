@@ -1,825 +1,793 @@
-# Cortex
+<table>
+  <tr>
+    <td width="190" align="center" valign="middle">
+      <img src="plugins/cortex/assets/logo.png" alt="Cortex logo" width="156" />
+    </td>
+    <td valign="middle">
+      <h1>Cortex</h1>
+      <p><strong>Reliable multi-agent orchestration for complex software engineering work in Codex.</strong></p>
+      <p>
+        Cortex turns a large task into a verifiable pipeline. It selects the
+        right profile, model, and reasoning effort for every stage, isolates
+        workers, preserves decisions and reports in a local ledger, and does
+        not declare the work complete without evidence.
+      </p>
+      <p>
+        <img src="https://img.shields.io/badge/Cortex-7.1.1-7c3aed" alt="Cortex 7.1.1" />
+        <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
+        <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
+        <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
+      </p>
+    </td>
+  </tr>
+</table>
 
-Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
-ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
-privacy-limited lifecycle hooks. It uses canonical task-ledger schema
-`cortex/v8`, public lifecycle schema `cortex/orchestration/v4`, and plugin
-version **6.6.0**. The public MCP surface has exactly seven tools: three coordinator
-lifecycle operations—
-`start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`—plus worker `worker_question`, `record_report`, exact
-immutable-briefing fallback `read_dispatch_briefing`, and scoped predecessor
-reads through `read_worker_report`. Pre-SQLite coordination state is unsupported:
-it is neither migrated nor resumed, so a task starts from the v8 SQLite ledger.
-The bundled `plugins/cortex/skills/orchestrator/SKILL.md` is the single authoritative
-source for the main Cortex skill. All installable profiles, skills, hooks, MCP
-configuration, and runtime code live below `plugins/cortex/`; root-level
-scripts, tests, docs, and the repository-root `AGENTS.md` support repository
-development only. `AGENTS.md` is not installed; all runtime guarantees are
-implemented and shipped under `plugins/cortex/`.
+> Cortex is activated only when you explicitly select it. An ordinary complex
+> request—or merely mentioning orchestration—does not create a Cortex session.
 
-## Install, update, and verify
+## Table of contents
 
-Cortex requires Codex multi-agent v2 for explicit per-subagent model routing,
-including forcing a Luna worker from a Terra or Sol coordinator. Enable it in
-`~/.codex/config.toml` before starting Codex:
+- [Installation](#installation)
+  - [System requirements](#1-system-requirements)
+  - [macOS-specific notes](#macos-specific-installation-notes)
+  - [Required Codex configuration](#required-codex-configuration)
+  - [Required hook trust](#required-post-install-hook-trust)
+  - [Codex Desktop](#2-install-on-codex-desktop)
+  - [Codex CLI](#3-install-on-codex-cli)
+  - [Orchestration commands](#4-orchestration-commands)
+  - [Existing repositories: run harvest first](#existing-repositories-run-harvest-first)
+- [Strongly recommended: Codebase Memory MCP](#strongly-recommended-codebase-memory-mcp)
+- [How orchestration works](#how-orchestration-works)
+- [Profiles and model routing](#profiles-and-model-routing)
+- [Developing Cortex](#developing-cortex)
+- [Verification and diagnostics](#verification-and-diagnostics)
+
+---
+
+## Installation
+
+### 1. System requirements
+
+| Component | Requirement | Why it is needed |
+| --- | --- | --- |
+| Codex | Desktop or CLI with Plugins and multi-agent v2 support | Loads the plugin, skills, MCP server, and internal agents |
+| Python | **3.11+**, with the standard-library `tomllib` module | Runs the local Cortex MCP server, hooks, and validators |
+| Git | A current version | Required for the local Marketplace and development installation |
+| Bash | **4.2+** | Used by the launcher and `sync-cortex.sh`; the macOS system Bash 3.2 is too old |
+| Operating system | macOS or Linux; WSL is recommended on Windows | The current launcher and installer are Bash-based |
+
+No additional Python packages are required through `pip`: the Cortex runtime
+uses the Python standard library. Confirm that the required tools are available:
+
+```bash
+python3 --version
+python3 -c 'import tomllib; print("tomllib: ok")'
+git --version
+codex --version
+```
+
+If the correct Python interpreter is not the default `python3`, provide its
+absolute path:
+
+```bash
+export CORTEX_PYTHON=/absolute/path/to/python3.11
+```
+
+The variable must be visible to the process that launches Codex. A Desktop app
+started from the graphical shell may not read `~/.bashrc`; in that case, set
+`CORTEX_PYTHON` in the environment used to launch the app.
+
+### macOS-specific installation notes
+
+The Plugins Marketplace workflow is the same on macOS, but the local runtime
+requires additional preparation:
+
+- macOS does not guarantee a suitable Python 3.11+ installation.
+- macOS ships `/bin/bash` 3.2. The current Cortex installer and launcher use
+  Bash features introduced in 4.2, so the system Bash is not sufficient.
+- Homebrew uses `/opt/homebrew` on Apple Silicon and `/usr/local` on Intel.
+  Use `brew --prefix` instead of hard-coding either location.
+- Apps opened from Finder or the Dock do not necessarily inherit shell startup
+  files such as `~/.zprofile`, `~/.zshrc`, or `~/.bashrc`.
+
+Install the prerequisites with [Homebrew](https://brew.sh/):
+
+```bash
+# Install Apple's command-line tools first if they are not already present.
+xcode-select --install
+
+brew install python@3.11 bash git
+```
+
+Resolve and verify the installed runtimes:
+
+```bash
+export CORTEX_BASH="$(brew --prefix bash)/bin/bash"
+export CORTEX_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
+
+"$CORTEX_BASH" --version
+"$CORTEX_PYTHON" --version
+"$CORTEX_PYTHON" -c 'import tomllib; print("tomllib: ok")'
+```
+
+Run the repository installer explicitly with the Homebrew Bash:
+
+```bash
+"$CORTEX_BASH" ./scripts/sync-cortex.sh
+```
+
+For Codex CLI sessions, make sure Homebrew is initialized before running
+`codex`. Homebrew prints the exact `shellenv` command for your machine during
+installation. A portable setup for the current shell is:
+
+```bash
+eval "$(brew shellenv)"
+export CORTEX_PYTHON="$(brew --prefix python@3.11)/bin/python3.11"
+codex
+```
+
+For Codex Desktop, the application process must receive both the Homebrew
+`PATH`—so `/usr/bin/env bash` resolves Bash 4.2+—and `CORTEX_PYTHON`. If the app
+is launched from Finder or the Dock, set them for the current macOS login
+session before opening Codex:
+
+```bash
+launchctl setenv PATH "$(brew --prefix)/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+launchctl setenv CORTEX_PYTHON "$(brew --prefix python@3.11)/bin/python3.11"
+```
+
+Fully quit and reopen Codex afterward, then start a new task. `launchctl setenv`
+is scoped to the current login session and may need to be repeated after a
+logout or restart. If your app launcher or device-management system already
+provides environment variables, configure the same values there instead.
+
+> [!TIP]
+> Run `python3 scripts/cortex-host-preflight.py` from the checkout before
+> installation. It reports the Codex CLI, selected Python runtime, manifest,
+> launcher, and same-user plugin cache without changing Codex configuration.
+
+### Required Codex configuration
+
+> [!IMPORTANT]
+> Configure Codex before the first orchestration, then start a **new task**.
+> Cortex requires multi-agent v2, and the global default model for internal
+> subagents must be **Luna**. Without a confirmed Luna default, the host cannot
+> reliably apply the standard hidden-worker routing policy.
+
+Add the following settings to `~/.codex/config.toml`:
 
 ```toml
 [features]
 multi_agent_v2 = true
+
+[agents]
+default_subagent_model = "gpt-5.6-luna"
 ```
 
-After changing this setting, start a new Codex task. Existing tasks retain the
-multi-agent adapter selected when they were created; with v1, an explicit
-`gpt-5.6-luna` override is rejected. Cortex uses the v2 adapter to apply its
-per-worker Luna/Terra/Sol policy and coordinator-selected effort.
+Both settings are required:
 
-If a host exposes only Sol/Terra to hidden `spawn_agent` and has not confirmed
-the global Luna default, Cortex stays hidden and falls back to an explicit
-Terra subagent. It never creates a sidebar task as a model fallback.
+- `multi_agent_v2 = true` enables explicit model and reasoning-effort routing
+  for each subagent. An already-open task retains the adapter selected when it
+  was created.
+- `default_subagent_model = "gpt-5.6-luna"` allows Cortex to launch standard
+  hidden Luna workers without copying the expected model into a native model
+  override. Cortex still selects Terra and Sol explicitly when policy requires
+  them.
 
-### MCP tool approvals and auto-review
+When installing from a checkout, `./scripts/sync-cortex.sh` atomically sets and
+verifies `agents.default_subagent_model`. Before replacing a different value,
+it creates a private configuration backup. For a manual Marketplace install,
+verify the setting yourself.
 
-To approve every tool exposed by Cortex's `cortex` MCP server by default, add
-this to `~/.codex/config.toml`:
+You may also approve all tools exposed by the local Cortex MCP server:
 
 ```toml
 [plugins."cortex@cortex".mcp_servers.cortex]
 default_tools_approval_mode = "approve"
 ```
 
-The `cortex` name is the MCP server name from the plugin's `.mcp.json`. A
-server-level default also applies to tools added by later plugin versions. An
-individual `[...tools.<tool>]` block can still override it, so remove the
-per-tool `approval_mode` blocks if every Cortex tool should inherit the same
-setting. This affects Cortex MCP calls only; shell, patch, and native Codex
-tool approvals keep their own policies.
+The MCP setting affects Cortex tools only. It does not change the approval
+policy for shell commands, patches, or tools provided by other plugins.
 
-Keep approval review routed to the user instead of the automatic reviewer:
+To keep other approval decisions routed to the user:
 
 ```toml
 approval_policy = "on-request"
 approvals_reviewer = "user"
 ```
 
-Do not enable `auto_review`/`guardian_subagent` for this workflow and do not
-use the `--approve-for-me` CLI option unless automatic review is intentional.
-Auto-review invokes an additional model-based review for approval requests,
-which consumes token and model budget; `approvals_reviewer = "user"` keeps the
-decision manual.
+> [!WARNING]
+> ### Do not use **Ask for me / Approve for me** with Cortex
+>
+> This Codex permission mode enables auto-review by setting
+> `approvals_reviewer = "auto_review"`. Every eligible approval request is then
+> routed to a **separate reviewer agent** instead of being shown directly to
+> the user. That review is an additional model request with its own context,
+> latency, token usage, and model-budget cost.
+>
+> Cortex already has its own evidence, report, and gate-review pipeline. Adding
+> a second model-based approval reviewer increases cost and makes the execution
+> path harder to reason about without improving the Cortex orchestration
+> contract. Keep `approvals_reviewer = "user"` and select the manual user-review
+> permission mode. Do not continue until **Ask for me / Approve for me** is
+> disabled.
 
-The main coordinator passes the exact model identifiers accepted by native
-`spawn_agent` as `host_capabilities.spawn_agent_models`. After a fresh host has
-loaded the installed global setting, it also passes
-`host_capabilities.spawn_agent_default_model = "gpt-5.6-luna"`. Cortex
-validates every planned wave against those capabilities before creating task
-state. A Luna route prefers the confirmed default and omits native `model`;
-without that confirmation it uses an explicit Luna override when supported,
-then an explicit hidden Terra fallback. It never labels Terra as Luna and
-never creates a visible task as a fallback.
+Codex Desktop may change the active permission mode when the selected model
+changes. Recheck the permission control after changing models and confirm that
+it still routes approvals to the user. See the
+[official OpenAI auto-review documentation](https://developers.openai.com/codex/sandboxing/auto-review)
+for the separate reviewer-agent flow.
 
-`dispatch_mode: visible_thread` remains a separate, explicitly selected
-user-owned workflow; it is not accepted as `luna_fallback`. For hidden Luna
-routes, the installer configures the global `[agents] default_subagent_model =
-"gpt-5.6-luna"` setting. A configured-default hidden request carries
-`expected_model = "gpt-5.6-luna"` and `model_resolution = "configured_default"`,
-always includes `reasoning_effort`, and omits native `model`; explicit
-Terra/Sol/Luna requests retain their `model` override. A visible task is
-user-owned and appears in the sidebar, while a supported hidden Luna route
-continues to use `spawn_agent`.
+### Required post-install hook trust
 
-### Explicit visible-thread workspace
+> [!IMPORTANT]
+> After every installation or update, review and trust the Cortex lifecycle
+> hooks **before starting orchestration**. Hook trust is content-hash based, so
+> a new plugin build may require renewed approval even when the hook names have
+> not changed.
 
-For a visible `create_thread` task, Cortex now emits
-`spawn_request.thread_environment = "local"` by default. The coordinator maps
-that value to the native request
-`target.environment: { "type": "local" }`, so the task stays in the saved
-project checkout instead of being moved to a managed Git worktree. To opt into
-isolation for a writer or a concurrent task, pass
-`thread_environment = "worktree"`; the coordinator then uses
-`target.environment: { "type": "worktree" }`.
+Cortex registers exactly five lifecycle hooks:
 
-The visible task still runs with the selected Cortex profile in its generated
-prompt (for example, `explorer`) and the routed model (for example, Luna), but
-it is a separate user-owned Codex task rather than the hidden `spawn_agent`
-worker. Local tasks share files, branches, and uncommitted changes with the
-main checkout, so concurrent writers must be serialized. Existing worktree
-tasks can be moved with the thread header's **Hand off → Local** action.
+| Hook | Purpose |
+| --- | --- |
+| `SessionStart` | Restores coordinator context on startup, resume, clear, and compaction |
+| `SubagentStart` | Binds the native worker identity to the issued Cortex dispatch |
+| `SubagentStop` | Records whether a worker reported, paused for a question, or failed |
+| `PreToolUse` | Enforces coordinator and worker safety guards before relevant tools run |
+| `PostToolUse` | Records lifecycle results and injects bounded recovery/report context |
 
-Normal Cortex routing always keeps the child out of the normal chat list. The
-native `spawn_agent` route is hidden; when Luna cannot be resolved, Cortex uses
-hidden Terra. `create_thread` is inherently user-visible and has no hidden
-flag, so it is used only when the caller explicitly requests
-`dispatch_mode = "visible_thread"` for reasons unrelated to model fallback.
+For a Marketplace installation, accept the hook trust prompt shown by Codex
+after installing or enabling Cortex. Before approving it, confirm that:
 
-Run one command from this repository:
+- the plugin ID is exactly `cortex@cortex`;
+- the source is the installed plugin's `hooks/hooks.json`;
+- the command invokes the same installed cache's `scripts/cortex-launcher` and
+  `scripts/cortex_hook.py`;
+- the set contains the five hooks listed above and no unexpected additional
+  hooks.
 
-```bash
-./scripts/sync-cortex.sh
-```
+Do not approve a hook whose plugin ID, source path, command, or hook set differs
+from this contract. Resolve the mismatch or reinstall the plugin first.
 
-### Select the Python runtime
-
-Cortex uses `python3` from `PATH` when `CORTEX_PYTHON` is unset. To select a
-specific interpreter, set one absolute executable path in the environment before
-installing or checking the plugin:
+When installing from this repository, `./scripts/sync-cortex.sh` performs the
+same trust operation automatically. It queries Codex `hooks/list`, validates
+the exact enabled five-hook set against the installed cache, and stores each
+current SHA-256 content hash in the global Codex hook-state configuration.
+Confirm the result with:
 
 ```bash
-export CORTEX_PYTHON=/absolute/path/to/python3.11
-./scripts/sync-cortex.sh --dry-run
-```
-
-Add the export to `~/.bashrc` for shell-launched Codex sessions, then open a
-new shell and restart Codex so the installer, MCP server, and lifecycle hooks
-inherit it. A GUI-launched Codex process may not read `~/.bashrc`; provide
-`CORTEX_PYTHON` in the environment used to launch the GUI instead. The selected
-interpreter must be executable, provide `tomllib`, and be Python 3.11 or newer.
-When the variable is unset, the same checks apply to the `python3` resolved from
-`PATH`; a Python 3.10 runtime stops with a diagnostic naming the minimum version.
-An explicit invalid path stops with a diagnostic before Codex configuration is
-changed; Cortex does not silently fall back to `python3`. Paths containing
-spaces are supported. This setting does not modify Ubuntu's `/usr/bin/python3`.
-
-The sync command validates the repository marketplace and plugin, registers the repo-local
-marketplace, reinstalls Cortex, and verifies same-version file content. It does
-not scan, import, alter, or clean up prior orchestration state or unrelated
-plugin data. If `~/.codex/config.toml` already contains Cortex's
-`plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
-override, the installer preserves it across the remove/add cycle and then
-enforces `default_tools_approval_mode = "approve"` even on a clean install. The same
-installer atomically enforces
-`[agents] default_subagent_model = "gpt-5.6-luna"`. Before replacing a
-different existing default it creates a private backup; comments, unrelated
-keys, and file mode are preserved. Use
-`--dry-run` to report the planned update without writing, or `--check` for a
-read-only installed-content check:
-
-`--dry-run` explicitly reports that it changed no plugin or Codex
-configuration. It is not required for source-mode live validation.
-
-```bash
-./scripts/sync-cortex.sh --dry-run
 ./scripts/sync-cortex.sh --check
 ```
 
-As part of both an explicit install and `--check`, the installer queries the
-Codex `hooks/list` API for the selected project. It trusts only the exact five
-Cortex lifecycle hooks and records their current content hashes in the global
-Codex configuration. Each hook must have plugin id `cortex@cortex`, the
-installed cache's `hooks/hooks.json` source path, the installed
-`scripts/cortex_hook.py` command path, `enabled = true`, and a complete
-`sha256:` digest. `--check` fails if any of those identities, hashes, or the
-five-hook set no longer match; a changed or untrusted `PreToolUse` or
-`PostToolUse` hook therefore cannot silently invalidate host-worker binding.
-
-For rollback, remove the new install with `codex plugin remove cortex@cortex`.
-When the installer changes an existing global default-subagent-model setting,
-it first creates a private backup under `$CODEX_HOME/backups/cortex-upgrade/`.
-The installer enforces mode `0700` on that directory and removes group/world
-permissions from each backup slot. Those backups are local operator data: they
-are never uploaded or included in the repository release archive.
-
-Start a **new Codex thread** after installing or updating before dispatching
-agents. Existing threads can retain absolute paths to lifecycle hooks in the
-retired cachebusted plugin directory. Cortex hook commands now detect that
-missing script and return the empty JSON object `{}` successfully, without the
-Python missing-file error; the stale thread simply receives no hook context or
-telemetry from that call. A new thread is still required to pick up the updated
-skills, hooks, and MCP tools. Plugin installation and reload are operator-owned
-actions; a task or lifecycle hook never installs or reloads the plugin for you.
-Test an isolated fresh
-registration with:
-
-```bash
-python3 scripts/probe-fresh-cortex-plugin.py
-```
-
-The repository marketplace is `.agents/plugins/marketplace.json` at the
-repository root.
-It is explicitly registered by the installer; no personal marketplace is used
-for the new installation.
-
-For the public v4 lifecycle, the synchronous `PostToolUse` hook binds a newly returned `task_ref` to
-the documented hook `session_id`, using the tool's explicit `project_root` and
-the event `cwd`. The task authorization identity remains separate. Explicitly
-forwarded `CODEX_SESSION_ID` or `CODEX_THREAD_ID` values are compatibility hints
-only; standalone MCP falls back to a generated task-local identity until the
-hook runs. `SessionStart` recovers the binding for `resume`, `clear`, and
-`compact`, while `read_worker_report` PostToolUse context repeats the exact
-main-chat report link requirement. Native dispatch calls are issued one at a
-time in returned worker order (the children still run concurrently), allowing
-the documented generic `SubagentStart.agent_type=default` event to bind each
-opaque child ID to its issued dispatch. A synchronous `PreToolUse` guard denies an
-`Agent` wait with no child target before the native call can block; the
-PostToolUse check remains a compatibility fallback. Model-visible context uses
-`hookSpecificOutput.additionalContext`.
-
-`SubagentStart` can recover a missing host-session binding only when the event
-identifies exactly one active pending dispatch: it matches the exact native
-task key when the host supplies one, or the generic `default` event together
-with the observed model. Ambiguous, missing, or already-consumed identities
-fail closed rather than guessing a worker. The hook trust check protects this
-binding logic, but installation still requires a new Codex thread so the host
-loads the updated hooks, skills, and MCP server.
-
-## Release boundary
-
-The repository package is ready for local validation, not for publication by
-default. The blocking release check builds a fresh `git archive HEAD` and
-rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
-and secret-prone paths before validating the package again. Run
-`python3 scripts/verify-cortex-release.py --require-tracked` against the exact
-committed Cortex 6.6.0 candidate before any push, tag, or catalog submission;
-the command deliberately does not attest mutable working-tree changes.
-
-See [release readiness](docs/release-readiness.md) for the external gates:
-verified public-manifest schema, confidential vulnerability reporting route,
-immutable-tag clean install, remote provenance, and catalog authorization.
-
-## Usage and activation
-
-### Codex Desktop
-
-Open the **Skills** picker, select **Cortex Orchestrator** (`cortex:orchestrator`), and state the
-task. You can also mention the skill in chat with `$cortex:orchestrator`. Add `help`,
-`harvest`, `harvest-refresh`, or `normal` after the skill name when needed; no
-argument starts ordinary task orchestration.
+The check must report:
 
 ```text
-$cortex:orchestrator Add tests for the billing retry flow.
-$cortex:orchestrator help
-$cortex:orchestrator harvest
+ok      Cortex lifecycle hook trust (5 content hashes)
+```
+
+If trust is missing, stale, rejected, or cannot be verified, do not start
+Cortex orchestration. Untrusted hooks can prevent durable worker binding,
+coordinator isolation, report recovery, and compaction-safe resume from working
+as designed. After trust is approved, fully restart Codex and open a new task.
+
+### 2. Install on Codex Desktop
+
+Codex Desktop and Codex CLI use the Plugins Marketplace system. The general
+user workflow is documented in the
+[official OpenAI plugin documentation](https://developers.openai.com/codex/plugins).
+
+#### Install from an available Marketplace
+
+1. Open the **Plugins** tab in Codex Desktop.
+2. Open the catalog where Cortex is published: **Personal**, your team's
+   Marketplace, or the public directory.
+3. Find **Cortex**, open its details, and select **+ / Install**.
+4. Review the requested permissions and bundled hooks/MCP server.
+5. Approve the exact five Cortex hooks described in
+   [Required post-install hook trust](#required-post-install-hook-trust).
+6. Verify the [required configuration](#required-codex-configuration).
+7. Start a **new Codex task**. Existing tasks do not load newly installed
+   skills, hooks, MCP tools, or a different multi-agent adapter.
+8. Open **Skills**, select **Cortex Orchestrator**, and describe your goal.
+
+> [!NOTE]
+> Until this repository version is published in the universal directory, use
+> its local Marketplace. Clone the repository and run
+> `./scripts/sync-cortex.sh`. The script registers
+> `.agents/plugins/marketplace.json` and installs `cortex@cortex` in the current
+> Codex environment.
+
+#### Update on Desktop
+
+1. Open **Plugins → Installed → Cortex**.
+2. Install the available newer version from the same Marketplace. If the UI
+   offers only uninstall and install actions, uninstall Cortex and install it
+   again.
+3. For the local repository version, run:
+
+   ```bash
+   git pull
+   ./scripts/sync-cortex.sh
+   ```
+
+4. Reapprove or verify trust for the updated five hook content hashes.
+5. Recheck `multi_agent_v2` and the Luna default.
+6. Start a **new Codex task**. An existing task may retain absolute paths to the
+   previous cachebusted plugin installation.
+
+### 3. Install on Codex CLI
+
+Start the interactive Codex CLI:
+
+```bash
+codex
+```
+
+Open the plugin browser:
+
+```text
+/plugins
+```
+
+Then:
+
+1. Switch to the required Marketplace tab.
+2. Open **Cortex** and install it.
+3. If needed, press `Space` to enable the installed plugin.
+4. Approve the exact five Cortex hooks described in
+   [Required post-install hook trust](#required-post-install-hook-trust).
+5. Verify the [required configuration](#required-codex-configuration).
+6. Exit the current CLI session and start `codex` again.
+7. In the new session, invoke `$cortex:orchestrator` or open `/skills`.
+
+For the local Marketplace version, registration and reinstallation are
+automated:
+
+```bash
+git clone https://github.com/igovet/codex-cortex-orchestrator.git codex-orchestration
+cd codex-orchestration
+./scripts/sync-cortex.sh
+```
+
+These are the equivalent low-level commands used by the script:
+
+```bash
+codex plugin marketplace add /absolute/path/to/codex-orchestration --json
+codex plugin remove cortex@cortex --json   # only when already installed
+codex plugin add cortex@cortex --json
+```
+
+#### Update on CLI
+
+For a published version, open `/plugins`, select the same Marketplace, and
+install the newer Cortex version. For the checkout version, run:
+
+```bash
+git pull
+./scripts/sync-cortex.sh
+./scripts/sync-cortex.sh --check
+```
+
+After every update, reapprove or verify the new hook content hashes, exit the
+current session, and start a new one.
+
+### 4. Orchestration commands
+
+Cortex exposes one explicit entry point with several routes. On Desktop,
+select **Skills → Cortex Orchestrator** or mention the skill in chat. In the
+CLI, use `$cortex:orchestrator` or `/skills`.
+
+| Command | Purpose | Example |
+| --- | --- | --- |
+| `$cortex:orchestrator <task>` | Start ordinary orchestration | `$cortex:orchestrator Find the race condition and fix it with tests` |
+| `$cortex:orchestrator help` | Show read-only help without changing the project or ledger | `$cortex:orchestrator help` |
+| `$cortex:orchestrator harvest` | Build or synchronize the repository knowledge baseline; required before the first task in an existing project | `$cortex:orchestrator harvest` |
+| `$cortex:orchestrator harvest-refresh` | Rebuild project knowledge documentation from source | `$cortex:orchestrator harvest-refresh` |
+| `$cortex:orchestrator prune` | Remove completed Cortex task state older than seven days | `$cortex:orchestrator prune` |
+| `$cortex:orchestrator normal` | Leave the active Cortex route | `$cortex:orchestrator normal` |
+
+Example tasks:
+
+```text
+$cortex:orchestrator Design and implement secure API-key rotation,
+including the migration, tests, and documentation.
+
+$cortex:orchestrator Review the current PR, identify regressions,
+check security, and verify the findings with tests.
+
 $cortex:orchestrator harvest-refresh
-$cortex:orchestrator normal
 ```
 
-### Codex CLI
+#### Existing repositories: run harvest first
 
-Lead with a skill mention:
+> [!IMPORTANT]
+> ### Run `$cortex:orchestrator harvest` before the first task in an existing project
+>
+> Cortex workers rely on durable repository knowledge under `docs/project/` and
+> `docs/features/`. For an existing codebase, run the harvest route once before
+> ordinary feature, debugging, migration, review, or refactoring work. This
+> gives later workers an evidence-backed map of the project's architecture,
+> features, commands, conventions, verification paths, decisions, and known
+> pitfalls.
+
+Start the initial knowledge build with:
 
 ```text
-$cortex:orchestrator Add tests for the billing retry flow.
+$cortex:orchestrator harvest
 ```
 
-Alternatively, enter `/skills`, select `cortex:orchestrator`, then provide the task
-or one of the same arguments: `help`, `harvest`, `harvest-refresh`, or
-`normal`.
+If the project does not already have a current, source-backed coverage manifest,
+`harvest` automatically performs a full baseline census rather than a shallow
+incremental update. The pipeline plans the repository domains, explores them,
+synthesizes the architecture, writes the canonical documentation, independently
+reviews coverage, and verifies the finished knowledge tree.
 
-Cortex does not provide native bare `/cortex` or `/normal` commands. Those
-values are server-side compatibility tokens only when a host explicitly passes
-textual shorthand through; a host may reserve or reject them. Never present a
-bare token as a required recovery step. Use the Cortex skill route instead. Do
-not use the deprecated `/prompts` mechanism. Selecting the
-Cortex skill for any non-help, non-`normal` route explicitly activates it;
-`$cortex:orchestrator normal` exits an active session. Ordinary requests and mere
-mentions remain normal workflow and do not create a ledger. Help is read-only
-and never activates Cortex.
+The resulting baseline includes:
 
-The knowledge routes build a source-backed exhaustive feature census, not a
-summary of recent changes. Both use the canonical `plan`, `discover`,
-`architecture`, `documentation`, `review`, and `close` phases. `harvest` is
-incremental only when `docs/features/index.md` already contains a current,
-zero-gap coverage manifest; otherwise it runs a full baseline census.
-`harvest-refresh` always rebuilds the inventory from source and requires an
-independent source-to-doc completeness review with zero unexplained unmapped
-surfaces and a no-change second documentation plan. Large repositories split
-discovery across 2–8 non-overlapping domain explorers and may parallelize
-technical writers only across non-overlapping documentation paths, with one
-owner for the coverage manifest. Both routes preserve manual notes outside
-generated blocks, reconcile the project manifest, and finish with a verified
-handoff. During `documentation`, `review`, and `close`, Cortex structurally
-validates `docs/features/index.md` and rejects a shallow link list that omits
-the Coverage matrix columns, Inventory totals, Unmapped surfaces, Exclusions,
-or Known unknowns sections.
+```text
+docs/project/index.md
+docs/project/conventions.md
+docs/project/verification.md
+docs/project/decisions.md
+docs/project/gotchas.md
+docs/features/index.md
+docs/features/<feature>/index.md
+```
 
-For every Cortex call, the coordinator supplies the exact absolute
-`project_root`; it is never inferred from the server process, environment, or
-working directory. One MCP process may serve multiple project roots, while
-each activation and task remains authorized only by its own
-`${project_root}/.codex/cortex` record. A missing, relative, symlinked,
-unwritable, or mismatched root, a set `CORTEX_ROOT`, or a `/tmp` fallback fails
-closed before task state is created.
+For large restructures, a stale knowledge tree, or suspected coverage gaps, run
+a full independent rebuild:
 
-The public normal flow has a narrow lifecycle plus scoped report transport. A
-minimal `start_orchestration` call contains only the absolute `project_root`
-and the user's exact, unexpanded text in `task.user_request`; complexity safely
-defaults to C2 and Cortex constructs the pipeline. Desktop's sole host-metadata
-exception is its injected `[$cortex:orchestrator](absolute-local-plugin-path/skills/orchestrator/SKILL.md)`
-wrapper: Cortex canonicalizes that exact wrapper to `$cortex:orchestrator`
-before task identity, labels, persistence, and worker prompts, while preserving
-the route and every following user-authored word. Arbitrary Markdown links and
-user paths are unchanged, so local plugin-cache paths and cache-version changes
-never enter durable task state. This is a breaking 4.0.0
-contract. The deprecated `task.objective` may be omitted; when supplied for
-compatibility, it must match the trimmed `user_request` exactly. Cortex rejects
-coordinator paraphrase or expansion before any ledger write. Optional compact
-overrides use `waves[].workers[]`, where only
-`phase` is required, `depends_on` selects exact prerequisite phases, and
-`context_files` carries task-relevant project or feature documentation.
-Omitting `depends_on` supplies all verified predecessor reports; an empty list
-marks an intentionally independent worker. Common human language names
-normalize to compact tags before ledger creation; in particular, `implement` maps to `implementation`
-and `build_verification` maps to the final `close` phase, avoiding repeated
-correction/retry loops around those common labels. `continue_orchestration` is called once per completed
-wave with the prior relative `step` and worker results. A single-worker
-completion may omit its slot; a parallel completion uses only the returned
-`worker: 1..N` slot, and a non-success completion also carries the exact
-`dispatch_ref` for that attempt. Any worker can persist a material user decision through
-`worker_question`, pause without completing its attempt, receive the answer on
-the same `question_ref`, and resume the same native worker. Open blocking
-questions reject both report publication and wave continuation. The
-coordinator passes only the opaque `question_ref` to
-`manage_orchestration(intent="question")`; Cortex resolves the task, attempt,
-profile, and native-thread identity and opens MCP elicitation. Guessed identity
-fields and a prose fallback fail closed. The worker ends its current native
-turn so it is idle and resumable; after the answer, the coordinator resumes
-that exact worker through `followup_task`, and the worker polls the same ref.
-Repeating question management for an already answered ref returns the durable
-answer without reopening the UI. Workers then
-persist all eight report sections with `record_report`,
-return only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
-summary (or the exact report-tool error), and the coordinator reads each ref
-with `read_worker_report`. That read returns both the derived
-`report_markdown_path` and exact `report_markdown_link`; the coordinator must
-publish the link verbatim in the main chat immediately before any other
-lifecycle call or additional report read. If a native acknowledgement is
-interrupted after persistence, `manage_orchestration` inspect exposes the ref
-and link in `available_reports`. Slots and report refs are validated atomically
-before lifecycle state is written.
+```text
+$cortex:orchestrator harvest-refresh
+```
 
-If the host compacts or resumes a conversation, call
-`manage_orchestration(intent="inspect")` once with the preserved opaque
-`task_ref`. The response includes a bounded `context_handoff` rebuilt from the
-ledger: goal, acceptance criteria, verified reports and links, decisions,
-changed files, checks, blockers, pipeline, and the recovery protocol. Treat
-it as authoritative current state; do not restart the task, replay completed
-dispatches, or infer state from a raw transcript.
+#### Documentation is maintained automatically after tasks
 
-The lifecycle `SessionStart` hook repeats this recovery route automatically
-for host `resume` and `compact` events, including the registry-backed opaque
-`task_ref`. This keeps the first post-compaction turn pointed at one durable
-inspect instead of relying on the model's free-form summary to preserve the
-orchestration protocol.
+After the initial harvest, you do **not** need to run `harvest` after every
+task. Cortex automatically adds scoped documentation synchronization after C2
+or C3 work, and whenever verified changes affect behavior, interfaces,
+architecture, project commands, conventions, gotchas, decisions, or feature
+ownership.
 
-Compaction recovery relies on the documented `SubagentStart` binding: the
-parent session plus native `agent_id`, observed `model`, and exact returned
-dispatch identity are persisted before the worker is treated as
-active (`agent_type` is `default` for these dynamic workers). `context_handoff` separates
-`pending_dispatches` (top-level `inspect` dispatch authority only) from
-`active_workers` (exact persisted child ids to wait on). Missing parent/child
-binding fails closed; the coordinator never guesses an identity or waits on a
-new child.
+The documentation worker updates only the affected durable pages, preserves
+protected human-authored text, verifies links and commands against the finished
+implementation, and keeps the feature registry consistent. Documentation is
+therefore updated as part of the task pipeline before the final close gate.
 
-Cortex deterministically marks a short, underspecified product-surface creation
-request for intent clarification. Repository evidence may support a useful
-question but cannot establish the user's desired product outcome. Discovery
-may gather bounded evidence; before plan or another decision-bearing phase can
-report completion, the worker must persist the smallest material question with
-`worker_question`, wait for the user's answer, poll it, and resume the same
-attempt. A sufficiently detailed product request does not receive this
-automatic hold, but material ambiguity discovered later still requires the
-same durable question lifecycle.
+A small local C1 fix that changes none of those durable facts intentionally
+skips documentation sync. Cortex does not create documentation merely to record
+that a task occurred.
 
-Every task-bound lifecycle response returns an opaque `task_ref`. Preserve it
-on every later `continue_orchestration`, `manage_orchestration`, and
-`read_worker_report` call. Different task contracts may run concurrently below
-one project root. The same exact `task.user_request` cannot create a second
-active task merely because coordinator metadata or proposed waves differ: the
-start replays the existing `task_ref` with no dispatches. A different user
-request creates a distinct task. Replayed continue calls likewise return no
-dispatches and never authorize another wave. If a later call omits the ref
-while several tasks are selectable, Cortex returns `needs_selection` with
-opaque refs and objectives instead of guessing.
+`help` and `normal` do not start durable orchestration. `prune` is a separate,
+bounded maintenance operation: it does not remove the project, source code,
+documentation, or plugin files. `harvest` is incremental only after a verified
+coverage manifest establishes a complete baseline; otherwise Cortex performs a
+full audit. `harvest-refresh` always rebuilds the inventory from current source.
 
-Caller-generated submission, task, wave, attempt, coordinator, and host IDs
-do not cross the normal-flow boundary. Cortex owns transaction idempotency:
-an identical retry replays, a changed payload conflicts, and a stale relative
-step is rejected. `manage_orchestration` keeps inspect, resume, deactivate,
-lane, resource, active `steer`, durable-question recovery, and confirmed `prune` maintenance
-outside the common path.
-The coordinator owns the pipeline: it builds or consciously accepts the
-initial waves, follows the returned `pipeline` snapshot by default, and alone
-decides whether verified evidence justifies changing `future_waves`, with a
-concise reason. Planner and explorer findings are advisory. Semantically
-unchanged reassessment is accepted as unchanged and keeps subsequent relative
-steps monotonic. When final-close evidence discovers bounded corrective work,
-an explicit same-call `future_waves` replacement with rework reopens the
-pipeline and invalidates the completed gate plus all downstream attempts,
-evidence records, and report receipts. Cortex must not return a false completed
-result while those replacement waves remain. A completed response explicitly
-reports `close_verified` and `handoff_ready` so Luna does not start a second
-run merely to rediscover terminal proof.
-Pre-SQLite and pre-v4 coordination state is unsupported and is not inspected,
-migrated, or resumed; only the seven documented v4 tools are published in
-`tools/list`.
+> [!CAUTION]
+> `/cortex` and `/normal` are not registered Codex slash commands. Use
+> `$cortex:orchestrator ...` or select the skill through `/skills`.
 
-Workers never call Cortex lifecycle operations. They call scoped
-`worker_question` for unresolved material user decisions, use the native
-parent/child channel only to return its compact ref and receive the resume
-signal, and call scoped `record_report` for their strict
-eight-field `cortex/report/v1`, and never paste that JSON into the native final
-response. Expected validation
-and recovery outcomes return `ok: false`, bounded diagnostics, and an exact
-`next_action` without being appended to the exception log. Unexpected MCP
-failures are appended as redacted JSONL under
-`~/.codex/logs/cortex-tool-errors.jsonl`. Each record includes the tool input
-summary, chat/thread session id, JSON-RPC request id, and any task/attempt or
-other call ids that were present; the log directory is `0700` and the file is
-`0600`.
+---
 
-An ordinary complex request, a request mentioning orchestration, or using
-subagents does **not** activate a durable ledger. After activation, the main
-agent remains user-facing while internal workers inspect, implement, test, and
-report through the main chat.
+## Strongly recommended: Codebase Memory MCP
 
-While Cortex is active, the main/root agent is coordination-only. It must not
-inspect, search, read, edit, patch, build, test, or run the target project and
-must remain idle while a worker is active. It may call Cortex, launch the exact
-returned dispatches, wait, evaluate reports, route questions, and communicate
-with the user. Worker failure or delay is handled as rework or a blocker, never
-by falling back to direct root implementation.
+> [!WARNING]
+> ### Install Codebase Memory MCP before serious orchestration work
+>
+> **[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)**
+> builds a local graph of functions, classes, calls, routes, and dependencies.
+> Cortex uses it for fast architecture discovery, impact analysis, and tracing
+> end-to-end execution paths. This is especially valuable in large monorepos:
+> without the graph, workers must search and read files more sequentially,
+> consuming more time and context while increasing the chance of missing a
+> non-obvious caller, alternate entry point, or cross-service relationship.
+>
+> Codebase Memory is not a hard runtime dependency. If the MCP server is not
+> available, a worker makes one bounded attempt and falls back to ordinary
+> repository tools. Nevertheless, it is **strongly recommended** for C2 and C3
+> tasks.
 
-Codebase Memory is an optional worker accelerator, not a root-coordinator
-capability. When its tools are actually present, a worker first calls
-`list_projects` and selects only the entry whose root exactly matches the task
-project. It should prefer graph, architecture, and trace operations for
-discovery and impact analysis, then confirm consequential findings in current
-source and tests. `planner`, `explorer`, `architect`, and `database_architect`
-may perform one bounded refresh when the exact index is missing or stale;
-every other profile falls back after one failed attempt to normal repository
-tools without setup loops. The coordination-only root never uses Codebase
-Memory to inspect the target project itself.
-
-When present, Cortex automatically adds `docs/project/index.md` and
-`docs/features/index.md` to every worker briefing. The planner reads those
-indexes first, selects all task-relevant linked pages, and recommends their
-exact paths; the coordinator attaches that evidence-backed selection to later
-workers through `context_files`. Every worker re-checks the indexes, treats
-documentation as navigation and prior knowledge rather than authority, and
-confirms consequential claims in current source, tests, schemas, or executable
-configuration. Its persisted report includes one `Knowledge reviewed:`
-evidence entry naming both available indexes and every additional page used;
-public `record_report` rejects a missing index acknowledgement. Explicit
-`context_files` must resolve to existing project-relative regular files;
-absolute, traversing, missing, and symlink paths are rejected.
-
-## Profiles, routing, and reports
-
-`plugins/cortex/profiles.json` is the canonical machine-validated contract for
-all 21 bundled profiles. Each entry defines the exact name, description,
-sandbox, automatic/manual route category, owned gates, `select_when`, and
-`avoid_when`; the matching TOML must agree on identity, description, and
-sandbox. Each profile carries a structured professional playbook. A generated worker briefing then combines that playbook with the
-overall task context and the current gate's mission, ownership, acceptance, and
-verification defaults. Task-level criteria remain separate from gate-level
-criteria; explicit coordinator overrides take precedence over gate defaults,
-and omitted values are filled from the validated 13-gate registry. The
-`planner` profile is read-only and must ground a decision-complete plan in
-repository evidence, resolve discoverable facts before asking questions, and
-leave no material implementation decisions for the executor. `task_formatter`
-is not a supported profile.
-
-Automatic implementation routing conservatively scans bounded explicit
-signals in the objective, requirements, acceptance criteria, scope, allowed
-paths, and verification, including relevant English and Russian terms. The
-ordered specialist precedence is `fullstack_dev`, `mobile_dev`,
-`devops_engineer`, `data_engineer`, `debugger`, `refactorer`, `frontend_dev`,
-then `backend_dev`; `general` is used only when no specialist signal is strong
-enough. This initial route is provisional: repository evidence from `planner`
-or `explorer` is advisory, and the coordinator alone decides whether it
-justifies replacing not-yet-started `future_waves`. Both worker profiles
-receive the complete generated team catalog, and the root
-orchestrator skill carries the synchronized generated roster and evidence-led
-routing rules while remaining coordination-only.
-
-The public compact worker schema advertises an exact enum of all 21 canonical
-profile names. Legacy aliases are accepted only as runtime compatibility input,
-and a profile that cannot own the requested phase is rejected before ledger
-writes. Every returned dispatch exposes `worker`, `phase`, `profile`,
-`capability`, `sandbox`, and `selection_reason` alongside `call` and unchanged
-native `arguments`.
-Each compact native dispatch carries a `dispatch_ref`, an immutable scoped
-`briefing_path`, and its SHA-256 digest. The bootstrap instructs the worker to
-read exactly that briefing path and no other `.codex/cortex` ledger path, then
-publish the exact `Dispatch briefing reviewed: <sha256>` marker in evidence.
-The full prompt is never stored in mutable coordination state: that state is
-kept in SQLite, while only the immutable briefing file is read directly. When the host file reader
-cannot open that exact path, `read_dispatch_briefing` provides a scoped,
-cursor-paged fallback bound to the complete task/attempt/profile/dispatch/digest
-tuple; a worker may continue only with its returned cursor, and cannot list the
-ledger or select another artifact. Predecessor reports remain available through
-scoped, bounded `read_worker_report` calls only.
-Every delegation records requested/expected model metadata separately from
-the native request override and always records reasoning effort. `explorer`
-always selects Luna; its effort is chosen by the coordinator or defaults from
-risk, and Terra is reserved for a hidden host-unavailable fallback. The only
-valid efforts are `low`, `medium`, `high`, `xhigh`, and `max`; `max` is the hard
-upper bound. The adaptive policy in `plugins/cortex/profiles.json` classifies
-ordinary profiles as efficient, adaptive, or deep. Efficient work uses Luna;
-deep profiles, C2/C3 planning, and `terra_task_kinds` entries such as complex
-planning, uncertain diagnosis, long-context or integration-conflict work, and
-high/critical failure cost use Terra. Other low/moderate-risk adaptive work
-stays on Luna. Efficient Luna uses
-C1/C2/C3 `high`/`high`/`xhigh`; bounded adaptive Luna uses
-`high`/`xhigh`/`max`; Terra uses `high`/`high`/`xhigh`. Risk floors remain
-low/moderate `medium`, high `high`, critical `xhigh`. Automatic `max` is
-limited to bounded C3 Luna work. Security context, the
-security gate, and `security_auditor` always select Sol with the same
-complexity floors. A coordinator may explicitly override an ordinary route
-between Luna and Terra without lowering its effort floor.
-
-The root coordinator is a separate operator choice from worker dispatch
-routing. Select the model and effort together:
-
-- Luna `high` for short C1 tasks with one or two waves and little ambiguity.
-- Luna `xhigh` as the recommended normal mode for multi-wave orchestration,
-  report reconciliation, and compaction recovery.
-- Luna `max` for complex but well-specified C3 orchestration with clear
-  acceptance criteria and bounded decisions.
-- Terra `high` when reports conflict, strategy is unclear, or the cost of a
-  wrong routing/completion decision is high.
-- Terra `xhigh` for high-risk C3 orchestration and unresolved, consequential
-  decisions.
-
-Luna `high/xhigh/max` is the effort ladder for the root coordinator; Terra is
-an adaptive model-tier escalation, not a substitute for the 256K Codex context
-limit. Compaction recovery uses the durable Cortex handoff with fresh goal,
-criteria, reports, decisions, blockers, and next-action data. This does not
-change the root coordinator's coordination-only boundary.
-
-Non-security Sol is accepted only when the user explicitly selected it. Pass
-compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
-Cortex records matching `user_requested_model` and `requested_model`.
-Coordinator preference, auditable-extreme labels, and a failed Terra attempt
-are not authorization;
-the retired `sol_escalation` field and model/effort remaps are not part of the
-current contract. A configured-default Luna request omits native `model` while
-preserving the selected effort. Explicit model selections retain `model`; if
-Luna is unavailable to the host, Cortex may dispatch hidden Terra without
-changing the selected effort. Observed host metadata is stored separately,
-and Cortex never claims an actual worker model from expected routing alone.
-
-Each v4 dispatch is `{worker, dispatch_ref, phase, profile, display_name,
-capability, sandbox, selection_reason, briefing_path, briefing_digest, call,
-arguments}`. `arguments` contains only the real native
-`spawn_agent` or `create_thread` parameters; hidden `spawn_agent` arguments
-retain `fork_turns: "none"` so localized parent history is not inherited.
-`profile` remains the exact canonical role name and `display_name` is derived
-from the task domain in the user's request as a human-readable `Profile Module`
-label (for example, `Planner Authentication`). It contains no ordinal or
-digest, and gate mission verbs such as `plan`, `discover`, or `close` are not
-used as the module. Meanwhile
-`spawn_agent.task_name` is a task/attempt-unique native session key and must
-match the host's strict `[a-z0-9_]{1,80}` agent-name contract. The native key
-uses the lower-underscore profile/module/ordinal plus a deterministic digest;
-the digest preserves uniqueness without copying durable task IDs, request text,
-or local skill paths into the host-visible name. Cortex durable task, attempt,
-and ledger IDs may still contain hyphens. Reusing a profile must therefore create a fresh
-native worker; only an explicit
-`followup_task` for the same confirmed host child may resume it. Routing and
-expected-model metadata is never copied into native `model`. Cortex rejects
-reuse of a `host_agent_id` already bound to another attempt. Lifecycle hooks
-correlate the exact returned native task key/dispatch ref and opaque child ID
-with the canonical profile before injecting worker context. The main Codex
-agent invokes independent requests in one model turn when the host supports
-parallel calls, waits for them, and submits their reports in
-one relative continue call. A malformed report, duplicate/foreign slot, or
-incomplete wave is rejected before partial acceptance. Native spawn failures
-are submitted as explicit non-success results with a normalized status and
-reason.
-
-Each worker writes exactly the `cortex/report/v1` fields—`summary`,
-`findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
-and `next_action`—through public `record_report`. The final `questions` list
-must always be empty. Material questions are resolved through
-`worker_question` before publication; genuinely non-blocking evidence gaps
-belong in `uncertainty`. Cortex rejects a report that uses `questions` as an
-escape hatch. The operation stores sanitized authoritative JSON, creates
-a one-use attempt receipt, updates task- and delegation-scoped indexes, and
-generates an escaped Markdown view. Evidence consumption creates an
-irreversible `reports/consumptions/` tombstone; reconciliation may repair
-derived receipts and indexes but never makes a consumed receipt reusable.
-Hook/tool observations use a task/attempt/context-epoch/fingerprint key. A
-successful full-coverage observation may be reused for the same workspace
-generation; duplicate calls increment a bounded repeat count without replacing
-the success, and partial coverage never authorizes reuse.
-For every gate that requires executed checks, every `report.tests` item must
-record integer `exit_code: 0`; one passing command cannot mask another
-nonzero result. A negative-path check is successful only when an assertion
-harness observes the expected rejection and itself exits 0. Workers must
-preserve nonzero outcomes rather than omit, disguise, or relabel them;
-`record_report` returns `worker_verification_failed`, and the gate requires
-repair plus fresh verification or a new Cortex-authorized rework attempt.
-Every gate report must publish a separate top-level `gate_result` envelope with
-`decision`, `failure_class`, `findings`, `verification`, and `workspace`.
-`gate_result` is canonical for all gates; the older top-level `closure` sibling
-is only a review/close compatibility alias and is never part of the strict
-eight-field report.
-Worker briefings contain only the exact task and attempt identifiers required
-for that one report write and explicitly forbid using them with lifecycle or
-pipeline tools. Host spawn prompts de-duplicate the exact user request before
-adding the worker contract. `start_orchestration.next_action` is serialized
-before dispatch payloads; the compact native bootstrap is below 1,500 bytes,
-the full immutable briefing is regression-tested below 11,500 bytes, and the complete public start response is
-regression-tested below 8,000 UTF-8 bytes to prevent Codex tool-output
-truncation. A worker is not considered sent until native `spawn_agent` returns
-a child id. The coordinator must not announce a dispatch or call wait with an
-empty target list; native dispatch failure is a blocker.
-The native result is only `REPORT_RECORDED report_ref=<value>`
-plus at most a two-sentence summary, or the exact report-tool error; the
-coordinator reads the durable report and maps its ref
-to the current relative slot. Cortex privately creates
-the durable report receipt, evidence, gate transitions, reconciliation, and
-handoff. The coordinator waits for every native worker in the current wave
-before calling `continue_orchestration`; while waiting, the response contract
-is `waiting_workers` with `output_policy="silent"`, so repeated timeouts do
-not produce heartbeat commentary. Dispatches use one model turn when the host
-supports parallel tool calls and correlate each child by exact `task_name`,
-`dispatch_ref`, and returned child id rather than ordinal position.
-`followup_task` is not a generic report-repair mechanism. It resumes the same
-native worker after a durable question answer or an active steer. An active
-steer appends a task revision and delivers canonical English to the existing
-`host_agent_id`; it does not create a replacement attempt. If a
-worker finishes with a report-tool error, `SubagentStop` has already persisted
-the attempt outcome; the coordinator inspects once and submits the recovered
-report, question, or exact failure. Rework starts only from a fresh Cortex
-dispatch. The supported `PostToolUse(wait)` hook reasserts this recovery before
-the coordinator can mistake the stopped worker for a resumable report repair.
-Read-only briefings also require non-writing verification modes (including
-`PYTHONDONTWRITEBYTECODE=1` and disabled test/build caches) and forbid cleanup
-commands. Result validation tracks newly changed generated or gitignored
-artifact sentinels in addition to ordinary manifest paths, so a worker cannot
-hide a cache-producing check behind normal source-manifest exclusions.
-Predecessor handoffs are passed as compact report refs rather than embedded
-report bodies. Before project work, the successor may read only predecessor refs
-explicitly supplied in its dispatch through `read_worker_report`, using the exact
-`project_root`, `task_ref`, `attempt_id`, and `profile`; Cortex rejects ungranted
-refs and does not inject the coordinator's Markdown-link instruction into worker
-context. The successor reconciles relevant findings and conflicts
-against current evidence, and adds the generated `Predecessor review:` entry
-naming every supplied report ref to report evidence. Public `record_report` rejects
-an incomplete acknowledgement. Cortex also fails closed instead of silently
-dropping predecessor reports when the safe count or context-size budget is
-exceeded; narrow the dependency set with `depends_on`.
-The public compact worker schema accepts `context_files`. Cortex also injects
-the available project and feature indexes, and the report must include the
-generated `Knowledge reviewed:` acknowledgement described above.
-Worker execution is English-only: internal prompts, Cortex arguments, reports,
-questions, handoffs, and audit records are English. The main coordinator uses
-the user's task language (or explicit `user_language`) for all user-facing
-questions and summaries. Localized question labels are transient projections;
-answers retain the original value/language and require canonical `answer_en`
-for localized free text. Workers can use `worker_question(action="ask_batch")`
-with 1–32 stable questions and poll the same `batch_ref` with
-`action="poll_batch"`; the host form answers every item in one atomic batch,
-and task revisions supersede unresolved batches. The v8 report, evidence, gate, and recovery primitives remain
-available only inside the server; coordinators and workers must not call them
-directly.
-Individual files are atomically replaced; the whole multi-file publication is
-not crash-atomic. Report bodies are task-bound and require an explicit
-per-attempt context grant. Hooks inject the report contract and internal-worker
-routing only for an active, initialized task; they remain best-effort telemetry,
-not proof that the host spawned an agent.
-Report intake is bounded to 64 KiB and 100 list items per field. Ordinary JSON
-writes are bounded by `MAX_JSON_BYTES` (8 MiB) and fail before replacement with
-an actionable diagnostic; manifests use the separate `MAX_MANIFEST_BYTES` (64
-MiB) bound. Initial manifest capture preflight runs before task-directory creation,
-and handoff/reconciliation snapshot serialization remains bounded, so oversized
-artifacts fail closed instead of surfacing only at close. Task and operation
-ledger state also has an 8 MiB file limit. A task keeps
-at most 256 reports / 1 MiB aggregate, and telemetry retains at most 1,000
-events / 512 KiB. Ledger paths reject symlink ancestry and regular-file
-replacement targets, so coordination data cannot be redirected through a
-symlink.
-
-Baseline manifests are deliberately narrower than “every byte below the
-project root”. Each new baseline honors project `.gitignore` rules, including
-ordered negations, and records the discovered files and frozen effective rules
-in its manifest policy. Later reconciliation reuses those frozen rules, so a
-task cannot silently change scope because a worker edits `.gitignore` midway.
-Cortex also excludes high-confidence dependency, cache, test-output, and
-runtime directories (for example `node_modules`, `.pnpm-store`, `.venv*`, and
-language-specific cache directories). Generic names such as `build`, `dist`,
-`target`, `bin`, and `obj` are excluded only when an applicable `.gitignore`
-rule or recognizable build-output marker justifies it; source directories with
-those names remain tracked otherwise. Symlinks are recorded without following
-them. This keeps final changed-file reconciliation useful without hashing
-virtual environments and package caches.
-
-Initial task and per-attempt manifests are immutable, content-addressed
-records in the project-local `cortex.db`. Task state and attempts carry only
-compact `manifest-<sha256>` references and the required comparison digests.
-Identical project state reuses one record, but every dispatch still performs a
-fresh capture so changes made outside the orchestration cannot hide behind
-deduplication. After a completed close is persisted, Cortex removes those
-manifest records; final receipts retain the digest and changed-file proof.
-Explicit `allow_rework` that reopens a completed task captures a new active
-baseline before replacement work is dispatched.
-
-## Questions in the main chat
-
-Questions are durable for every worker profile. A worker calls
-`worker_question(action="ask")`, returns only `QUESTION_RECORDED` with the
-`question_ref` and a concise summary, ends its native turn in an idle/resumable
-state, and does not record a report. The main agent passes only that exact ref
-to `manage_orchestration(intent="question")`; Cortex resolves lifecycle
-identity and opens native MCP elicitation. Identity guesses and prose fallback
-are rejected. After the answer, the coordinator uses `followup_task` to resume
-the exact same worker, which calls `worker_question(action="poll")` with the
-same ref and continues the same attempt. Duplicate management calls do not
-reopen the UI. Its private payload commands remain `ask`, `publish`,
-`list`, `answer`, and `updates`; server-owned management transactions hide
-their lifecycle identifiers from the normal coordinator path.
-
-Every worker classifies an unknown before acting. Repository-answerable facts
-are investigated; low-impact reversible details may be chosen and documented;
-material product intent, behavior, audience, design direction, security,
-irreversibility, or external commitments must be asked. Existing source proves
-the current system, not the user's desired outcome. Cortex fails closed if a
-worker tries to report or the coordinator tries to continue while a blocking
-question remains open. It also rejects a non-empty final report `questions`
-list. When deterministic preflight marks a short product-surface creation
-request as underspecified, plan and other decision-bearing phases cannot report
-completion until at least one blocking question has been answered.
-
-## Prune maintenance
-
-The explicit `$cortex:orchestrator prune` route calls
-`manage_orchestration(intent="prune",
-payload={"confirmation":"PRUNE","older_than_days":7})` without a task ref.
-It removes only task-scoped `.codex/cortex` records last updated at least seven
-days ago when the task is already completed, and reconciles the canonical task
-index,
-activations, transaction and classification receipts, task resource claims,
-and lane bindings. Active and blocked tasks are retained regardless of age, and
-a classification receipt referenced by any retained task is never removed. It
-also preserves recent completed tasks, lanes themselves, project source,
-documentation, and plugin files. This bounded weekly prune replaces the unsafe
-idea of clearing the whole ledger. The initial maintenance call can instead
-return the stable choices `keep_1d`, `keep_7d`, `keep_30d`, or `full_reset`.
-`full_reset` is a separate destructive project-scoped operation: it requires
-the exact second confirmation `RESET CORTEX`, fails closed while any task is
-active, and removes only `.codex/cortex` state (never project source or docs).
-
-The native form supports one-choice options, multi-choice checkboxes via
-`multiple: true`, and always appends a final `custom_response` field for free
-text or additional context. Returned structured content is retained so host
-attachment/image metadata is not discarded. The main agent owns the decision;
-workers must not resolve an unresolved user branch themselves.
-Several workers can ask questions at once. The durable bus assigns a global
-sequence while retaining each `attempt_id`; the coordinator answers each open
-question independently in sequence order and keeps polling until `open_count`
-reaches zero. A worker may instead submit a `worker_question` batch of 1–32
-stable questions; the coordinator localizes the batch projection, records all
-answers atomically, translates localized free text through `canonical_answers`,
-and resumes the same worker with canonical English answers.
-
-## Validation
+Quick install on macOS/Linux:
 
 ```bash
-python3 -m unittest discover -s tests -v
+curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash
+```
+
+Review the remote installation script before running it. For Windows, manual
+installation, and package-manager options, see the
+[official Codebase Memory README](https://github.com/DeusData/codebase-memory-mcp#quick-start).
+
+After installation:
+
+1. Restart Codex so it loads the new MCP server.
+2. Ask Codex to index the project, or enable automatic indexing:
+
+   ```bash
+   codebase-memory-mcp config set auto_index true
+   ```
+
+3. Confirm that the project is resolved by its **exact absolute root**.
+
+Internal Cortex workers use Codebase Memory; the coordination-only root does
+not. The `planner`, `explorer`, `architect`, and `database_architect` profiles
+may perform one bounded refresh when the exact index is missing or stale.
+Other profiles do not loop on MCP setup and use the safe fallback instead.
+
+---
+
+## How orchestration works
+
+Cortex is more than a prompt asking Codex to “run several agents.” It is a
+local control plane with explicit stages, durable state, and verifiable
+transitions.
+
+```mermaid
+flowchart LR
+    U["User goal"] --> R["Root coordinator"]
+    R --> P["Plan and waves"]
+    P --> W1["Specialist 1"]
+    P --> W2["Specialist 2"]
+    P --> W3["Specialist N"]
+    W1 --> B["Reports and evidence"]
+    W2 --> B
+    W3 --> B
+    B --> G{"Gate passed?"}
+    G -- "no" --> P
+    G -- "decision needed" --> Q["Question for the user"]
+    Q --> W1
+    G -- "yes" --> N["Next wave"]
+    N --> C["Verified completion"]
+    R <--> L[("Local SQLite ledger")]
+```
+
+### The orchestration cycle
+
+1. **Explicit activation.** Cortex preserves the exact user request,
+   acceptance criteria, and task boundaries.
+2. **Complexity and risk classification.** The coordinator builds the required
+   canonical waves: discovery, planning, architecture, implementation, QA,
+   review, documentation, and final verification—only where the task needs them.
+3. **Precise dispatch.** Every worker receives a profile, model, reasoning
+   effort, allowed paths, ownership, acceptance criteria, and verification
+   responsibilities.
+4. **Isolated execution.** The root remains a coordinator and does not mix its
+   own project changes with worker work. Independent read-only tasks run in
+   parallel, while overlapping writes are serialized.
+5. **Reports instead of trust.** Every worker publishes a structured
+   `cortex/report/v1` containing findings, changed files, checks, evidence,
+   uncertainty, and the recommended next action.
+6. **Gates and adaptation.** The coordinator evaluates each report against the
+   contract. New evidence may change future waves, but verified work is not
+   repeated without reason.
+7. **Automatic documentation sync.** When completed work changes durable
+   behavior, interfaces, architecture, commands, decisions, or ownership,
+   Cortex dispatches a technical writer to update the affected project and
+   feature documentation before closing the task.
+8. **Verified close.** A task completes only after the required gates are
+   satisfied and the final handoff is ready.
+
+### Why this is more reliable than ordinary multi-agent work
+
+- **State survives compaction and resume.** The goal, decisions, workers,
+  reports, checks, and blockers are recovered from the ledger rather than
+  guessed from a shortened chat history.
+- **No accidental duplicate dispatch.** Idempotent lifecycle calls and opaque
+  `task_ref` values prevent an active wave from being started twice.
+- **Explicit file ownership.** Each worker knows its allowed scope. Independent
+  writers can use separate worktrees when isolation is required.
+- **Material decisions are not invented.** A worker can persist a question,
+  pause, and resume the same attempt after the user answers.
+- **Verification is contractual.** Executed checks record the command, working
+  directory, exit code, and decisive result.
+- **Documentation does not override source.** `docs/project/` and
+  `docs/features/` provide navigation, while consequential claims are verified
+  against source, tests, schemas, or executable configuration.
+- **Knowledge stays current automatically.** After the initial harvest,
+  behavior- or architecture-changing tasks synchronize the affected durable
+  documentation before the close gate.
+- **Privacy is the default.** The ledger and internal reports remain local.
+  Secrets and sensitive data must not be included in dispatches, reports, or logs.
+
+### Internal structure
+
+```text
+plugins/cortex/
+├── .codex-plugin/plugin.json   # Manifest and UI metadata
+├── .mcp.json                   # Local MCP server
+├── agents/                     # 21 worker profiles
+├── assets/logo.png             # Plugin logo
+├── hooks/hooks.json            # Lifecycle hooks
+├── profiles.json               # Routing and model policy
+├── scripts/                    # Server, launcher, hooks, and runtime
+└── skills/                     # 10 bundled skills
+```
+
+The public MCP surface is deliberately small. The coordinator uses
+`start_orchestration`, `continue_orchestration`, `manage_orchestration`, and
+`read_worker_report`. Workers use `read_dispatch_briefing`, `worker_question`,
+`record_report`, and scoped reads of authorized predecessor reports.
+
+The complete worker assignment is stored in an immutable briefing protected by
+a SHA-256 digest. A worker reads only its assigned briefing, verifies the digest,
+and never browses unrelated `.codex/cortex` coordination data. Canonical state
+is stored in the local SQLite `cortex/v8` ledger. Unsupported pre-SQLite state is
+not migrated or resumed.
+
+---
+
+## Profiles and model routing
+
+Cortex ships 21 profiles. They are not decorative personas: every profile has
+its own sandbox, eligible gates, ownership boundaries, completion criteria, and
+professional playbook.
+
+| Area | Profiles |
+| --- | --- |
+| Discovery and planning | `explorer`, `planner`, `architect`, `database_architect` |
+| Implementation | `frontend_dev`, `backend_dev`, `fullstack_dev`, `mobile_dev`, `data_engineer`, `devops_engineer`, `general` |
+| Diagnosis and improvement | `debugger`, `refactorer`, `performance_engineer`, `ux_designer`, `accessibility_engineer` |
+| Quality control | `qa_engineer`, `code_reviewer`, `security_auditor`, `build_verification` |
+| Documentation | `technical_writer` |
+
+### Adaptive model policy
+
+Cortex selects a model based on task type, complexity, and the cost of failure:
+
+- **Luna** handles fast, well-bounded tasks, exploration, most efficient
+  implementation work, and low- or moderate-risk adaptive work.
+- **Terra** handles deep C2/C3 planning, architecture, migrations, review,
+  uncertain diagnosis, concurrency, performance, integration conflicts, and
+  work with a high cost of failure.
+- **Sol** handles security context and the `security_auditor` profile. Outside
+  security work, Sol is allowed only when the user explicitly selects it.
+
+| Work class | C1 | C2 | C3 |
+| --- | --- | --- | --- |
+| Efficient / Luna | `high` | `high` | `xhigh` |
+| Adaptive / Luna | `high` | `xhigh` | `max` |
+| Deep / Terra | `high` | `high` | `xhigh` |
+| Security / Sol | minimum `medium` | minimum `high` | minimum `xhigh` |
+
+Automatic `max` effort is limited to bounded C3 Luna work. Risk also raises the
+minimum effort: low/moderate → `medium`, high → `high`, and critical → `xhigh`.
+If Luna is unavailable on the host, Cortex may use a hidden Terra fallback, but
+it never labels Terra as Luna and never creates a visible sidebar task without
+an explicit request.
+
+The root coordinator model is an operator choice separate from worker routing.
+Luna `xhigh` is the practical default for multi-wave orchestration. Terra is a
+better fit when reports conflict, strategy is unclear, or a routing/completion
+mistake would be expensive.
+
+---
+
+## Developing Cortex
+
+### Runtime boundary
+
+The complete installable product lives under `plugins/cortex/`: the manifest,
+profiles, skills, hooks, MCP configuration, and runtime. Root-level `scripts/`,
+`tests/`, `docs/`, and `AGENTS.md` support repository development and are not
+part of the installed plugin's runtime contract.
+
+Important entry points:
+
+| Path | Purpose |
+| --- | --- |
+| `plugins/cortex/scripts/cortex.py` | MCP server |
+| `plugins/cortex/scripts/cortex-launcher` | Python selection and server startup |
+| `plugins/cortex/scripts/cortex_hook.py` | Lifecycle hooks |
+| `plugins/cortex/profiles.json` | Canonical profiles and routing policy |
+| `plugins/cortex/skills/orchestrator/SKILL.md` | The single authoritative orchestration skill |
+| `.agents/plugins/marketplace.json` | Repository-local Marketplace |
+| `scripts/sync-cortex.sh` | Install, update, and verify the checkout version |
+
+### Recommended development loop
+
+```bash
+# 1. Preview the update without writing
+./scripts/sync-cortex.sh --dry-run
+
+# 2. Install or reinstall the current checkout
+./scripts/sync-cortex.sh
+
+# 3. Open a new Codex task and test the changed behavior
+
+# 4. Confirm that the installed copy matches the checkout
+./scripts/sync-cortex.sh --check
+```
+
+`sync-cortex.sh` validates the Marketplace and manifest, registers the local
+Marketplace, reinstalls `cortex@cortex`, detects same-version content drift,
+verifies trust for the five lifecycle hooks, and enforces the required Luna
+default. It does not import, clean, or modify user Cortex ledgers or unrelated
+plugin data.
+
+To select another Python interpreter:
+
+```bash
+CORTEX_PYTHON=/absolute/path/to/python3.11 ./scripts/sync-cortex.sh --dry-run
+CORTEX_PYTHON=/absolute/path/to/python3.11 ./scripts/sync-cortex.sh
+```
+
+### Versioning
+
+When changing the plugin, update the version in
+`plugins/cortex/.codex-plugin/plugin.json` according to SemVer:
+
+- patch for a fix without new functionality;
+- minor for a backward-compatible feature;
+- major for a large or breaking change.
+
+Do not publish an ordinary fix or feature as a major release. Build metadata
+after `+` may be used as a cachebuster, while SemVer communicates public
+compatibility.
+
+### Development agreements
+
+- Do not create a second repository-level copy of the orchestration skill.
+- Preserve exact machine-readable profile names from `profiles.json`.
+- Do not embed complete worker prompts in mutable task state.
+- Synchronize changes to behavior, architecture, interfaces, or verification
+  commands with `docs/project/` and `docs/features/`.
+- Read-only checks must not leave caches, bytecode, or generated artifacts.
+- Never commit `.codex/cortex`, runtime ledgers, diagnostic logs, credentials,
+  or private data.
+
+---
+
+## Verification and diagnostics
+
+Run the relevant checks before publishing a change:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+python3 scripts/validate-cortex-marketplace.py
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/cortex-luna-high-eval.py
-python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
-python3 scripts/probe-fresh-cortex-plugin.py
-python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
-python3 scripts/validate-cortex-marketplace.py
-python3 scripts/verify-cortex-release.py --require-tracked  # requires a committed HEAD
-# Optional: run the plugin-creator validator from its installed skill directory.
+python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py
 bash -n scripts/sync-cortex.sh
+./scripts/sync-cortex.sh --check
 ```
 
-The source-tree live command starts an isolated temporary project with its MCP
-server pointed at this checkout and streams newline-delimited, sanitized
-`cortex_live_progress` JSON records. It emits aggregate ledger/tool activity
-and a bounded 15-second heartbeat, but never streams prompts, arguments,
-results, source paths, or arbitrary host diagnostic content. Each scenario
-defaults to a 1,800-second timeout; `--live-timeout-seconds` accepts 10..7200
-seconds and
-terminates the complete process group with a graceful `SIGTERM`/`SIGKILL`
-fallback. `codex exec` uses `--ignore-user-config` and per-run private 0700
-`HOME`/`CODEX_HOME` plus private temporary/cache/config/data directories. Only
-least-privilege runtime variables and a selected `OPENAI_API_KEY` or
-`CODEX_API_KEY` are passed; when neither key is present, a private regular
-non-symlink `auth.json` no larger than 1 MiB is copied with no-follow checks to
-0600 storage, without logging credentials. It does not install, reinstall,
-update, or modify global Codex configuration, and does not verify an installed
-plugin. On normal or supervised exits, private runtime and temporary project
-directories are cleaned; a crash or external `SIGKILL` may leave OS-temp
-residue. Failure metadata is not retained by default; pass
-`--retain-failure-metadata` to opt in to a `/tmp` artifact directory
-containing only sanitized `progress.json`. Raw host output is not retained.
-The source candidate's resolver and launcher
-contract is covered by focused invariant tests, marketplace validation, shell
-syntax, the isolated fresh-plugin probe, and installed-content verification.
-The full regression, cold-boot lifecycle, and tracked-release archive checks
-remain required before publication. File-size hardening covers the 8 MiB ordinary-JSON bound with
-fail-before-replace diagnostics, the separate 64 MiB manifest bound, bounded
-handoff/reconciliation state, and fail-closed diagnostics for oversized
-artifacts. New tasks use SQLite only: first access creates a fresh database or
-applies a checksummed SQLite-to-SQLite migration; pre-SQLite files are left
-untouched and never become task state. The installer enforces Cortex MCP
-approval mode `approve` on clean and existing configurations while preserving
-the value across remove/add. The live-model and tracked-release archive checks remain
-required before push. No commit, tag, push,
-catalog publication, or public release is claimed.
+Live source-mode validation runs the MCP server directly from the checkout. It
+does **not** install or update the user's plugin:
+
+```bash
+python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
+```
+
+Run the read-only preflight on a local or SSH host with:
+
+```bash
+python3 scripts/cortex-host-preflight.py
+```
+
+It independently checks the Codex CLI, selected Python/`tomllib` runtime,
+plugin manifest, launcher, and same-user plugin cache.
+For the SSH-specific failure signatures, source-versus-cache distinction, and
+same-user remediation sequence, see the [SSH host troubleshooting runbook](docs/project/ssh-hetzner-troubleshooting.md).
+
+Before a release, verify the exact committed candidate:
+
+```bash
+python3 scripts/verify-cortex-release.py --require-tracked
+```
+
+The command builds a fresh `git archive HEAD` and rejects runtime state,
+bytecode, symlinks, nested Marketplace artifacts, and secret-prone paths. The
+remaining external publication requirements are documented in
+[docs/release-readiness.md](docs/release-readiness.md).
+
+Unexpected Cortex MCP errors are written to the private diagnostic log at
+`~/.codex/logs/cortex-tool-errors.jsonl`. Treat it as sensitive: inspect a small
+tail, extract only correlation metadata, and never paste the raw log into a
+chat, issue, or external system.
+
+---
+
+<p align="center">
+  <strong>Cortex makes multi-agent work reproducible:</strong><br />
+  exact goal → specialist workers → verifiable reports → proven completion.
+</p>

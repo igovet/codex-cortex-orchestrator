@@ -21,7 +21,7 @@ the compact task contract, then continues once per completed wave.
 The active-wave cursor is a relative `step`; parallel results use only
 relative worker slots. Start owns classification, ledger initialization,
 full-plan persistence, and first-wave preparation. Every worker persists its
-exact eight-field `cortex/report/v1` through `record_report`, returns only
+exact seven-field `cortex/report/v1` through `record_report`, returns only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary (or
 the exact report-tool error), and never sends the report body in its native
 final. The coordinator reads each ref, then Continue validates all parallel
@@ -245,6 +245,45 @@ the same gate/mode is persisted as a recovery event; after three failures the ta
 blocked with a handoff/resume action. This preserves the exact failure for
 repair while guaranteeing a terminal control-plane outcome.
 
+## Same-user host readiness and hook trust
+
+Host readiness is intentionally stricter than “the source directory exists” or
+“the cache contains a plugin.” The read-only `cortex-host-preflight.py`
+diagnostic emits seven prerequisite checks: `codex_cli`, `cortex_python`,
+`plugin_root`, `codex_home`, `cortex_registration`, `cortex_mcp_config`, and
+`cortex_hook_trust`. `mcp.status=READY` requires every check to pass. The
+registration check requires exactly one enabled, installed `cortex@cortex`
+entry at the checked version for the same Codex user; the MCP check requires a
+regular, non-symlink `config.toml` with Cortex enabled and
+`default_tools_approval_mode = "approve"`; hook trust requires all five
+enabled, trusted, cache-backed hooks and matching persisted hashes. The script
+does not install or mutate anything, so remote provisioning remains an
+operator-authorized step and an unavailable approved runtime is reported as a
+blocker. This closes the false-positive class where source or cache evidence
+looked healthy while the active SSH user’s registration or hook binding was
+missing.
+
+## Terminal recovery for reportless native stops
+
+A native worker stopped without a durable report or question is a terminal
+failed attempt, recorded as
+`native_worker_stopped_without_report`. It is not an active or resumable child:
+the handoff exposes its exact `dispatch_ref`, and the coordinator submits one
+failed continuation with that ref and reason. Cortex alone may return a fresh
+top-level dispatch; the dead child is never waited on, respawned, or resumed
+with `followup_task`. A stopped worker with a report is consumed normally, and
+a worker paused on a durable question remains resumable through its exact host
+identity. `MAX_ORCHESTRATE_GATE_FAILURES = 3` bounds repeated failed
+continuations for one gate; the third failure records a durable blocked
+handoff instead of looping. This separates evidence-bearing and user-paused
+stops from the no-report deadlock while preserving idempotent, identity-scoped
+recovery.
+
+The corresponding PostToolUse recovery is deliberately ordering-independent:
+it searches all matching reportless attempts in the current gate, so a later
+completed retry cannot hide an earlier failed attempt whose exact failed
+receipt is still needed.
+
 ## C2/C3 proof requirements
 
 C2 and C3 tasks require delegation-linked evidence and a final handoff before
@@ -450,7 +489,7 @@ fallback is not part of model routing.
 
 ## Scoped worker report bus
 
-Workers publish a strict eight-field `cortex/report/v1` payload through public
+Workers publish a strict seven-field `cortex/report/v1` payload through public
 `record_report`; the v8 report primitive stores the canonical
 sanitized JSON record, which is task- and attempt-bound; server-owned receipts
 make retries idempotent. A receipt links one report to one C2/C3

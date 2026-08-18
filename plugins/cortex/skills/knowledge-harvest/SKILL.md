@@ -110,10 +110,10 @@ facts. Preserve text outside generated blocks and do not overwrite a manual
 ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
-Every Cortex worker records the strict eight-field report through
+Every Cortex worker records the strict seven-field report through
 `record_report`, acknowledges all supplied predecessor handoffs, and identifies
 its inventory counts, mapped surfaces, exclusions, unknowns, evidence, and
-next coverage action. It must also review only the exact immutable briefing
+coverage gaps. It must also review only the exact immutable briefing
 issued by its compact dispatch bootstrap, verify the supplied SHA-256, and add
 the exact `Dispatch briefing reviewed: <sha256>` evidence marker. That briefing
 is the sole direct filesystem read allowed below `.codex/cortex`; workers never

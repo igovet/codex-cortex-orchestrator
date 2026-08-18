@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
 import cortex_hook
 from cortex_runtime import orchestration_engine
+from cortex_runtime import mcp_api
 from cortex_runtime import reports as runtime_reports
 
 
@@ -122,7 +123,7 @@ class ControlPlaneTests(unittest.TestCase):
         return {**delegated, "state": confirmed["state"], "host_spawn": confirmed["host_spawn"]}
 
     def report(self, task_id, attempt_id, principal="thread-a", submission_id="final"):
-        return control.record_report({"task_id": task_id, "principal": principal, "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": [], "next_action": "advance the gate"}})
+        return control.record_report({"task_id": task_id, "principal": principal, "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": []}})
 
     def facade_start(self, task_id, waves, *, complexity="C1", submission_id=None, host_capabilities=None):
         return control.orchestrate({
@@ -265,7 +266,6 @@ class ControlPlaneTests(unittest.TestCase):
             }],
             "evidence": evidence,
             "uncertainty": [],
-            "next_action": "advance",
         }
 
     @staticmethod
@@ -538,7 +538,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertIsNone(recovered)
 
-    def test_subagent_stop_without_report_remains_exactly_resumable(self):
+    def test_subagent_stop_without_report_is_terminal_and_bounded(self):
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         with mock.patch.dict(
             os.environ,
@@ -576,9 +576,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(stopped.stdout.strip(), "{}", stopped.stderr)
         state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
-        self.assertEqual(attempt["status"], "running")
-        self.assertEqual(attempt["host_stop_outcome"], "native_worker_stopped_recoverable")
-        self.assertTrue(attempt["host_resumable"])
+        self.assertEqual(attempt["host_stop_outcome"], "native_worker_stopped_without_report")
+        self.assertEqual(attempt["status"], "failed")
+        self.assertFalse(attempt["host_resumable"])
+        self.assertEqual(attempt["finalization_reason"], "native_worker_stopped_without_report")
         waited = subprocess.run(
             [sys.executable, str(hook)],
             input=json.dumps({
@@ -597,29 +598,188 @@ class ControlPlaneTests(unittest.TestCase):
         wait_output = json.loads(waited.stdout)
         wait_context = wait_output["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(wait_output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        self.assertIn("stopped without a report but remains resumable", wait_context)
-        self.assertIn("followup_task", wait_context)
-        self.assertIn("native.Stop:01", wait_context)
+        self.assertIn("stopped without a report and is terminal failed", wait_context)
+        self.assertIn("status='failed'", wait_context)
+        self.assertIn("native_worker_stopped_without_report", wait_context)
+        self.assertNotIn("followup_task", wait_context)
         self.assertIn(started["task_ref"], wait_context)
         inspected = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
         })
         self.assertEqual(inspected["context_handoff"]["active_workers"], [])
         self.assertEqual(inspected["context_handoff"]["stopped_workers"][0]["host_agent_id"], "native.Stop:01")
-        self.assertIn("followup_task", inspected["next_action"])
-        self.assertIn("native.Stop:01", inspected["next_action"])
+        self.assertFalse(inspected["context_handoff"]["stopped_workers"][0]["resumable"])
+        self.assertIn("status='failed'", inspected["next_action"])
+        self.assertIn(attempt["dispatch_ref"], inspected["next_action"])
+        self.assertNotIn("followup_task", inspected["next_action"])
         self.assertNotIn("Wait only on", inspected["next_action"])
+        failed = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{
+                "status": "failed",
+                "reason": "native_worker_stopped_without_report",
+                "dispatch_ref": attempt["dispatch_ref"],
+            }],
+        })
+        self.assertTrue(failed["ok"], failed)
+        self.assertEqual(failed["outcome"], "ready_to_spawn")
 
-    def test_post_wait_stop_context_ignores_passed_and_running_attempts(self):
-        event = {"hook_event_name": "PostToolUse", "tool_name": "wait"}
-        resumable = {"attempts": [{
-            "attempt_id": "close-01",
-            "status": "running",
+    def test_legacy_reportless_stop_is_terminal_during_compaction_recovery(self):
+        started = self.v3_start(
+            "recover a legacy reportless stop",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        confirmed = control.confirm_host_spawn({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "expected_revision": state["revision"],
+            "attempt_id": attempt["attempt_id"],
+            "host_tool": attempt["spawn_request"]["host_tool"],
+            "host_agent_id": "native.LegacyStop:01",
+            "host_task_name": attempt["spawn_request"]["task_name"],
+            "host_model": attempt["spawn_request"]["expected_model"],
+            "host_reasoning_effort": attempt["spawn_request"]["reasoning_effort"],
+        })
+        self.assertTrue(confirmed["confirmed"], confirmed)
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        # Simulate the pre-fix ledger record left by an interrupted
+        # SubagentStop hook.  Recovery must fail it closed instead of
+        # advertising followup_task to the dead native child.
+        attempt["host_stopped_at"] = control.now()
+        attempt["host_stop_outcome"] = "native_worker_stopped_recoverable"
+        attempt["host_resumable"] = True
+        self.write_task_state(state)
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        stopped = inspected["context_handoff"]["stopped_workers"][0]
+        self.assertEqual(stopped["failure_status"], "failed")
+        self.assertEqual(stopped["failure_reason"], "native_worker_stopped_without_report")
+        self.assertFalse(stopped["resumable"])
+        self.assertIn(attempt["dispatch_ref"], inspected["next_action"])
+        self.assertNotIn("followup_task", inspected["next_action"])
+
+    def test_compaction_ignores_stale_question_ref_after_native_stop(self):
+        started = self.v3_start(
+            "discard stale question recovery target",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        confirmed = control.confirm_host_spawn({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "expected_revision": state["revision"],
+            "attempt_id": attempt["attempt_id"],
+            "host_tool": attempt["spawn_request"]["host_tool"],
+            "host_agent_id": "native.StaleQuestion:01",
+            "host_task_name": attempt["spawn_request"]["task_name"],
+            "host_model": attempt["spawn_request"]["expected_model"],
+            "host_reasoning_effort": attempt["spawn_request"]["reasoning_effort"],
+        })
+        self.assertTrue(confirmed["confirmed"], confirmed)
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        attempt.update({
+            "host_stopped_at": control.now(),
+            "host_stop_outcome": "awaiting_user",
+            "host_question_refs": ["question-answered"],
+            "host_resumable": True,
+        })
+        self.write_task_state(state)
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        stopped = inspected["context_handoff"]["stopped_workers"][0]
+        self.assertEqual(stopped["failure_status"], "failed")
+        self.assertEqual(stopped["failure_reason"], "native_worker_stopped_without_report")
+        self.assertEqual(stopped["question_refs"], [])
+        self.assertFalse(stopped["resumable"])
+        self.assertNotIn("question-answered", inspected["next_action"])
+        self.assertNotIn("followup_task", inspected["next_action"])
+
+    def test_compaction_recovers_report_from_canonical_index_when_stop_metadata_is_incomplete(self):
+        started = self.v3_start(
+            "recover canonical report after interrupted stop hook",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        confirmed = control.confirm_host_spawn({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "expected_revision": state["revision"],
+            "attempt_id": attempt["attempt_id"],
+            "host_tool": attempt["spawn_request"]["host_tool"],
+            "host_agent_id": "native.ReportIndex:01",
+            "host_task_name": attempt["spawn_request"]["task_name"],
+            "host_model": attempt["spawn_request"]["expected_model"],
+            "host_reasoning_effort": attempt["spawn_request"]["reasoning_effort"],
+        })
+        self.assertTrue(confirmed["confirmed"], confirmed)
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        published = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report("canonical report survives stop")),
+        })
+        self.assertTrue(published["ok"], published)
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        attempt.update({
+            "host_stopped_at": control.now(),
             "host_stop_outcome": "native_worker_stopped_recoverable",
+            "host_resumable": True,
+        })
+        attempt.pop("host_report_refs", None)
+        self.write_task_state(state)
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        stopped = inspected["context_handoff"]["stopped_workers"][0]
+        self.assertEqual(stopped["report_refs"], [published["report_ref"]])
+        self.assertIsNone(stopped["failure_status"])
+        self.assertFalse(stopped["resumable"])
+        self.assertIn(published["report_ref"], inspected["next_action"])
+        self.assertNotIn("native_worker_stopped_without_report", inspected["next_action"])
+
+    def test_post_wait_stop_context_directs_terminal_failure(self):
+        event = {"hook_event_name": "PostToolUse", "tool_name": "wait"}
+        stopped = {"attempts": [{
+            "attempt_id": "close-01",
+            "status": "failed",
+            "dispatch_ref": "dispatch-close-01",
+            "host_stop_outcome": "native_worker_stopped_without_report",
             "host_spawn": {"agent_id": "native.Close:01", "task_name": "close_01_abcd1234"},
         }]}
-        context = cortex_hook.stopped_worker_after_wait_context(event, resumable, "task-test")
-        self.assertIn("followup_task", context)
+        context = cortex_hook.stopped_worker_after_wait_context(event, stopped, "task-test")
+        self.assertIn("status='failed'", context)
+        self.assertIn("dispatch-close-01", context)
+        self.assertIn("native_worker_stopped_without_report", context)
+        self.assertNotIn("followup_task", context)
         self.assertIn("manage_orchestration(intent='inspect'", context)
 
         for status, outcome in (("passed", "report_recorded"), ("running", None)):
@@ -629,6 +789,42 @@ class ControlPlaneTests(unittest.TestCase):
                 "host_stop_outcome": outcome,
             }]}
             self.assertIsNone(cortex_hook.stopped_worker_after_wait_context(event, state, "task-test"))
+
+    def test_post_wait_stop_context_finds_earlier_reportless_attempt(self):
+        event = {"hook_event_name": "PostToolUse", "tool_name": "wait"}
+        state = {
+            "current_gates": ["discover"],
+            "attempts": [
+                {
+                    "attempt_id": "discover-01",
+                    "gate": "discover",
+                    "status": "failed",
+                    "dispatch_ref": "dispatch-discover-01",
+                    "host_stop_outcome": "native_worker_stopped_without_report",
+                    "host_spawn": {
+                        "agent_id": "native.Discover:01",
+                        "task_name": "explorer_discover_01_abcd1234",
+                    },
+                },
+                {
+                    "attempt_id": "discover-02",
+                    "gate": "discover",
+                    "status": "passed",
+                    "dispatch_ref": "dispatch-discover-02",
+                    "host_stop_outcome": "report_recorded",
+                    "host_spawn": {
+                        "agent_id": "native.Discover:02",
+                        "task_name": "explorer_discover_02_efgh5678",
+                    },
+                },
+            ],
+        }
+
+        context = cortex_hook.stopped_worker_after_wait_context(event, state, "task-test")
+
+        self.assertIn("discover-01", context)
+        self.assertIn("dispatch-discover-01", context)
+        self.assertNotIn("discover-02", context)
 
     def test_subagent_stop_after_report_recovers_report_instead_of_waiting(self):
         with mock.patch.dict(
@@ -671,6 +867,8 @@ class ControlPlaneTests(unittest.TestCase):
             inspected["context_handoff"]["stopped_workers"][0]["report_refs"],
             [recorded["report_ref"]],
         )
+        self.assertFalse(inspected["context_handoff"]["stopped_workers"][0]["resumable"])
+        self.assertNotIn("followup_task", inspected["context_handoff"]["next_action"])
         self.assertIn(recorded["report_ref"], inspected["next_action"])
         self.assertIn("Never wait on or respawn", inspected["next_action"])
 
@@ -2197,7 +2395,7 @@ class ControlPlaneTests(unittest.TestCase):
         briefing = self.briefing_from_request(delegated["spawn_request"])
         self.assertIn("Use attempt_id='discover-01' exactly", briefing)
         self.assertIn("stable lowercase submission_id", briefing)
-        self.assertIn("exactly these eight keys", briefing)
+        self.assertIn("exactly these seven keys", briefing)
         self.assertIn("byte-identical retry", briefing)
         self.assertIn("Do not activate or initialize Cortex", briefing)
         confirmed = control.confirm_host_spawn({
@@ -2322,7 +2520,7 @@ class ControlPlaneTests(unittest.TestCase):
         report = control.record_report({
             "task_id": "worker-report-alias", "principal": "planner", "attempt_id": delegated["attempt_id"],
             "submission_id": "worker-report", "report": {"summary": "done", "findings": [], "questions": [],
-            "changed_files": [], "tests": [], "evidence": ["evidence"], "uncertainty": [], "next_action": "advance"},
+            "changed_files": [], "tests": [], "evidence": ["evidence"], "uncertainty": []},
         })
         self.assertEqual(report["principal_correction"], {"requested": "planner", "used": "thread-a"})
 
@@ -2335,7 +2533,7 @@ class ControlPlaneTests(unittest.TestCase):
             "attempt_id": delegated["attempt_id"], "submission_id": "host-report",
             "report": {"summary": "done", "findings": [], "questions": [],
             "changed_files": [], "tests": [], "evidence": ["evidence"],
-            "uncertainty": [], "next_action": "advance"},
+            "uncertainty": []},
         })
         self.assertEqual(report["principal_correction"], {"requested": host_id, "used": "thread-a"})
         self.assertEqual(report["report"]["attempt_id"], delegated["attempt_id"])
@@ -2348,7 +2546,7 @@ class ControlPlaneTests(unittest.TestCase):
             "attempt_id": "", "submission_id": "",
             "report": {"summary": "done", "findings": [], "questions": [],
             "changed_files": [], "tests": [], "evidence": ["evidence"],
-            "uncertainty": [], "next_action": "advance"},
+            "uncertainty": []},
         })
         self.assertFalse(report["idempotent"])
         self.assertEqual(report["report"]["attempt_id"], delegated["attempt_id"])
@@ -2363,7 +2561,7 @@ class ControlPlaneTests(unittest.TestCase):
             "task_id": "worker-report-ambiguous", "principal": "planner",
             "report": {"summary": "done", "findings": [], "questions": [],
             "changed_files": [], "tests": [], "evidence": ["evidence"],
-            "uncertainty": [], "next_action": "advance"},
+            "uncertainty": []},
         })
         self.assertFalse(result["recorded"])
         self.assertEqual(result["reason"], "delegation_attempt_required")
@@ -2651,7 +2849,7 @@ class ControlPlaneTests(unittest.TestCase):
             "host_agent_id": "host-composite", "host_task_name": prepared["delegation"]["spawn_request"]["task_name"], "host_model": "gpt-5.6-luna",
             "host_reasoning_effort": "low", "status": "passed", "report": {
                 "summary": "discovery complete", "findings": [], "questions": [], "changed_files": [],
-                "tests": [], "evidence": ["source paths"], "uncertainty": [], "next_action": "advance",
+                "tests": [], "evidence": ["source paths"], "uncertainty": [],
             },
         })
         self.assertTrue(completed["atomic"])
@@ -2765,7 +2963,7 @@ class ControlPlaneTests(unittest.TestCase):
             "host_reasoning_effort": prepared["delegation"]["spawn_request"]["reasoning_effort"],
             "status": "passed", "submission_id": "corrected-report", "report": {
                 "summary": "complete", "findings": [], "questions": [], "changed_files": [],
-                "tests": [], "evidence": ["report"], "uncertainty": [], "next_action": "advance",
+                "tests": [], "evidence": ["report"], "uncertainty": [],
             },
         })
         self.assertTrue(good["atomic"])
@@ -4379,7 +4577,7 @@ class ControlPlaneTests(unittest.TestCase):
         finding = {
             "fingerprint": "docs-link-001", "severity": "P2", "status": "open", "blocking": True,
             "summary": "Documentation link is stale",
-            "next_action": {"required": True, "target_gate": "documentation", "description": "Refresh the link"},
+            "details": {"affected_paths": ["docs/features/example/index.md"]},
         }
         closure = {
             "decision": "pass", "findings": [finding],
@@ -4415,7 +4613,7 @@ class ControlPlaneTests(unittest.TestCase):
             item for item in current["attempts"]
             if item["gate"] == "review" and not item.get("invalidated")
         )
-        resolved = dict(finding, status="resolved", blocking=False, resolved_at="2026-08-17T12:00:00Z", next_action={"required": False})
+        resolved = dict(finding, status="resolved", blocking=False, resolved_at="2026-08-17T12:00:00Z")
         resolved_closure = dict(closure, findings=[resolved])
         resolved_report, _ = self._report_for_attempt(
             task_dir,
@@ -4470,7 +4668,7 @@ class ControlPlaneTests(unittest.TestCase):
             {
                 "fingerprint": "late-p2-001", "severity": "P2", "status": "open", "blocking": False,
                 "summary": "A canonical P2 remains open",
-                "next_action": {"required": True, "target_gate": "documentation", "description": "Correct the documented defect"},
+                "details": {"affected_paths": ["docs/features/example/index.md"]},
             },
             source={"report_id": "report-0001", "attempt_id": state["attempts"][0]["attempt_id"]},
         )
@@ -4627,15 +4825,68 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(blocked["ok"])
         self.assertIn("awaiting explicit user approval", blocked["diagnostics"][0]["message"])
 
-        approved = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": started["task_ref"],
-            "intent": "plan_approval",
-            "payload": {"decision": "approve"},
-        })
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            return_value=("accept", {"decision": "approve"}, "plan-approval-1"),
+        ) as elicitation:
+            approved = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "plan_approval",
+                "payload": {"decision": "prompt"},
+            })
         self.assertTrue(approved["ok"])
         self.assertEqual(approved["outcome"], "ready_to_spawn")
         self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
+        self.assertEqual(approved["approval_message"], "Plan approved.")
+        self.assertIn("Tell the user", approved["next_action"])
+        approval_form = elicitation.call_args.args[1]
+        self.assertEqual(approval_form["properties"]["decision"]["oneOf"], [
+            {"const": "approve", "title": "Approve"},
+            {"const": "cancel", "title": "Cancel"},
+        ])
+
+    def test_v3_plan_approval_cancel_is_silent_and_keeps_the_plan_pending(self):
+        started = self.v3_start(
+            "cancel plan approval and wait for a user message",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("plan awaiting a decision")),
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            return_value=("accept", {"decision": "cancel"}, "plan-approval-cancel"),
+        ):
+            cancelled = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "plan_approval",
+                "payload": {"decision": "prompt"},
+            })
+        self.assertTrue(cancelled["ok"], cancelled)
+        self.assertEqual(cancelled["outcome"], "awaiting_plan_approval")
+        self.assertEqual(cancelled["dispatches"], [])
+        self.assertEqual(cancelled["result"]["decision"], "cancelled")
+        self.assertEqual(cancelled["output_policy"], "silent")
+        self.assertEqual(cancelled["allowed_visible_events"], ["user_message"])
+        self.assertIn("Stop now and wait", cancelled["next_action"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(state["plan_approval"]["status"], "awaiting_user")
+        self.assertEqual([item["gate"] for item in state["attempts"]], ["plan"])
 
     def test_v3_follow_up_creates_a_linked_corrective_task_without_mutating_completed_source(self):
         source = self.v3_start(
@@ -4951,7 +5202,7 @@ class ControlPlaneTests(unittest.TestCase):
             "schema": control.REPORT_SCHEMA, "report_id": "report-0099", "task_id": state["task_id"],
             "gate": "discover", "attempt_id": attempt["attempt_id"], "submission_id": "large-report",
             "producer": {"profile": attempt["profile"], "model": attempt["selected_model"], "reasoning_effort": attempt["selected_reasoning_effort"]},
-            "report": {"summary": "large", "findings": ["x" * 50000], "questions": [], "changed_files": [], "tests": [], "evidence": ["bounded"], "uncertainty": [], "next_action": "page"},
+            "report": {"summary": "large", "findings": ["x" * 50000], "questions": [], "changed_files": [], "tests": [], "evidence": ["bounded"], "uncertainty": []},
             "planning": None, "result_validation": None, "content_digest": "test", "created_at": control.now(),
         }
         artifact = control.store_immutable_artifact(
@@ -5565,6 +5816,65 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(advanced["ok"])
         self.assertEqual(advanced["dispatches"][0]["phase"], "implementation")
+
+    def test_v3_inspect_mixed_stops_preserves_reports_and_failed_receipts(self):
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "waiting_workers",
+                "wave_id": "wave-1",
+                "operation": "inspect",
+                "spawn_requests": [],
+                "result": {
+                    "context_handoff": {
+                        "active_workers": [],
+                        "stopped_workers": [
+                            {"report_refs": ["report-0001"]},
+                            {
+                                "failure_status": "failed",
+                                "failure_reason": "native_worker_stopped_without_report",
+                                "dispatch_ref": "dispatch-0002",
+                            },
+                        ],
+                    },
+                },
+            },
+            "task-ref",
+            native_arguments=lambda request: {},
+            public_schema="cortex/orchestration/v4",
+            coordinator_lock="LOCK",
+        )
+        self.assertIn("report-0001", response["next_action"])
+        self.assertIn("dispatch-0002", response["next_action"])
+        self.assertIn("status='failed'", response["next_action"])
+        self.assertIn("Read and publish", response["next_action"])
+
+        mixed_response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "waiting_workers",
+                "wave_id": "wave-1",
+                "operation": "inspect",
+                "spawn_requests": [],
+                "result": {
+                    "context_handoff": {
+                        "active_workers": [{"host_agent_id": "native-live-01"}],
+                        "stopped_workers": [{
+                            "failure_status": "failed",
+                            "failure_reason": "native_worker_stopped_without_report",
+                            "dispatch_ref": "dispatch-stopped-01",
+                        }],
+                    },
+                },
+            },
+            "task-ref",
+            native_arguments=lambda request: {},
+            public_schema="cortex/orchestration/v4",
+            coordinator_lock="LOCK",
+        )
+        self.assertIn("native-live-01", mixed_response["next_action"])
+        self.assertIn("dispatch-stopped-01", mixed_response["next_action"])
+        self.assertIn("Include exactly one failed result", mixed_response["next_action"])
 
     def test_v3_public_schema_never_advertises_inline_worker_reports(self):
         result_schema = control.CONTINUE_ORCHESTRATION_SCHEMA["properties"]["results"]["items"]
@@ -6221,8 +6531,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIsNone(package["fallback_reason"])
         self.assertEqual(package["selected_reasoning_effort"], "high")
         self.assertEqual(package["model_choice_reason"], "coordinator_selected_terra")
-        report = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
-        replay = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": [], "next_action": "advance"}})
+        report = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": []}})
+        replay = control.record_report({"task_id": "reports", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "stable", "report": {"summary": "client_secret: canary", "findings": ["Authorization: Bearer canary"], "questions": [], "changed_files": [], "tests": [], "evidence": ["<script>alert(1)</script>"], "uncertainty": []}})
         self.assertTrue(replay["idempotent"])
         task_dir = self.ledger / "tasks" / "0001-reports"
         canonical = control.db_get_artifact_for_export_path(
@@ -6290,7 +6600,7 @@ class ControlPlaneTests(unittest.TestCase):
 
         def publish(index):
             try:
-                results.append(control.record_report({"task_id": "publishers", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": f"publisher-{index}", "report": {"summary": f"publisher {index}", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": [f"evidence {index}"], "uncertainty": [], "next_action": "merge"}}))
+                results.append(control.record_report({"task_id": "publishers", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": f"publisher-{index}", "report": {"summary": f"publisher {index}", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": [f"evidence {index}"], "uncertainty": []}}))
             except Exception as exc:  # pragma: no cover - failure is asserted below.
                 failures.append(exc)
 
@@ -6441,7 +6751,7 @@ class ControlPlaneTests(unittest.TestCase):
                 self.report("quotas", delegation["attempt_id"], submission_id="byte-limit")
         finally:
             control.MAX_REPORTS_PER_ATTEMPT, control.MAX_REPORTS_PER_TASK, control.MAX_REPORT_AGGREGATE_BYTES = original_attempt, original_task, original_bytes
-        report = control.record_report({"task_id": "quotas", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "one", "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": [], "next_action": "advance the gate"}})
+        report = control.record_report({"task_id": "quotas", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "one", "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": []}})
         evidence = control.record_evidence({"task_id": "quotas", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "done"})
         control.record_gate({"task_id": "quotas", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
         with self.assertRaisesRegex(ValueError, "terminal"):
@@ -6863,7 +7173,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.6.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "7.1.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

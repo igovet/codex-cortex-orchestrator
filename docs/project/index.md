@@ -41,3 +41,8 @@ CLI is unavailable; it is not registration evidence.
 - [Storage classification ADR](storage-classification.md) — authoritative
   SQLite data, required briefing capabilities, rebuildable projections, and
   legacy/WAL/SHM lifecycle boundaries.
+
+## Operational runbooks
+
+- [SSH host troubleshooting](ssh-hetzner-troubleshooting.md) — read-only
+  diagnosis for Codex, Python, plugin, and same-user cache prerequisites.

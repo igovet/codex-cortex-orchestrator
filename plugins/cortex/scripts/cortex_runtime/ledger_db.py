@@ -703,9 +703,9 @@ def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, so
             # A later closure may resolve/waive a finding; preserve the most
             # conservative severity/blocking state until explicitly resolved.
             status = str(finding["status"])
-            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (finding["severity"], status, int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), _canonical_json(finding.get("next_action")) if finding.get("next_action") is not None else None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
+            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (finding["severity"], status, int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
         else:
-            connection.execute("INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), _canonical_json(finding.get("next_action")) if finding.get("next_action") is not None else None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, now))
+            connection.execute("INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, now))
     return finding | {"task_id": task_id, "source_evidence": evidence}
 
 
@@ -720,7 +720,6 @@ def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = Tru
         for field in ("waiver_reason", "waived_by", "waived_at", "resolved_at"):
             if field in row.keys() and row[field] is not None:
                 item[field] = row[field]
-        item["next_action"] = json.loads(row["next_action_json"]) if row["next_action_json"] else None
         item["source_evidence"] = json.loads(row["source_evidence_json"])
         item["first_seen_at"] = row["first_seen_at"]; item["updated_at"] = row["updated_at"]
         result.append(item)
@@ -728,7 +727,7 @@ def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = Tru
 
 
 def task_findings_blockers(root: Path, task_id: str) -> list[dict[str, Any]]:
-    return [item for item in list_task_findings(root, task_id, include_resolved=True) if item.get("status") == "open" and (item["severity"] in {"P0", "P1", "P2"} or item["blocking"] or (item.get("next_action") or {}).get("required") is True)]
+    return [item for item in list_task_findings(root, task_id, include_resolved=True) if item.get("status") == "open" and (item["severity"] in {"P0", "P1", "P2"} or item["blocking"])]
 
 
 def task_index(root: Path) -> dict[str, dict[str, Any]]:

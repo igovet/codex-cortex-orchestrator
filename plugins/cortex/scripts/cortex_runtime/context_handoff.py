@@ -186,22 +186,69 @@ def _context_handoff(
                 "recovery_authority": "invoke_only_the_matching_top_level_inspect_dispatch",
             })
         elif attempt.get("host_stopped_at"):
+            attempt_id = str(attempt.get("attempt_id") or "")
+            report_refs = []
+            for item in (attempt.get("host_report_refs") or []):
+                report_ref = redact(item, 128)
+                if report_ref and report_ref not in report_refs:
+                    report_refs.append(report_ref)
+            # The report index is canonical, while host_stop metadata is only
+            # a lifecycle projection.  Recover reports from the index when a
+            # stop hook persisted the stop before copying its refs into the
+            # attempt record; otherwise a durable report could be mistaken for
+            # a reportless stop and retried as a failure.
+            for item in report_index.get("reports", []):
+                if not isinstance(item, dict) or str(item.get("attempt_id") or "") != attempt_id:
+                    continue
+                report_ref = redact(item.get("report_id", ""), 128)
+                if report_ref and report_ref not in report_refs:
+                    report_refs.append(report_ref)
+            report_refs = report_refs[:8]
+            # Only currently open questions authorize follow-up.  Do not let
+            # stale host_question_refs from an answered question resurrect a
+            # dead native child during compaction recovery.
+            question_refs = []
+            for item in _open_blocking_questions(task_dir, state, attempt_id):
+                if not isinstance(item, dict):
+                    continue
+                question_ref = redact(item.get("question_id", ""), 128)
+                if question_ref and question_ref not in question_refs:
+                    question_refs.append(question_ref)
+            question_refs = question_refs[:8]
+            # A stop record can predate the terminal reportless-stop fix, or
+            # have incomplete host metadata after an interrupted hook.  Once
+            # the native worker has stopped, the absence of both durable
+            # evidence kinds is enough to make it a terminal failure.  Do not
+            # let a stale ``native_worker_stopped_recoverable`` or an
+            # ``awaiting_user`` flag without question refs reintroduce a
+            # follow-up target for a dead child.
+            reportless_stop = not report_refs and not question_refs
             stopped_workers.append({
                 **common,
                 "status": redact(attempt.get("status", ""), 64),
                 "outcome": redact(attempt.get("host_stop_outcome", ""), 128),
-                "report_refs": [
-                    redact(item, 128) for item in (attempt.get("host_report_refs") or [])[:8]
-                ],
-                "question_refs": [
-                    redact(item, 128) for item in (attempt.get("host_question_refs") or [])[:8]
-                ],
+                "report_refs": report_refs,
+                "question_refs": question_refs,
                 "reason": redact(attempt.get("finalization_reason", ""), 1000) or None,
+                "failure_status": (
+                    "failed"
+                    if reportless_stop
+                    else None
+                ),
+                "failure_reason": (
+                    "native_worker_stopped_without_report"
+                    if reportless_stop
+                    else None
+                ),
                 "host_agent_id": redact((attempt.get("host_spawn") or {}).get("agent_id", ""), 256),
                 "host_task_name": redact((attempt.get("host_spawn") or {}).get("task_name", ""), 128),
                 "resumable": bool(
-                    attempt.get("host_resumable")
-                    or attempt.get("host_stop_outcome") in {"awaiting_user", "native_worker_stopped_recoverable"}
+                    # A native spawn starts as provisionally resumable, but a
+                    # stopped worker is resumable only when its durable
+                    # question is still open. Reports are consumed and
+                    # reportless stops are failed; neither may become a
+                    # follow-up target through stale host metadata.
+                    bool(question_refs)
                 ),
                 "stopped_at": attempt.get("host_stopped_at"),
             })
@@ -231,6 +278,20 @@ def _context_handoff(
             + "."
         )
     if stopped_workers:
+        terminal_failures = [
+            item for item in stopped_workers
+            if item.get("failure_status") == "failed" and item.get("dispatch_ref")
+        ]
+        if terminal_failures:
+            recovery_actions.append(
+                "For each stopped worker without a report, submit exactly one failed continuation using its "
+                "dispatch_ref and failure_reason; never wait on, follow up, or respawn that stopped child: "
+                + ", ".join(
+                    f"{item['dispatch_ref']} (reason={item['failure_reason']})"
+                    for item in terminal_failures
+                )
+                + "."
+            )
         resumable_ids = [
             item["host_agent_id"] for item in stopped_workers
             if item.get("resumable") and item.get("host_agent_id")
@@ -276,7 +337,7 @@ def _context_handoff(
             "worker_language": "Worker-authored commentary, tool arguments, reports, questions, and native final output are English-only.",
             "hidden_dispatch": "Hidden spawn_agent requests retain fork_turns=none so the coordinator transcript is not inherited.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",
-            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn. Active workers are waitable exact child ids. A stopped resumable worker is never respawned; it may be resumed only through followup_task to its persisted host_agent_id when the returned action authorizes that resume.",
+            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn. Active workers are waitable exact child ids. A stopped worker without a report is terminal and requires one exact failed continuation; it is never waitable, followup-resumable, or respawned. A worker paused on a durable question may be resumed only through followup_task to its persisted host_agent_id when the returned action authorizes that resume.",
             "report_publication": "Read each report_ref, then publish the returned report_markdown_link verbatim in the main chat before any other lifecycle call or report read.",
             "instruction_source": "cortex:orchestrator and cortex-control skills; this handoff restores state and invariants, not a replacement skill source.",
         },

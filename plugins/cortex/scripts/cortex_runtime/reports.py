@@ -343,7 +343,6 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 "blocking": bool(missing_checks),
                 "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
                 "details": missing_checks,
-                "next_action": {"required": bool(missing_checks), "description": "Execute all required verification"} if missing_checks else None,
             }
             _runtime.db_upsert_task_finding(root, state["task_id"], verification_finding, source={"report_id": report_id, "attempt_id": attempt_id, "kind": "verification"})
         receipt = {

@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 6.6.0 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 7.1.1 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -87,7 +87,7 @@ dispatch performs a fresh capture so external changes remain visible.
 `start_orchestration` accepts an absolute `project_root` and requires the
 user's exact, unexpanded text in `task.user_request`. Desktop's sole
 host-metadata exception is its injected
-`[$cortex:orchestrator](absolute-local-plugin-path/skills/orchestrator/SKILL.md)`
+`$cortex:orchestrator`
 wrapper, which Cortex canonicalizes to `$cortex:orchestrator` before task
 identity, labels, persistence, and worker prompts. The route and every
 following user-authored word are preserved; arbitrary Markdown links and user
@@ -114,6 +114,13 @@ project-scoped prune, active-task `steer`, and completed-task `follow_up`; it is
 part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
+
+Before the single start call, ordinary tasks must advertise non-empty
+`task.acceptance_criteria` and `task.verification` lists grounded in the exact
+request or verified authority. Harvest and exact knowledge-census routes are
+the sole server-supplied exception: Cortex provides their exhaustive census
+contract. If a caller cannot ground either list without inventing material
+intent, it must ask the user before starting.
 
 Cortex keeps each new v4 task on a generated task-local authorization identity.
 The synchronous `PostToolUse` hook separately binds its returned `task_ref` to
@@ -181,12 +188,15 @@ approval. For ordinary tasks, a required plan must be the only phase in its
 wave. After that plan succeeds, Cortex returns
 `outcome: awaiting_plan_approval`, dispatches no successor, and includes a
 bounded `plan_review` containing `report_ref`, `summary`, `findings`,
-`uncertainty`, `next_action`, `remaining_phases`, and the derived absolute
+`uncertainty`, `remaining_phases`, and the derived absolute
 `report_markdown_path`. The coordinator reads
 the referenced planner report, gives the user a concise main-chat summary,
 and waits for an explicit decision. It resumes with
-`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`;
-approval dispatches the next wave. A revision uses
+`manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`,
+which surfaces the host-native **Approve/Cancel** UI. Approve returns a
+localized plan-approved notice and authorizes dispatch of the next wave;
+Cancel returns no user-facing notice, leaves the plan in `awaiting_user`, and
+waits silently for the next user message. A revision uses
 `payload={"decision":"revise", "feedback":"..."}` with non-empty feedback
 and reruns the Planner before another approval hold. This is distinct from
 the worker-question lifecycle: material questions are still resolved through
@@ -194,11 +204,12 @@ the worker-question lifecycle: material questions are still resolved through
 
 The Planner may also include a separate public `planning` object in its
 `record_report` call. The strict `cortex/report/v1` report remains unchanged
-at eight fields; `planning` must contain exactly `overview` and
+at seven fields; `planning` must contain exactly `overview` and
 `work_packages`. Each package has `id`, `title`, `objective`, optional
 `allowed_paths` and `depends_on`, and at least one `microtasks` entry. Each
-microtask has `id`, `title`, and `objective`, with optional `profile`,
-`allowed_paths`, `depends_on`, `acceptance_criteria`, and `verification`.
+microtask requires `id`, `title`, `objective`, non-empty
+`acceptance_criteria`, and non-empty `verification`, with optional `profile`,
+`allowed_paths`, and `depends_on`; package-level `profile` is forbidden.
 Package and per-package microtask dependencies are validated as acyclic DAGs,
 with bounded limits of 32 packages, 32 microtasks per package, and 128 total
 microtasks.
@@ -224,6 +235,13 @@ Bounded phase aliases normalize `implement` to `implementation` and
 `build_verification` to final `close`; the server also rejects a canonical
 phase repeated across later waves, preventing correction/retry loops caused by
 relabeling the same work.
+
+The control plane owns dynamic sequencing. It selects corrective waves, blocks
+environment or policy conditions, carries the originating report into
+corrective and originating-gate verification context, and requires that gate's
+finding to be resolved before downstream waves can start. Workers report
+observed facts and evidence; they do not choose remediation, the next action,
+or a target gate.
 
 While a Cortex task is active, the main/root agent is coordination-only. It
 may use Cortex lifecycle calls, launch only the exact returned worker
@@ -329,19 +347,24 @@ material intent/product/security/irreversible decisions must not be guessed.
 Localized labels are transient UI projections; answers retain original
 value/language and require canonical `answer_en` for localized free text.
 Workers may submit 1–32 stable questions through `ask_batch` and poll the
-same `batch_ref` with `poll_batch`; localized UI is a transient projection,
-all answers commit atomically, and localized free text requires canonical
-English translation before resumption. A task revision supersedes an
-unresolved batch.
+same `batch_ref` with `poll_batch`; the coordinator retains one durable ref but
+renders one question per native UI step. Each accepted answer is checkpointed
+before the next step. Cancellation leaves the batch open and a later resume
+starts at the next unanswered question. Localized UI is a transient
+projection, and localized free text requires canonical English translation
+before resumption. A task revision supersedes an unresolved batch.
 
-After questions are resolved, every worker uses `record_report` to persist exactly `summary`,
-`findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
-and `next_action`. Final `questions` must be `[]`: material decisions complete
+After questions are resolved, every worker uses `record_report` to persist exactly seven
+fields: `summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`,
+and `uncertainty`. A worker report has no `next_action`; findings contain observed
+facts and evidence, not remediation instructions or target-gate decisions. Final `questions` must be `[]`: material decisions complete
 the durable question lifecycle first, while genuinely non-blocking evidence
 limitations belong in `uncertainty`. Public report intake rejects a non-empty
 questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
-tool failure returns only the exact error. The coordinator
+tool failure returns only the exact error. For a caller-correctable
+`report_validation_failed`, the worker may make exactly one corrected retry;
+otherwise it returns the exact error and blocker. The coordinator
 reads the full record through `read_worker_report` and advances with the ref,
 never an inline report body. That read also returns Cortex's derived absolute
 `report_markdown_path` and the exact `report_markdown_link` for
@@ -358,13 +381,19 @@ Every gate report carries a separate top-level `gate_result` envelope with
 `decision`, `failure_class`, `findings`, `verification`, and `workspace` for
 every gate. The older top-level `closure` sibling is retained only as a
 review/close compatibility alias; neither envelope is nested in the strict
-eight-field report.
+seven-field report.
 
 For C2/C3 close attempts, Cortex additionally requires at least one executed
 test or verification result and observed evidence. Completion markers such as
 “not run” or “unverified” fail closed, and the report must map every task-level
 acceptance and verification criterion to the observed evidence; a bare
 completion assertion is insufficient.
+
+Every non-empty `report.tests` item is an object with exactly `command`, `cwd`,
+`exit_code`, and `evidence`; the command must be exact and reproducible, and
+the required exit code is zero. The generated worker briefing and public tool
+description mirror these report, planning, and start-contract constraints so
+callers can correct one validation failure without guessing the schema.
 
 ### Context-compaction recovery
 
@@ -384,6 +413,23 @@ worker is considered active; dynamic workers report generic
 only matching top-level `inspect` dispatches authorize new spawns, while
 active workers expose exact persisted child wait IDs. Missing binding fails
 closed; the coordinator never guesses an identity or waits on a replacement.
+
+When inspect finds an active gate with no pending dispatches and a stopped
+worker, the stop outcome is decisive. A stopped worker with a persisted report
+is consumed before the current step continues; a durable-question stop is
+surfaced and resumes only through the exact persisted native worker. A
+reportless stop is terminal failed as
+`native_worker_stopped_without_report`: submit one failed continuation with
+its exact `dispatch_ref`, `status="failed"`, and reason, then use only a fresh
+top-level dispatch returned by Cortex. Never wait on, respawn, or send
+`followup_task` to the dead child. `MAX_ORCHESTRATE_GATE_FAILURES` bounds this
+repair to three failed attempts for one active phase: the first two exact
+failed continuations may each yield one fresh authorized top-level dispatch;
+the third failure blocks the task with a durable handoff instead of looping.
+The PostToolUse wait-recovery hook filters every matching reportless stop in
+the current gate rather than assuming the newest attempt is relevant. An
+earlier failed attempt therefore remains surfaced even when a later retry has
+already completed; its exact failed receipt is still required before advance.
 
 Native worker identity is separate from the canonical role label. Every
 dispatch keeps `profile` canonical and sets a human-readable `display_name`
@@ -552,11 +598,12 @@ during retirement.
 
 ## Verification
 
-The source-tree regression suite passed 388 offline tests, the cold-boot smoke
-passed, and `python3 scripts/cortex-luna-high-eval.py --live --scenario
-automatic_sequential` passed in source mode. The live command uses this checkout
-as its MCP server and does not install, reinstall, update, or verify an
-installed plugin. Installation-bound checks and tracked-release verification
-remain separate release work. Related commands and boundaries are in
+The complete source-tree suite passes all 463 tests. Focused plan-approval,
+sequential-question, dynamic-rework, report-contract, host-preflight, and
+control-plane regressions pass, as do marketplace validation and cold boot.
+The live command uses this checkout as its MCP server
+and does not install, reinstall, update, or verify an installed plugin.
+Installation-bound checks and tracked-release verification remain separate
+release work. Related commands and boundaries are in
 [verification.md](../../project/verification.md).
 <!-- GENERATED:END -->

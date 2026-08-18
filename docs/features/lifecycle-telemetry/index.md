@@ -30,9 +30,12 @@ authorized spawn returns a child id. This prevents a long result from leaving
 the actionable dispatch below the model's effective attention boundary.
 Before an `Agent` call, `PreToolUse` denies a targetless wait when Cortex has no
 durably bound running child, so the host cannot block indefinitely while
-claiming that a worker was dispatched. A host wait-any representation may use
-an empty receiver list only while such a child exists. The PostToolUse form
-remains a compatibility fallback.
+claiming that a worker was dispatched. The denial is the actionable
+`CORTEX DISPATCH FAILURE` diagnostic: it says that no worker was spawned,
+requires invoking the exact pending `spawn_agent` dispatch, and forbids retrying
+an empty wait. A host wait-any representation may use an empty receiver list
+only while such a child exists. The PostToolUse form remains a compatibility
+fallback.
 Installing or reloading the
 plugin remains an operator action; after an install or update, start a fresh
 Codex thread so the new hook and skill paths are loaded.
@@ -58,11 +61,20 @@ not allow `SubagentStop` to emit model context, the supported `PostToolUse`
 hook on the completing wait re-reads this durable state. When the latest
 attempt stopped without a report it instructs the coordinator to inspect and
 submit the exact failed result, and explicitly forbids a corrective
-`followup_task` to the dead child.
+`followup_task` to the dead child. The failed continuation is bounded by
+`MAX_ORCHESTRATE_GATE_FAILURES = 3`: only a newly returned top-level dispatch
+may retry, and the third failure blocks the task with a durable handoff.
 If more than one active task shares a host session, Cortex removes the session's
 lookup entry until only one active task remains; the hook never guesses which
 task should receive recovery context. Completing one of the ambiguous tasks
 rebuilds the entry when exactly one active task is left.
+
+This terminal stop path closes the session-start/pre-planning dispatch failure
+where a native child had already stopped but recovery still treated it as a
+follow-up target. The coordinator must inspect once, submit the stopped
+attempt's exact `dispatch_ref` as a failed continuation, and spawn only the new
+top-level dispatch returned by `continue_orchestration`; an empty wait or
+`followup_task` against the dead child is rejected as an invalid recovery.
 
 Every registered lifecycle command checks that `${PLUGIN_ROOT}/scripts/cortex-launcher` and `${PLUGIN_ROOT}/scripts/cortex_hook.py` still exist before invoking the launcher. The launcher selects `CORTEX_PYTHON` (or `python3` from `PATH` when unset) and requires Python 3.11+ with `tomllib`. If an already-open thread retains a retired cachebusted plugin path after an update, the command fails open with exit 0 and the empty JSON object `{}`, without stderr, instead of emitting a missing-file error. That protects task completion from stale hook paths but does not load updated skills, hooks, or MCP tools; operators should still start a new thread after updating Cortex. Lifecycle telemetry remains observational and is not proof that a host spawned a worker.
 
@@ -79,5 +91,17 @@ hook paths.
 
 ## Verification
 
-Lifecycle-hook regressions are in [test_cortex_invariants.py](../../../tests/test_cortex_invariants.py) and run through the standard unittest command in [verification.md](../../project/verification.md). Coverage executes all four registered commands with a missing `PLUGIN_ROOT` target and requires exit 0, stdout `{}`, and empty stderr.
+Lifecycle-hook regressions are in [test_cortex_invariants.py](../../../tests/test_cortex_invariants.py) and run through the standard unittest command in [verification.md](../../project/verification.md). The session-start/pre-planning recovery path is covered by the focused command below, which exercises terminal reportless stops, exact failed continuation, bounded retry, and empty-wait rejection:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_subagent_stop_is_terminal_and_non_resumable \
+  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry \
+  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_mixed_wave_reportless_stop_keeps_failed_slot_addressable \
+  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_repeated_reportless_stops_use_three_failure_budget \
+  tests.test_cortex_control.ControlPlaneTests.test_post_wait_stop_context_directs_terminal_failure \
+  tests.test_cortex_invariants.OrchestrationInvariantTests.test_agent_hook_rejects_empty_wait_as_unspawned_dispatch
+```
+
+Coverage executes all four registered commands with a missing `PLUGIN_ROOT` target and requires exit 0, stdout `{}`, and empty stderr.
 <!-- GENERATED:END -->

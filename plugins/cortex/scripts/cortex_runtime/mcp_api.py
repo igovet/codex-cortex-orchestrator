@@ -9,11 +9,11 @@ from typing import Any
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
-    "start_orchestration": "Start a Cortex task from the exact user-authored request. Cortex preserves that intent boundary, creates internal identifiers, and returns native dispatches with canonical profile, capability, access, and selection rationale.",
+    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Never submit an inline worker report body.",
     "manage_orchestration": "Inspect or recover state, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, or surface a worker's durable question through native MCP elicitation. For intent=question pass only payload.question_ref; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Ask before guessing; do not record a report while a blocking question is open.",
-    "record_report": "Worker-only operation: validate the gate contract, executed-check evidence, and claimed file delta; then persist the strict eight-field report and, for review/close, its optional top-level closure sibling, returning a compact report_ref. Do not paste the report body into the parent channel after success.",
+    "record_report": "Worker-only operation: validate and persist the strict seven-field report. Every report.tests item has exactly command, cwd, exit_code, and evidence. Planner planning packages allow id/title/objective/microtasks plus optional allowed_paths/depends_on; profile and the required acceptance_criteria/verification belong on each microtask. gate_result is top-level. Do not paste the report body into the parent channel after success.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref. Coordinators omit worker identity and use it before gate decisions; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
 }
@@ -24,40 +24,72 @@ def build_public_schemas(
     *,
     agents: Mapping[str, Any],
     report_fields: set[str],
+    max_report_items: int,
     max_work_packages: int,
+    max_microtasks_per_package: int,
     question_option_schema: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
     """Build the seven public contracts independently of internal handlers."""
+    EXECUTED_TEST_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "command": {
+                "type": "string",
+                "minLength": 2,
+                "description": "Exact reproducible command that was executed; placeholders such as ... are forbidden.",
+            },
+            "cwd": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Exact project root or safe project-relative working directory used for the command.",
+            },
+            "exit_code": {"type": "integer", "const": 0},
+            "evidence": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Decisive observed output or behavior from this executed command.",
+            },
+        },
+        "required": ["command", "cwd", "exit_code", "evidence"],
+    }
     V3_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Strict cortex/report/v1 object with exactly eight fields. Review and close closure belongs beside this object, never inside it.",
+        "description": "Strict cortex/report/v1 object with exactly seven fields. Review and close closure belongs beside this object, never inside it.",
         "properties": {
-            "summary": {"type": "string", "minLength": 1},
-            "findings": {"type": "array"},
-            "questions": {"type": "array"},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "findings": {"type": "array", "maxItems": max_report_items},
+            "questions": {
+                "type": "array",
+                "maxItems": 0,
+                "description": "Final reports must use the durable worker_question lifecycle and therefore contain questions=[].",
+            },
             "changed_files": {
                 "type": "array",
-                "items": {"type": "string"},
+                "maxItems": max_report_items,
+                "items": {"type": "string", "minLength": 1, "maxLength": 500},
                 "description": "Safe project-relative paths only; put prose in findings or evidence.",
             },
             "tests": {
                 "type": "array",
+                "maxItems": max_report_items,
                 "description": (
                     "For implementation, QA, specialist checks, review, documentation, and close, each item must contain "
                     "exactly command, cwd, exit_code, and evidence from an executed check."
                 ),
-                "items": {},
+                "items": EXECUTED_TEST_SCHEMA,
             },
             "evidence": {
                 "type": "array",
+                "minItems": 1,
+                "maxItems": max_report_items,
                 "description": (
                     "Evidence plus every exact generated Predecessor review:, Knowledge reviewed:, Gate acceptance:, "
                     "Gate verification:, and close-level Task acceptance:/Task verification: marker from the briefing."
                 ),
             },
-            "uncertainty": {"type": "array"},
-            "next_action": {"type": "string", "minLength": 1},
+            "uncertainty": {"type": "array", "maxItems": max_report_items},
         },
         "required": sorted(report_fields),
     }
@@ -71,16 +103,6 @@ def build_public_schemas(
             "blocking": {"type": "boolean"},
             "summary": {"type": "string", "minLength": 1},
             "details": {},
-            "next_action": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "required": {"type": "boolean"},
-                    "target_gate": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-                "required": ["required"],
-            },
             "waiver_reason": {"type": "string"},
             "waived_by": {"type": "string"},
             "waived_at": {"type": "string"},
@@ -136,18 +158,71 @@ def build_public_schemas(
         },
         "required": ["decision", "failure_class", "findings", "verification", "workspace"],
     }
+    PLANNING_STRING_LIST_SCHEMA = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 32,
+        "uniqueItems": True,
+        "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+    }
+    PLANNING_PATHS_SCHEMA = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 50,
+        "uniqueItems": True,
+        "items": {"type": "string", "minLength": 1},
+    }
+    PLANNING_DEPENDENCIES_SCHEMA = {
+        "type": "array",
+        "maxItems": 32,
+        "uniqueItems": True,
+        "items": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    }
+    PLANNING_MICROTASK_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 500},
+            "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "profile": {"type": "string", "enum": sorted(agents)},
+            "allowed_paths": PLANNING_PATHS_SCHEMA,
+            "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
+            "acceptance_criteria": PLANNING_STRING_LIST_SCHEMA,
+            "verification": PLANNING_STRING_LIST_SCHEMA,
+        },
+        "required": ["id", "title", "objective", "acceptance_criteria", "verification"],
+    }
+    PLANNING_PACKAGE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 500},
+            "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "allowed_paths": PLANNING_PATHS_SCHEMA,
+            "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
+            "microtasks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": max_microtasks_per_package,
+                "items": PLANNING_MICROTASK_SCHEMA,
+            },
+        },
+        "required": ["id", "title", "objective", "microtasks"],
+    }
     V3_PLANNING_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "overview": {"type": "string", "minLength": 1},
+            "overview": {"type": "string", "minLength": 1, "maxLength": 8000},
             "work_packages": {
                 "type": "array", "minItems": 1, "maxItems": max_work_packages,
                 "description": (
                     "Planner-only task-local work breakdown. Runtime requires each package to have id, title, objective, "
                     "and non-empty microtasks, and writes the validated artifact under .codex/cortex/tasks/<task>/planning/."
                 ),
-                "items": {"type": "object"},
+                "items": PLANNING_PACKAGE_SCHEMA,
             },
         },
         "required": ["overview", "work_packages"],
@@ -227,13 +302,13 @@ def build_public_schemas(
                     "objective": {"type": "string", "minLength": 1, "description": "Deprecated exact mirror of user_request. Omit it; when supplied it must match user_request byte-for-byte after trimming."},
                     "requirements": {"type": "array", "items": {"type": "string"}},
                     "acceptance_criteria": {
-                        "type": "array", "items": {"type": "string"},
+                        "type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1},
                         "description": "Required observable outcomes, except harvest routes where Cortex supplies the exhaustive census contract.",
                     },
                     "scope": {"type": "array", "items": {"type": "string"}},
                     "allowed_paths": {"type": "array", "items": {"type": "string"}},
                     "verification": {
-                        "type": "array", "items": {"type": "string"},
+                        "type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1},
                         "description": "Required authoritative checks, except harvest routes where Cortex supplies the census checks.",
                     },
                     "budget": {"type": "string"},
@@ -245,6 +320,20 @@ def build_public_schemas(
                     "replan_limit": {"type": "integer", "minimum": 0},
                 },
                 "required": ["user_request"],
+                "anyOf": [
+                    {
+                        "required": ["acceptance_criteria", "verification"],
+                        "description": "Every ordinary task must provide a complete observable result contract before dispatch.",
+                    },
+                    {
+                        "properties": {
+                            "user_request": {
+                                "pattern": "(?:[Hh][Aa][Rr][Vv][Ee][Ss][Tt](?:-[Rr][Ee][Ff][Rr][Ee][Ss][Hh])?|[Ff][Ee][Aa][Tt][Uu][Rr][Ee] [Cc][Ee][Nn][Ss][Uu][Ss]|[Rr][Ee][Pp][Oo][Ss][Ii][Tt][Oo][Rr][Yy] [Kk][Nn][Oo][Ww][Ll][Ee][Dd][Gg][Ee]|[Kk][Nn][Oo][Ww][Ll][Ee][Dd][Gg][Ee] [Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt][Aa][Tt][Ii][Oo][Nn])",
+                            }
+                        },
+                        "description": "Knowledge-harvest routes may omit either list because Cortex supplies the exhaustive census contract.",
+                    },
+                ],
             },
             "waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
         },
@@ -280,7 +369,7 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Worker report request. report remains exactly eight fields; gate_result is the canonical result envelope for every gate and closure is the temporary review/close alias.",
+        "description": "Worker report request. report remains exactly seven fields; gate_result is the canonical result envelope for every gate and closure is the temporary review/close alias.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
@@ -313,7 +402,7 @@ def build_public_schemas(
             "batch": {
                 "type": "object",
                 "additionalProperties": False,
-                "description": "Atomic material-question batch. question_key and option_id are stable canonical identifiers; every question/options label must be English.",
+                "description": "Durable material-question batch. question_key and option_id are stable canonical identifiers; the coordinator UI renders one question at a time and checkpoints each answer before advancing.",
                 "properties": {
                     "batch_key": {"type": "string", "minLength": 1},
                     "questions": {
@@ -380,7 +469,8 @@ def build_public_schemas(
             "payload": {
                 "type": "object",
                 "description": (
-                    "Rare-operation payload. For intent=follow_up, use the completed source task_ref and an exact "
+                    "Rare-operation payload. For intent=plan_approval, decision=prompt opens the native Approve/Cancel "
+                    "UI; approve/revise remain explicit compatibility and feedback paths. For intent=follow_up, use the completed source task_ref and an exact "
                     "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
                     "{question_ref: '<worker ref>'}; Cortex resolves task/principal/thread and opens native MCP "
                     "elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
@@ -494,9 +584,10 @@ def v3_response(
     elif outcome == "awaiting_plan_approval":
         next_action = (
             f"{coordinator_lock} Read plan_review.report_ref, publish plan_review.report_markdown_link verbatim in "
-            "the main chat, present a concise plan summary there, and "
-            "wait for explicit user approval. Do not dispatch the next wave. Call manage_orchestration with "
-            "intent=plan_approval and payload.decision=approve, or decision=revise with the user's feedback."
+            "the main chat, present a concise plan summary there, then immediately call manage_orchestration with "
+            "intent=plan_approval and payload.decision=prompt so Cortex opens the native Approve/Cancel UI. On "
+            "Approve, announce that the plan was approved and dispatch the next wave. On Cancel, stop silently and "
+            "wait for the user's next message; use decision=revise only after the user supplies feedback."
         )
     elif outcome == "completed":
         next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
@@ -517,17 +608,48 @@ def v3_response(
         stopped_workers = [
             item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
         ]
+        stopped_report_refs = [
+            str(report_ref)
+            for item in stopped_workers
+            for report_ref in item.get("report_refs", [])
+            if str(report_ref or "").strip()
+        ]
         resumable_workers = [
             item for item in stopped_workers
             if item.get("resumable") and str(item.get("host_agent_id") or "").strip()
         ]
+        terminal_failures = [
+            item for item in stopped_workers
+            if item.get("failure_status") == "failed"
+            and str(item.get("dispatch_ref") or "").strip()
+        ]
         if outcome == "waiting_workers":
             if active_worker_ids:
+                terminal_failure_targets = "; ".join(
+                    f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
+                    for item in terminal_failures
+                )
+                stopped_report_clause = (
+                    " Also read and publish these persisted report refs before continuing: "
+                    + ", ".join(stopped_report_refs)
+                    + "."
+                    if stopped_report_refs
+                    else ""
+                )
+                failed_result_clause = (
+                    " Include exactly one failed result for each stopped slot when you continue: "
+                    + terminal_failure_targets
+                    + "."
+                    if terminal_failure_targets
+                    else ""
+                )
                 next_action = (
                     f"{coordinator_lock} Rehydrate from result.context_handoff. Do not restart, replay, or respawn "
                     "the running attempts. Wait only on these exact persisted native child ids: "
                     + ", ".join(active_worker_ids)
                     + ". After completion, read and validate their report refs before continuing Cortex."
+                    + stopped_report_clause
+                    + failed_result_clause
                 )
             elif any(item.get("question_refs") for item in stopped_workers):
                 waiting_questions = [
@@ -542,16 +664,28 @@ def v3_response(
                     + ", ".join(waiting_questions) + "."
                 )
             elif stopped_workers and all(item.get("report_refs") for item in stopped_workers):
-                report_refs = [
-                    str(report_ref)
-                    for item in stopped_workers
-                    for report_ref in item.get("report_refs", [])
-                    if str(report_ref or "").strip()
-                ]
                 next_action = (
                     f"{coordinator_lock} Recovery found stopped workers with persisted reports, not running "
                     "children. Never wait on or respawn them. Read and publish these report refs, then call "
-                    "continue_orchestration for the current step: " + ", ".join(report_refs) + "."
+                    "continue_orchestration for the current step: " + ", ".join(stopped_report_refs) + "."
+                )
+            elif terminal_failures:
+                failure_targets = "; ".join(
+                    f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
+                    for item in terminal_failures
+                )
+                report_clause = (
+                    " Read and publish these persisted report refs before continuing: "
+                    + ", ".join(stopped_report_refs)
+                    + "."
+                    if stopped_report_refs
+                    else ""
+                )
+                next_action = (
+                    f"{coordinator_lock} Recovery found a terminal stopped worker without a report. Never wait on, "
+                    "follow up, or respawn the stopped child. Submit exactly one failed result for the current "
+                    "step using: " + failure_targets + "; Cortex will apply the bounded retry budget."
+                    + report_clause
                 )
             elif resumable_workers:
                 resume_targets = [str(item["host_agent_id"]) for item in resumable_workers]
@@ -579,15 +713,27 @@ def v3_response(
                     + ". Then resume the same persisted host_agent_id with followup_task."
                 )
             elif all(item.get("report_refs") for item in stopped_workers):
-                report_refs = [
-                    str(report_ref)
-                    for item in stopped_workers
-                    for report_ref in item.get("report_refs", [])
-                    if str(report_ref or "").strip()
-                ]
                 next_action = (
                     f"{coordinator_lock} Never wait on or respawn the stopped worker. Read and publish these "
-                    "persisted report refs, then continue the current step: " + ", ".join(report_refs) + "."
+                    "persisted report refs, then continue the current step: " + ", ".join(stopped_report_refs) + "."
+                )
+            elif terminal_failures:
+                failure_targets = "; ".join(
+                    f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
+                    for item in terminal_failures
+                )
+                report_clause = (
+                    " Read and publish these persisted report refs before continuing: "
+                    + ", ".join(stopped_report_refs)
+                    + "."
+                    if stopped_report_refs
+                    else ""
+                )
+                next_action = (
+                    f"{coordinator_lock} Recovery found a terminal stopped worker without a report. Never wait on, "
+                    "follow up, or respawn the stopped child. Submit exactly one failed result for the current "
+                    "step using: " + failure_targets + "; Cortex will apply the bounded retry budget."
+                    + report_clause
                 )
             elif resumable_workers:
                 resume_targets = [str(item["host_agent_id"]) for item in resumable_workers]

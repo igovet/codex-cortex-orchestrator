@@ -36,8 +36,7 @@
       "changed_files",
       "tests",
       "evidence",
-      "uncertainty",
-      "next_action"
+      "uncertainty"
     ]
   },
   "profile_execution_contracts": {
@@ -89,7 +88,7 @@
     "explorer": {
       "inputs": "Read supplied knowledge pages first, then exact entry points, callers, state, configuration, persistence, integrations, tests, and alternate paths for the bounded domain.",
       "project_artifacts": "Report-only: do not edit files or create solution artifacts.",
-      "completion": "Produce a source-cited execution and ownership map with constraints, contradictions, unknowns, counterexample search, and the next specialist recommendation."
+      "completion": "Produce a source-cited execution and ownership map with constraints, contradictions, unknowns, and counterexample search."
     },
     "frontend_dev": {
       "inputs": "Read delegated components, routes, state and data flow, API contracts, design tokens, accessibility patterns, localization, and UI tests.",
@@ -166,7 +165,7 @@
       "ownership": "Own bounded repository discovery and factual context; do not design or implement the solution.",
       "acceptance": [
         "Identify entry points, execution paths, state and data boundaries, dependencies, owners, constraints, and material unknowns.",
-        "Distinguish verified facts, contradictions, inference, and missing evidence, and recommend the next specialist owner."
+        "Distinguish verified facts, contradictions, inference, and missing evidence."
       ],
       "verification": [
         "Support consequential findings with exact repository paths and symbols or test/configuration evidence.",

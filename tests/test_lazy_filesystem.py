@@ -51,7 +51,7 @@ class LazyFilesystemTests(unittest.TestCase):
                 "evidence": "Observed output: focused regression passed with zero failures.",
             }],
             "evidence": evidence,
-            "uncertainty": [], "next_action": "Advance the gate.",
+            "uncertainty": [],
         }
 
     def test_initialization_and_path_helpers_do_not_materialize_task_artifacts(self) -> None:

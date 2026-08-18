@@ -553,7 +553,6 @@ def report(label: str, project: Path, changed_files: list[str] | None = None) ->
             "evidence": "The deterministic fixture command printed luna-high fixture and exited zero.",
         }],
         "evidence": [label], "uncertainty": [],
-        "next_action": "advance",
     }
 
 
@@ -734,7 +733,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
             or snapshot_cleanup.get("status") != "completed"
             or not report_records
             or any(set(item.get("report", {})) != {
-                "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action",
+                "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
             } for item in report_records)
             or any(
                 not isinstance(item.get("closure"), dict)
@@ -779,7 +778,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
         "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "
-        "For every review or close dispatch, record_report must also include a separate top-level closure sibling: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Never place closure inside the strict eight-key report. "
+        "For every review or close dispatch, record_report must also include a separate top-level closure sibling: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Never place closure inside the strict seven-key report. "
         "Read every ref with read_worker_report and advance with report_ref. "
         "and finish only after close evidence and handoff. Do not ask for manual argument corrections. "
         f"The exact project_root is {project}. "
@@ -882,7 +881,7 @@ def live_eval(
             json.loads(cortex.db_read_artifact_content(ledger, str(state["task_id"]), str(item["artifact_ref"])))
             for item in report_artifacts
         ]
-        report_keys = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
+        report_keys = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"}
         strict_reports = bool(report_records) and all(
             set(record.get("report", {})) == report_keys
             for record in report_records

@@ -92,7 +92,7 @@ are required. Any gap triggers bounded documentation rework rather than a
 successful close.
 
 The coordinator must reject reports that lack inventory counts, domain/source
-coverage, mapping/exclusion evidence, or a concrete next coverage action. A
+coverage, mapping/exclusion evidence, and concrete coverage gaps. A
 handful of top-level service summaries is not complete documentation when
 those services own distinct workflows, commands, state machines, integrations,
 configuration, failure behavior, or operational contracts.
@@ -273,7 +273,12 @@ call it once.
    requirements, audience, design direction, behavior, or acceptance merely to
    make the dispatch look complete. Include success criteria, constraints,
    paths, approval boundaries, and user language only when supplied or already
-   established. The coordinator owns the initial plan: it
+   established. Before calling Cortex, verify that ordinary tasks have
+   non-empty `task.acceptance_criteria` and `task.verification`, derived only
+   from the exact request or verified authority. If either list cannot be
+   grounded without inventing material intent, ask the user first. Exact
+   harvest routes are the sole exception because Cortex supplies their
+   exhaustive census contract. The coordinator owns the initial plan: it
    may supply compact waves or consciously accept Cortex's safe standard C2
    proposal. In either case, treat the returned `pipeline` snapshot as the
    authoritative current coordinator plan.
@@ -321,20 +326,25 @@ call it once.
    status commentary. Visible output is limited to a worker question,
    completion/failure, or a blocking error.
 
-   Any profile may first publish a material question with
-   `worker_question(action="ask")`. The worker returns only its `question_ref`
-   and a concise summary, publishes no report, and finishes its current native
-   turn into an idle/resumable state; it must not busy-wait for the user.
+   Any profile may first publish a material question. Before pausing, it
+   collects all currently known material decisions: use
+   `worker_question(action="ask_batch")` when there is more than one, and
+   `worker_question(action="ask")` only when exactly one is known. The worker
+   returns only its `question_ref` and a concise summary, publishes no report,
+   and finishes its current native turn into an idle/resumable state; it must
+   not busy-wait for the user.
    Call `manage_orchestration(intent="question", payload={"question_ref":
    "<exact ref>"})` exactly once. That call must open the host-native question
-   UI; never restate the question as commentary or a final message, and never
-   guess task, principal, thread, attempt, or profile identifiers. After the UI
+   UI; a batch is rendered sequentially, one native question at a time, with
+   each accepted answer checkpointed before the next appears. Never restate the
+   question as commentary or a final message, and never guess task, principal,
+   thread, attempt, or profile identifiers. After the UI
    records the answer, use `followup_task` on the exact same native worker and
    instruct it to poll the same ref before resuming the same attempt. Do not
    dispatch a replacement or advance the wave. If native elicitation is
    unavailable, keep the durable question open and report the host limitation
    without asking the question as prose. Once
-   complete, each worker publishes its strict eight-section
+   complete, each worker publishes its strict seven-field
    `cortex/report/v1` through the scoped public `record_report` tool, then
    returns only `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence
    summary. A worker must never paste the report JSON into the parent channel.
@@ -362,7 +372,7 @@ call it once.
    `decision`, `failure_class`, `findings`, `verification`, and `workspace`.
    It is canonical for all gates, including QA and implementation. The older
    top-level `closure` sibling remains only as a review/close compatibility
-   alias and must never be nested inside the strict eight-field report; both
+   alias and must never be nested inside the strict seven-field report; both
    forms must agree when supplied.
 5. Read every returned ref with `read_worker_report`. The result includes the
    derived absolute `report_markdown_path` for the persisted
@@ -442,11 +452,13 @@ its own wave. After a successful plan wave, Cortex returns
 `outcome: awaiting_plan_approval`, sends no successor dispatch, and provides
 `plan_review` with the planner `report_ref`, derived absolute
 `report_markdown_path`, `summary`, `findings`,
-`uncertainty`, `next_action`, and `remaining_phases`. Read the referenced
-report, present a concise plan summary in the main chat, and wait for the
-user's explicit decision. To continue, call
-`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`;
-this dispatches the next wave. To request changes, call
+`uncertainty`, and `remaining_phases`. Read the referenced
+report, present a concise plan summary in the main chat, then immediately call
+`manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
+Cortex opens a native `Approve` / `Cancel` choice. On `Approve`, tell the user
+in their language that the plan was approved and dispatch the returned next
+wave. On `Cancel`, stop silently, keep the approval pending, and wait for the
+user's next message. To request changes after that message, call
 `manage_orchestration(intent="plan_approval", payload={"decision":"revise", "feedback":"..."})`
 with non-empty feedback; Cortex reruns the Planner and presents a new review.
 Do not turn this into a second worker-question flow: material questions remain
@@ -454,11 +466,12 @@ distinct and are resolved through `worker_question` during planning.
 
 The Planner's same-call public `record_report` may include a separate
 `planning` object with exactly `overview` and `work_packages`; the strict
-eight-field `cortex/report/v1` report is unchanged. Each package requires
+seven-field `cortex/report/v1` report is unchanged. Each package requires
 `id`, `title`, `objective`, and non-empty `microtasks`, with optional
-`allowed_paths` and `depends_on`. Each microtask requires `id`, `title`, and
-`objective`, with optional `profile`, `allowed_paths`, `depends_on`,
-`acceptance_criteria`, and `verification`. Use explicit ownership and
+`allowed_paths` and `depends_on`; `profile` is forbidden at package level.
+Each microtask requires `id`, `title`, `objective`, non-empty
+`acceptance_criteria`, and non-empty `verification`, with optional `profile`,
+`allowed_paths`, and `depends_on`. Use explicit ownership and
 dependencies; Cortex validates package and per-package microtask DAGs and
 enforces limits of 32 packages, 32 microtasks per package, and 128 total.
 Remain read-only: Cortex—not the Planner—materializes
@@ -546,9 +559,11 @@ for transient user-language UI projections. Answers retain original
 language/value and require canonical English `answer_en` for localized free
 text before the worker resumes. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
-same `batch_ref` with `action="poll_batch"`; the host form answers every item
-in one atomic batch. A task revision supersedes an unresolved batch rather
-than resuming stale user intent. A `follow_up` task inherits the
+same `batch_ref` with `action="poll_batch"`; the host renders one question per
+native step and durably checkpoints each accepted answer before showing the
+next. Cancellation preserves completed steps and resumes at the next unanswered
+item. A task revision supersedes an unresolved batch rather than resuming stale
+user intent. A `follow_up` task inherits the
 completed source task's user language while preserving this English-only
 worker boundary.
 
@@ -573,7 +588,9 @@ final receipts retain digest and changed-file proof. An explicit
 `allow_rework` reopening establishes a fresh active baseline before new work.
 
 Every persisted report contains exactly `summary`, `findings`, `questions`,
-`changed_files`, `tests`, `evidence`, `uncertainty`, and `next_action`.
+`changed_files`, `tests`, `evidence`, and `uncertainty`. Worker reports and
+findings contain evidence, never routing instructions; the coordinator alone
+selects corrective waves.
 The final `questions` list is always empty: material questions use the durable
 `worker_question` lifecycle before report publication, while genuinely
 non-blocking evidence limitations belong in `uncertainty`. Cortex rejects a
