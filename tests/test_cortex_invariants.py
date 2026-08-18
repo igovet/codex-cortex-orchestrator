@@ -72,7 +72,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         return {**delegated, "state": confirmed["state"], "host_spawn": confirmed["host_spawn"]}
 
     def report(self, task_id, attempt_id, submission_id="final"):
-        return control.record_report({"task_id": task_id, "principal": "owner", "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused evidence"], "uncertainty": [], "next_action": "advance"}})
+        return control.record_report({"task_id": task_id, "principal": "owner", "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused evidence"], "uncertainty": []}})
 
     def test_runtime_dependency_slices_do_not_import_executable_facade(self):
         """Extracted slices depend on the explicit composition binding only."""
@@ -109,6 +109,47 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "cortex_runtime.questions",
         ):
             self.assertIsNotNone(importlib.import_module(module_name))
+
+    def test_public_mcp_schemas_match_runtime_start_report_and_planning_contracts(self):
+        self.assertIn("ordinary task needs non-empty task.acceptance_criteria", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
+        self.assertIn("Every report.tests item has exactly command, cwd, exit_code, and evidence", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
+        self.assertIn("profile and the required acceptance_criteria/verification belong on each microtask", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
+        task_schema = control.START_ORCHESTRATION_SCHEMA["properties"]["task"]
+        ordinary_contract = task_schema["anyOf"][0]
+        self.assertEqual(
+            ordinary_contract["required"],
+            ["acceptance_criteria", "verification"],
+        )
+        for field in ("acceptance_criteria", "verification"):
+            self.assertEqual(task_schema["properties"][field]["minItems"], 1)
+            self.assertEqual(task_schema["properties"][field]["maxItems"], 100)
+
+        test_schema = control.V3_REPORT_SCHEMA["properties"]["tests"]["items"]
+        self.assertFalse(test_schema["additionalProperties"])
+        self.assertEqual(
+            set(test_schema["required"]),
+            {"command", "cwd", "exit_code", "evidence"},
+        )
+        self.assertEqual(set(test_schema["properties"]), set(test_schema["required"]))
+        self.assertNotIn("observed_evidence", test_schema["properties"])
+        self.assertEqual(test_schema["properties"]["exit_code"]["const"], 0)
+        self.assertEqual(control.V3_REPORT_SCHEMA["properties"]["questions"]["maxItems"], 0)
+        self.assertEqual(control.V3_REPORT_SCHEMA["properties"]["evidence"]["minItems"], 1)
+
+        package_schema = control.V3_PLANNING_SCHEMA["properties"]["work_packages"]["items"]
+        self.assertFalse(package_schema["additionalProperties"])
+        self.assertEqual(
+            set(package_schema["required"]),
+            {"id", "title", "objective", "microtasks"},
+        )
+        self.assertNotIn("profile", package_schema["properties"])
+        microtask_schema = package_schema["properties"]["microtasks"]["items"]
+        self.assertFalse(microtask_schema["additionalProperties"])
+        self.assertIn("profile", microtask_schema["properties"])
+        self.assertEqual(
+            set(microtask_schema["required"]),
+            {"id", "title", "objective", "acceptance_criteria", "verification"},
+        )
 
     @classmethod
     def replace_generated_facts(cls, content, facts):
@@ -421,7 +462,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         second_report = self.report("task", second["attempt_id"], "second")
         second_evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": second["state"]["revision"], "gate": "plan", "attempt_id": second["attempt_id"], "report_receipt": second_report["receipt"]["receipt_id"], "summary": "replacement plan"})
         repassed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": second_evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
-        self.assertEqual(repassed["state"]["current_gates"], ["discover"])
+        self.assertEqual(repassed["state"]["current_gates"], ["implementation"])
 
     def test_stop_reassessment_requires_current_handoff(self):
         state = self.init(complexity="C2")["state"]
@@ -501,9 +542,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_public_report_contract_keeps_closure_as_top_level_review_sibling(self):
         schema = control.WORKER_RECORD_REPORT_SCHEMA
+        contract = json.loads(
+            (Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8")
+        )
+        required_report_fields = contract["shared_worker_contract"]["required_report_fields"]
+        self.assertEqual(list(control.REPORT_FIELDS), required_report_fields)
+        self.assertEqual(schema["properties"]["report"]["required"], required_report_fields)
         self.assertEqual(
             set(schema["properties"]["report"]["properties"]),
-            {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"},
+            {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"},
         )
         self.assertEqual(set(schema["properties"]["report"]["required"]), set(schema["properties"]["report"]["properties"]))
         closure = schema["properties"]["closure"]
@@ -530,10 +577,37 @@ class OrchestrationInvariantTests(unittest.TestCase):
         }
         review_prompt = control.host_spawn_prompt("code_reviewer", package)
         self.assertIn("top-level `gate_result`", review_prompt)
-        self.assertIn("Top-level `closure` remains review/close compatibility only", review_prompt)
+        self.assertIn("needs matching top-level `gate_result` and `closure`", review_prompt)
+        self.assertIn("outside the 7-key report", review_prompt)
+        self.assertIn("findings is the literal empty array [] in both", review_prompt)
+        self.assertIn("never strings or informational entries", review_prompt)
+        self.assertIn("fingerprint/severity/status/blocking/summary", review_prompt)
         package["gate"] = "close"
         close_prompt = control.host_spawn_prompt("build_verification", package)
-        self.assertIn("top-level `gate_result`", close_prompt)
+        self.assertIn("needs matching top-level `gate_result` and `closure`", close_prompt)
+
+    def test_planner_briefing_requires_top_level_planning_sibling(self):
+        package = {
+            "task_id": "task", "gate": "plan", "attempt_id": "plan-01", "dispatch_ref": "dispatch-plan-000000000000",
+            "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
+            "task_user_request": "Plan the fixture.", "task_objective": "Plan the fixture.", "objective": "Plan.",
+            "ownership": "Own planning", "allowed_paths": ["."], "acceptance_criteria": ["Plan complete"],
+            "verification": ["Verify plan"], "task_acceptance_criteria": [], "task_verification": [],
+            "context_files": [], "knowledge_index_files": [], "context_report_ids": [],
+            "result_baseline_ref": "manifest-" + "a" * 64, "task_requirements": [], "task_scope": [],
+            "pause_conditions": [], "budget": "none", "plan_feedback": None,
+            "intent_clarification_required": False, "intent_clarification_reason": None,
+        }
+        prompt = control.host_spawn_prompt("planner", package)
+        self.assertIn("REQUIRED top-level planning sibling={overview,work_packages}", prompt)
+
+    def test_installable_orchestrator_releases_completed_native_agent_slots(self):
+        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Before every new native", skill)
+        self.assertIn("use `list_agents` defensively", skill)
+        self.assertIn("exact failed result Cortex already accepted", skill)
+        self.assertIn("close that exact completed native child", skill)
+        self.assertIn("Never close a running child", skill)
 
     def test_sync_detects_and_repairs_same_version_plugin_content_drift(self):
         if not shutil.which("codex"):
@@ -692,6 +766,82 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), str(selected))
+
+    def test_cortex_launcher_reports_old_python_before_missing_tomllib(self):
+        isolated = self.base / "old-python-launcher-home"
+        isolated.mkdir()
+        selected = isolated / "python launcher 3.10"
+        selected.write_text(
+            f"#!{sys.executable}\n"
+            "import builtins\n"
+            "import sys\n"
+            "sys.version_info = (3, 10, 12)\n"
+            "sys.version = '3.10.12 (fake)'\n"
+            "real_import = builtins.__import__\n"
+            "def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
+            "    if name == 'tomllib':\n"
+            "        raise ImportError('tomllib is unavailable')\n"
+            "    return real_import(name, globals, locals, fromlist, level)\n"
+            "builtins.__import__ = blocked_import\n"
+            "exec(sys.argv[2], {'__name__': '__main__'})\n",
+            encoding="utf-8",
+        )
+        selected.chmod(selected.stat().st_mode | 0o100)
+        launcher = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex-launcher"
+        environment = os.environ.copy()
+        environment.update({"CORTEX_PYTHON": str(selected), "HOME": str(isolated), "CODEX_HOME": str(isolated / ".codex")})
+
+        completed = subprocess.run(
+            [str(launcher), str(isolated / "missing.py")],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Python 3.10.12 is too old; Python 3.11 or newer is required", completed.stderr)
+        self.assertNotIn("tomllib is unavailable", completed.stderr)
+
+    def test_sync_reports_old_python_before_missing_tomllib(self):
+        isolated = self.base / "old-python-sync-home"
+        codex_home = isolated / ".codex"
+        codex_home.mkdir(parents=True)
+        selected = isolated / "python sync 3.10"
+        selected.write_text(
+            f"#!{sys.executable}\n"
+            "import builtins\n"
+            "import sys\n"
+            "sys.version_info = (3, 10, 12)\n"
+            "sys.version = '3.10.12 (fake)'\n"
+            "real_import = builtins.__import__\n"
+            "def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
+            "    if name == 'tomllib':\n"
+            "        raise ImportError('tomllib is unavailable')\n"
+            "    return real_import(name, globals, locals, fromlist, level)\n"
+            "builtins.__import__ = blocked_import\n"
+            "exec(sys.argv[2], {'__name__': '__main__'})\n",
+            encoding="utf-8",
+        )
+        selected.chmod(selected.stat().st_mode | 0o100)
+        environment = os.environ.copy()
+        environment.update({"HOME": str(isolated), "CODEX_HOME": str(codex_home), "CORTEX_PYTHON": str(selected)})
+        script = Path(__file__).parents[1] / "scripts/sync-cortex.sh"
+
+        completed = subprocess.run(
+            ["bash", str(script), "--dry-run"],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Python 3.10.12 is too old; Python 3.11 or newer is required", completed.stderr)
+        self.assertNotIn("tomllib is unavailable", completed.stderr)
+        self.assertFalse((codex_home / "config.toml").exists())
 
     def test_sync_backs_up_and_replaces_a_different_global_subagent_model(self):
         if not shutil.which("codex"):
@@ -864,6 +1014,21 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 self.assertIn("CORTEX DISPATCH FAILURE", reason)
                 self.assertIn("No worker was spawned", reason)
                 self.assertIn("Never retry an empty wait", reason)
+
+        bare_wait = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "owner",
+            "tool_name": "wait",
+            "tool_input": {},
+        }
+        completed = subprocess.run(
+            [sys.executable, str(hook)], input=json.dumps(bare_wait), text=True,
+            capture_output=True, env=os.environ.copy(), check=True,
+        )
+        output = json.loads(completed.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("CORTEX DISPATCH FAILURE", output["permissionDecisionReason"])
 
         event["tool_input"]["receiver_thread_ids"] = ["child-01"]
         targeted = subprocess.run(
@@ -1155,6 +1320,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("do not send a corrective follow-up", skill)
         self.assertIn("Only a newly returned top-level dispatch authorizes rework", skill)
         self.assertIn("at most three automatic failed attempts", skill)
+        self.assertIn("ordinary tasks have non-empty `task.acceptance_criteria`", skill)
+        self.assertIn("ask the user before calling Cortex", skill)
+        self.assertIn("`profile` is forbidden at package level", skill)
+        self.assertIn("non-empty `verification`, with optional `profile`", skill)
         self.assertRegex(skill, r"Dispatch\s+briefing reviewed: <sha256>")
 
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
@@ -1181,6 +1350,28 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_runtime_contract_is_plugin_bundled_and_does_not_depend_on_root_agents(self):
         repository = Path(__file__).parents[1]
         plugin = repository / "plugins/cortex"
+        root_policy = (repository / "AGENTS.md").read_text(encoding="utf-8")
+        control_skill = (plugin / "skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
+        orchestrator_skill = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("This file governs work in this source checkout only", root_policy)
+        self.assertIn("No project-local `AGENTS.md` is part of the installed contract", orchestrator_skill)
+        self.assertIn("`../cortex-control/SKILL.md`", orchestrator_skill)
+        for runtime_only in (
+            "Every native dispatch carries only a compact bootstrap",
+            "Call `start_orchestration` once per task contract",
+            "The explicit `prune` route calls",
+            "## Cortex MCP tool-error log",
+        ):
+            self.assertNotIn(runtime_only, root_policy)
+        for bundled_contract in (
+            "Assign exactly one writer to an overlapping code or documentation area",
+            "Report every unrun required check, environmental limitation",
+            "## Private tool-error diagnostics",
+            "at or below 10 MiB",
+            "Expected public validation and recovery responses with `ok: false`",
+            "never put secrets in tool inputs",
+        ):
+            self.assertIn(bundled_contract, control_skill)
         manifest = json.loads((plugin / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertTrue((plugin / "hooks/hooks.json").is_file())
@@ -1201,7 +1392,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("bind_host_worker_from_hook", hook)
         self.assertIn("Dispatch briefing reviewed digest", hook)
         self.assertIn("def stopped_worker_after_wait_context(", hook)
-        self.assertIn("stopped without a report but remains resumable", hook)
+        self.assertIn("stopped without a report and is terminal failed", hook)
         for relative in (
             "skills/cortex-control/SKILL.md",
             "skills/orchestrator/SKILL.md",
@@ -1233,10 +1424,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertNotIn("gpt-", prompt.lower())
         planner = prompts["planner"]
         for marker in (
-            "Ground in the environment before planning",
+            "Ground in the environment",
             "Separate unknowns",
             "Close the implementation contract",
-            "another engineer can execute without making design decisions",
+            "executable without downstream design decisions",
         ):
             self.assertIn(marker, planner)
 
@@ -1297,6 +1488,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 self.assertIn("read_worker_report", prompt)
                 self.assertIn(f"attempt_id='{gate}-01'", prompt)
                 self.assertIn(f"profile={name!r}", prompt)
+                self.assertIn("use project key 'workspace-prompt-audit' directly", prompt)
+                self.assertIn("do not call `list_projects` before the first indexed query", prompt)
+                self.assertIn("`mcp__codebase_memory__list_projects` at most once", prompt)
                 self.assertIn("worker_question", prompt)
                 self.assertIn("record_report", prompt)
                 self.assertIn("Gate acceptance 1: PASS - ", prompt)
@@ -1307,9 +1501,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 else:
                     self.assertIn("put every path changed since this attempt began", prompt)
                 if gate in control.EXECUTED_CHECK_RESULT_GATES:
-                    self.assertIn("report.tests requires at least one exact reproducible command (no `...`)", prompt)
+                    self.assertIn("report.tests requires object(s) with exactly command/cwd/exit_code/evidence", prompt)
                 else:
-                    self.assertIn("If report.tests is non-empty, every item needs the exact command (no `...`)", prompt)
+                    self.assertIn("Non-empty report.tests items have exactly command/cwd/exit_code/evidence", prompt)
+                self.assertIn("literal `evidence`", prompt)
+                self.assertNotIn("observed_evidence", prompt)
+                if gate == "plan":
+                    self.assertIn("optional allowed_paths/depends_on; never profile", prompt)
+                    self.assertIn("Microtask: id/title/objective/acceptance_criteria/verification", prompt)
                 self.assertIn("integer exit_code 0", prompt)
                 digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
                 bootstrap = control.host_spawn_bootstrap(
@@ -1388,6 +1587,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(
             shared["repository_intelligence"],
             "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
+        )
+        self.assertEqual(
+            shared["codebase_memory_project_resolution"],
+            "derive_canonical_path_key_then_single_exact_root_list_fallback",
+        )
+        self.assertEqual(
+            shared["codebase_memory_project_key_algorithm"],
+            "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200",
         )
         self.assertEqual(
             set(shared["codebase_memory_refresh_profiles"]),
@@ -1498,6 +1705,79 @@ class OrchestrationInvariantTests(unittest.TestCase):
         manifest = json.loads((Path(__file__).parents[1] / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["version"], control.SERVER_VERSION)
 
+    def test_release_version_is_synchronized_across_current_contract_sources(self):
+        repository = Path(__file__).parents[1]
+        manifest = json.loads(
+            (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        base_version = manifest["version"].split("+", 1)[0]
+        self.assertEqual(base_version, "8.0.0")
+        expected_markers = {
+            "README.md": f"Cortex-{base_version}",
+            "CHANGELOG.md": f"## [{base_version}]",
+            "docs/release-readiness.md": base_version,
+            "docs/project/verification.md": base_version,
+            "docs/features/plugin-packaging/index.md": base_version,
+            "docs/features/orchestration-ledger/index.md": base_version,
+            "scripts/validate-cortex-marketplace.py": f'base_version != "{base_version}"',
+            "scripts/sync-cortex.sh": f'base_version != "{base_version}"',
+        }
+        for relative, marker in expected_markers.items():
+            self.assertIn(marker, (repository / relative).read_text(encoding="utf-8"), relative)
+
+    def test_launcher_and_installer_remain_compatible_with_stock_macos_bash(self):
+        repository = Path(__file__).parents[1]
+        launcher = (repository / "plugins/cortex/scripts/cortex-launcher").read_text(encoding="utf-8")
+        installer = (repository / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
+        for path, source in (("cortex-launcher", launcher), ("sync-cortex.sh", installer)):
+            self.assertNotIn("[[ -v ", source, path)
+            self.assertNotIn("declare -A", source, path)
+            self.assertNotIn("local -n", source, path)
+            self.assertNotIn("mapfile", source, path)
+        completed = subprocess.run(
+            ["bash", "-n", "plugins/cortex/scripts/cortex-launcher", "scripts/sync-cortex.sh"],
+            cwd=repository,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_current_contract_sources_reject_stale_report_and_tool_counts(self):
+        repository = Path(__file__).parents[1]
+        stale_contract = re.compile(
+            r"\beight(?:[- ](?:field|key|sections?)| report sections?)\b|\bsix tools\b",
+            re.IGNORECASE,
+        )
+        roots = [repository / name for name in ("AGENTS.md", "CHANGELOG.md", "docs", "scripts", "plugins")]
+        for root in roots:
+            paths = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
+            for path in paths:
+                if path.suffix not in {"", ".md", ".py", ".json", ".toml", ".sh"}:
+                    continue
+                self.assertIsNone(
+                    stale_contract.search(path.read_text(encoding="utf-8", errors="ignore")),
+                    str(path.relative_to(repository)),
+                )
+
+    def test_ci_runs_complete_cross_version_release_gates(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/cortex.yml").read_text(encoding="utf-8")
+        for marker in (
+            'python-version: ["3.11", "3.12"]',
+            "unittest discover -s tests -v",
+            "error::ResourceWarning",
+            "validate-cortex-marketplace.py",
+            "ast.parse",
+            "bash -n plugins/cortex/scripts/cortex-launcher scripts/sync-cortex.sh",
+            "git diff --check",
+            "cortex-cold-boot-smoke.py",
+            "cortex-luna-high-eval.py",
+            "cortex-composite-benchmark.py --workers 8 --waves 5",
+            "probe-fresh-cortex-plugin.py",
+            "verify-cortex-release.py --require-tracked",
+        ):
+            self.assertIn(marker, workflow)
+        self.assertNotIn("tests.test_ledger_db", workflow)
+
     def test_user_requested_model_schema_is_explicit_and_sol_escalation_is_removed(self):
         for tool_name in ("resolve_dispatch_route", "record_delegation"):
             with self.subTest(tool_name=tool_name):
@@ -1507,6 +1787,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_cortex_help_route_is_deterministic_and_read_only(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("ordinary tasks have", skill)
+        self.assertIn("non-empty `task.acceptance_criteria` and `task.verification`", skill)
+        self.assertIn("ask the user first", skill)
+        self.assertIn("`profile` is forbidden at package level", skill)
+        self.assertIn("non-empty `verification`, with optional `profile`", skill)
         self.assertEqual(self.cortex_routes(skill), {
             "empty": "orchestrate",
             "help": "help",

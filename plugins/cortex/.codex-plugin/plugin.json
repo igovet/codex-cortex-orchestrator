@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "6.6.0+codex.20260817231012",
+  "version": "8.0.0+codex.20260818180000",
   "description": "Relative Cortex orchestration for reliable staged agent work with durable internal audit state.",
   "author": {
     "name": "igovet"
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "Cortex",
     "shortDescription": "Coordinate staged work across Codex agents",
-    "longDescription": "Adds 21 bundled agent profiles, 10 skills, three coordinator lifecycle operations, scoped immutable dispatch briefings, and worker question/report transport over the canonical local Cortex v8 SQLite ledger. Cortex preserves the exact user-authored request, binds native workers for compaction-safe recovery, requires observable task and microtask contracts, reconciles worker claims with database-backed immutable evidence, applies checksummed SQLite-to-SQLite schema migrations on plugin upgrades, and keeps receipt-backed gates, verification, maintenance, and handoff state.",
+    "longDescription": "Adds 21 bundled agent profiles, 10 skills, evidence-first scope and planning gates, approval-fresh adaptive pipelines, scoped immutable dispatch briefings, and worker question/report transport over the canonical local Cortex v8 SQLite ledger. Cortex preserves the exact user-authored request, binds native workers for compaction-safe recovery, requires observable task and microtask contracts, reconciles worker claims with database-backed immutable evidence, applies checksummed SQLite-to-SQLite schema migrations on plugin upgrades, and keeps receipt-backed gates, verification, maintenance, and handoff state.",
     "developerName": "igovet",
     "category": "DeveloperTools",
     "capabilities": [

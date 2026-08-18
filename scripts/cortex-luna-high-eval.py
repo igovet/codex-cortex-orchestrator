@@ -36,11 +36,17 @@ SAFE_TOOL_NAMES = {
     "start_orchestration", "continue_orchestration", "manage_orchestration",
     "read_worker_report", "record_report", "worker_question", "read_dispatch_briefing",
 }
+SAFE_NATIVE_TOOL_NAMES = {
+    "spawn_agent", "wait", "send_message", "followup_task", "interrupt_agent", "list_agents", "close_agent",
+}
 SAFE_LEDGER_EVENTS = {
     "delegation", "orchestrate_wave", "worker_report", "attempt", "evidence", "gate",
     "task_started", "task_completed", "task_blocked", "task_resumed",
 }
-SAFE_GATE_NAMES = {"plan", "discover", "architecture", "implementation", "qa", "review", "close"}
+SAFE_GATE_NAMES = {
+    "scope", "plan", "discover", "architecture", "implementation", "qa", "security", "performance",
+    "accessibility", "ux", "review", "documentation", "close",
+}
 SAFE_TASK_STATUSES = {"active", "blocked", "completed", "failed", "unknown"}
 SAFE_ATTEMPT_STATUSES = {
     "awaiting_host_spawn", "running", "passed", "failed", "blocked", "idle_resumable",
@@ -50,6 +56,50 @@ SAFE_SESSION_STATUSES = {
     "awaiting_spawn", "running", "idle_resumable", "stopped_recoverable",
     "terminated_unavailable", "completed", "unknown",
 }
+SAFE_NATIVE_AGENT_STATUSES = {
+    "pending", "running", "completed", "failed", "cancelled", "shut_down", "unknown",
+}
+
+RESULT_FAILURE_PATTERNS = (
+    ("passed completion requires report_ref", "reportless_success"),
+    ("non-success completion requires an explicit reason", "missing_failure_reason"),
+    ("advance requires a non-empty completions array", "empty_results"),
+    ("advance completion attempt_ids must be unique", "duplicate_attempt_result"),
+    ("advance contains attempts outside the active wave", "wrong_attempt_result"),
+    ("advance is missing completions for", "missing_attempt_result"),
+    ("dispatch_ref", "dispatch_identity"),
+    ("unanswered blocking worker question", "open_worker_question"),
+    ("report_ref does not belong", "wrong_report_ref"),
+    ("report_validation_failed", "report_validation"),
+)
+NATIVE_TERMINAL_PATTERNS = (
+    ("report_validation_failed", "report_validation_failed"),
+    ("report_evidence_incomplete", "report_evidence_incomplete"),
+    ("report_identity_invalid", "report_identity_invalid"),
+    ("report_changed_files_invalid", "artifact_delta_error"),
+    ("worker_verification_failed", "test_evidence_error"),
+    ("dispatch_briefing_invalid", "dispatch_briefing_error"),
+    ("worker_output_language_violation", "output_language_error"),
+    ("blocking_question_open", "open_worker_question"),
+    ("unresolved_report_questions", "open_worker_question"),
+    ("intent_clarification_required", "open_worker_question"),
+    ("dispatch briefing", "dispatch_briefing_error"),
+    ("briefing digest", "dispatch_briefing_error"),
+    ("briefing_digest", "dispatch_briefing_error"),
+    ("gate acceptance", "evidence_marker_error"),
+    ("gate verification", "evidence_marker_error"),
+    ("predecessor review", "evidence_marker_error"),
+    ("knowledge reviewed", "evidence_marker_error"),
+    ("changed_files", "artifact_delta_error"),
+    ("read-only result gate", "artifact_delta_error"),
+    ("executed check", "test_evidence_error"),
+    ("report.tests", "test_evidence_error"),
+    ("mcp", "mcp_access_error"),
+    ("permission", "filesystem_access_error"),
+    ("unreadable", "filesystem_access_error"),
+    ("not found", "filesystem_access_error"),
+    ("record_report", "record_report_error"),
+)
 
 
 def configured_codex_home() -> Path:
@@ -194,6 +244,48 @@ def structured_ok(value: object) -> bool | None:
     return None
 
 
+def classified_result_failure(value: object) -> str | None:
+    """Classify a known lifecycle rejection without retaining response text."""
+    queue = [value]
+    visited = 0
+    while queue and visited < 64:
+        item = queue.pop(0)
+        visited += 1
+        if isinstance(item, dict):
+            queue.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            queue.extend(item)
+        elif isinstance(item, str):
+            lowered = item.lower()
+            for pattern, category in RESULT_FAILURE_PATTERNS:
+                if pattern in lowered:
+                    return category
+    return None
+
+
+def classified_native_outcome(value: object) -> str | None:
+    """Return only a safe durable-result class from native agent state."""
+    if not isinstance(value, dict):
+        return None
+    saw_message = False
+    for agent in value.values():
+        if not isinstance(agent, dict):
+            continue
+        message = str(agent.get("message") or "").strip()
+        if not message:
+            continue
+        saw_message = True
+        if message.startswith("REPORT_RECORDED report_ref="):
+            return "report_recorded"
+        if message.startswith("QUESTION_RECORDED question_ref="):
+            return "question_recorded"
+        lowered = message.lower()
+        for pattern, category in NATIVE_TERMINAL_PATTERNS:
+            if pattern in lowered:
+                return category
+    return "other_terminal_message" if saw_message else None
+
+
 def sanitize_codex_stream_line(line: str) -> dict[str, object]:
     """Classify a Codex JSON event while never returning its text or arguments."""
     try:
@@ -211,6 +303,27 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
             return {"event": "parent_turn", "status": "started" if event_type.endswith("started") else "completed"}
         return {"event": "host_event"}
     item_type = str(item.get("type") or "")
+    if item_type == "collab_tool_call":
+        tool = str(item.get("tool") or "")
+        safe_native: dict[str, object] = {
+            "event": "native_tool_call",
+            "tool": tool if tool in SAFE_NATIVE_TOOL_NAMES else "other",
+            "status": safe_status(item.get("status"), {"started", "in_progress", "completed", "failed"}),
+        }
+        states = item.get("agents_states")
+        native_outcome = classified_native_outcome(states)
+        if native_outcome is not None:
+            safe_native["outcome"] = native_outcome
+        if isinstance(states, dict):
+            statuses: dict[str, int] = {}
+            for agent in states.values():
+                if not isinstance(agent, dict):
+                    continue
+                status = safe_status(agent.get("status"), SAFE_NATIVE_AGENT_STATUSES)
+                statuses[status] = statuses.get(status, 0) + 1
+            if statuses:
+                safe_native["agent_statuses"] = statuses
+        return safe_native
     if item_type not in {"mcp_tool_call", "tool_call"}:
         if item_type in {"agent_message", "reasoning", "message"}:
             return {"event": "parent_activity", "kind": "model"}
@@ -228,6 +341,10 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
         ok = structured_ok(result)
         if ok is not None:
             safe["ok"] = ok
+        if ok is False:
+            failure_class = classified_result_failure(result)
+            if failure_class is not None:
+                safe["failure_class"] = failure_class
     return safe
 
 
@@ -553,7 +670,6 @@ def report(label: str, project: Path, changed_files: list[str] | None = None) ->
             "evidence": "The deterministic fixture command printed luna-high fixture and exited zero.",
         }],
         "evidence": [label], "uncertainty": [],
-        "next_action": "advance",
     }
 
 
@@ -585,6 +701,23 @@ def planning(label: str) -> dict[str, object]:
                 "acceptance_criteria": ["The fixture result is recorded."],
                 "verification": ["Run the deterministic fixture command."],
             }],
+        }],
+    }
+
+
+def scoping(label: str) -> dict[str, object]:
+    return {
+        "overview": f"Deterministic discovery brief for {label}.",
+        "context_files": [],
+        "discovery_domains": [{
+            "id": "fixture_runtime",
+            "title": "Fixture runtime",
+            "objective": "Trace the deterministic fixture lifecycle and evidence boundaries.",
+            "paths": ["."],
+            "context": ["Current source, tests, and executable fixture configuration are authoritative."],
+            "depends_on": [],
+            "acceptance_criteria": ["The discovery report maps the complete fixture lifecycle."],
+            "verification": ["Confirm the lifecycle against current fixture source and tests."],
         }],
     }
 
@@ -651,6 +784,8 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                 publication["closure"] = passing_closure(project, str(attempt["gate"]))
             if attempt.get("gate") == "plan":
                 publication["planning"] = planning(label)
+            if attempt.get("gate") == "scope":
+                publication["scoping"] = scoping(label)
             published = cortex.publish_worker_report(publication)
             if not published.get("ok"):
                 raise AssertionError(published)
@@ -680,8 +815,9 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     parallel = base / "parallel"
     parallel.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(parallel), "task": task("parallel Luna fixture", "standard"),
-        "waves": [{"workers": [{"phase": "research"}, {"phase": "architecture"}]}],
+        "project_root": str(parallel),
+        "task": {**task("parallel Luna fixture", "standard"), "plan_approval": "auto"},
+        "waves": [{"workers": [{"phase": "research"}, {"phase": "discover", "profile": "explorer"}]}],
     })
     if len(current.get("dispatches") or []) != 2:
         raise AssertionError("parallel fixture did not return two relative worker slots")
@@ -691,7 +827,8 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     blocked = base / "blocked"
     blocked.mkdir()
     current = cortex.start_orchestration({
-        "project_root": str(blocked), "task": task("blocked resume Luna fixture", "C2"),
+        "project_root": str(blocked),
+        "task": {**task("blocked resume Luna fixture", "C2"), "plan_approval": "auto"},
         "waves": [{"workers": [{"phase": "discover"}]}],
     })
     blocked_result = cortex.continue_orchestration({
@@ -734,7 +871,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
             or snapshot_cleanup.get("status") != "completed"
             or not report_records
             or any(set(item.get("report", {})) != {
-                "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action",
+                "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
             } for item in report_records)
             or any(
                 not isinstance(item.get("closure"), dict)
@@ -767,49 +904,129 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         return (
             "Use only the public Cortex tools for this isolated partial smoke test. "
             f"The exact project_root is {project}. The completed source task_ref is {source_task_ref!r}. "
-            "Call manage_orchestration exactly once with intent=follow_up, that task_ref, and payload.user_request exactly "
-            "'Correct the fixture result because the completed task produced the wrong behavior.' with complexity C1. "
+            "Call manage_orchestration exactly once with intent=follow_up, that task_ref, and payload exactly "
+            "{\"user_request\":\"Correct the fixture result because the completed task produced the wrong behavior.\","
+            "\"complexity\":\"C1\",\"acceptance_criteria\":[\"The linked corrective task is created without "
+            "mutating the completed source task.\"],\"verification\":[\"Inspect the returned follow-up linkage and "
+            "the unchanged source-task state.\"],\"plan_approval\":\"auto\"}. "
             "Do not call start_orchestration, continue_orchestration, or any private Cortex tool. Do not execute the returned "
             "worker dispatch: this test must stop after Cortex has created the linked corrective task. You may inspect that new task "
             "once with manage_orchestration to confirm it is awaiting its first worker."
         )
+    report_field_names = ", ".join(cortex.REPORT_FIELDS)
+    report_contract = f"exactly {len(cortex.REPORT_FIELDS)} report fields: {report_field_names}"
     common = (
         "Use the Cortex MCP public tools to complete this isolated task. "
         "You are the parent orchestrator. The exact task contract is the content inside <cortex_task_contract>; "
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
-        "never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist all eight report sections with record_report and return only report_ref plus a short summary. "
-        "For every review or close dispatch, record_report must also include a separate top-level closure sibling: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Never place closure inside the strict eight-key report. "
-        "Read every ref with read_worker_report and advance with report_ref. "
-        "and finish only after close evidence and handoff. Do not ask for manual argument corrections. "
+        f"never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist {report_contract} with record_report and return only report_ref plus a short summary. "
+        f"For every review or close dispatch, record_report must include both a top-level gate_result and a separate compatible top-level closure sibling: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Their decision, findings, verification, and workspace values must match. Never place gate_result or closure inside the strict {len(cortex.REPORT_FIELDS)}-key report. "
+        "Read every ref with read_worker_report and advance with report_ref. After a durable report was read and no "
+        "question or follow-up remains for that child, close the completed native child with close_agent when that "
+        "host tool is available, before dispatching a later wave; never close a running or question-paused child. "
+        "Before every new spawn, FIRST close every known leftover completed child only after its durable report was "
+        "read or its exact failed result was accepted by Cortex. If recovery may have missed a terminal child, use "
+        "list_agents defensively and apply the same rule; THEN spawn. Do not close active or question-paused children. "
+        "Treat a native child as successful only "
+        "when its final response starts with REPORT_RECORDED and the referenced report was read successfully. If a "
+        "stopped child returns anything else and no durable report exists, call continue_orchestration once for that "
+        "current wave with status=failed, the exact dispatch_ref from the dispatch, and the child's exact bounded "
+        "failure text as reason; never submit an empty result or a reportless success, and let Cortex issue any "
+        "bounded retry dispatch. Finish only after close evidence and handoff. Do not ask for manual argument "
+        "corrections. "
         f"The exact project_root is {project}. "
     )
     if scenario == "automatic_sequential":
         return common + (
             "<cortex_task_contract>"
-            "{\"user_request\":\"inspect README.md and append a concise verified note to result.md.\","
-            "\"acceptance_criteria\":[\"README.md is inspected and the note is grounded in its verified content.\","
-            "\"result.md has a concise note appended, preserving existing content.\","
+            "{\"user_request\":\"Inspect README.md and append exactly 'Verified note: README heading is Luna high Cortex fixture.' as one new line to result.md, creating the file if absent.\","
+            "\"complexity\":\"C2\","
+            "\"acceptance_criteria\":[\"README.md is inspected and its heading is confirmed as Luna high Cortex fixture.\","
+            "\"result.md contains exactly one appended line: Verified note: README heading is Luna high Cortex fixture.\","
             "\"The final handoff identifies the changed file and includes evidence that the append was verified.\"],"
-            "\"verification\":[\"Read README.md and confirm the appended note in result.md.\","
-            "\"Inspect the resulting diff or equivalent file evidence to verify only the intended concise append was made.\"],"
+            "\"verification\":[\"Read README.md and confirm its heading, then read result.md and confirm the exact appended line.\","
+            "\"Inspect the resulting diff or equivalent file evidence to verify only result.md received the intended line.\"],"
             "\"plan_approval\":\"auto\"}"
             "</cortex_task_contract>"
         )
     if scenario == "compact_parallel":
-        return common + "Use an explicit compact first wave with parallel discovery and architecture workers, then complete objective: create result.md summarizing the fixture."
+        return common + (
+            "<cortex_task_contract>"
+            "{\"user_request\":\"Inspect README.md, then create result.md containing exactly one line: Parallel discovery fixture completed.\","
+            "\"complexity\":\"C1\","
+            "\"acceptance_criteria\":[\"Two independent discovery workers inspect README.md in the first wave.\","
+            "\"result.md contains exactly one line: Parallel discovery fixture completed.\","
+            "\"Close evidence and the final handoff verify the intended file change.\"],"
+            "\"verification\":[\"Read README.md and both discovery reports before implementation.\","
+            "\"Read result.md and inspect the resulting diff or equivalent file evidence.\"],"
+            "\"plan_approval\":\"auto\"}"
+            "</cortex_task_contract> "
+            "Call start_orchestration exactly once with that exact task and these exact waves: "
+            "[{\"workers\":[{\"phase\":\"discover\",\"profile\":\"explorer\",\"objective\":\"Confirm the README heading and relevant context.\"},"
+            "{\"phase\":\"discover\",\"profile\":\"explorer\",\"objective\":\"Independently verify the required result.md content and constraints.\"}]},"
+            "{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"review\"}]},"
+            "{\"workers\":[{\"phase\":\"documentation\"}]},{\"workers\":[{\"phase\":\"close\"}]}]."
+        )
     if scenario == "planner_work_breakdown":
         return common + (
-            "Exercise the Planner work-breakdown contract end to end. Start a C2 task with plan_approval required and "
-            "a plan wave followed by the necessary implementation, documentation, review, and close waves. The Planner "
-            "must call record_report with the normal strict report plus a separate planning object containing an overview "
-            "and at least two dependency-linked work_packages, each with non-empty microtasks, ownership profiles, paths, "
-            "acceptance criteria, and verification. Read the Planner report and inspect the plan_review returned by Cortex. "
-            "For this automated acceptance exercise, the user has explicitly pre-authorized approving that reviewed plan: "
-            "call manage_orchestration intent=plan_approval with decision=approve, then complete the task by creating "
-            "result.md. Do not bypass the approval gate or edit .codex/cortex directly."
+            "Exercise the Planner work-breakdown contract deterministically. "
+            "<cortex_task_contract>"
+            "{\"user_request\":\"Inspect README.md, then create result.md containing exactly one line: Planner fixture completed.\","
+            "\"complexity\":\"C2\",\"acceptance_criteria\":[\"README.md is inspected.\","
+            "\"result.md contains exactly one line: Planner fixture completed.\",\"A final handoff is created.\"],"
+            "\"verification\":[\"Read README.md and result.md and verify the exact result.md content.\"],"
+            "\"plan_approval\":\"required\"}"
+            "</cortex_task_contract> "
+            "Call start_orchestration exactly once with that exact task and waves exactly "
+            "[{\"workers\":[{\"phase\":\"discover\"}]},{\"workers\":[{\"phase\":\"plan\"}]},"
+            "{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"qa\"}]},"
+            "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
+            "{\"workers\":[{\"phase\":\"close\"}]}]. Complete discovery before the singleton final Planner. "
+            "The Planner must read its supplied discovery report and publish the strict report plus this exact planning sibling: "
+            "{\"overview\":\"Inspect the source before producing and verifying the requested result.\","
+            "\"work_packages\":[{\"id\":\"inspect_source\",\"title\":\"Inspect source\","
+            "\"objective\":\"Inspect README.md.\",\"allowed_paths\":[\"README.md\"],\"microtasks\":[{"
+            "\"id\":\"read_readme\",\"title\":\"Read README\",\"objective\":\"Inspect README.md.\","
+            "\"profile\":\"explorer\",\"allowed_paths\":[\"README.md\"],"
+            "\"acceptance_criteria\":[\"README.md is inspected.\"],\"verification\":[\"Read README.md.\"]}]},{"
+            "\"id\":\"deliver_result\",\"title\":\"Deliver result\",\"objective\":\"Create and verify result.md.\","
+            "\"depends_on\":[\"inspect_source\"],\"allowed_paths\":[\"result.md\"],\"microtasks\":[{"
+            "\"id\":\"write_result\",\"title\":\"Write result\",\"objective\":\"Create the exact result.md line.\","
+            "\"profile\":\"general\",\"allowed_paths\":[\"result.md\"],"
+            "\"acceptance_criteria\":[\"result.md contains exactly the required Planner fixture line.\"],"
+            "\"verification\":[\"Read result.md and compare its exact content.\"]}]}]}. "
+            "Do not add, remove, rename, or reorder packages or microtasks. Read the plan report, close the completed "
+            "Planner child, then call "
+            "continue_orchestration with that report_ref. Only after it returns outcome=awaiting_plan_approval and "
+            "plan_review, call manage_orchestration intent=plan_approval with decision=approve; never call approval "
+            "before that continue. The user pre-authorized this fixture. Then run implementation, qa, review, "
+            "documentation, and close in the returned order. Implementation creates result.md. Do not bypass approval "
+            "or edit .codex/cortex."
         )
-    return common + "Exercise a blocked/resume or future-wave reassessment path safely, then create result.md and complete the task."
+    return common + (
+        "Exercise a deterministic future-wave reassessment without manufacturing a blocker. "
+        "<cortex_task_contract>"
+        "{\"user_request\":\"Inspect README.md, then create result.md containing exactly one line: Reassessment fixture completed.\","
+        "\"complexity\":\"C2\","
+        "\"acceptance_criteria\":[\"README.md is inspected before result.md is created.\","
+        "\"result.md contains exactly one line: Reassessment fixture completed.\","
+        "\"The final handoff identifies result.md and the verification evidence.\"],"
+        "\"verification\":[\"Read README.md and result.md, then verify the exact result.md content.\","
+        "\"Inspect the resulting diff or equivalent file evidence.\"],"
+        "\"plan_approval\":\"auto\"}"
+        "</cortex_task_contract> "
+        "Call start_orchestration with that exact task and these exact initial waves: "
+        "[{\"workers\":[{\"phase\":\"discover\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
+        "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"close\"}]}]. "
+        "After the discover report is read and its completed child is closed, call continue_orchestration for that "
+        "wave with its exact task_ref, step, and report_ref result plus future_waves exactly "
+        "[{\"workers\":[{\"phase\":\"implementation\"}]},{\"workers\":[{\"phase\":\"documentation\"}]},"
+        "{\"workers\":[{\"phase\":\"review\"}]},{\"workers\":[{\"phase\":\"close\"}]}] and reason exactly "
+        "'Discovery confirms result.md must be created, so add implementation before documentation.' Do not set "
+        "rework. This one replacement must create the reassessment evidence; after it, follow the returned pipeline "
+        "normally and do not replace future waves again."
+    )
 
 
 def live_eval(
@@ -857,6 +1074,8 @@ def live_eval(
         events = list(streamed["events"])
         tool_names: list[str] = []
         completed_tool_names: list[str] = []
+        native_tool_names: list[str] = []
+        completed_native_tool_names: list[str] = []
         failed_public_calls: list[str] = []
         for event in events:
             if not isinstance(event, dict) or event.get("event") != "cortex_mcp_call":
@@ -868,6 +1087,14 @@ def live_eval(
                     completed_tool_names.append(name)
                     if event.get("ok") is False:
                         failed_public_calls.append(name)
+        for event in events:
+            if not isinstance(event, dict) or event.get("event") != "native_tool_call":
+                continue
+            name = event.get("tool")
+            if isinstance(name, str):
+                native_tool_names.append(name)
+                if event.get("status") == "completed":
+                    completed_native_tool_names.append(name)
         task_dirs = list((project / ".codex/cortex/tasks").glob("*"))
         task_dir = task_dirs[0] if len(task_dirs) == 1 else None
         if scenario == "follow_up_partial":
@@ -882,7 +1109,7 @@ def live_eval(
             json.loads(cortex.db_read_artifact_content(ledger, str(state["task_id"]), str(item["artifact_ref"])))
             for item in report_artifacts
         ]
-        report_keys = {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}
+        report_keys = set(cortex.REPORT_FIELDS)
         strict_reports = bool(report_records) and all(
             set(record.get("report", {})) == report_keys
             for record in report_records
@@ -938,6 +1165,9 @@ def live_eval(
             "review_close_closures": closures_valid,
             "no_failed_public_calls": not failed_public_calls,
             "one_start": completed_tool_names.count("start_orchestration") == 1,
+            "native_dispatch_exercised": "spawn_agent" in completed_native_tool_names,
+            "native_wait_exercised": "wait" in completed_native_tool_names,
+            "native_cleanup_exercised": "close_agent" in completed_native_tool_names,
         }
         if scenario == "compact_parallel":
             checks["parallel_wave_exercised"] = parallel_exercised
@@ -983,6 +1213,7 @@ def live_eval(
             "exit_code": streamed["returncode"], "elapsed_seconds": streamed["elapsed_seconds"],
             "termination": streamed["termination"], "dropped_stream_events": streamed["dropped_stream_events"],
             "tool_names": tool_names,
+            "native_tool_names": native_tool_names,
             "checks": checks, "failed_public_calls": failed_public_calls,
         })
         if not passed:
@@ -1004,10 +1235,10 @@ def live_eval(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="run the three real gpt-5.6-luna high parent scenarios")
+    parser.add_argument("--live", action="store_true", help="run the four real gpt-5.6-luna high parent scenarios")
     parser.add_argument(
         "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown", "follow_up_partial"),
-        help="run one live scenario for diagnosis; the default release run still requires all three",
+        help="run one live scenario for diagnosis; the default release run still requires all four",
     )
     parser.add_argument(
         "--live-timeout-seconds", type=int, default=LIVE_TIMEOUT_SECONDS,

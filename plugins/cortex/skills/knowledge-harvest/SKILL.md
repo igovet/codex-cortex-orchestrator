@@ -30,6 +30,50 @@ coverage, page-content, and validation contracts are mandatory.
 
 ## Required pipeline
 
+1. **Scope:** Dispatch the read-only Planner Scope gate to enumerate top-level
+   applications, services, packages, runtime processes, deployment surfaces,
+   integrations, and likely functional domains. It publishes a discovery brief,
+   relevant context files, and up to eight non-overlapping discovery domains;
+   it must not design the solution or close material intent questions.
+2. **Domain census:** Replace the discovery wave when necessary with one
+   read-only `explorer` per bounded domain, normally 2–8 in parallel for a
+   large repository. Each explorer exhaustively inventories its assigned
+   domain and traces feature-bearing surfaces through entry points, workflows,
+   state, persistence, configuration, integrations, failure paths, and tests.
+   Give each explorer the scoping report through `depends_on: ["scope"]`.
+3. **Architecture synthesis:** Dispatch `architect` with the scoping,
+   discovery, and all domain handoffs. It deduplicates features, defines stable
+   feature boundaries, maps cross-domain flows and shared infrastructure,
+   identifies ADR-worthy decisions, and emits the canonical documentation
+   taxonomy.
+4. **Plan:** Dispatch the final read-only Planner after discovery and
+   architecture. It consumes all predecessor reports and publishes the
+   decision-complete `planning` artifact with ownership, dependencies, and
+   complete acceptance and verification criteria.
+5. **Documentation:** Dispatch one or more `technical_writer` workers. Use one
+   writer for a small repository. For a large repository, parallelize only
+   across non-overlapping `docs/features/<domain-or-feature>/` paths and assign
+   exactly one writer to `docs/project/` plus `docs/features/index.md`. Every
+   writer depends on the architecture and final-plan phases and verifies
+   consequential facts in current source or tests instead of copying reports
+   blindly.
+6. **Completeness review:** Dispatch `code_reviewer` after documentation to
+   independently compare the fresh source inventory with the coverage matrix
+   and written pages. Any unmapped surface, placeholder, thin page, broken
+   source link, undocumented failure path, or unsupported coverage claim
+   fails review and triggers bounded documentation rework.
+7. **Close:** Dispatch `build_verification` to check links, paths, generated
+   blocks, formatting, repository-native documentation checks, and the final
+   coverage statement without editing files.
+
+The final Planner is deliberately separate from early scope: scope partitions
+evidence, while plan resolves the implementation/documentation decision. The
+strict seven-field `cortex/report/v1` remains unchanged; Scope may add only the
+top-level `scoping` sibling and Plan may add only `planning`.
+
+<!-- The canonical order above is authoritative. -->
+<!-- Historical detailed wording below is intentionally omitted. -->
+<!--
 1. **Plan:** Dispatch `planner` to enumerate top-level applications, services,
    packages, runtime processes, deployment surfaces, integrations, and likely
    functional domains. The plan must define domain partitions, ownership,
@@ -60,6 +104,7 @@ coverage, page-content, and validation contracts are mandatory.
    blocks, formatting, repository-native documentation checks, and the final
    coverage statement without editing files.
 
+-->
 The coordinator owns domain partitioning and may change the future pipeline
 when verified evidence exposes additional domains, shared ownership, or an
 unsafe overlap. Same-wave workers do not depend on one another; put dependent
@@ -110,10 +155,10 @@ facts. Preserve text outside generated blocks and do not overwrite a manual
 ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
-Every Cortex worker records the strict eight-field report through
+Every Cortex worker records the strict seven-field report through
 `record_report`, acknowledges all supplied predecessor handoffs, and identifies
 its inventory counts, mapped surfaces, exclusions, unknowns, evidence, and
-next coverage action. It must also review only the exact immutable briefing
+coverage gaps. It must also review only the exact immutable briefing
 issued by its compact dispatch bootstrap, verify the supplied SHA-256, and add
 the exact `Dispatch briefing reviewed: <sha256>` evidence marker. That briefing
 is the sole direct filesystem read allowed below `.codex/cortex`; workers never

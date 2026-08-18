@@ -576,7 +576,16 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
         "thread_ids", "threadIds", "targets", "ids",
     )
     present_targets = [tool_input.get(key) for key in target_keys if key in tool_input]
-    wait_shaped = action in {"wait", "wait_agent"} or bool(present_targets)
+    # The dedicated ``wait`` host tool is inherently wait-shaped even when
+    # the host sends an empty input object.  Without this branch a failed
+    # spawn could fall through as an ordinary tool call and allow an
+    # unspawned wait to block before Cortex can emit its actionable dispatch
+    # diagnostic.
+    wait_shaped = (
+        str(event.get("tool_name")) == "wait"
+        or action in {"wait", "wait_agent"}
+        or bool(present_targets)
+    )
     has_target = any(isinstance(value, list) and any(str(item).strip() for item in value) for value in present_targets)
     has_persisted_child = any(
         isinstance(item, dict)
@@ -695,7 +704,7 @@ def stopped_worker_after_wait_context(
     state: dict,
     public_task_ref: str | None,
 ) -> str | None:
-    """Reassert exact-worker resume recovery after a native stop."""
+    """Reassert bounded recovery after a reportless native stop."""
     if (
         str(event.get("hook_event_name")) != "PostToolUse"
         or str(event.get("tool_name")) not in {"Agent", "wait"}
@@ -705,16 +714,24 @@ def stopped_worker_after_wait_context(
         item for item in state.get("attempts", [])
         if isinstance(item, dict) and not item.get("invalidated")
     ]
-    if not attempts:
+    current_gates = {
+        str(item) for item in (state.get("current_gates") or [])
+        if str(item).strip()
+    }
+    stopped_attempts = [
+        item for item in attempts
+        if item.get("host_stop_outcome") == "native_worker_stopped_without_report"
+        and (not current_gates or str(item.get("gate") or "") in current_gates)
+    ]
+    if not stopped_attempts:
         return None
-    latest = attempts[-1]
-    if latest.get("host_stop_outcome") != "native_worker_stopped_recoverable":
-        return None
-    attempt_id = str(latest.get("attempt_id") or "unknown")
-    host_spawn = latest.get("host_spawn") or {}
+    stopped = stopped_attempts[-1]
+    attempt_id = str(stopped.get("attempt_id") or "unknown")
+    dispatch_ref = str(stopped.get("dispatch_ref") or "").strip()
+    host_spawn = stopped.get("host_spawn") or {}
     host_agent_id = str(host_spawn.get("agent_id") or "").strip()
-    host_task_name = str(host_spawn.get("task_name") or (latest.get("spawn_request") or {}).get("task_name") or "").strip()
-    if not host_agent_id or not host_task_name:
+    host_task_name = str(host_spawn.get("task_name") or (stopped.get("spawn_request") or {}).get("task_name") or "").strip()
+    if not dispatch_ref or not host_agent_id or not host_task_name:
         return None
     inspect = (
         f"Call manage_orchestration(intent='inspect', task_ref={public_task_ref!r}) once"
@@ -722,9 +739,11 @@ def stopped_worker_after_wait_context(
         else "Call manage_orchestration(intent='inspect') once with the preserved task_ref"
     )
     return (
-        f"CORTEX WAIT RECOVERY: latest attempt {attempt_id!r} stopped without a report but remains resumable on its exact "
-        f"native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). Do not respawn it or substitute another worker. "
-        f"{inspect}; then resume this exact worker with followup_task and request its durable report."
+        f"CORTEX WAIT RECOVERY: attempt {attempt_id!r} stopped without a report and is terminal failed "
+        f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_report'). Do not wait on, respawn, "
+        f"or follow up the stopped native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). "
+        f"{inspect}; then submit exactly one result with status='failed', this dispatch_ref, and this reason so Cortex can apply its "
+        "bounded retry policy."
     )
 
 

@@ -21,6 +21,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/cortex-luna-high-eval.py"
+FAILURE_FIXTURE_API_KEY = "TEST_ONLY_FAILURE_METADATA_API_KEY"
 
 
 def load_harness():
@@ -256,6 +257,70 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         calls = [item for item in events if item.get("event") == "cortex_mcp_call"]
         self.assertEqual(calls[0]["tool"], "start_orchestration")
         self.assertEqual(calls[0]["ok"], False)
+
+    def test_native_collaboration_events_expose_only_safe_tool_status(self) -> None:
+        line = json.dumps({
+            "type": "item",
+            "item": {
+                "type": "collab_tool_call",
+                "tool": "spawn_agent",
+                "status": "completed",
+                "prompt": "SECRET_PROMPT",
+                "agents_states": {"child": {"message": "SECRET_REPORT"}},
+            },
+        })
+        event = self.harness.sanitize_codex_stream_line(line)
+        self.assertEqual(event, {
+            "event": "native_tool_call",
+            "tool": "spawn_agent",
+            "status": "completed",
+            "outcome": "other_terminal_message",
+            "agent_statuses": {"unknown": 1},
+        })
+        self.assertNotIn("SECRET_PROMPT", json.dumps(event))
+        self.assertNotIn("SECRET_REPORT", json.dumps(event))
+
+        closed = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {"type": "collab_tool_call", "tool": "close_agent", "status": "completed"},
+        }))
+        self.assertEqual(closed["tool"], "close_agent")
+
+    def test_stream_classifies_native_report_and_known_lifecycle_failure(self) -> None:
+        native = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {
+                "type": "collab_tool_call",
+                "tool": "wait",
+                "status": "completed",
+                "agents_states": {
+                    "child": {
+                        "status": "completed",
+                        "message": "REPORT_RECORDED report_ref=SECRET_REF\nSECRET_SUMMARY",
+                    },
+                },
+            },
+        }))
+        self.assertEqual(native["outcome"], "report_recorded")
+        self.assertEqual(native["agent_statuses"], {"completed": 1})
+        self.assertNotIn("SECRET_REF", json.dumps(native))
+        validation = self.harness.classified_native_outcome({
+            "child": {"message": "record_report returned report_validation_failed for SECRET_PATH"},
+        })
+        self.assertEqual(validation, "report_validation_failed")
+        lifecycle = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {
+                "type": "mcp_tool_call",
+                "tool": "mcp__cortex__continue_orchestration",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "error": "passed completion requires report_ref from SECRET_REPORT",
+                    },
+                },
+            },
+        }))
+        self.assertEqual(lifecycle["failure_class"], "reportless_success")
+        self.assertNotIn("SECRET_REPORT", json.dumps(lifecycle))
 
     def test_isolated_codex_runtime_uses_minimal_private_environment_and_cleans_up(self) -> None:
         base = self.root / "runtime-base"
@@ -664,6 +729,11 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         bin_dir = self.fake_codex()
         environment = os.environ.copy()
         environment["PATH"] = f"{bin_dir}{os.pathsep}{environment.get('PATH', '')}"
+        # This fixture exercises failure-metadata handling with a fake Codex
+        # binary, not evaluator authentication. Give the isolated runtime an
+        # explicit test-only credential so a clean CI runner does not depend
+        # on a developer's ~/.codex/auth.json.
+        environment["CODEX_API_KEY"] = FAILURE_FIXTURE_API_KEY
         with mock.patch.dict(os.environ, environment, clear=True):
             return self.harness.live_eval(
                 base,
@@ -690,8 +760,10 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         result = results[0]
         self.assertEqual(result["failure_metadata"], "not_retained")
         self.assertNotIn("failure_artifacts", result)
-        self.assertNotIn("SECRET_PROMPT", json.dumps(result, sort_keys=True))
-        self.assertNotIn("SECRET_REPORT", json.dumps(result, sort_keys=True))
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn("SECRET_PROMPT", serialized)
+        self.assertNotIn("SECRET_REPORT", serialized)
+        self.assertNotIn(FAILURE_FIXTURE_API_KEY, serialized)
 
     def test_live_failure_metadata_requires_opt_in_and_is_sanitized(self) -> None:
         retention_dir = self.root / "retained-failure"
@@ -714,6 +786,7 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         serialized = json.dumps(progress, sort_keys=True)
         self.assertNotIn("SECRET_PROMPT", serialized)
         self.assertNotIn("SECRET_REPORT", serialized)
+        self.assertNotIn(FAILURE_FIXTURE_API_KEY, serialized)
         self.assertLessEqual(len(progress["events"]), 100)
         self.assertEqual(progress["events"][0]["tool"], "record_report")
         self.assertEqual(progress["events"][0]["ok"], False)

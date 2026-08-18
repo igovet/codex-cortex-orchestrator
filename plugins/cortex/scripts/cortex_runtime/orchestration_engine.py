@@ -14,6 +14,10 @@ from typing import Any
 from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
 
 
+class PlanReapprovalRequired(ValueError):
+    """A post-plan dispatch cannot use the currently approved evidence basis."""
+
+
 # The executable facade is the composition root.  It supplies this explicitly
 # declared port set after it has finished initialization; this module never
 # imports the facade and therefore cannot form a reverse import cycle.
@@ -34,6 +38,7 @@ bind_symbols(
         "ORCHESTRATE_SCHEMA",
         "ORCHESTRATION_PLAN_SCHEMA",
         "ORCHESTRATION_TRANSACTION_SCHEMA",
+        "PIPELINE_CONTRACT_VERSION",
         "REPORT_SCHEMA",
         "SUPPORTED_MODELS",
         "TERMINAL_ATTEMPT_STATUSES",
@@ -69,6 +74,7 @@ bind_symbols(
         "current_planning_manifest",
         "db_get_classification",
         "db_get_operation",
+        "db_list_task_findings",
         "db_load_task",
         "db_put_operation",
         "db_update_task_plan",
@@ -193,7 +199,9 @@ def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
             "policy": _plan_approval(state).get("policy", "auto"),
             "status": _plan_approval(state).get("status", "not_required"),
             "plan_report_ref": _plan_approval(state).get("plan_report_ref"),
+            "approved_basis": _plan_approval(state).get("approved_basis"),
         },
+        "pipeline_contract_version": _pipeline_contract_version(state),
         "attempts": [
             {
                 "attempt_id": item.get("attempt_id"),
@@ -336,6 +344,7 @@ def _leave_orchestrate_transaction_retryable(
 
 def _default_profile_for_gate(gate: str) -> str:
     return {
+        "scope": "planner",
         "plan": "planner",
         "discover": "explorer",
         "architecture": "architect",
@@ -354,7 +363,7 @@ def _default_profile_for_gate(gate: str) -> str:
 
 def _default_task_kind_for_gate(gate: str) -> str:
     return {
-        "plan": "planning", "discover": "discovery", "architecture": "architecture",
+        "scope": "scoping", "plan": "planning", "discover": "discovery", "architecture": "architecture",
         "database_architecture": "database", "implementation": "implementation", "qa": "testing",
         "security": "security", "performance": "performance", "accessibility": "accessibility",
         "ux": "ux", "review": "code_review", "documentation": "documentation", "close": "verification",
@@ -430,7 +439,7 @@ def _normalize_orchestrate_waves(
                 objective = str(raw_spec.get("objective") or briefing["objective"]).strip()
                 ownership = str(raw_spec.get("ownership") or briefing["ownership"]).strip()
                 task_kind = str(raw_spec.get("task_kind") or _default_task_kind_for_gate(gate))
-                risk = str(raw_spec.get("risk") or ("high" if gate == "security" else "low" if gate in {"plan", "discover", "documentation"} else "moderate"))
+                risk = str(raw_spec.get("risk") or ("high" if gate == "security" else "low" if gate in {"scope", "plan", "discover", "documentation"} else "moderate"))
                 spec = {
                     **raw_spec,
                     "gate": gate,
@@ -464,6 +473,53 @@ def _normalize_orchestrate_waves(
                 delegations.append(spec)
         normalized.append({"wave_id": wave_id, "gates": list(group), "delegations": delegations, "status": "pending"})
     return normalized, classification
+
+
+def _validate_v2_wave_contract(
+    waves: list[dict[str, Any]],
+    *,
+    plan_approval: str,
+) -> None:
+    """Enforce evidence-first ordering for newly created pipeline-v2 tasks."""
+    positions = {
+        gate: index
+        for index, wave in enumerate(waves)
+        for gate in wave.get("gates", [])
+    }
+    if "scope" in positions and "discover" in positions and positions["scope"] >= positions["discover"]:
+        raise ValueError("pipeline contract v2 requires scope before discover")
+    design_gates = [gate for gate in ("architecture", "database_architecture", "ux") if gate in positions]
+    if "discover" in positions:
+        late_design = [gate for gate in design_gates if positions[gate] <= positions["discover"]]
+        if late_design:
+            raise ValueError("pipeline contract v2 requires discovery before design gates: " + ", ".join(late_design))
+    preplan = [
+        gate for gate in ("scope", "discover", "architecture", "database_architecture", "ux")
+        if gate in positions
+    ]
+    if "plan" in positions:
+        late = [gate for gate in preplan if positions[gate] >= positions["plan"]]
+        if late:
+            raise ValueError(
+                "pipeline contract v2 requires final plan after scope, discovery, and pre-implementation design gates: "
+                + ", ".join(late)
+            )
+    if plan_approval == "required":
+        if "plan" not in positions:
+            raise ValueError("plan_approval=required requires a singleton final plan wave")
+        plan_wave = waves[positions["plan"]]
+        if plan_wave.get("gates") != ["plan"] or len(plan_wave.get("delegations", [])) != 1:
+            raise ValueError("plan_approval=required requires a singleton final plan wave")
+        if plan_wave["delegations"][0].get("agent") != "planner":
+            raise ValueError("plan_approval=required requires the planner profile for the final plan wave")
+    if "implementation" in positions:
+        for audit in ("security", "performance", "accessibility"):
+            if audit in positions and positions[audit] <= positions["implementation"]:
+                raise ValueError(f"pipeline contract v2 requires {audit} after implementation")
+    if "review" in positions:
+        for audit in ("security", "performance", "accessibility"):
+            if audit in positions and positions[audit] >= positions["review"]:
+                raise ValueError(f"pipeline contract v2 requires {audit} before review")
 
 
 def _orchestrate_plan_path(task_dir: Path) -> Path:
@@ -534,10 +590,72 @@ def _predecessor_context_report_ids(
     return selected
 
 
+def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[str]:
+    """Keep the report that opened an active corrective wave in its context.
+
+    A closure rework invalidates its predecessor gate, so ordinary predecessor
+    selection intentionally excludes that report.  The corrective worker still
+    needs it: otherwise it receives a generic implementation task with no
+    durable statement of the defect it must resolve.
+    """
+    selected: list[str] = []
+    for source_gate, rework in (state.get("closure_rework") or {}).items():
+        if not isinstance(rework, dict):
+            continue
+        if rework.get("status") != "rework_required" or not (
+            rework.get("target_gate") in gates or source_gate in gates
+        ):
+            continue
+        for report_ref in rework.get("source_report_refs") or []:
+            value = str(report_ref).strip()
+            if value and value not in selected:
+                selected.append(value)
+    return selected
+
+
+def _unresolved_rework_findings(
+    root: Path,
+    state: dict[str, Any],
+    gate: str,
+) -> list[dict[str, Any]]:
+    """Return findings that their originating verification gate still has to close."""
+    findings = {
+        str(item.get("fingerprint")): item
+        for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
+    }
+    unresolved: list[dict[str, Any]] = []
+    for source_gate, rework in (state.get("closure_rework") or {}).items():
+        # A corrective implementation/documentation worker may perform the
+        # change, but the gate that found the defect must verify it.  Holding
+        # the source gate rather than the writer preserves the canonical
+        # implementation -> QA or documentation -> review route and prevents
+        # a generic writer report from being treated as proof of a fix.
+        if (
+            not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+            or source_gate != gate
+        ):
+            continue
+        fingerprints = [str(item) for item in rework.get("finding_fingerprints") or []]
+        open_findings = [
+            findings[fingerprint]
+            for fingerprint in fingerprints
+            if findings.get(fingerprint, {}).get("status") == "open"
+        ]
+        if open_findings:
+            unresolved.extend(open_findings)
+        elif rework.get("status") == "rework_required":
+            rework["status"] = "resolved"
+            rework["resolved_at"] = now()
+            rework["resolved_by_gate"] = gate
+    return unresolved
+
+
 def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     current_gates = active_gates(state)
     if not current_gates:
         return {"wave_id": None, "spawn_requests": [], "attempt_ids": [], "state": state}
+    _assert_approved_plan_fresh(task_dir, state, plan)
     wave = _wave_for_gates(plan, current_gates)
     if wave is None:
         raise ValueError("orchestrate plan has no wave for the current gates")
@@ -562,6 +680,7 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
         )
     prepared_attempts: list[dict[str, Any]] = []
     predecessor_report_ids = _predecessor_context_report_ids(state)
+    rework_report_ids = _rework_context_report_ids(state, set(current_gates))
     for spec in wave["delegations"]:
         key = spec["orchestration_delegation_key"]
         existing = next(
@@ -596,6 +715,23 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             )
         else:
             context_report_ids = predecessor_report_ids
+        if spec.get("gate") == "plan" and _pipeline_contract_version(state) >= 2:
+            required_basis, _ = _verified_plan_predecessor_basis(task_dir, state)
+            required_reports = {item["report_ref"] for item in required_basis}
+            missing_required = sorted(required_reports - set(context_report_ids))
+            if missing_required:
+                raise ValueError(
+                    "final planner must receive every verified scope, discovery, architecture, database_architecture, and ux predecessor report: "
+                    + ", ".join(missing_required)
+                )
+        # The report that triggered corrective work stays readable even though
+        # its original gate receipt was invalidated.  Put it first so bounded
+        # context cannot silently discard the reason for the rework.
+        context_report_ids = list(dict.fromkeys(rework_report_ids + context_report_ids))
+        if len(context_report_ids) > MAX_CONTEXT_REPORTS:
+            raise ValueError(
+                f"verified predecessor context contains {len(context_report_ids)} reports, exceeding the {MAX_CONTEXT_REPORTS}-report limit; narrow the discovery wave before dispatch"
+            )
         delegated = record_delegation({
             **params,
             **spec,
@@ -693,11 +829,19 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
     if not isinstance(host_capabilities, dict):
         raise ValueError("start requires host_capabilities")
     waves, classification_preview = _normalize_orchestrate_waves(params.get("waves"), task, host_capabilities, str(params["project_root"]))
-    if str(task.get("plan_approval") or "auto") == "required":
-        plan_wave = next((wave for wave in waves if "plan" in wave.get("gates", [])), None)
-        if plan_wave is not None and len(plan_wave.get("gates", [])) != 1:
-            raise ValueError("plan_approval=required requires plan to be in its own wave")
     root = ledger_root(params)
+    existing_contract_version = PIPELINE_CONTRACT_VERSION
+    try:
+        _, _, existing_preview = load_state(task_id, params)
+    except (FileNotFoundError, ValueError):
+        existing_preview = None
+    if isinstance(existing_preview, dict):
+        existing_contract_version = int(existing_preview.get("pipeline_contract_version") or 1)
+    if existing_contract_version >= 2:
+        _validate_v2_wave_contract(
+            waves,
+            plan_approval=str(task.get("plan_approval") or "auto"),
+        )
     with state_lock(root):
         activated = activate_orchestration({**params, "user_command": ACTIVATION_COMMAND})
         if not activated.get("active"):
@@ -748,6 +892,9 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
         plan = {
             "schema": ORCHESTRATION_PLAN_SCHEMA,
             "task_id": task_id,
+            "pipeline_contract_version": int(state.get("pipeline_contract_version") or 1),
+            "semantic_pipeline_version": 1,
+            "history": [],
             "waves": waves,
             "host_capabilities": sanitize_structured(host_capabilities),
             "classification": classification_preview,
@@ -794,7 +941,141 @@ def _report_receipt_for_attempt(task_dir: Path, state: dict[str, Any], attempt_i
     return receipt
 
 
-def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+def _pipeline_contract_version(state: dict[str, Any]) -> int:
+    """Treat active tasks created before the additive field as pipeline v1."""
+    return int(state.get("pipeline_contract_version") or 1)
+
+
+def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project approval-relevant semantics after the most recent plan wave.
+
+    Wave completion is execution progress, not a semantic pipeline change.
+    Keeping already-executed post-plan waves in this projection makes the
+    approval digest stable while the approved pipeline advances normally.
+    """
+    semantic: list[dict[str, Any]] = []
+    waves = [wave for wave in plan.get("waves", []) if isinstance(wave, dict)]
+    plan_positions = [
+        index for index, wave in enumerate(waves)
+        if "plan" in wave.get("gates", [])
+    ]
+    selected = waves[plan_positions[-1] + 1:] if plan_positions else waves
+    for wave in selected:
+        if not isinstance(wave, dict):
+            continue
+        workers = []
+        for spec in wave.get("delegations", []):
+            if not isinstance(spec, dict):
+                continue
+            dependencies: object = (
+                list(spec.get("context_gates") or [])
+                if "context_gates" in spec else "all_verified_predecessors"
+            )
+            workers.append({
+                "phase": spec.get("gate"),
+                "profile": spec.get("agent"),
+                "objective": str(spec.get("objective") or ""),
+                "paths": list(spec.get("allowed_paths") or []),
+                "dependencies": dependencies,
+                "context_files": list(spec.get("context_files") or []),
+                "acceptance_criteria": list(spec.get("acceptance_criteria") or []),
+                "verification": list(spec.get("verification") or []),
+            })
+        if workers:
+            semantic.append({"workers": workers})
+    return semantic
+
+
+def _semantic_future_pipeline_digest(plan: dict[str, Any]) -> str:
+    return digest_text(json.dumps(
+        _semantic_future_pipeline(plan),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ))
+
+
+def _verified_plan_predecessor_basis(
+    task_dir: Path,
+    state: dict[str, Any],
+) -> tuple[list[dict[str, str]], str]:
+    pipeline = list(state.get("current_pipeline") or [])
+    plan_index = pipeline.index("plan") if "plan" in pipeline else len(pipeline)
+    required_gates = {
+        gate for gate in ("scope", "discover", "architecture", "database_architecture", "ux")
+        if gate in pipeline and pipeline.index(gate) < plan_index
+    }
+    report_refs = _predecessor_context_report_ids(state, required_gates)
+    basis: list[dict[str, str]] = []
+    for report_ref in report_refs:
+        record, _ = read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{safe_id(str(report_ref))}.json",
+            kinds={"worker_report", "report_record"},
+        )
+        basis.append({
+            "phase": str(record.get("gate") or ""),
+            "report_ref": safe_id(str(record.get("report_id") or "")),
+            "content_digest": str(record.get("content_digest") or ""),
+        })
+    digest = digest_text(json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    return basis, digest
+
+
+def _current_plan_basis(
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    report_ref: str,
+) -> dict[str, Any]:
+    manifest = current_planning_manifest(task_dir)
+    if not isinstance(manifest, dict) or manifest.get("source_report_ref") != report_ref:
+        raise ValueError("plan approval requires the current planning revision from the final planner report")
+    predecessor_reports, predecessor_digest = _verified_plan_predecessor_basis(task_dir, state)
+    return {
+        "pipeline_contract_version": _pipeline_contract_version(state),
+        "plan_revision": str(manifest.get("revision") or ""),
+        "plan_report_ref": report_ref,
+        "verified_predecessor_reports": predecessor_reports,
+        "verified_predecessor_digest": predecessor_digest,
+        "semantic_pipeline_version": int(plan.get("semantic_pipeline_version") or 1),
+        "semantic_future_pipeline_digest": _semantic_future_pipeline_digest(plan),
+    }
+
+
+def _assert_approved_plan_fresh(
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> None:
+    if _pipeline_contract_version(state) < 2:
+        return
+    approval = _plan_approval(state)
+    if approval.get("policy") != "required" or "plan" not in state.get("completed_gates", []):
+        return
+    current_gates = set(active_gates(state))
+    if not current_gates or current_gates <= {"scope", "discover", "architecture", "database_architecture", "ux", "plan"}:
+        return
+    if approval.get("status") != "approved":
+        raise PlanReapprovalRequired("post-plan work requires an explicitly approved current plan revision")
+    report_ref = safe_id(str(approval.get("plan_report_ref") or ""))
+    current = _current_plan_basis(task_dir, state, plan, report_ref=report_ref)
+    approved = approval.get("approved_basis") if isinstance(approval.get("approved_basis"), dict) else {}
+    keys = (
+        "plan_revision", "plan_report_ref", "verified_predecessor_digest",
+        "semantic_pipeline_version", "semantic_future_pipeline_digest",
+    )
+    mismatches = [key for key in keys if approved.get(key) != current.get(key)]
+    if mismatches:
+        raise PlanReapprovalRequired(
+            "approved plan basis is stale for: " + ", ".join(mismatches)
+            + "; rework the plan and obtain explicit approval before dispatch"
+        )
+
+
+def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     """Return a bounded coordinator-facing summary of the completed plan."""
     planner_attempts = [
         item for item in state.get("attempts", [])
@@ -833,8 +1114,10 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any
                 if isinstance(package, dict)
             ],
         }
+    basis = _current_plan_basis(task_dir, state, plan, report_ref=report_ref)
     return {
         "report_ref": report_ref,
+        **basis,
         # This payload is persisted while the orchestration transaction is
         # held.  Keep it wholly canonical: a Markdown projection is optional
         # filesystem output and is resolved only once the transaction commits.
@@ -842,7 +1125,6 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any]) -> dict[str, Any
         "summary": redact(report["summary"], 2400),
         "findings": [redact(item, 1000) for item in report.get("findings", [])][:12],
         "uncertainty": [redact(item, 1000) for item in report.get("uncertainty", [])][:12],
-        "next_action": redact(report["next_action"], 1200),
         "remaining_phases": list(active_gates(state)),
         **({"planning_artifacts": artifact_summary} if artifact_summary else {}),
     }
@@ -873,7 +1155,7 @@ def _materialize_response_report_links(params: dict[str, Any], response: dict[st
     return response
 
 
-def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any]) -> dict[str, Any] | None:
+def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:
     """Persist the post-plan human gate before any successor is prepared."""
     approval = _plan_approval(state)
     if (
@@ -887,14 +1169,19 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any]) -> dict[str, 
         return None
     if approval.get("status") == "awaiting_user":
         return dict(approval.get("review") or {})
-    review = _plan_review_payload(task_dir, state)
+    review = _plan_review_payload(task_dir, state, plan)
     history = approval.setdefault("history", [])
-    history.append({"event": "requested", "at": now(), "report_ref": review["report_ref"]})
+    history.append({"event": "requested", "at": now(), "plan_review": dict(review)})
     approval.update({
         "policy": "required",
         "status": "awaiting_user",
         "review": review,
         "plan_report_ref": review["report_ref"],
+        "pending_basis": {key: review[key] for key in (
+            "pipeline_contract_version", "plan_revision", "plan_report_ref",
+            "verified_predecessor_digest", "semantic_pipeline_version",
+            "semantic_future_pipeline_digest",
+        )},
         "requested_at": now(),
     })
     state["plan_approval"] = approval
@@ -1188,6 +1475,31 @@ def _replace_future_orchestrate_waves(
     task = load_task_definition(task_dir, state)
     host_capabilities = plan.get("host_capabilities") or {}
     future, classification = _normalize_orchestrate_waves(raw_future, task, host_capabilities, str(params["project_root"]))
+    old_semantic_pipeline = _semantic_future_pipeline(plan)
+    old_semantic_digest = _semantic_future_pipeline_digest(plan)
+    candidate_plan = {**plan, "waves": [
+        *[wave for wave in plan.get("waves", []) if wave.get("status") == "completed"],
+        *future,
+    ]}
+    new_semantic_digest = _semantic_future_pipeline_digest(candidate_plan)
+    semantic_changed = old_semantic_digest != new_semantic_digest
+    approval_before = _plan_approval(state)
+    invalidate_approval = (
+        _pipeline_contract_version(state) >= 2
+        and semantic_changed
+        and approval_before.get("status") in {"awaiting_user", "approved"}
+    )
+    if invalidate_approval:
+        first_future = future[0] if future else {}
+        singleton_plan = (
+            first_future.get("gates") == ["plan"]
+            and len(first_future.get("delegations", [])) == 1
+            and first_future["delegations"][0].get("agent") == "planner"
+        )
+        if not params.get("allow_rework", False) or not singleton_plan:
+            raise PlanReapprovalRequired(
+                "a material approved-future change requires rework=true and a singleton Planner plan wave before affected work"
+            )
     completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
     requested_future_gates = {gate for wave in future for gate in wave["gates"]}
     rework_gates = sorted(completed_set & requested_future_gates)
@@ -1248,6 +1560,41 @@ def _replace_future_orchestrate_waves(
     })
     state = reassessed["state"]
     plan["waves"] = completed_waves + future
+    if semantic_changed:
+        previous_version = int(plan.get("semantic_pipeline_version") or 1)
+        plan.setdefault("history", []).append({
+            "event": "semantic_pipeline_replaced",
+            "at": now(),
+            "reason": redact(params.get("reason") or "Coordinator replaced future waves.", 2000),
+            "semantic_pipeline_version": previous_version,
+            "semantic_future_pipeline_digest": old_semantic_digest,
+            "semantic_future_pipeline": old_semantic_pipeline,
+            **({"approval": json.loads(json.dumps(approval_before))} if invalidate_approval else {}),
+        })
+        plan["semantic_pipeline_version"] = previous_version + 1
+    if invalidate_approval:
+        approval = _plan_approval(state)
+        approval.setdefault("history", []).append({
+            "event": "material_pipeline_change",
+            "at": now(),
+            "reason": redact(params.get("reason") or "Coordinator recorded a material future-wave change.", 2000),
+            "previous_plan_review": dict(approval_before.get("review") or {}),
+            "previous_approved_basis": dict(approval_before.get("approved_basis") or {}),
+        })
+        for key in (
+            "review", "plan_report_ref", "pending_basis", "approved_basis",
+            "requested_at", "approved_at",
+        ):
+            approval.pop(key, None)
+        approval.update({"policy": "required", "status": "pending_plan", "feedback": None})
+        state["plan_approval"] = approval
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "plan_approval",
+            "material future-wave change requires a replacement plan and approval",
+        )
     _write_orchestrate_plan(task_dir, plan)
     return state, plan
 
@@ -1283,7 +1630,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"report_count": audited["report_count"]}, plan=plan)
             if state.get("status") == "blocked":
                 return _orchestrate_response("advance", state, wave_id=requested_wave_id, plan=plan)
-            review = _hold_for_plan_approval(task_dir, state)
+            review = _hold_for_plan_approval(task_dir, state, plan)
             if review is not None:
                 return _orchestrate_response(
                     "advance", state, wave_id=requested_wave_id,
@@ -1353,6 +1700,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             statuses = {item.get("status") for item in gate_attempts}
             default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
             gate_decision = _canonical_gate_decision(task_dir, state, gate)
+            unresolved_rework = _unresolved_rework_findings(root, state, gate)
             if gate_decision == "blocked":
                 default_outcome = "blocked"
             elif gate_decision == "fail":
@@ -1361,6 +1709,12 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 # record_gate consults canonical blockers and performs the
                 # fail-back transition instead of completing this gate.
                 default_outcome = "passed"
+            elif unresolved_rework:
+                # A corrective worker cannot advance the pipeline merely by
+                # completing unrelated work.  Treat an unclosed inherited
+                # finding as a failed attempt; normal bounded retry handling
+                # will either dispatch another corrective worker or block.
+                default_outcome = "failed"
             outcome = str(gate_outcomes.get(gate, default_outcome))
             failure_counts = state.setdefault("orchestrate_gate_failure_counts", {})
             failure_count_changed = False
@@ -1401,6 +1755,10 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     raise ValueError("automatic handoff manifest reconciliation failed")
                 state = handed["state"]
             gate_summary = f"Unified facade recorded {gate} as {outcome}."
+            if unresolved_rework and outcome == "failed":
+                gate_summary += " Required corrective findings remain open: " + ", ".join(
+                    str(item["fingerprint"]) for item in unresolved_rework
+                ) + "."
             if outcome == "blocked" and state.get("blocked_reason"):
                 gate_summary += " " + str(state["blocked_reason"])
             recorded = record_gate({
@@ -1432,7 +1790,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"report_count": audited["report_count"]}, plan=plan)
         if state.get("status") == "blocked":
             return _orchestrate_response("advance", state, wave_id=requested_wave_id, plan=plan)
-        review = _hold_for_plan_approval(task_dir, state)
+        review = _hold_for_plan_approval(task_dir, state, plan)
         if review is not None:
             return _orchestrate_response(
                 "advance", state, wave_id=requested_wave_id,
@@ -1478,8 +1836,26 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
         review = dict(approval.get("review") or {})
 
         if decision == "approve":
-            approval.update({"status": "approved", "approved_at": now(), "feedback": None})
-            history.append({"event": "approved", "at": now(), "report_ref": approval.get("plan_report_ref")})
+            report_ref = safe_id(str(approval.get("plan_report_ref") or ""))
+            current_basis = _current_plan_basis(task_dir, state, plan, report_ref=report_ref)
+            pending_basis = approval.get("pending_basis") if isinstance(approval.get("pending_basis"), dict) else {}
+            basis_keys = (
+                "pipeline_contract_version", "plan_revision", "plan_report_ref",
+                "verified_predecessor_digest", "semantic_pipeline_version",
+                "semantic_future_pipeline_digest",
+            )
+            mismatches = [key for key in basis_keys if pending_basis.get(key) != current_basis.get(key)]
+            if mismatches:
+                raise PlanReapprovalRequired(
+                    "plan review basis changed before approval: " + ", ".join(mismatches)
+                )
+            approval.update({
+                "status": "approved",
+                "approved_at": now(),
+                "feedback": None,
+                "approved_basis": current_basis,
+            })
+            history.append({"event": "approved", "at": now(), "plan_review": review, "approved_basis": current_basis})
             state["plan_approval"] = approval
             save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval", "user approved the completed plan")
             prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
@@ -1499,9 +1875,11 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
         })
         state = revised["state"]
         approval = _plan_approval(state)
+        for key in ("review", "plan_report_ref", "pending_basis", "approved_basis", "requested_at", "approved_at"):
+            approval.pop(key, None)
         approval.update({"policy": "required", "status": "pending_plan", "feedback": feedback})
         history = approval.setdefault("history", [])
-        history.append({"event": "revision_requested", "at": now(), "feedback": feedback, "report_ref": review.get("report_ref")})
+        history.append({"event": "revision_requested", "at": now(), "feedback": feedback, "previous_plan_review": review})
         state["plan_approval"] = approval
         for wave in plan.get("waves", []):
             if "plan" in wave.get("gates", []):
@@ -1673,6 +2051,8 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
     }
     if command not in handlers:
         raise ValueError("question payload.command is unsupported")
+    task_id = safe_id(str(params.get("task_id") or payload.get("task_id") or ""))
+    _, _, state = load_state(task_id, params)
     # Coordinator identity is resolved by the facade and must never be
     # overridden by a question payload.  In particular, a model must not be
     # able to guess task/principal/thread values until one happens to pass.
@@ -1681,9 +2061,8 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
         for key in ("project_root", "task_id", "principal", "thread_id", "submission_id")
         if key in params
     }
+    reserved["user_language"] = str(state.get("user_language") or "en")
     result = handlers[command]({**payload, **reserved})
-    task_id = safe_id(str(params.get("task_id") or payload.get("task_id") or ""))
-    _, _, state = load_state(task_id, params)
     return _orchestrate_response("question", state, result=result)
 
 
@@ -1761,6 +2140,27 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             params,
             {**result, "transaction_id": None, "idempotent": False},
         )
+    except PlanReapprovalRequired as exc:
+        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
+        error = _orchestrate_error(
+            operation,
+            "plan_reapproval_required",
+            exc,
+            phase="validation",
+            recoverable=True,
+            next_operation=operation,
+            task_id=task_id,
+        )
+        error["state"] = "plan_reapproval_required"
+        error["next_action"] = (
+            "Record the coordinator's material-change decision and reason, insert a singleton Planner plan rework "
+            "before affected work, then obtain explicit approval of the replacement plan."
+        )
+        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+            transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})
+            db_put_operation(transaction_path, safe_id(str(transaction["submission_id"])), transaction)
+            error["transaction_id"] = transaction.get("transaction_id")
+        return error
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
         error = _orchestrate_error(

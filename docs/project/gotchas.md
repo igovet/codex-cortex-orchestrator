@@ -1,5 +1,20 @@
 # Gotchas
 
+## Evidence-first scope and approval freshness
+
+The `scope` gate is a read-only discovery partition, not the final plan and
+not an intent-closing phase. C3 and harvest begin with Planner Scope; C2 begins
+with Explorer discovery. The final Planner runs only after discovery and every
+pre-implementation design gate, then receives all verified predecessor reports.
+Required approval is bound to the resulting plan revision, report reference,
+predecessor evidence digest, and semantic future-pipeline digest. A material
+future-wave change must explicitly rework the plan and obtain approval again;
+no-op and transport-only changes retain approval.
+
+The strict seven-field `cortex/report/v1` remains unchanged. Scope's additive
+`scoping` sibling is owned only by Planner Scope and is limited to a discovery
+brief, context files, and at most eight validated domains.
+
 ## Canonical runtime artifacts
 
 - New tasks use the SQLite-backed `cortex/v8` ledger and public
@@ -64,8 +79,7 @@
   public surface is exactly seven tools.
 - Every public call requires the exact absolute `project_root`. Start requires
   the user's exact, unexpanded `task.user_request`; the sole host-metadata
-  exception is Desktop's injected absolute local
-  `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` wrapper, which is
+  exception is Desktop's injected `$cortex:orchestrator` wrapper, which is
   canonicalized to `$cortex:orchestrator` before task identity, labels,
   persistence, and worker prompts. The route and following user text are
   preserved; arbitrary links and user paths are not normalized. Deprecated
@@ -75,8 +89,10 @@
   `worker`; a parallel wave must return every unique integer worker slot once.
   Stale, duplicate, missing, foreign, or changed retries fail before task-state
   writes.
-- Successful results carry a compact `report_ref`. Workers persist all eight
-  `cortex/report/v1` sections through the scoped public `record_report` tool,
+- Successful results carry a compact `report_ref`. Workers persist exactly
+  these ordered seven `cortex/report/v1` fields through the scoped public
+  `record_report` tool: `summary`, `findings`, `questions`, `changed_files`,
+  `tests`, `evidence`, and `uncertainty`.
   then return only `REPORT_RECORDED report_ref=<value>` plus at most a
   two-sentence summary. The coordinator reads the full report through
   `read_worker_report`; successor workers may use that tool only for explicitly
@@ -155,9 +171,11 @@
   render elicitation.
 - Localized question labels are transient UI projections. Answers retain the
   original value/language and require canonical `answer_en` for localized free
-  text. `ask_batch` accepts 1–32 stable questions and `poll_batch` returns
-  canonical English answers atomically; an active task revision supersedes an
-  unresolved batch so stale intent cannot resume a worker.
+  text. `ask_batch` accepts 1–32 stable questions but the native UI renders
+  only one step at a time under one durable `batch_ref`; each accepted step is
+  checkpointed, and cancellation resumes at the next unanswered question.
+  `poll_batch` returns canonical English answers; an active task revision
+  supersedes an unresolved batch so stale intent cannot resume a worker.
 - Fixture Luna-high evaluation covers sequential, compact parallel, and
   blocked/resume flows. The live evaluator is source-mode only: it launches
   `codex exec --ephemeral --ignore-user-config` against this checkout's MCP
@@ -232,6 +250,17 @@
   Hooks map that key (or its confirmed host alias) back to the canonical
   profile. Use `followup_task` only for that exact resumed worker;
   `host_agent_id` reuse is rejected across attempts.
+- A native child that stops before publishing a report or durable question is
+  terminal, not follow-up-resumable. After one `manage_orchestration` inspect,
+  submit exactly one failed continuation with the stopped attempt's
+  `dispatch_ref`, `status="failed"`, and
+  `reason="native_worker_stopped_without_report"`; wait, respawn, and
+  `followup_task` are invalid for that child. Only the fresh top-level
+  dispatch returned by Cortex may retry, and the third failure blocks with a
+  durable handoff. PostToolUse recovery scans all non-invalidated reportless
+  attempts in the current gate, not only the last attempt, so a later
+  completed retry does not hide an earlier failure receipt that is still
+  required.
 - Once Cortex is active, the main/root agent is coordination-only. It must not
   inspect, search, read, edit, patch, build, test, or run the target project,
   even when a worker is delayed, fails, or is unavailable. Dispatch only the
@@ -254,14 +283,17 @@
   update, start a fresh Codex thread; an existing thread may retain retired
   cachebusted hook paths and will not load updated skills, hooks, or MCP tools
   automatically.
-- Codebase Memory is worker-only and conditional. When its tools are present,
-  call `list_projects` first and use only the project whose root exactly matches
-  the task root; prefer graph, architecture, and trace operations, then confirm
-  consequential facts in source/tests. `planner`, `explorer`, `architect`, and
-  `database_architect` may refresh one missing or stale index; other profiles
-  fall back to repository-native tools after one failed attempt. Never guess a
-  project id or loop. An indexed repository never authorizes the root
-  coordinator to inspect the project.
+- Codebase Memory is worker-only and conditional. Every briefing contains the
+  project key precomputed from canonical task root with the current upstream
+  safe-ASCII/UTF-8-hex/FNV-1a-200 path rule. Use it directly; do not call
+  `list_projects` before routine queries. Only a direct not-found, ambiguity,
+  or apparent drift/collision permits one list fallback, and its root must
+  exactly match the task root rather than only its basename. Prefer graph,
+  architecture, and trace operations, then confirm consequential facts in
+  source/tests. `planner`, `explorer`, `architect`, and `database_architect`
+  may refresh one missing or stale index; other profiles fall back to
+  repository-native tools after one failed attempt. Never loop. An indexed
+  repository never authorizes the root coordinator to inspect the project.
 
 ## Internal ledger invariants
 
@@ -357,8 +389,8 @@ and v8 ledger. They are not caller-facing request envelopes.
   `create_thread`), `host_agent_id`, `host_task_name`, `host_model`,
   `host_reasoning_effort`, and terminal `status`; it may include `reason` and,
   when passed, a `report` containing exactly `summary`, `findings`,
-  `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`, and
-  `next_action`. Completion and report objects reject every other nested key.
+  `questions`, `changed_files`, `tests`, `evidence`, and `uncertainty`.
+  Completion and report objects reject every other nested key.
 - Every `orchestrate` call for a real task must include its exact absolute
   `project_root`. The server is multi-root: do not assume a process-wide root
   binding. A failed, read-only, or mismatched selected root is a hard blocker,
@@ -434,7 +466,9 @@ and v8 ledger. They are not caller-facing request envelopes.
   independent completeness review. Refreshes rebuild the inventory, preserve
   manual text outside generated blocks, require zero unexplained unmapped
   surfaces, and finish only after a no-change second documentation plan.
-- A worker report must contain exactly the eight `cortex/report/v1` fields.
+- A worker report must contain exactly the seven ordered `cortex/report/v1`
+  fields: `summary`, `findings`, `questions`, `changed_files`, `tests`,
+  `evidence`, and `uncertainty`.
   Reports are size/item bounded, sanitized, task-bound, and tied to a real
   delegation attempt. Use an empty list rather than omitting a field; reuse a
   `submission_id` only for an identical payload and mint a new id for a

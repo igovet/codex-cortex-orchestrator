@@ -4,215 +4,50 @@ All notable public changes to Cortex are recorded here. Release entries use
 semantic versions; the plugin manifest adds a unique Codex cachebuster to the
 same base version.
 
-## [Unreleased]
+## [8.0.0] - 2026-08-18
 
-- Narrow baseline manifests to meaningful project state: honor `.gitignore`
-  rules with ordered negations and freeze the effective rules per task, exclude
-  high-confidence dependency/cache/runtime directories across languages, and
-  require an ignore rule or build marker before excluding ambiguous output
-  directory names such as `build`, `dist`, `target`, `bin`, or `obj`.
+- Separate evidence-first `scope` from the final `plan`; C2 starts with
+  Explorer discovery, while C3 and harvest start with structured Planner
+  scoping. Architecture, database architecture, and UX precede the final
+  Planner; security, performance, and accessibility remain post-implementation
+  audits.
+- Bind required plan approval to the plan revision, planner report, verified
+  predecessor digest, and semantic future-pipeline digest. Material replanning
+  preserves approval history and requires fresh approval; no-op and
+  transport-only changes do not invalidate approval.
+- Keep the strict seven-field `cortex/report/v1`, v4 public surface, and
+  SQLite v8 ledger while adding pipeline contract v2 with v1 resume behavior.
+- Make the launcher compatible with stock macOS Bash 3.2, cap sensitive tool
+  error logs at 10 MiB with tail-preserving rotation, and require root UI
+  questions to use the user's language.
+- Precompute Codebase Memory project keys from canonical project roots in every
+  worker briefing; routine queries no longer spend a call on `list_projects`,
+  which remains a single exact-root fallback for lookup drift or collisions.
+- Move runtime-only coordination, ownership, verification, and private-log
+  handling rules into the bundled orchestrator/control skills; root
+  `AGENTS.md` now contains repository-development policy only.
+- This source candidate has not installed or updated a user plugin and has not
+  been published, committed, or tagged.
 
-- Keep native worker session keys task/attempt-unique while compacting long
-  request-derived task IDs to a deterministic fingerprint, so local skill paths
-  and prompt text do not leak into host-visible worker names. Native
-  `spawn_agent.task_name` values also satisfy the host's strict
-  `[a-z0-9_]{1,80}` contract: hyphens are normalized only in this
-  host-facing field and a deterministic identity fingerprint prevents
-  collisions. Cortex durable task, attempt, and ledger IDs retain their
-  hyphen-compatible format.
+## [7.1.2] - 2026-08-18
 
-- Canonicalize only Desktop's injected absolute
-  `[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` host wrapper to
-  `$cortex:orchestrator` before task identity, labels, persistence, and worker
-  prompts. Preserve the route and following user-authored text verbatim, leave
-  arbitrary Markdown links and user paths unchanged, and prevent local plugin
-  cache paths or cache-version changes from entering durable task state.
-
-- Bind v3 lifecycle recovery through the documented synchronous Cortex
-  `PostToolUse.session_id` and tool `project_root`, keeping task authorization
-  immutable and treating session environment variables as compatibility hints.
-  Cover `SessionStart.source=clear`, inject exact report-link publication
-  context after `read_worker_report`, and add compact server-wide MCP
-  instructions for post-compaction invariants.
-
-- Add a ledger-derived `cortex/context-handoff/v1` recovery snapshot to
-  `manage_orchestration(intent="inspect")`, with explicit post-compaction
-  rehydration guidance and bounded goal, evidence, decisions, checks,
-  blockers, pipeline, and report-link state.
-
-- Make the `SessionStart` hook reassert the recovery route after `resume` or
-  `compact`, resolving the registry-backed opaque `task_ref` and requiring one
-  inspect before dispatch, report reads, or lifecycle continuation.
-
-- Keep host-session lifecycle lookup fail-closed when multiple active v3 tasks
-  share one session; rebuild the lookup only after exactly one task remains.
-
-- Isolate hidden worker dispatches from the coordinator transcript by forcing
-  `fork_turns: "none"`, so localized parent messages cannot override the
-  English-only worker protocol. `read_worker_report` now returns the exact
-  `report_markdown_link` plus an immediate main-chat publication requirement;
-  plan review and inspection responses expose the same link for recovery.
-
-- Fix linked completed-task `follow_up` replays after coordinator deactivation:
-  restore the server-owned activation for the idempotent existing corrective
-  task, suppress duplicate dispatches, and keep `/cortex`/`/normal` internal
-  tokens out of user-facing recovery instructions. Add regression coverage for
-  source immutability, activation restoration, and replay receipts.
-
-- Keep caller-correctable public `record_report` failures out of the private
-  MCP exception journal. Worker briefings now repeat the exact generated
-  predecessor/knowledge evidence markers next to the report protocol, and
-  report identity, acknowledgement, changed-path, harvest-manifest, and
-  payload corrections return structured `ok: false` diagnostics while genuine
-  ledger/server failures remain exceptions.
-
-- Replace the blanket Luna/`max` default with a machine-validated adaptive
-  policy in `profiles.json`. Explorer remains Luna and Security remains Sol;
-  ordinary profiles are classified as efficient, adaptive, or deep, with
-  deterministic Luna/Terra selection from profile, task kind, complexity, and
-  risk. Efficient Luna uses `high`/`high`/`xhigh`; bounded low/moderate-risk
-  adaptive work uses Luna `high`/`xhigh`/`max`, while C2/C3 planning,
-  `terra_task_kinds`, deep profiles, and high/critical failure cost use Terra
-  `high`/`high`/`xhigh`. Automatic `max` is limited to bounded C3 Luna work.
-  Preserve bounded Luna/Terra coordinator overrides, hidden
-  Luna-to-Terra host fallback, and explicit-user provenance for non-security
-  Sol; retired escalation/remapping fields remain rejected.
-- Make the coordinator the explicit pipeline authority: Cortex validates and
-  persists its plan, planner/explorer reports remain advisory, and only the
-  coordinator may replace future waves with a stated evidence-based reason.
-- Restore scoped worker `record_report` and add coordinator
-  `read_worker_report`. Workers persist the full eight-field report, return
-  only a compact `report_ref` plus at most a two-sentence summary, and the
-  coordinator advances by ref. Persisted refs remain recoverable after a
-  native worker acknowledgement is interrupted. Together with the three
-  coordinator lifecycle operations and worker `worker_question`, these make
-  the public surface six tools.
-- Add a durable ask/poll protocol for every worker profile. Material questions
-  pause the same attempt, are surfaced by the main coordinator, and resume the
-  same native worker after the user answers. Report publication and wave
-  continuation now fail closed while a blocking question is open; Planner and
-  shared prompts explicitly forbid inventing missing product intent.
-- Add the explicit project-scoped `prune` maintenance route with exact
-  confirmation and a seven-day default. It removes stale task-scoped ledgers
-  and reconciles registry, receipt, claim, activation, and lane references
-  while preserving recent tasks and all project/plugin content.
-- Mark every start response as fresh or replayed and instruct the coordinator
-  that start is terminal for dispatch preparation, preventing a second
-  lifecycle call and duplicate worker invocation for the same task contract.
-- Require every worker to review all embedded predecessor handoffs and include
-  the generated `Predecessor review:` acknowledgement in report evidence.
-  Add phase-level `depends_on` selection and fail closed on predecessor-context
-  overflow instead of silently dropping older reports.
-- Automatically add available `docs/project/index.md` and
-  `docs/features/index.md` files to every worker briefing. Planner reports now
-  recommend task-relevant linked pages for later `context_files`; all workers
-  re-check the indexes, verify consequential documentation claims against
-  authoritative project artifacts, and persist a required
-  `Knowledge reviewed:` acknowledgement. Explicit context paths must be
-  existing project-relative regular files.
-- Return an opaque `task_ref` on every task-bound lifecycle response and
-  preserve it on later lifecycle/report-read calls. Distinct task contracts may now run
-  concurrently below one project root; exact duplicate active starts remain
-  idempotent and ambiguous calls return selectable refs.
-- Normalize common pipeline labels such as `implement` and
-  `build_verification`, reject a canonical phase duplicated across later
-  waves, and return the current pipeline snapshot with every lifecycle result
-  to prevent correction loops.
-- Make Codebase Memory conditional worker tooling: resolve an exact-root index,
-  prefer graph/architecture/trace queries for discovery and impact, confirm
-  consequential findings in source/tests, allow one bounded refresh only for
-  `planner`, `explorer`, `architect`, and `database_architect`, and otherwise
-  fall back without looping.
-  The coordination-only root never uses it to inspect the target project.
-- Make `harvest` and `harvest-refresh` build an exhaustive source-backed
-  feature census. Incremental harvest now requires a proven zero-gap coverage
-  manifest; otherwise Cortex uses domain-partitioned discovery, architecture
-  synthesis, behavior-complete feature pages, independent completeness review,
-  and zero unexplained unmapped surfaces before close.
-- Enforce the feature coverage-manifest shape during harvest documentation,
-  review, and close, rejecting shallow indexes without Coverage matrix
-  columns, Inventory totals, Unmapped surfaces, Exclusions, or Known unknowns.
-- Make `profiles.json` the canonical machine-validated catalog for all 21
-  profiles, including exact descriptions, sandbox and route metadata, owned
-  gates, and selection/avoidance guidance; keep TOML identities and the
-  generated root roster synchronized with that contract.
-- Add conservative evidence-revisable implementation routing across the eight
-  specialist writers before the `general` fallback, using bounded English and
-  Russian task signals. Planner and explorer receive the complete team catalog
-  so their evidence can inform the coordinator's decision to replace future
-  waves with a narrower owner.
-- Publish the exact 21-profile enum in the compact v3 worker schema, reject
-  unsupported phase/profile pairs before ledger writes, and expose phase,
-  profile, capability, sandbox, and selection rationale separately from
-  unchanged native dispatch arguments.
-- Enforce a coordinator-only root during active Cortex work through the
-  installable orchestration skills, SessionStart context, and every public v3
-  next action: root must remain idle while workers run and may never inspect,
-  edit, patch, build, or test the target project itself.
-- Stop recording expected public v3 `ok: false` validation and recovery
-  responses as private server exceptions; actual MCP exceptions remain logged.
-- Expand all 21 bundled agents into role-specific professional playbooks and
-  add a validated 13-gate briefing registry so every worker receives the
-  overall task outcome, a concrete gate mission, scoped success criteria,
-  validation requirements, context, and stopping rules. Planner now follows a
-  repository-grounded, decision-complete planning workflow.
-- Separate task-level acceptance and validation from gate-level criteria,
-  preserve explicit worker overrides, and remove duplicated worker-language
-  guidance from generated prompts without changing the public v3 facade.
-- Warn operators to start a new Codex thread before dispatching agents after a
-  plugin update because an existing thread can retain absolute lifecycle-hook
-  paths into the retired cachebusted plugin directory; stale hook commands now
-  fail open with an empty JSON result instead of a Python missing-file error.
-- Replace the v2 `orchestrate` facade with the relative v3 public tools
-  `start_orchestration`, `continue_orchestration`, and
-  `manage_orchestration`; keep v7 lifecycle state and receipts private for
-  ledger compatibility.
-- Make the minimal start contract just `project_root` plus `task.objective`,
-  default to C2, normalize human-readable phase/profile/complexity aliases,
-  normalize common language names before ledger creation, build the standard pipeline automatically, and accept compact wave
-  overrides without durable wave identifiers.
-- Make continuation relative to the returned `step`, omit worker references
-  for sequential waves, use short `worker: 1..N` slots for parallel waves,
-  and atomically reject missing, duplicate, foreign, stale, or malformed
-  results before lifecycle writes.
-- Move idempotency ownership to the server, replay byte-identical retries,
-  reject changed or stale continuation payloads, recover checkpointed
-  transactions, and isolate changed start contracts as distinct active tasks.
-- Treat semantically unchanged future-wave reassessment as a valid unchanged
-  receipt and keep relative future steps monotonic after replacement.
-- Return compact native dispatches without internal task/wave/attempt IDs;
-  keep expected routing separate from actual host attestation and never copy
-  an expected configured-default Luna model into native `model`.
-- Keep the worker contract to one strict eight-section persisted report,
-  expose only the identifiers needed for its scoped report write, and retire
-  unsuccessful attempts before a fresh relative retry.
-- Keep inspect/resume/deactivate/lane/resource/question on the rare management
-  path and add regression coverage for the modern Codex
-  `extensions["openai/form"]` elicitation capability.
-- Add v3 cold-boot, benchmark, fixture Luna-high, and opt-in live Luna-high
-  evaluation. A skipped live run is explicitly missing release evidence, not
-  a pass.
-- Route omitted Luna model overrides through the configured global
-  `agents.default_subagent_model`, keep expected-model metadata separate from
-  native requests, and make the installer enforce the default atomically with
-  a private backup before replacing another value plus dry-run/check coverage.
-- Remove automatic visible `create_thread` fallback. An unavailable hidden
-  Luna route now stays hidden and uses an explicit Terra override; visible
-  threads remain an independently requested workflow only.
-- Let visible Cortex threads request the saved Local checkout by default, with
-  an explicit worktree option for isolation.
-- Harden coordinator/worker protocol guidance for bound identities,
-  preview/apply reassessment, stale-attempt recovery, strict report retries,
-  evidence receipts, mandatory gates, and blocked-gate handoffs. Confirmed host
-  child ids are now accepted as aliases only for their own worker reports.
-- Add aggregate private-facade preflight diagnostics with exact nested `start` and
-  `advance` schemas, and record every private `orchestrate` `ok: false` result in the
-  redacted Cortex tool-error journal.
-- Catalog submission, remote provenance, and tagged installation remain
-  pending external release authorization and verification.
-- The 3.2.2 working-tree changes remain uncommitted; a committed release tree and
-  a passing `verify-cortex-release.py --require-tracked` check remain
-  prerequisites to any publication claim.
+- Align the worker report contract across runtime prompts, validators, and
+  documentation: `cortex/report/v1` now has exactly seven ordered fields,
+  `summary`, `findings`, `questions`, `changed_files`, `tests`, `evidence`,
+  and `uncertainty`. `gate_result` and `closure` remain separate top-level
+  compatibility siblings.
+- Harden report reconciliation, JSON-RPC harness cleanup, Python 3.11
+  preflight isolation, and release/version invariants.
+- Restore complete Python 3.11/3.12 discovery and offline release gates in CI,
+  including marketplace, AST, shell, cold-boot, deterministic fixtures,
+  benchmark, conditional fresh-plugin, and tracked-archive checks.
+- Source/package evidence for `7.1.2+codex.20260818103113` includes 476-test
+  full discovery on Python 3.11 and 3.12, focused `ResourceWarning` coverage,
+  cold boot on both supported versions, deterministic fixtures, benchmark, and
+  an isolated fresh-plugin probe. Three source-mode live scenarios passed; the
+  planner lifecycle completed but its deterministic two-package live rerun is
+  still pending, so a complete live PASS is not claimed. The installed user
+  plugin remains 6.6.0 and was not changed.
 
 ## [1.0.6] - 2026-08-14
 
@@ -236,8 +71,8 @@ same base version.
 ## [1.0.1] - 2026-08-14
 
 - Package Cortex as one root marketplace backed by `plugins/cortex`.
-- Provide the opt-in `cortex/v7` task, gate, report, evidence, and handoff
-  control plane with 21 agent profiles and 10 skills.
+- Provide the opt-in Cortex task, gate, report, evidence, and handoff control
+  plane with 21 agent profiles and 10 skills.
 - Add isolated installation, cold-boot, tracked-archive, redaction, symlink,
   and runtime-state boundary checks.
 - Make upgrade backups collision-safe and private.

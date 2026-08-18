@@ -58,6 +58,7 @@ from cortex import (
     report_bus_paths,
     report_markdown_link,
     report_markdown_path,
+    sanitize_scoping_payload,
     sanitize_planning_payload,
     sanitize_report_payload,
     sanitize_closure_payload,
@@ -201,7 +202,19 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             planning = sanitize_planning_payload(raw_planning)
         elif params.get("_require_plan_artifact") and attempt.get("gate") == "plan":
             raise ValueError("planner reports require a planning artifact with overview and work_packages")
+        raw_scoping = params.get("scoping")
+        scoping = None
+        if raw_scoping is not None:
+            if attempt.get("gate") != "scope" or attempt.get("profile") != "planner":
+                raise ValueError("scoping artifacts may be published only by the active planner scope attempt")
+            scoping = sanitize_scoping_payload(raw_scoping)
+        elif params.get("_require_scope_artifact") and attempt.get("gate") == "scope":
+            raise ValueError(
+                "planner scope reports require a scoping artifact with overview, context_files, and discovery_domains"
+            )
         digest_payload = {"report": report, "planning": planning}
+        if scoping is not None:
+            digest_payload["scoping"] = scoping
         if gate_result is not None:
             digest_payload["gate_result"] = gate_result
         if closure is not None:
@@ -309,7 +322,9 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             "schema": REPORT_SCHEMA, "report_id": report_id, "task_id": state["task_id"],
             "gate": attempt["gate"], "attempt_id": attempt_id, "submission_id": submission_id,
             "producer": {"profile": attempt["profile"], "model": attempt["selected_model"], "reasoning_effort": attempt["selected_reasoning_effort"]},
-            "report": report, "planning": planning, "result_validation": result_validation,
+            "report": report, "planning": planning,
+            **({"scoping": scoping} if scoping is not None else {}),
+            "result_validation": result_validation,
             **({"gate_result": gate_result} if gate_result is not None else {}),
             **({"closure": closure} if closure is not None else {}),
             "content_digest": content_digest, "created_at": now(),
@@ -343,7 +358,6 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 "blocking": bool(missing_checks),
                 "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
                 "details": missing_checks,
-                "next_action": {"required": bool(missing_checks), "description": "Execute all required verification"} if missing_checks else None,
             }
             _runtime.db_upsert_task_finding(root, state["task_id"], verification_finding, source={"report_id": report_id, "attempt_id": attempt_id, "kind": "verification"})
         receipt = {
@@ -424,7 +438,7 @@ def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
 def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Public worker adapter: persist a report and return only a compact receipt."""
     try:
-        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "planning", "gate_result", "closure"})
+        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "scoping", "planning", "gate_result", "closure"})
         if unknown:
             raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
         for field in ("project_root", "task_id", "attempt_id", "profile"):
@@ -439,6 +453,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "attempt_id": params.get("attempt_id"),
             "principal": profile,
             "report": params.get("report"),
+            "scoping": params.get("scoping"),
             "planning": params.get("planning"),
             "gate_result": params.get("gate_result"),
             "closure": params.get("closure"),
@@ -446,6 +461,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "_require_knowledge_review": True,
             "_require_harvest_manifest": True,
             "_require_plan_artifact": True,
+            "_require_scope_artifact": True,
             "_require_gate_validation": True,
             "_require_close_validation": True,
         })
@@ -546,7 +562,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "report uncertainty must", "report exceeds the", "report count quota exhausted",
             "report aggregate byte quota exhausted", "idempotent report submission_id",
             "project_root is required", "project_root must be an absolute path", "CORTEX_ROOT is not supported",
-            "planning ", "planner reports require", "C2/C3 close report",
+            "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
             "project files changed during read-only",
             "review and close reports require a top-level closure sibling",
@@ -893,6 +909,8 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "phase": phase,
                 "profile": (record.get("producer") or {}).get("profile"),
                 "report": report_payload,
+                **({"scoping": record["scoping"]} if isinstance(record.get("scoping"), dict) else {}),
+                **({"planning": record["planning"]} if isinstance(record.get("planning"), dict) else {}),
                 "result_validation": record.get("result_validation"),
                 "report_artifact": artifact,
                 "complete": True,

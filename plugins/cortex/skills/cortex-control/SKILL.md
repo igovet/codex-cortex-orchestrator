@@ -40,7 +40,12 @@ signal, never permission for the root to perform the work directly.
    complexity only when the user supplied them or they are established facts.
    Do not make an abstract request look decision-complete by inventing product
    intent, audience, design direction, behavior, or acceptance. Complexity
-   defaults to C2 and accepts aliases.
+   defaults to C2 and accepts aliases. Before the one start call, verify that
+   ordinary tasks have non-empty `task.acceptance_criteria` and
+   `task.verification`, derived only from the exact request or verified
+   authority. If either list cannot be grounded without inventing material
+   intent, ask the user before calling Cortex. Exact harvest routes are the
+   sole exception because Cortex supplies their exhaustive census contract.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
    returns, and validates that plan and enforces documentation and close. An override uses only
@@ -103,16 +108,20 @@ signal, never permission for the root to perform the work directly.
    produce no heartbeat or status commentary. Visible output is limited to a
    worker question, worker completion/failure, or a blocking error.
 
-   Any worker may call
-   `worker_question(action="ask")` when repository evidence cannot resolve a
-   material user decision. It returns a compact `question_ref`; the worker
-   sends only that ref and a concise question summary through the native parent
+   Any worker may call `worker_question` when repository evidence cannot
+   resolve a material user decision. Before pausing, it collects every
+   currently known material decision: use `action="ask_batch"` when there is
+   more than one, and `action="ask"` only when exactly one is known. It returns
+   a compact `question_ref`; the worker sends only that ref and a concise
+   question summary through the native parent
    channel, publishes no report, and finishes its native turn into an
    idle/resumable state rather than busy-waiting. The coordinator calls
    `manage_orchestration(intent="question", payload={"question_ref": "<exact
    ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
-   the host-native question UI. Never ask the question in commentary/final
-   prose or guess an internal identity. After the answer is durably recorded,
+   the host-native question UI. A batch is rendered sequentially, one native
+   question at a time, and every accepted answer is checkpointed before the
+   next appears. Never ask the question in commentary/final prose or guess an
+   internal identity. After the answer is durably recorded,
    resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
    continuing. Never replace the worker or advance the wave for a question.
@@ -136,7 +145,7 @@ signal, never permission for the root to perform the work directly.
    This is the canonical result envelope for implementation, QA, review, close,
    and every other gate. The older top-level `closure` sibling is retained only
    as a temporary compatibility alias for review/close and must not be placed
-   inside the strict eight-field report; when both are supplied they must agree.
+   inside the strict seven-field report; when both are supplied they must agree.
    `followup_task` resumes the same addressable native worker for an answered
    durable question or an explicit active steer. Active steer is recorded as a
    new task revision and delivered to the existing `host_agent_id`; it does
@@ -205,11 +214,13 @@ exact `report_markdown_link` before the next lifecycle or report-read call.
 user confirmation. A required plan must be its own wave. Once that plan
 completes, the lifecycle result is `awaiting_plan_approval` with no successor
 dispatch and a bounded `plan_review` containing `report_ref`, `summary`,
-`findings`, `uncertainty`, `next_action`, and `remaining_phases`. The
-coordinator reads the report, summarizes the plan in the main chat, and waits
-for explicit user approval. Resume with
-`manage_orchestration(intent="plan_approval", payload={"decision":"approve"})`.
-For requested changes, use
+`findings`, `uncertainty`, and `remaining_phases`. The
+coordinator reads the report, summarizes the plan in the main chat, then calls
+`manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
+Cortex opens the native `Approve` / `Cancel` UI. On `Approve`, announce in the
+user's language that the plan was approved and dispatch the returned wave. On
+`Cancel`, stop silently, keep the plan pending, and wait for the user's next
+message. For requested changes after that message, use
 `manage_orchestration(intent="plan_approval", payload={"decision":"revise", "feedback":"..."})`;
 feedback is required and the Planner runs again before approval. This gate is
 separate from `worker_question`: material questions are resolved through that
@@ -217,11 +228,13 @@ lifecycle during planning rather than through a duplicate approval question.
 
 The Planner may attach a separate `planning` object to its public
 `record_report`. It contains exactly `overview` and `work_packages`; the
-strict eight-field `cortex/report/v1` contract remains unchanged. Each package
+strict seven-field `cortex/report/v1` contract remains unchanged. Each package
 has `id`, `title`, `objective`, optional `allowed_paths`/`depends_on`, and
-non-empty microtasks. Each microtask has `id`, `title`, `objective`, and
-optional `profile`, `allowed_paths`, `depends_on`, `acceptance_criteria`, and
-`verification`. Cortex validates package and per-package microtask dependency
+non-empty microtasks; `profile` is forbidden at package level. Each microtask
+requires `id`, `title`, `objective`, non-empty `acceptance_criteria`, and
+non-empty `verification`, with optional `profile`, `allowed_paths`, and
+`depends_on`.
+Cortex validates package and per-package microtask dependency
 DAGs and enforces 32 packages, 32 microtasks per package, and 128 total
 microtasks. The Planner remains read-only; Cortex materializes
 `.codex/cortex/tasks/<task>/planning/manifest.json`, `overview.md`, and
@@ -317,9 +330,11 @@ question remains canonical English. Answers preserve the user's original
 value and language and require `answer_en` for localized free text before the
 worker receives the canonical English answer. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
-same `batch_ref` with `action="poll_batch"`; the host form answers every item
-in one atomic batch. A task revision supersedes an unresolved batch rather
-than resuming stale user intent. Every
+same `batch_ref` with `action="poll_batch"`; the host renders one question per
+native step and durably checkpoints each accepted answer before showing the
+next. Cancellation preserves completed steps and resumes at the next unanswered
+item. A task revision supersedes an unresolved batch rather than resuming stale
+user intent. Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;
 existing code is current-state evidence, not evidence of desired product
@@ -386,10 +401,18 @@ durable record. A corrective `follow_up` inherits the completed source task's
 user language, but workers retain the same English-only protocol.
 
 Generated worker briefings carry a bounded Codebase Memory contract. When the
-`mcp__codebase_memory__*` tools are actually available, workers resolve the
-project through `list_projects` by exact `project_root`, prefer graph,
-architecture, trace, and impact tools for non-trivial discovery, and confirm
-consequential facts in current source or tests. Designated read-only discovery
+`mcp__codebase_memory__*` tools are actually available, each briefing supplies
+the exact project key precomputed from canonical `project_root` using Codebase
+Memory's `cbm_project_name_from_path` rule: preserve ASCII
+`[A-Za-z0-9._-]`, replace other ASCII with `-`, hex-encode non-ASCII UTF-8
+bytes, collapse repeated dashes/dots, trim invalid edges, use `root` when
+empty, and cap at 200 bytes with an eight-hex FNV-1a suffix. Workers use that
+key directly and must not call `list_projects` before the first indexed query.
+Only direct not-found, ambiguity, or apparent key drift/collision permits one
+`list_projects` fallback, whose entry must match the exact canonical root;
+basename matching is forbidden. Workers prefer graph, architecture, trace, and
+impact tools for non-trivial discovery and confirm consequential facts in
+current source or tests. Designated read-only discovery
 profiles may refresh one missing or stale index; other profiles fall back to
 repository-native tools. One failed MCP attempt is enough: record the
 limitation and do not loop. The coordinator never calls repository-intelligence
@@ -408,7 +431,7 @@ schemas, or executable configuration. Every worker report must include one
 additional knowledge page actually used. The report tool rejects an omitted
 index acknowledgement.
 
-Canonical phases are `plan`, `discover`, `architecture`,
+Canonical phases are `scope`, `plan`, `discover`, `architecture`,
 `database_architecture`, `implementation`, `qa`, `security`, `performance`,
 `accessibility`, `ux`, `review`, `documentation`, and `close`. One phase may
 appear in only one wave; multiple owners for a phase share that wave. Generic
@@ -434,3 +457,49 @@ captures again to detect external changes. Terminal close persists completed
 state before removing database manifest records;
 final receipts retain digest/change proof. `allow_rework` reopening captures a
 fresh active baseline before replacement dispatches.
+
+## Ownership, safety, and verification
+
+Parallelize read-only exploration, review, testing, and analysis when their
+dependencies permit it. Assign exactly one writer to an overlapping code or documentation area.
+Independent write streams require separate worktrees and
+must still reconcile predecessor evidence before integration.
+
+Never place secrets, credentials, private tokens, personal data, raw private
+reports, or sensitive operational detail in task inputs, worker prompts,
+questions, reports, handoffs, logs, or user-visible summaries. Redaction is a
+defense in depth measure, not permission to transmit sensitive input.
+
+Before completion, run the smallest non-destructive verification set that
+proves the affected acceptance and verification contract, then broaden checks
+in proportion to risk. Read-only workers select non-writing modes before they
+run: disable bytecode and test/build caches and skip checks that require
+cleanup. Never create an artifact and then delete it to simulate read-only
+verification. Report every unrun required check, environmental limitation, and
+remaining uncertainty plainly. Current source, tests, schemas, and executable
+configuration outrank generated documentation.
+
+## Private tool-error diagnostics
+
+Cortex appends raised MCP exceptions and legacy error-shaped tool results as
+JSONL to `~/.codex/logs/cortex-tool-errors.jsonl`, where `~` is the home of the
+user running the MCP process. This is private per-user diagnostic data, not the
+project ledger. The writer keeps the file at or below 10 MiB by dropping the
+oldest complete records and retaining the newest complete records before each
+append. Expected public validation and recovery responses with `ok: false` are
+not exceptions and are not written to this log.
+
+Records contain bounded correlation metadata such as timestamp, method, tool,
+error type, `chat_session_id`/`thread_id`, request id, and supplied durable ids.
+Common credential shapes are redacted, nested values are bounded, the parent
+directory is mode `0700`, the file is mode `0600`, and symlink paths are
+rejected. These controls do not guarantee arbitrary input is non-sensitive:
+never put secrets in tool inputs, relax permissions, commit the log, or copy
+raw records into a prompt, chat, issue, ticket, or external system.
+
+For local read-only diagnosis, inspect only a small tail and project an
+allowlist such as `timestamp`, `event`, `method`, `tool`, `error_type`,
+`error`, `chat_session_id`, `thread_id`, `request_id`, and `ids`. If `jq` is
+unavailable, parse UTF-8 JSONL locally with the same allowlist. A request
+rejected by the host before it reaches the MCP server cannot appear here; use
+the host or session diagnostics for that boundary.

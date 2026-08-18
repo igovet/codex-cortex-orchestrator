@@ -113,7 +113,6 @@ class BatchQuestionTests(unittest.TestCase):
             }],
             "evidence": evidence,
             "uncertainty": [],
-            "next_action": "advance",
         }
 
     @staticmethod
@@ -167,15 +166,11 @@ class BatchQuestionTests(unittest.TestCase):
         with mock.patch.object(
             control,
             "_request_mcp_elicitation",
-            return_value=(
-                "accept",
-                {
-                    "database_strategy": "use_existing_schema",
-                    "migration_scope": ["data", "code"],
-                    "extra_context": "Нужно сохранить обратную совместимость.",
-                },
-                "batch-form-1",
-            ),
+            side_effect=[
+                ("accept", {"database_strategy": "use_existing_schema"}, "batch-form-1"),
+                ("accept", {"migration_scope": ["data", "code"]}, "batch-form-2"),
+                ("accept", {"extra_context": "Нужно сохранить обратную совместимость."}, "batch-form-3"),
+            ],
         ) as elicitation:
             pending = control.manage_orchestration({
                 "project_root": str(self.project),
@@ -189,11 +184,17 @@ class BatchQuestionTests(unittest.TestCase):
             })
         self.assertTrue(pending["ok"], pending)
         self.assertEqual(pending["outcome"], "awaiting_translation")
-        form = elicitation.call_args.args[1]
-        self.assertEqual(set(form["properties"]), {"database_strategy", "migration_scope", "extra_context"})
+        self.assertEqual(elicitation.call_count, 3)
+        self.assertEqual([call.args[0] for call in elicitation.call_args_list], [
+            "1 / 3", "2 / 3", "3 / 3",
+        ])
+        form = elicitation.call_args_list[0].args[1]
+        self.assertEqual(set(form["properties"]), {"database_strategy"})
         self.assertEqual(form["properties"]["database_strategy"]["oneOf"][0], {
             "const": "use_existing_schema", "title": "Использовать существующую схему",
         })
+        self.assertEqual(set(elicitation.call_args_list[1].args[1]["properties"]), {"migration_scope"})
+        self.assertEqual(set(elicitation.call_args_list[2].args[1]["properties"]), {"extra_context"})
 
         durable = self._record(state, batch_ref)
         self.assertEqual(durable["status"], "awaiting_translation")
@@ -341,15 +342,11 @@ class BatchQuestionTests(unittest.TestCase):
         with mock.patch.object(
             control,
             "_request_mcp_elicitation",
-            return_value=(
-                "accept",
-                {
-                    "database_strategy": "use_existing_schema",
-                    "migration_scope": ["data"],
-                    "extra_context": "Preserve compatibility during rollout.",
-                },
-                "batch-form-report-gate",
-            ),
+            side_effect=[
+                ("accept", {"database_strategy": "use_existing_schema"}, "batch-form-report-1"),
+                ("accept", {"migration_scope": ["data"]}, "batch-form-report-2"),
+                ("accept", {"extra_context": "Preserve compatibility during rollout."}, "batch-form-report-3"),
+            ],
         ):
             answered = control.manage_orchestration({
                 "project_root": str(self.project),
@@ -361,6 +358,58 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertEqual(answered["outcome"], "question_answered")
         accepted = control.publish_worker_report(report_payload)
         self.assertTrue(accepted["ok"], accepted)
+
+    def test_cancelled_batch_resumes_at_the_next_unanswered_question(self):
+        started, _, state, attempt = self._start(user_language="en")
+        asked = self._ask(state, attempt)
+        batch_ref = asked["batch_ref"]
+
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            side_effect=[
+                ("accept", {"database_strategy": "use_existing_schema"}, "batch-step-1"),
+                ("cancel", None, "batch-step-2-cancel"),
+            ],
+        ) as first_run:
+            cancelled = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "question",
+                "payload": {"question_ref": batch_ref, "user_language": "en"},
+            })
+        self.assertTrue(cancelled["ok"], cancelled)
+        self.assertEqual(cancelled["outcome"], "awaiting_user")
+        self.assertEqual(first_run.call_count, 2)
+        durable = self._record(state, batch_ref)
+        self.assertEqual(durable["status"], "open")
+        self.assertEqual(durable["answered_count"], 1)
+        self.assertEqual(durable["next_question_key"], "migration_scope")
+        self.assertEqual(set(durable["answers"]), {"database_strategy"})
+
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            side_effect=[
+                ("accept", {"migration_scope": ["data"]}, "batch-step-2"),
+                ("accept", {"extra_context": "Preserve compatibility."}, "batch-step-3"),
+            ],
+        ) as resumed_run:
+            answered = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "question",
+                "payload": {"question_ref": batch_ref, "user_language": "en"},
+            })
+        self.assertTrue(answered["ok"], answered)
+        self.assertEqual(answered["outcome"], "question_answered")
+        self.assertEqual(resumed_run.call_count, 2)
+        self.assertEqual(set(resumed_run.call_args_list[0].args[1]["properties"]), {"migration_scope"})
+        self.assertEqual(set(resumed_run.call_args_list[1].args[1]["properties"]), {"extra_context"})
+        durable = self._record(state, batch_ref)
+        self.assertEqual(durable["status"], "answered")
+        self.assertEqual(durable["answered_count"], 3)
+        self.assertIsNone(durable["next_question_key"])
 
 
 if __name__ == "__main__":

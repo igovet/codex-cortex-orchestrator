@@ -27,6 +27,7 @@ class JsonRpcHarness:
             env=environment,
         )
         self.next_id = 1
+        self._closed = False
         initialized = self.request("initialize", {"protocolVersion": "2025-06-18"})
         if initialized["serverInfo"]["name"] != "cortex":
             raise RuntimeError("unexpected MCP server")
@@ -60,11 +61,36 @@ class JsonRpcHarness:
         return self.request("tools/call", {"name": name, "arguments": {**arguments, "project_root": str(self.project_root)}})["structuredContent"]
 
     def close(self) -> None:
-        if self.process.stdin:
-            self.process.stdin.close()
-        return_code = self.process.wait(timeout=5)
+        if self._closed:
+            return
+        self._closed = True
+        timed_out = False
+        stderr = ""
+        try:
+            if self.process.stdin and not self.process.stdin.closed:
+                try:
+                    self.process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            self.process.stdin = None
+            try:
+                _, stderr = self.process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self.process.terminate()
+                try:
+                    _, stderr = self.process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    _, stderr = self.process.communicate(timeout=2)
+            return_code = self.process.returncode
+        finally:
+            for pipe in (self.process.stdout, self.process.stderr):
+                if pipe and not pipe.closed:
+                    pipe.close()
+        if timed_out:
+            raise RuntimeError(f"MCP server did not exit after stdin closed; terminated with {return_code}: {stderr}")
         if return_code != 0:
-            stderr = self.process.stderr.read() if self.process.stderr else ""
             raise RuntimeError(f"MCP server exited {return_code}: {stderr}")
 
     def __enter__(self) -> "JsonRpcHarness":

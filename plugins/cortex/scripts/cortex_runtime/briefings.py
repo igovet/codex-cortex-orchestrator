@@ -16,6 +16,7 @@ bind_symbols(
         "EXECUTED_CHECK_RESULT_GATES",
         "PROFILE_EXECUTION_CONTRACTS",
         "PROFILE_INSTRUCTIONS",
+        "REPORT_FIELDS",
         "WRITE_REQUIRED_RESULT_GATES",
         "_predecessor_review_marker",
         "_result_contract_markers",
@@ -30,6 +31,45 @@ def dispatch_briefing_review_marker(briefing_digest: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("dispatch briefing digest is invalid")
     return f"Dispatch briefing reviewed: {digest}"
+
+
+def codebase_memory_project_key_from_root(project_root: object) -> str:
+    """Mirror Codebase Memory's cbm_project_name_from_path for a canonical root."""
+    raw = str(project_root or "")
+    if not raw or all(character in "/\\:" for character in raw):
+        return "root"
+    try:
+        path = str(Path(raw).resolve(strict=True))
+    except (OSError, RuntimeError):
+        path = raw
+    path = path.replace("\\", "/")
+    mapped: list[str] = []
+    for byte in path.encode("utf-8"):
+        if (
+            ord("a") <= byte <= ord("z")
+            or ord("A") <= byte <= ord("Z")
+            or ord("0") <= byte <= ord("9")
+            or byte in (ord("."), ord("_"), ord("-"))
+        ):
+            mapped.append(chr(byte))
+        elif byte >= 0x80:
+            mapped.append(f"{byte:02x}")
+        else:
+            mapped.append("-")
+    collapsed: list[str] = []
+    for character in mapped:
+        previous = collapsed[-1] if collapsed else ""
+        if (character == "-" and previous == "-") or (character == "." and previous == "."):
+            continue
+        collapsed.append(character)
+    key = "".join(collapsed).lstrip(".-").rstrip("-") or "root"
+    if len(key) <= 200:
+        return key
+    digest = 2166136261
+    for byte in key.encode("ascii"):
+        digest ^= byte
+        digest = (digest * 16777619) & 0xFFFFFFFF
+    return f"{key[:191]}-{digest:08x}"
 
 
 def host_spawn_bootstrap(
@@ -62,12 +102,13 @@ def host_spawn_bootstrap(
 
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     """Build the exact bounded briefing for a native Codex worker dispatch."""
+    report_field_names = ", ".join(REPORT_FIELDS)
+    report_contract = f"exactly {len(REPORT_FIELDS)} keys: {report_field_names}"
     instructions = PROFILE_INSTRUCTIONS[agent]
     execution_contract = PROFILE_EXECUTION_CONTRACTS[agent]
     team_context = (
         "\n\n## Canonical Cortex team\n"
-        "Use only these exact profile names when recommending downstream ownership. "
-        "Prefer the narrowest justified specialist and do not use `general` when a specialist clearly fits.\n"
+        "Reference roster only: report observed ownership; the coordinator alone routes future waves.\n"
         + render_profile_catalog(compact=True)
         if agent in {"planner", "explorer"}
         else ""
@@ -93,15 +134,18 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "read_dispatch_briefing only after exact host-file failure (continue only its supplied cursor if its "
             "bounded response is incomplete), supplied read_worker_report refs, "
             "worker_question, and one final record_report. "
-            "For a material decision, call worker_question(action=ask), return `QUESTION_RECORDED question_ref=<value>` "
-            "plus a concise summary, publish no report, and end idle and resumable. Never busy-wait or use local UI. "
-            "The coordinator uses followup_task to resume this worker; poll the ref before continuing. Then call the "
-            "public `record_report` tool exactly once. Its report has exactly eight keys: summary, findings, questions, "
-            "changed_files, tests, evidence, uncertainty, next_action; use empty lists and questions=[]. Every "
+            "Batch known material decisions with worker_question(action=ask_batch); for one use action=ask. "
+            "Keep question_key/option_id stable; batch UI is sequential. "
+            "Return `QUESTION_RECORDED question_ref=<value>` plus a concise summary, publish no report, and end idle "
+            "and resumable. Never busy-wait or use local UI. The coordinator uses followup_task to resume this worker; "
+            "poll via poll_batch or poll, then call the "
+            f"public `record_report` tool exactly once. Its report has {report_contract}; use [] when empty. "
+            "Never route work; coordinator routes. "
+            "Every "
             "changed_files item must be a safe project-relative path, never absolute, `..`, URI, or prose. After "
             "success, do not paste or reproduce that JSON; return only "
-            "`REPORT_RECORDED report_ref=<value>` plus at most two summary sentences. On failure return only the exact "
-            "error and short blocker. Never subdelegate without explicit coordinator authorization."
+            "`REPORT_RECORDED report_ref=<value>` plus at most two summary sentences. Fix one "
+            "report_validation_failed once; otherwise return its exact error and blocker. Never subdelegate."
         )
     else:
         task_context_line = f"Cortex task: {package['task_id']}; gate: {package['gate']}; attempt: {package['attempt_id']}."
@@ -121,8 +165,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Before finishing, publish exactly one cortex/report/v1 report for this attempt. "
             f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
             f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
-            "The report object must contain exactly these eight keys: summary, findings, questions, changed_files, "
-            "tests, evidence, uncertainty, and next_action. Use an empty list when a list has no entries; never "
+            f"The report object must contain {report_contract}. Never route work; the coordinator owns routing. "
+            "Use [] when empty; "
+            "never "
             "omit evidence or any other key. Every changed_files item must be a safe project-relative path such as "
             "`docs/features/trading/index.md`; never use an absolute path, `..`, a URI, or prose in changed_files. "
             "Put descriptive details in findings or evidence instead. Reuse the same submission_id only for a byte-identical retry. If the "
@@ -146,10 +191,20 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "plus at most a two-sentence summary. If report publication fails, return only the exact error and a "
             "short blocker description."
         )
-    closure_contract = (
-        "`record_report` needs top-level `gate_result` (not inside the eight-key report); "
-        "follow the tool schema. Top-level `closure` remains review/close compatibility only."
-    )
+    if package.get("gate") in {"review", "close"}:
+        closure_contract = (
+            f"This {package.get('gate')} report needs matching top-level `gate_result` and `closure`; keep both "
+            f"outside the {len(REPORT_FIELDS)}-key report. `gate_result` has exactly decision/failure_class/findings/"
+            "verification/workspace; `closure` omits only failure_class. On pass, findings is the literal empty "
+            "array [] in both—never strings or informational entries. Both verification objects have exactly "
+            "executed/not_executed/required_missing/limitations arrays; both workspace objects have exactly "
+            "modified/untracked/staged arrays and committed boolean or `not_required`. Shared values must match. "
+            "A non-pass finding is an object with exactly fingerprint/severity/status/blocking/summary."
+        )
+    else:
+        closure_contract = (
+            "Optional `gate_result`: pass findings=[]; no info entries or `closure` except review/close."
+        )
     briefing_transport_contract = (
         "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "
         f"dispatch_ref={package.get('dispatch_ref')!r}. The native bootstrap authorized reading this exact briefing "
@@ -158,19 +213,24 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "scoped Cortex tools for predecessor reports. Include the bootstrap `Dispatch briefing reviewed: <sha256>` "
         "marker as one report.evidence item; a missing marker, writable file, or digest mismatch fails closed."
     )
-    planning_contract = (
+    planner_artifact_contract = (
+        "\n## Planner discovery-scoping artifact\n"
+        "REQUIRED top-level scoping sibling={overview,context_files,discovery_domains}. Publish it only for Planner Scope. Supply 1–8 "
+        "non-overlapping domains with exactly id/title/objective/paths/context/depends_on/acceptance_criteria/verification. "
+        "Use lowercase DAG ids, non-empty context/acceptance/verification, and do not design the solution."
+        if package.get("gate") == "scope" else
         "\n## Planner work-breakdown artifact\n"
-        "In record_report send planning={overview,work_packages}. Package keys: id/title/objective/microtasks; "
-        "microtask keys: id/title/objective/acceptance_criteria/verification. Optional: profile, allowed_paths, "
-        "depends_on. Use lowercase DAG ids. Cortex writes it; remain read-only."
+        "REQUIRED top-level planning sibling={overview,work_packages}. Package: id/title/objective/microtasks; optional "
+        "allowed_paths/depends_on; never profile. Microtask: id/title/objective/acceptance_criteria/verification; "
+        "optional profile/allowed_paths/depends_on. Lowercase DAG ids; read-only."
         if package.get("gate") == "plan" else ""
     )
     executed_test_contract = (
-        "report.tests requires at least one exact reproducible command (no `...`), cwd, observed evidence, and integer "
-        "exit_code 0; negative-path harnesses must exit 0. Preserve any failure and return the report-tool error."
+        "report.tests requires object(s) with exactly command/cwd/exit_code/evidence: exact command (no `...`), "
+        "observed literal `evidence`, integer exit_code 0. Negative harnesses exit 0; preserve failures."
         if package.get("gate") in EXECUTED_CHECK_RESULT_GATES else
-        "If report.tests is non-empty, every item needs the exact command (no `...`), cwd, observed evidence, and "
-        "integer exit_code 0; otherwise leave it empty."
+        "Non-empty report.tests items have exactly command/cwd/exit_code/evidence: exact command (no `...`), "
+        "observed literal `evidence`, integer exit_code 0; otherwise leave tests empty."
     )
     if result_contract_is_read_only(package):
         artifact_delta_contract = (
@@ -290,10 +350,18 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         return acknowledgement_contract + " " + proof_contract
 
     codebase_memory_refresh = agent in CODEBASE_MEMORY_REFRESH_PROFILES
+    codebase_memory_project_key = codebase_memory_project_key_from_root(package.get("project_root"))
     codebase_memory_contract = (
-        "If `mcp__codebase_memory__list_projects` exists, resolve by matching the exact "
-        f"root_path {str(package.get('project_root'))!r}; never guess. For non-trivial work, prefer "
+        f"If Codebase Memory query tools are present, use project key {codebase_memory_project_key!r} directly as "
+        "the `project` argument; do not call `list_projects` before the first indexed query. It is derived from "
+        f"canonical project_root {str(package.get('project_root'))!r} with Codebase Memory's path-key rule: keep "
+        "ASCII `[A-Za-z0-9._-]`, map other ASCII to `-`, encode every non-ASCII UTF-8 byte as two lowercase hex "
+        "digits, collapse repeated dashes/dots, trim leading dots/dashes and trailing dashes, use `root` if empty, "
+        "and cap at 200 bytes with an 8-hex FNV-1a suffix. For non-trivial work, prefer "
         "`get_architecture`, `search_graph`, `trace_path`, `detect_changes`. Confirm consequential indexed claims in current source or tests. "
+        "Only if a direct lookup reports project-not-found, ambiguity, or apparent key drift/collision, call "
+        "`mcp__codebase_memory__list_projects` at most once and accept only an entry whose canonical root_path exactly matches this "
+        "task root; never select by basename alone. "
         + (
             "If absent/stale, you may call `index_repository` once for this root, then continue. "
             if codebase_memory_refresh else
@@ -310,7 +378,14 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         if exact_user_request and exact_user_request in rendered:
             return rendered.replace(exact_user_request, "the exact user-authored request above")
         return rendered
-    if package.get("intent_clarification_required"):
+    if package.get("intent_clarification_required") and package.get("gate") == "scope":
+        intent_contract = (
+            "Cortex intent preflight: material intent is incomplete. This Scope phase is evidence-gathering, not "
+            "intent-closing: produce a bounded discovery brief without choosing product behavior or solution design. "
+            "If a material decision is needed now, call worker_question; otherwise identify the precise decision and "
+            "the evidence needed to ask it in the scoping report."
+        )
+    elif package.get("intent_clarification_required"):
         intent_contract = (
             "Cortex intent preflight: BLOCKING. The exact user-authored request below is too underspecified to "
             "establish the desired product outcome. Repository content proves only the current state, and any "
@@ -327,6 +402,10 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "use worker_question. Treat requirements as user intent only when supported by the exact request, a "
             "durable user answer, or verified external authority."
         )
+    if package.get("gate") == "close":
+        phase_completion_contract = "Final close evaluates both gate-level and task-level contracts."
+    else:
+        phase_completion_contract = "Judge only this gate; unfinished downstream task outcomes are not blockers."
 
     return "\n".join((
         f"You are the internal Cortex worker with profile `{agent}`.",
@@ -345,12 +424,17 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         intent_contract,
         f"Overall task outcome: {task_text_reference(package.get('task_objective') or package['objective'])}",
         f"Current mission: {task_text_reference(package['objective'])}",
+        f"Phase/profile: {package.get('gate')} / {agent}",
+        f"Selection rationale: {package.get('selection_reason') or 'canonical phase owner'}",
+        f"Task kind and risk: {package.get('task_kind')} / {package.get('risk')}",
+        f"Model route and reasoning effort: {package.get('selected_model')} / {package.get('selected_reasoning_effort')}",
         (
             "User requested these plan changes after reviewing the prior plan: "
             + str(package["plan_feedback"])
             if package.get("plan_feedback") else ""
         ),
         f"Ownership boundary: {package['ownership']}",
+        prompt_list("Phase dependencies", package.get("depends_on_phases", []), empty="all verified predecessor phases"),
         prompt_list("Task requirements", package.get("task_requirements", [])),
         prompt_list("Task scope", package.get("task_scope", [])),
         prompt_list("Allowed paths", package["allowed_paths"]),
@@ -364,6 +448,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         prompt_list("Gate success criteria", package["acceptance_criteria"]),
         prompt_list("Task-level validation", package.get("task_verification", [])),
         prompt_list("Required gate verification", package["verification"]),
+        phase_completion_contract,
         prompt_list("Pause conditions", package.get("pause_conditions", [])),
         f"Budget or operating limit: {package.get('budget') or 'none supplied'}",
         "",
@@ -372,7 +457,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         codebase_memory_contract,
         "",
         "## Evidence and stopping rules",
-        "Ground consequential claims in evidence; distinguish fact, inference, and gaps. Stop only when criteria pass or return the smallest material question/blocker.",
+        "Ground claims in evidence; separate fact, inference, and gaps. Stop when criteria pass or return all known material questions/blockers together.",
         "Use only tools actually available in this worker context. Record a limitation and use a safe fallback rather than inventing a tool, identifier, or mode.",
         artifact_delta_contract,
         "Resolve facts from evidence; use worker_question for material intent, behavior, security, irreversible, external, or scope decisions. Existing code is current state, not desired intent.",
@@ -381,7 +466,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         task_context_line,
         briefing_transport_contract,
         identity_contract,
-        planning_contract,
+        planner_artifact_contract,
         executed_test_contract,
         closure_contract,
         "Internal worker protocol: English only. " + output_language_contract,

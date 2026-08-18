@@ -133,7 +133,7 @@ class RecordReportSliceTests(unittest.TestCase):
                     **scope, "task_id": "slice-task", "principal": "owner", "attempt_id": delegated["attempt_id"],
                     "submission_id": "stable", "report": {
                         "summary": "slice report", "findings": [], "questions": [], "changed_files": [],
-                        "tests": [], "evidence": ["characterization"], "uncertainty": [], "next_action": "advance",
+                        "tests": [], "evidence": ["characterization"], "uncertainty": [],
                     },
                 }
                 first = control.record_report(payload)

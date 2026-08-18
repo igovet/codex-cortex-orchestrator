@@ -135,6 +135,8 @@ SCHEMA = "cortex/v8"
 REPORT_SCHEMA = "cortex/report/v1"
 RESULT_VALIDATION_SCHEMA = "cortex/result-validation/v1"
 PLANNING_SCHEMA = "cortex/planning/v1"
+SCOPING_SCHEMA = "cortex/scoping/v1"
+PIPELINE_CONTRACT_VERSION = 2
 QUESTION_SCHEMA = "cortex/question/v2"
 ACTIVATION_COMMAND = "/cortex"
 NORMAL_COMMAND = "/normal"
@@ -239,7 +241,9 @@ if (
     SHARED_WORKER_CONTRACT.get("repository_intelligence")
     != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
     or SHARED_WORKER_CONTRACT.get("codebase_memory_project_resolution")
-    != "list_projects_exact_project_root_match_never_guess"
+    != "derive_canonical_path_key_then_single_exact_root_list_fallback"
+    or SHARED_WORKER_CONTRACT.get("codebase_memory_project_key_algorithm")
+    != "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200"
     or SHARED_WORKER_CONTRACT.get("codebase_memory_fallback")
     != "one_bounded_attempt_then_repository_native_tools_without_looping"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
@@ -247,12 +251,12 @@ if (
 ):
     raise RuntimeError("bundled Cortex Codebase Memory worker contract is invalid")
 AVAILABLE_GATES = {
-    "plan", "discover", "architecture", "database_architecture", "implementation",
+    "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
     "qa", "security", "performance", "accessibility", "ux", "review",
     "documentation", "close",
 }
 READ_ONLY_RESULT_GATES = {
-    "plan", "discover", "architecture", "database_architecture", "security",
+    "scope", "plan", "discover", "architecture", "database_architecture", "security",
     "performance", "accessibility", "ux", "review", "close",
 }
 EXECUTED_CHECK_RESULT_GATES = {
@@ -434,6 +438,7 @@ def select_implementation_profile(task: dict[str, Any]) -> dict[str, Any]:
 # ledger uses the canonical IDs above. Keep input normalization explicit and
 # bounded: unknown IDs must still fail closed instead of being guessed.
 PIPELINE_GATE_ALIASES = {
+    "scoping": "scope",
     "planning": "plan",
     "analysis": "discover",
     "investigation": "discover",
@@ -492,8 +497,8 @@ MANDATORY_PIPELINE_GATES = {
 # gates are selected from task requirements instead of being baked into C3.
 BASE_PIPELINES = {
     "C1": ["discover", "implementation", "review", "close"],
-    "C2": ["plan", "discover", "implementation", "qa", "review", "documentation", "close"],
-    "C3": ["plan", "discover", "implementation", "qa", "review", "documentation", "close"],
+    "C2": ["discover", "plan", "implementation", "qa", "review", "documentation", "close"],
+    "C3": ["scope", "discover", "plan", "implementation", "qa", "review", "documentation", "close"],
 }
 GATE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 HOST_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$")
@@ -509,6 +514,8 @@ MAX_REPORTS_PER_ATTEMPT = 32
 MAX_REPORTS_PER_TASK = 256
 MAX_REPORT_AGGREGATE_BYTES = 1024 * 1024
 MAX_PLANNING_BYTES = 128 * 1024
+MAX_SCOPING_BYTES = 128 * 1024
+MAX_DISCOVERY_DOMAINS = 8
 MAX_BRIEFING_BYTES = 128 * 1024
 MAX_WORK_PACKAGES = 32
 MAX_MICROTASKS_PER_PACKAGE = 32
@@ -529,6 +536,7 @@ MAX_GATE_RECOVERY_FAILURES = 3
 MAX_ORCHESTRATE_GATE_FAILURES = 3
 MAX_GATE_RECOVERY_EVENTS = 64
 MAX_TOOL_ERROR_LOG_INPUT_BYTES = 16384
+MAX_TOOL_ERROR_LOG_BYTES = 10 * 1024 * 1024
 MAX_QUESTIONS_PER_ATTEMPT = 64
 MAX_QUESTIONS_PER_TASK = 512
 # These are Cortex policy models, not a claim about the native host catalog.
@@ -1896,7 +1904,7 @@ def bind_host_worker_from_hook(
     existing = attempt.get("host_spawn") or {}
     if attempt.get("status") == "running":
         if existing.get("agent_id") == host_agent_id and existing.get("task_name") == host_task_name:
-            if attempt.get("host_stop_outcome") in {"awaiting_user", "native_worker_stopped_recoverable"}:
+            if attempt.get("host_stop_outcome") == "awaiting_user":
                 with state_lock(root):
                     resumed_loaded = _v3_task_state(root, task_id)
                     if resumed_loaded is None:
@@ -1972,8 +1980,10 @@ def finalize_host_worker_stop_from_hook(
 
     A worker that has already published a report remains eligible for the
     coordinator's normal ``continue_orchestration`` receipt. A worker paused
-    on a durable question, or stopped before recording either a question or a
-    report, remains addressable through the exact persisted host identity.
+    on a durable question remains addressable through the exact persisted host
+    identity. A worker stopped without either a report or question is terminal
+    failed; the coordinator must submit that exact dispatch's failure receipt
+    so the bounded gate retry policy can decide whether to re-dispatch.
     """
     project = select_project_root({"project_root": str(project_root_value or "")})
     task_id = safe_id(str(task_id_value or ""))
@@ -2024,9 +2034,15 @@ def finalize_host_worker_stop_from_hook(
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         if report_refs:
             attempt["host_stop_outcome"] = "report_recorded"
+            # The report is the durable completion signal.  Do not retain the
+            # provisional resumability flag written when the native worker
+            # started; doing so would make compaction handoff advertise a
+            # follow-up target instead of consuming the persisted report.
+            attempt["host_resumable"] = False
             attempt["host_report_refs"] = report_refs
             package["spawn_status"] = "stopped_after_report"
             package["host_stopped_at"] = stopped_at
+            package["resumable"] = False
             package["report_refs"] = report_refs
             event = "host_stop_after_report"
             detail = f"{attempt_id}: {', '.join(report_refs)}"
@@ -2034,34 +2050,41 @@ def finalize_host_worker_stop_from_hook(
         elif open_questions:
             question_refs = [str(item.get("question_id")) for item in open_questions]
             attempt["host_stop_outcome"] = "awaiting_user"
+            attempt["host_resumable"] = True
             attempt["host_question_refs"] = question_refs
             package["spawn_status"] = "paused_for_question"
             package["host_stopped_at"] = stopped_at
+            package["resumable"] = True
             package["question_refs"] = question_refs
             event = "host_stop_for_question"
             detail = f"{attempt_id}: {', '.join(question_refs)}"
             outcome = "awaiting_user"
         else:
-            reason = "native_worker_stopped_recoverable"
+            reason = "native_worker_stopped_without_report"
+            attempt["status"] = "failed"
+            attempt["finalized_at"] = stopped_at
+            attempt["finalization_reason"] = reason
             attempt["host_stop_outcome"] = reason
-            attempt["host_resumable"] = True
-            package["spawn_status"] = "stopped_recoverable"
+            attempt["host_resumable"] = False
+            package["spawn_status"] = "stopped_without_report"
             package["host_stopped_at"] = stopped_at
-            package["resumable"] = True
-            event = "host_stop_recoverable"
+            package["resumable"] = False
+            package["failure_reason"] = reason
+            package["dispatch_ref"] = str(attempt.get("dispatch_ref") or "")
+            event = "host_stop_without_report"
             detail = f"{attempt_id}: {reason}"
             outcome = reason
         session_status = (
-            "completed" if report_refs else "idle_resumable" if open_questions else "stopped_recoverable"
+            "completed" if report_refs else "idle_resumable" if open_questions else "terminated_unavailable"
         )
         db_put_worker_session(root, {
             "task_id": state["task_id"], "attempt_id": attempt_id,
             "host_agent_id": host_agent_id,
             "host_task_name": str((attempt.get("host_spawn") or {}).get("task_name") or ""),
             "host_tool": str((attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
-            "status": session_status, "resumable": not bool(report_refs),
+            "status": session_status, "resumable": bool(open_questions),
             "started_at": (attempt.get("host_spawn") or {}).get("confirmed_at"),
-            **({"terminated_at": stopped_at} if report_refs else {}),
+            **({"terminated_at": stopped_at} if report_refs or not open_questions else {}),
         })
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
         save_state(task_dir, task_dir / "state.sqlite", state, event, detail)
@@ -2231,12 +2254,40 @@ def log_tool_error(request: Any, request_id: Any, raw_line: str, error: BaseExce
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(parent, 0o700)
         _reject_symlink_ancestry(path, "tool error log", allow_missing_leaf=True)
-        flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags, 0o600)
         try:
             os.fchmod(descriptor, 0o600)
             if fcntl is not None:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+            size = os.fstat(descriptor).st_size
+            if size + len(encoded) > MAX_TOOL_ERROR_LOG_BYTES:
+                keep_budget = max(0, MAX_TOOL_ERROR_LOG_BYTES - len(encoded))
+                tail = b""
+                if keep_budget and size:
+                    offset = max(0, size - keep_budget)
+                    os.lseek(descriptor, offset, os.SEEK_SET)
+                    remaining = min(size - offset, keep_budget)
+                    chunks: list[bytes] = []
+                    while remaining > 0:
+                        chunk = os.read(descriptor, min(65536, remaining))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        remaining -= len(chunk)
+                    tail = b"".join(chunks)
+                    if offset:
+                        newline = tail.find(b"\n")
+                        tail = tail[newline + 1:] if newline >= 0 else b""
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.ftruncate(descriptor, 0)
+                written = 0
+                while written < len(tail):
+                    count = os.write(descriptor, tail[written:])
+                    if count <= 0:
+                        raise OSError("tool error log compaction made no progress")
+                    written += count
+            os.lseek(descriptor, 0, os.SEEK_END)
             written = 0
             while written < len(encoded):
                 count = os.write(descriptor, encoded[written:])
@@ -2292,12 +2343,16 @@ def resolve_dispatch_route(params: dict[str, Any]) -> dict[str, Any]:
         select_project_root=select_project_root,
     )
 
-REPORT_FIELDS = set(PROFILE_CONTRACT.get("shared_worker_contract", {}).get("required_report_fields", []))
-if REPORT_FIELDS != {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty", "next_action"}:
+REPORT_FIELDS = tuple(PROFILE_CONTRACT.get("shared_worker_contract", {}).get("required_report_fields", []))
+EXPECTED_REPORT_FIELDS = (
+    "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
+)
+if REPORT_FIELDS != EXPECTED_REPORT_FIELDS:
     raise RuntimeError("bundled Cortex shared worker report contract is invalid")
+REPORT_FIELD_SET = frozenset(REPORT_FIELDS)
 
 
-INTENT_CLOSURE_GATES = AVAILABLE_GATES - {"discover"}
+INTENT_CLOSURE_GATES = AVAILABLE_GATES - {"scope", "discover"}
 PRODUCT_SURFACE_PATTERNS = (
     r"\blanding(?:\s+page)?\b", r"\bweb\s*site\b", r"\bhomepage\b", r"\bpage\b",
     r"\bdashboard\b", r"\bapp(?:lication)?\b", r"\binterface\b", r"\bui\b", r"\bux\b",
@@ -2393,9 +2448,9 @@ def _safe_project_relative_path(value: Any) -> str:
 
 
 def sanitize_report_payload(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != REPORT_FIELDS:
-        missing = sorted(REPORT_FIELDS - set(value) if isinstance(value, dict) else REPORT_FIELDS)
-        unknown = sorted(set(value) - REPORT_FIELDS) if isinstance(value, dict) else []
+    if not isinstance(value, dict) or set(value) != REPORT_FIELD_SET:
+        missing = sorted(REPORT_FIELD_SET - set(value) if isinstance(value, dict) else REPORT_FIELD_SET)
+        unknown = sorted(set(value) - REPORT_FIELD_SET) if isinstance(value, dict) else []
         detail = []
         if missing:
             detail.append("missing: " + ", ".join(missing))
@@ -2403,9 +2458,8 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
             detail.append("unknown: " + ", ".join(unknown))
         raise ValueError("report must contain exactly the cortex/report/v1 fields" + (" (" + "; ".join(detail) + ")" if detail else ""))
     summary = str(value["summary"]).strip()
-    next_action = str(value["next_action"]).strip()
-    if not summary or not next_action:
-        raise ValueError("report summary and next_action are required")
+    if not summary:
+        raise ValueError("report summary is required")
     result: dict[str, Any] = {"summary": redact(summary, 4000)}
     for field in ("findings", "questions", "evidence", "uncertainty"):
         items = value[field]
@@ -2425,8 +2479,7 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
     if not isinstance(changed_files, list) or len(changed_files) > MAX_REPORT_ITEMS:
         raise ValueError(f"report changed_files must be an array with at most {MAX_REPORT_ITEMS} items")
     result["changed_files"] = [_safe_project_relative_path(item) for item in changed_files]
-    result["next_action"] = redact(next_action, 4000)
-    for field in ("summary", "findings", "questions", "tests", "evidence", "uncertainty", "next_action"):
+    for field in ("summary", "findings", "questions", "tests", "evidence", "uncertainty"):
         require_internal_english(result[field], f"report {field}")
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_REPORT_BYTES:
@@ -2455,7 +2508,7 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
     for item in raw_findings:
         if not isinstance(item, dict):
             raise ValueError("closure finding must be an object")
-        allowed = {"fingerprint", "severity", "status", "blocking", "summary", "details", "next_action", "waiver_reason", "waived_by", "waived_at", "resolved_at"}
+        allowed = {"fingerprint", "severity", "status", "blocking", "summary", "details", "waiver_reason", "waived_by", "waived_at", "resolved_at"}
         if set(item) - allowed:
             raise ValueError("closure finding contains unknown fields")
         fingerprint = str(item.get("fingerprint") or "").strip()
@@ -2477,15 +2530,7 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
                 raise ValueError("workers cannot self-waive closure findings")
         elif any(item.get(field) is not None for field in ("waiver_reason", "waived_by", "waived_at")):
             raise ValueError("waiver metadata is only valid for waived closure findings")
-        action = item.get("next_action")
-        if action is not None:
-            if not isinstance(action, dict) or not isinstance(action.get("required"), bool):
-                raise ValueError("closure next_action requires boolean required")
-            unknown = set(action) - {"required", "target_gate", "description"}
-            if unknown or (action.get("required") and not str(action.get("description") or "").strip()):
-                raise ValueError("closure next_action metadata is invalid")
-            action = {"required": bool(action["required"]), **({"target_gate": str(action["target_gate"]).strip()} if action.get("target_gate") else {}), **({"description": redact(str(action["description"]).strip(), 2000)} if action.get("description") else {})}
-        finding = {"fingerprint": fingerprint, "severity": severity, "status": status, "blocking": item["blocking"], "summary": redact(summary, 4000), **({"details": details} if details is not None else {}), "next_action": action}
+        finding = {"fingerprint": fingerprint, "severity": severity, "status": status, "blocking": item["blocking"], "summary": redact(summary, 4000), **({"details": details} if details is not None else {})}
         if status == "waived":
             finding.update({"waiver_reason": redact(waiver_reason, 4000), "waived_by": redact(waived_by, 400), "waived_at": redact(waived_at, 200)})
         if item.get("resolved_at") is not None:
@@ -2531,14 +2576,13 @@ def sanitize_gate_result_payload(value: Any, *, actor_ids: set[str] | None = Non
     )
     if decision in {"rework", "fail", "blocked"} and not (
         any(
-            item.get("status") == "open"
-            and (item.get("blocking") or (item.get("next_action") or {}).get("required"))
+            item.get("status") == "open" and item.get("blocking")
             for item in closure["findings"]
         )
         or closure["verification"]["required_missing"]
     ):
         raise ValueError(
-            "non-pass gate_result requires an open blocking finding, a required next action, or required_missing verification"
+            "non-pass gate_result requires an open blocking finding or required_missing verification"
         )
     return {**closure, "decision": decision, "failure_class": failure_class}
 
@@ -2602,6 +2646,92 @@ def _validate_planning_dependency_graph(nodes: set[str], dependencies: dict[str,
 
     for node in nodes:
         visit(node)
+
+
+def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str, Any]:
+    """Validate the Planner Scope discovery brief without widening report/v1."""
+    if persisted and isinstance(value, dict) and value.get("schema") == SCOPING_SCHEMA:
+        value = {key: item for key, item in value.items() if key != "schema"}
+    if not isinstance(value, dict) or set(value) != {"overview", "context_files", "discovery_domains"}:
+        raise ValueError("scoping must contain exactly overview, context_files, and discovery_domains")
+    overview = _planning_text(value.get("overview"), "scoping overview", maximum=8000)
+    raw_context_files = value.get("context_files")
+    if not isinstance(raw_context_files, list) or len(raw_context_files) > 50:
+        raise ValueError("scoping context_files must be an array with at most 50 paths")
+    context_files = [_safe_project_relative_path(item) for item in raw_context_files]
+    if len(context_files) != len(set(context_files)):
+        raise ValueError("scoping context_files must be unique")
+    raw_domains = value.get("discovery_domains")
+    if (
+        not isinstance(raw_domains, list)
+        or not raw_domains
+        or len(raw_domains) > MAX_DISCOVERY_DOMAINS
+    ):
+        raise ValueError(f"scoping discovery_domains must contain 1..{MAX_DISCOVERY_DOMAINS} items")
+    domains: list[dict[str, Any]] = []
+    domain_ids: set[str] = set()
+    dependency_graph: dict[str, list[str]] = {}
+    required = {
+        "id", "title", "objective", "paths", "context", "depends_on",
+        "acceptance_criteria", "verification",
+    }
+    for index, raw_domain in enumerate(raw_domains, 1):
+        if not isinstance(raw_domain, dict) or set(raw_domain) != required:
+            unknown = sorted(set(raw_domain) - required) if isinstance(raw_domain, dict) else []
+            missing = sorted(required - set(raw_domain)) if isinstance(raw_domain, dict) else sorted(required)
+            details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + (
+                [] if not missing else ["missing: " + ", ".join(missing)]
+            )
+            raise ValueError(
+                f"scoping discovery_domains[{index - 1}] is invalid (" + "; ".join(details) + ")"
+            )
+        domain_id = _planning_identifier(raw_domain.get("id"), "scoping discovery domain id")
+        if domain_id in domain_ids:
+            raise ValueError("scoping discovery domain ids must be unique")
+        domain_ids.add(domain_id)
+        raw_dependencies = raw_domain.get("depends_on")
+        if not isinstance(raw_dependencies, list):
+            raise ValueError(f"scoping discovery domain {domain_id!r} depends_on must be an array")
+        dependencies = [_planning_identifier(item, "scoping discovery domain dependency") for item in raw_dependencies]
+        if len(dependencies) != len(set(dependencies)):
+            raise ValueError(f"scoping discovery domain {domain_id!r} dependencies must be unique")
+        context = _planning_string_list(raw_domain.get("context"), "scoping discovery domain context")
+        acceptance = _planning_string_list(
+            raw_domain.get("acceptance_criteria"),
+            "scoping discovery domain acceptance_criteria",
+        )
+        verification = _planning_string_list(
+            raw_domain.get("verification"),
+            "scoping discovery domain verification",
+        )
+        if not context:
+            raise ValueError(f"scoping discovery domain {domain_id!r} requires non-empty context")
+        if not acceptance or not verification:
+            raise ValueError(
+                f"scoping discovery domain {domain_id!r} requires non-empty acceptance_criteria and verification"
+            )
+        domain = {
+            "id": domain_id,
+            "title": _planning_text(raw_domain.get("title"), "scoping discovery domain title", maximum=500),
+            "objective": _planning_text(raw_domain.get("objective"), "scoping discovery domain objective"),
+            "paths": _planning_paths_list(raw_domain.get("paths"), "scoping discovery domain paths"),
+            "context": context,
+            "depends_on": dependencies,
+            "acceptance_criteria": acceptance,
+            "verification": verification,
+        }
+        domains.append(domain)
+        dependency_graph[domain_id] = dependencies
+    _validate_planning_dependency_graph(domain_ids, dependency_graph, "scoping discovery domain")
+    result = {
+        "schema": SCOPING_SCHEMA,
+        "overview": overview,
+        "context_files": context_files,
+        "discovery_domains": domains,
+    }
+    if len(json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")) > MAX_SCOPING_BYTES:
+        raise ValueError(f"scoping exceeds the {MAX_SCOPING_BYTES}-byte limit")
+    return result
 
 
 def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[str, Any]:
@@ -2993,9 +3123,9 @@ def _open_blocking_questions(
         and bool(item.get("blocking", True))
         and (attempt_id is None or item.get("attempt_id") == attempt_id)
     ]
-    # Localized batch questions are persisted atomically as one SQLite task
-    # document.  Treat an unsubmitted translation exactly like an unanswered
-    # single question: neither state may allow a worker report or wave advance.
+    # Localized batch questions use one SQLite task document with per-slide
+    # checkpoints. Treat an unfinished sequence or translation exactly like an
+    # unanswered single question: neither may allow a report or wave advance.
     document_root = _task_document_root(task_dir, str(state["task_id"]))
     for document_key, batch in db_list_task_documents(document_root, str(state["task_id"]), "question_batch:"):
         batch_id = str(batch.get("batch_id") or "")
@@ -3081,7 +3211,6 @@ def _report_markdown(record: dict[str, Any]) -> str:
                     lines.extend(["```json", json.dumps(item, ensure_ascii=False, sort_keys=True, indent=2), "```"])
                 else:
                     lines.append(f"- {scalar_item(item)}")
-    lines.extend(["", "## Next Action", "", prose(report["next_action"]), ""])
     validation = record.get("result_validation")
     if isinstance(validation, dict):
         lines.extend([
@@ -3091,6 +3220,12 @@ def _report_markdown(record: dict[str, Any]) -> str:
             f"- Reported changed files: {scalar_item((validation.get('artifacts') or {}).get('reported_change_count'))}",
             "",
         ])
+    scoping = record.get("scoping")
+    if isinstance(scoping, dict):
+        lines.extend(["", "## Scoping", "", "```json", json.dumps(scoping, ensure_ascii=False, sort_keys=True, indent=2), "```"])
+    planning = record.get("planning")
+    if isinstance(planning, dict):
+        lines.extend(["", "## Planning", "", "```json", json.dumps(planning, ensure_ascii=False, sort_keys=True, indent=2), "```"])
     return "\n".join(lines)
 
 
@@ -3331,7 +3466,6 @@ def _compact_report_context(record: dict[str, Any]) -> dict[str, Any]:
         "tests": compact_list("tests"),
         "evidence": compact_list("evidence"),
         "uncertainty": compact_list("uncertainty", items=8),
-        "next_action": redact(report.get("next_action", ""), 2400),
     }
 
 
@@ -3719,7 +3853,7 @@ def _validate_close_report(task_dir: Path, state: dict[str, Any], attempt: dict[
         raise ValueError("C2/C3 close report requires observed evidence, not only a completion assertion")
     task = load_task_definition(task_dir, state)
     combined = "\n".join(
-        str(item) for field in ("summary", "findings", "evidence", "uncertainty", "next_action")
+        str(item) for field in ("summary", "findings", "evidence", "uncertainty")
         for item in (report.get(field) if isinstance(report.get(field), list) else [report.get(field)])
     ).lower()
     weak_markers = ("not run", "not tested", "unverified", "todo", "tbd", "blocked")
@@ -4585,7 +4719,11 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
         "architecture", "design", "contract", "refactor", "cross-cutting",
         "архитектур", "контракт", "рефактор", "сквозн",
     ):
-        add_before("architecture", "implementation", "architecture, design, contract, or cross-cutting change")
+        add_before(
+            "architecture",
+            "plan" if "plan" in pipeline else "implementation",
+            "architecture, design, contract, or cross-cutting change",
+        )
 
     # Do not treat generic words such as ``schema`` or ``migration`` as proof
     # of database work: manifests, JSON schemas, API contracts, and source
@@ -4603,13 +4741,13 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
     if database_reason is None and has("база данных", "базы данных", "бд", "sql", "postgres", "mysql", "sqlite", "схема данных"):
         database_reason = "database or datastore terminology"
     if proposed_pipeline is None and database_reason:
-        add_before("database_architecture", "implementation", database_reason)
+        add_before("database_architecture", "plan" if "plan" in pipeline else "implementation", database_reason)
     if proposed_pipeline is None and has("performance", "latency", "load", "benchmark", "производительн", "задержк", "нагрузк", "бенчмарк"):
         add_before("performance", "review", "performance or load concern")
     if proposed_pipeline is None and has("accessibility", "a11y", "screen reader", "keyboard", "доступност", "скринридер", "клавиатур"):
         add_before("accessibility", "review", "accessibility requirement")
     if proposed_pipeline is None and has("frontend", "ui", "ux", "design system", "фронтенд", "интерфейс", "дизайн-систем"):
-        add_before("ux", "implementation", "UI/UX or design-system work")
+        add_before("ux", "plan" if "plan" in pipeline else "implementation", "UI/UX or design-system work")
     if proposed_pipeline is None and has("documentation", "docs", "runbook", "adr", "документац", "доки", "ранбук"):
         add_before("documentation", "close", "explicit documentation deliverable")
     parallel_groups = normalize_parallel_groups(params.get("parallel_groups"), pipeline)
@@ -4617,7 +4755,7 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
         "objective": params.get("objective", ""),
         "requirements": params.get("requirements", []),
     })
-    roles = {"plan": ["planner"], "discover": ["explorer"], "architecture": ["architect"], "database_architecture": ["database_architect"], "implementation": [implementation_selection["profile"]], "qa": ["qa_engineer", "build_verification"], "security": ["security_auditor"], "performance": ["performance_engineer"], "accessibility": ["accessibility_engineer"], "ux": ["ux_designer"], "review": ["code_reviewer"], "documentation": ["technical_writer"], "close": ["build_verification"]}
+    roles = {"scope": ["planner"], "plan": ["planner"], "discover": ["explorer"], "architecture": ["architect"], "database_architecture": ["database_architect"], "implementation": [implementation_selection["profile"]], "qa": ["qa_engineer", "build_verification"], "security": ["security_auditor"], "performance": ["performance_engineer"], "accessibility": ["accessibility_engineer"], "ux": ["ux_designer"], "review": ["code_reviewer"], "documentation": ["technical_writer"], "close": ["build_verification"]}
     return {"complexity": complexity, "base_pipeline": BASE_PIPELINES[complexity], "pipeline": pipeline, "parallel_groups": parallel_groups, "pipeline_source": pipeline_source, "pipeline_corrections": pipeline_corrections, "conditional_gates": additions, "conditional_gate_reasons": addition_reasons, "available_gates": sorted(AVAILABLE_GATES), "suggested_roles": {gate: roles.get(gate, profiles_for_gate(gate)) for gate in pipeline}, "implementation_selection": implementation_selection}
 
 
@@ -4699,10 +4837,10 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("plan_approval must be auto or required")
         follow_up = params.get("follow_up") if isinstance(params.get("follow_up"), dict) else None
         baseline_ref = store_manifest_snapshot(task_dir, baseline)
-        task = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "user_request": redact(params.get("user_request") or params.get("objective", ""), 4000), "objective": redact(params.get("objective", "")), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": redact(params.get("user_request") or params.get("objective", ""), 4000), "objective": redact(params.get("objective", "")), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan"}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
         if thread_id and (
@@ -4800,19 +4938,38 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
             report_id = safe_id(str(record.get("report_id", "")))
             attempt = _attempt(state, safe_id(str(record.get("attempt_id", ""))))
             sanitized = sanitize_report_payload(record.get("report"))
+            raw_scoping = record.get("scoping")
+            if raw_scoping is not None:
+                if attempt.get("gate") != "scope" or attempt.get("profile") != "planner":
+                    raise ValueError(
+                        f"report record {report_id!r} failed reconciliation: "
+                        "scoping is allowed only for planner scope reports"
+                    )
+                scoping = sanitize_scoping_payload(raw_scoping, persisted=True)
+            else:
+                scoping = None
             raw_planning = record.get("planning")
             if raw_planning is not None:
                 if attempt.get("gate") != "plan" or attempt.get("profile") != "planner":
-                    raise ValueError(f"report record failed reconciliation: {path.name}")
+                    raise ValueError(
+                        f"report record {report_id!r} failed reconciliation: "
+                        "planning is allowed only for planner plan reports"
+                    )
                 planning = sanitize_planning_payload(raw_planning, persisted=True)
                 digest_input: Any = {"report": sanitized, "planning": planning}
             else:
                 planning = None
                 digest_input: Any = ({"report": sanitized, "planning": planning} if "planning" in record else sanitized)
+            if scoping is not None:
+                digest_input = {
+                    **(digest_input if isinstance(digest_input, dict) and "report" in digest_input else {"report": sanitized, "planning": planning}),
+                    "scoping": scoping,
+                }
             if "gate_result" in record:
                 digest_input = {
                     "report": sanitized,
                     "planning": planning,
+                    **({"scoping": scoping} if scoping is not None else {}),
                     "gate_result": sanitize_gate_result_payload(record.get("gate_result")),
                 }
             if "closure" in record:
@@ -6903,7 +7060,7 @@ def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
 
     knowledge_harvest = _is_knowledge_harvest_task(task)
     groups = (
-        [["plan"], ["discover"], ["architecture"], ["documentation"], ["review"], ["close"]]
+        [["scope"], ["discover"], ["architecture"], ["plan"], ["documentation"], ["review"], ["close"]]
         if knowledge_harvest else classified["parallel_groups"]
     )
     return [
@@ -7163,7 +7320,37 @@ def _v3_active_wave_context(
         and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
         and not item.get("invalidated")
     ]
-    attempt_ids = active_attempt_ids or list(wave.get("attempt_ids") or [])
+    # A SubagentStop without a report is terminalized before recovery, but a
+    # mixed wave still contains live workers.  Keep that exact failed slot in
+    # the relative result contract; otherwise the handoff asks the
+    # coordinator to submit a failed receipt that this adapter rejects as an
+    # unknown slot.  Other terminal attempts (notably passed attempts kept
+    # during bounded gate rework) remain omitted when a live retry exists.
+    reportless_failure_ids = {
+        str(item.get("attempt_id") or "")
+        for item in state.get("attempts", [])
+        if item.get("gate") in wave.get("gates", [])
+        and item.get("status") == "failed"
+        and item.get("host_stop_outcome") == "native_worker_stopped_without_report"
+        and not item.get("invalidated")
+    }
+    wave_attempt_ids = [
+        str(attempt_id)
+        for attempt_id in (wave.get("attempt_ids") or [])
+        if str(attempt_id or "").strip()
+    ]
+    if active_attempt_ids:
+        eligible = set(active_attempt_ids) | reportless_failure_ids
+        attempt_ids = [attempt_id for attempt_id in wave_attempt_ids if attempt_id in eligible]
+        if not attempt_ids:
+            attempt_ids = active_attempt_ids + [
+                attempt_id for attempt_id in reportless_failure_ids
+                if attempt_id not in active_attempt_ids
+            ]
+    else:
+        attempt_ids = wave_attempt_ids
+    if not attempt_ids:
+        attempt_ids = active_attempt_ids
     return wave, attempt_ids, expected_step
 
 
@@ -7492,7 +7679,8 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
     elif status_value in {"decline", "cancel", "invalid_answer", "pending_user_input"}:
         response["outcome"] = "awaiting_user"
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the same worker and question open. Translate the durable English question into "
+            f"{COORDINATOR_LOCK} Keep the same worker and question or batch open. Accepted batch steps are durable, "
+            "so retrying resumes at the next unanswered item. Translate the durable English question into "
             "the task's original user language only through localized_question, localized_header, localized_options, "
             "and localized_custom_label, then retry the native question UI when the user is ready; do not replace the "
             "worker, alter the durable worker record, fabricate an answer, or advance the wave."
@@ -7501,23 +7689,146 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
+    if value is None:
+        value = {}
     if not isinstance(value, dict):
-        raise ValueError("plan_approval requires payload with decision approve or revise")
+        raise ValueError("plan_approval requires a payload object")
     payload = dict(value)
-    unknown = sorted(set(payload) - {"decision", "feedback"})
+    localization_fields = {
+        "localized_prompt", "localized_title", "localized_approve", "localized_cancel",
+    }
+    unknown = sorted(set(payload) - {"decision", "feedback", *localization_fields})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
-    raw = str(payload.get("decision") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    raw = str(payload.get("decision") or "prompt").strip().lower().replace("-", "_").replace(" ", "_")
     decision = {
+        "prompt": "prompt", "ask": "prompt", "review": "prompt",
         "approve": "approve", "approved": "approve", "accept": "approve",
         "revise": "revise", "changes": "revise", "request_changes": "revise",
     }.get(raw)
     if not decision:
-        raise ValueError("plan_approval decision must be approve or revise")
+        raise ValueError("plan_approval decision must be prompt, approve, or revise")
     feedback = str(payload.get("feedback") or "").strip()
+    if decision == "prompt" and feedback:
+        raise ValueError("plan_approval prompt does not accept feedback")
     if decision == "revise" and not feedback:
         raise ValueError("plan_approval revise requires non-empty feedback")
-    return {"decision": decision, **({"feedback": feedback} if feedback else {})}
+    if decision != "prompt" and any(str(payload.get(field) or "").strip() for field in localization_fields):
+        raise ValueError("plan approval localization fields are accepted only with decision=prompt")
+    normalized = {"decision": decision, **({"feedback": feedback} if feedback else {})}
+    for field in localization_fields:
+        if str(payload.get(field) or "").strip():
+            normalized[field] = redact(str(payload[field]).strip(), 300)
+    return normalized
+
+
+PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str]] = {
+    "en": ("Approve the completed plan?", "Plan review", "Approve", "Cancel"),
+    "ru": ("Утвердить завершённый план?", "Проверка плана", "Утвердить", "Отмена"),
+    "uk": ("Затвердити завершений план?", "Перевірка плану", "Затвердити", "Скасувати"),
+    "ro": ("Aprobați planul finalizat?", "Revizuirea planului", "Aprobă", "Anulează"),
+    "de": ("Den fertigen Plan genehmigen?", "Planprüfung", "Genehmigen", "Abbrechen"),
+    "fr": ("Approuver le plan finalisé ?", "Examen du plan", "Approuver", "Annuler"),
+    "es": ("¿Aprobar el plan finalizado?", "Revisión del plan", "Aprobar", "Cancelar"),
+    "it": ("Approvare il piano completato?", "Revisione del piano", "Approva", "Annulla"),
+    "pt": ("Aprovar o plano concluído?", "Revisão do plano", "Aprovar", "Cancelar"),
+    "pl": ("Zatwierdzić ukończony plan?", "Przegląd planu", "Zatwierdź", "Anuluj"),
+    "zh": ("批准已完成的计划？", "计划审核", "批准", "取消"),
+    "ja": ("完成した計画を承認しますか？", "計画の確認", "承認", "キャンセル"),
+    "ko": ("완료된 계획을 승인하시겠습니까?", "계획 검토", "승인", "취소"),
+    "el": ("Έγκριση του ολοκληρωμένου σχεδίου;", "Έλεγχος σχεδίου", "Έγκριση", "Ακύρωση"),
+}
+
+
+def _v3_plan_approval_copy(state: dict[str, Any], localization: dict[str, Any]) -> tuple[str, str, str, str]:
+    language = str(state.get("user_language") or "en").lower().split("-", 1)[0]
+    translated = PLAN_APPROVAL_TRANSLATIONS.get(language)
+    supplied = tuple(
+        str(localization.get(field) or "").strip()
+        for field in ("localized_prompt", "localized_title", "localized_approve", "localized_cancel")
+    )
+    if all(supplied):
+        return supplied
+    if language != "en" and translated is None:
+        raise ValueError(
+            "non-English plan approval requires localized_prompt, localized_title, localized_approve, and localized_cancel"
+        )
+    if any(supplied):
+        raise ValueError("plan approval localization requires all four localized fields")
+    return translated or PLAN_APPROVAL_TRANSLATIONS["en"]
+
+
+def _v3_prompt_plan_approval(
+    state: dict[str, Any],
+    task_ref: str,
+    localization: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Open the native Approve/Cancel UI without mutating a cancelled plan."""
+    approval = _plan_approval(state)
+    if approval.get("policy") != "required":
+        raise ValueError("this task does not require post-plan approval")
+    if approval.get("status") != "awaiting_user":
+        raise ValueError("there is no pending plan approval for this task")
+    review = dict(approval.get("review") or {})
+    prompt, title, approve_label, cancel_label = _v3_plan_approval_copy(state, localization)
+    requested_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "decision": {
+                "type": "string",
+                "title": title,
+                "oneOf": [
+                    {"const": "approve", "title": approve_label},
+                    {"const": "cancel", "title": cancel_label},
+                ],
+            },
+        },
+        "required": ["decision"],
+    }
+    try:
+        action, content, elicitation_id = _request_mcp_elicitation(
+            prompt,
+            requested_schema,
+            thread_id=str(state.get("thread_id") or ""),
+        )
+    except RuntimeError as exc:
+        return None, {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "host_plan_approval_unavailable",
+            "code": "host_plan_approval_unavailable",
+            "task_ref": task_ref,
+            "dispatches": [],
+            "plan_review": review,
+            "diagnostics": [{"message": redact(str(exc), 1000)}],
+            "next_action": (
+                f"{COORDINATOR_LOCK} Keep the plan pending and stop. Retry only in a main-chat host that can render "
+                "native MCP elicitation; do not infer approval."
+            ),
+        }
+    selected = ""
+    if action == "accept" and isinstance(content, dict):
+        selected = str(content.get("decision") or "").strip().lower()
+    if action != "accept" or selected == "cancel":
+        return None, {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "awaiting_plan_approval",
+            "task_ref": task_ref,
+            "dispatches": [],
+            "plan_review": review,
+            "result": {"decision": "cancelled", "elicitation_id": elicitation_id},
+            "output_policy": "silent",
+            "allowed_visible_events": ["user_message"],
+            "next_action": (
+                f"{COORDINATOR_LOCK} Stop now and wait for the user's next message. Keep the plan pending; do not "
+                "dispatch, revise, or send approval/cancellation commentary."
+            ),
+        }
+    if selected != "approve":
+        raise ValueError("plan approval UI returned an invalid decision")
+    return {"decision": "approve"}, None
 
 
 def _v3_follow_up_payload(value: object) -> dict[str, Any]:
@@ -7827,7 +8138,25 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             normalized_payload = _v3_question_management_payload(params.get("payload"))
         elif intent == "plan_approval":
             normalized_payload = _v3_plan_approval_payload(params.get("payload"))
-        submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload")}, sort_keys=True, default=str))[:16])
+            if normalized_payload["decision"] == "prompt":
+                normalized_payload, prompt_response = _v3_prompt_plan_approval(state, task_ref, normalized_payload)
+                if prompt_response is not None:
+                    return prompt_response
+        operation_context: dict[str, Any] = {}
+        if intent == "question" and str((normalized_payload or {}).get("question_id") or "").startswith("batch-"):
+            batch_id = str(normalized_payload["question_id"])
+            batch = db_get_task_document(
+                _task_document_root(task_dir, str(state["task_id"])),
+                str(state["task_id"]),
+                "question_batch:" + batch_id,
+            )
+            if isinstance(batch, dict):
+                operation_context["batch_progress"] = {
+                    "status": batch.get("status"),
+                    "answered_keys": sorted((batch.get("answers") or {}).keys()),
+                    "translation_required_for": sorted(batch.get("translation_required_for") or []),
+                }
+        submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload"), **operation_context}, sort_keys=True, default=str))[:16])
         if intent in {"resume", "deactivate"}:
             old = orchestrate({
                 **common,
@@ -7846,7 +8175,15 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "payload": payload,
             })
         response = _v3_response(old, task_ref, include_result=True)
-        return _v3_question_response(response) if intent == "question" else response
+        if intent == "question":
+            return _v3_question_response(response)
+        if intent == "plan_approval" and (old.get("result") or {}).get("decision") == "approved":
+            response["approval_message"] = "Plan approved."
+            response["next_action"] = (
+                f"{COORDINATOR_LOCK} Tell the user in their language that the plan was approved, then execute every "
+                "returned dispatch exactly once and continue the normal Cortex wave workflow."
+            )
+        return response
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         error = _v3_error("management_failed", exc)
         if resolved_task_ref:
@@ -7872,6 +8209,7 @@ bind_runtime_dependencies(globals())
 
 
 from cortex_runtime.briefings import (
+    codebase_memory_project_key_from_root,
     dispatch_briefing_review_marker,
     host_spawn_bootstrap,
     host_spawn_prompt,
@@ -8061,11 +8399,15 @@ ORCHESTRATE_TOOL_SCHEMA = {
 PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
     agents=AGENTS,
     report_fields=REPORT_FIELDS,
+    max_report_items=MAX_REPORT_ITEMS,
     max_work_packages=MAX_WORK_PACKAGES,
+    max_microtasks_per_package=MAX_MICROTASKS_PER_PACKAGE,
+    max_discovery_domains=MAX_DISCOVERY_DOMAINS,
     question_option_schema=QUESTION_OPTION_SCHEMA,
 )
 V3_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_report"]
 V3_PLANNING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_planning"]
+V3_SCOPING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_scoping"]
 V3_WORKER_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_worker"]
 V3_WAVE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_wave"]
 START_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["start_orchestration"]
@@ -8095,7 +8437,7 @@ TOOLS = {
     "confirm_host_spawn": (confirm_host_spawn, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string", "minLength": 1, "description": "Native child id; for create_thread pass the returned threadId here."}, "host_task_name": {"type": "string", "minLength": 1}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "host_agent_id", "host_task_name"]}),
     "finalize_attempt": (finalize_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision", "attempt_id", "status"]}),
     "complete_attempt": (complete_attempt, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "host_tool": {"type": "string", "enum": ["spawn_agent", "create_thread"]}, "host_agent_id": {"type": "string"}, "host_task_name": {"type": "string"}, "host_model": {"type": "string"}, "host_reasoning_effort": {"type": "string"}, "status": {"type": "string", "enum": sorted(TERMINAL_ATTEMPT_STATUSES)}, "reason": {"type": "string"}, "submission_id": {"type": "string"}, "report": {"type": "object"}}, "required": ["task_id", "principal", "attempt_id"]}),
-    "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}, "next_action": {"type": "string"}}, "required": sorted(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
+    "record_report": (record_report, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string", "description": "Optional when the worker identity maps to exactly one active attempt; Cortex infers it."}, "submission_id": {"type": "string", "description": "Optional; Cortex derives a deterministic id from the attempt and report digest."}, "report": {"type": "object", "additionalProperties": False, "properties": {"summary": {"type": "string"}, "findings": {"type": "array"}, "questions": {"type": "array"}, "changed_files": {"type": "array", "items": {"type": "string"}}, "tests": {"type": "array"}, "evidence": {"type": "array"}, "uncertainty": {"type": "array"}}, "required": list(REPORT_FIELDS)}}, "required": ["task_id", "principal", "report"]}),
     "cortex.question": (cortex_question, QUESTION_TOOL_SCHEMA),
     "publish_worker_question": (publish_worker_question, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "submission_id": {"type": "string"}, "question": {"type": "string", "minLength": 1}, "header": {"type": "string"}, "options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA}, "multiple": {"type": "boolean"}, "custom_label": {"type": "string"}, "context": {}, "blocking": {"type": "boolean"}}, "required": ["task_id", "principal", "attempt_id", "submission_id", "question"]}),
     "list_worker_questions": (list_worker_questions, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "status": {"type": "string", "enum": ["open", "answered"]}}, "required": ["task_id", "principal"]}),

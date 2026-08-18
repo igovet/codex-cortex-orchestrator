@@ -7,6 +7,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/cortex-luna-high-eval.py
 # Uses this checkout as the MCP source; it does not install, reinstall, or update Cortex.
+# Fast source-mode transport/follow-up probe used during development.
+python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
+# Full lifecycle live scenario for a release gate.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Optional per-scenario timeout override (10..7200 seconds; default 1800).
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --live-timeout-seconds 900
@@ -14,6 +17,7 @@ python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential 
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --retain-failure-metadata
 python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
 python3 scripts/probe-fresh-cortex-plugin.py
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py
 python3 scripts/validate-cortex-marketplace.py
 python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py
 bash -n scripts/sync-cortex.sh
@@ -28,14 +32,28 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v`
-  passed **388 offline tests**.
-- `python3 scripts/cortex-cold-boot-smoke.py` passed.
-- `python3 scripts/cortex-luna-high-eval.py --live --scenario
-  automatic_sequential` passed against this workspace's source tree. This is
-  live source-mode validation in an isolated temporary project: it points its
-  MCP server at the checkout and does **not** install, reinstall, update, or
-  otherwise verify a user's installed Cortex plugin.
+- The full Python 3.12.3 discovery run passed all 485 tests. Focused question,
+  lazy-filesystem, approval-freshness, pipeline-order, briefing-completeness,
+  log-cap, compatibility, and evaluator-contract regressions also passed.
+- Cold boot passed with 9 reports, 9 worker attempts, 8 continuation calls,
+  plan approval, and a parallel wave.
+- Marketplace and plugin validation, Python compilation, Bash syntax, and
+  `git diff --check` passed. Deterministic evaluator fixtures for
+  `automatic_sequential`, `compact_parallel`, and `blocked_resume` completed.
+- The isolated fresh-plugin probe passed for
+  `8.0.0+codex.20260818180000` in temporary `HOME`/`CODEX_HOME`.
+- The targeted source-mode `follow_up_partial` live scenario passed in 22
+  seconds: it created exactly one linked v2 corrective task, preserved the
+  completed source task, prepared the first dispatch, and made no failed public
+  calls. The longer `automatic_sequential` scenario was not run to completion
+  after the user requested faster targeted validation; it is still a separate
+  release-only gate. Both modes use this workspace's source tree in an isolated
+  temporary project and do **not** install, reinstall, update, or otherwise
+  verify a user's installed Cortex plugin.
+- The reportless-stop recovery coverage includes terminal failed-stop handling,
+  exact failed receipts, mixed-wave slot preservation, bounded retry failure,
+  and the ordering-sensitive PostToolUse case where an earlier reportless
+  attempt remains visible after a later attempt completes.
 
 The live evaluator emits newline-delimited JSON progress records while the
 parent runs. Each record has `type: "cortex_live_progress"`, the scenario, and
@@ -86,11 +104,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `6.6.0`. These results are evidence for
-the checked-out source only; release publication and installed-plugin
+The source manifest declares `8.0.0+codex.20260818180000`. These results are
+evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 6.6.0 source contract
+## Current 8.0.0 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -100,8 +118,8 @@ verification remain separate, explicitly requested actions.
   `tomllib`, the dry-run stops with a diagnostic naming the Python 3.11+
   requirement. The same resolver contract is enforced by the installed MCP
   and lifecycle-hook launcher, including paths containing spaces. For the
-  persistent shell/GUI setup sequence, see [README.md's Select the Python
-  runtime section](../../README.md#select-the-python-runtime); it covers the
+  persistent shell/GUI setup sequence, see [README.md's system requirements
+  section](../../README.md#1-system-requirements); it covers the
   new-shell and Codex restart requirement and confirms that `/usr/bin/python3`
   is not modified.
 - Resolver and launcher acceptance checks cover a selected interpreter,
@@ -109,8 +127,7 @@ verification remain separate, explicitly requested actions.
   launcher-based MCP and five-hook configuration, marketplace validation, and
   fresh-plugin probing. A release candidate must pass the full regression,
   cold-boot, fresh-plugin, and tracked-archive checks before publication.
-- The public executable was reduced from 11,831 to 7,576 lines. It is a small
-  public composition and stdio entrypoint; focused runtime modules own the
+- The public executable is a composition and stdio entrypoint; focused runtime modules own the
   orchestration engine, SQLite ledger/migrations, artifact transport,
   delegation persistence, gate transitions, harvest validation, reports,
   questions, briefings, and MCP schema transport. Behavioral tests import the
@@ -147,7 +164,12 @@ verification remain separate, explicitly requested actions.
   worker sessions in place; completed-task corrections remain linked
   `follow_up` tasks. Schema v8 stores the revision, session, and atomic
   question-batch identity; `ask_batch`/`poll_batch` cover 1–32 questions with
-  canonical answers.
+  canonical answers. The main-chat UI keeps one durable batch ref while
+  presenting one native question per step, checkpoints accepted answers, and
+  resumes after cancellation at the next unanswered question.
+- Required post-plan review is surfaced through native **Approve/Cancel** UI.
+  Approve emits a localized plan-approved notice and dispatches the next wave;
+  Cancel is silent and leaves the plan pending for the next user message.
 - Prune first commits a tombstone, removes the projection tree outside the
   state lock, and only then deletes canonical task rows in one final SQLite
   transaction. Failed filesystem removal leaves the task recoverable for a
@@ -211,6 +233,15 @@ bounded identifiers.
 - `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for a streamed, sanitized source-mode parent run against the workspace source tree. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
+- `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host
+  diagnostic for Codex CLI, Python 3.11+/`tomllib`, plugin launcher, same-user
+  cache, exact `cortex@cortex` registration, MCP approval configuration, and
+  lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
+  `BLOCKED`) and `mcp.blocking_checks`; `READY` requires every emitted check to
+  pass. A nonzero result identifies the failed prerequisite; it never installs
+  software or changes Codex configuration. See the [SSH host troubleshooting
+  runbook](ssh-hetzner-troubleshooting.md) for same-user remediation and the
+  bounded reportless-stop recovery sequence.
 - `python3 scripts/validate-cortex-marketplace.py` — marketplace and plugin-contract validation.
 - `python3 -m py_compile ...` — Python syntax compilation for runtime and helper modules.
 - `bash -n scripts/sync-cortex.sh` — shell syntax check.
