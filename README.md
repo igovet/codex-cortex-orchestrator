@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.0.4-7c3aed" alt="Cortex 9.0.4" />
+        <img src="https://img.shields.io/badge/Cortex-9.1.0-7c3aed" alt="Cortex 9.1.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -694,10 +694,12 @@ and `record_report`.
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
 exact `dispatch_ref`, briefing path, and digest; the worker reads and verifies
-that briefing before project work. The briefing carries the phase/profile,
-selection rationale, objective, ownership, paths, dependencies, context files,
-acceptance criteria, verification, and predecessor handoffs, so scheduler data
-cannot silently disappear from the worker prompt. A worker never browses
+that briefing before project work. Worker Briefing v2 JSON-serializes every
+task-controlled assignment value inside one explicitly untrusted data block;
+the surrounding authority, role playbook, phase overlay, evidence rules, and
+worker protocol remain fixed instructions. Ordinary profiles do not carry
+harvest specialization; exact harvest routes add a conditional mode overlay.
+A worker never browses
 unrelated `.codex/cortex` coordination data. Canonical state is stored in the
 local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
 tasks without that field resume their persisted pipeline unchanged.
@@ -715,6 +717,10 @@ or storage blockers are terminal. Successful finalization revalidates the
 current draft and state, commits the durable report atomically, and deletes the
 draft post-commit. Bounded briefing, report, and coordinator artifact reads
 clamp oversized `max_bytes` requests to 32768 and continue with cursors.
+Failed work has two independent limits: at most two failures may reuse one
+strategy, while a phase may fail at most three times total. Before a third phase
+attempt, the coordinator supplies a materially different `next_strategy` or
+replans the future pipeline.
 Drafts expire after one hour and a new template supersedes
 the prior attempt draft. Read-only
 workers do not claim source changes observed in the shared checkout as their

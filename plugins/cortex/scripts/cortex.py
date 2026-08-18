@@ -249,8 +249,11 @@ def load_profile_contract() -> tuple[dict[str, Any], dict[str, dict[str, Any]], 
 PROFILE_CONTRACT, PROFILES, PROFILE_INSTRUCTIONS = load_profile_contract()
 AGENTS = set(PROFILES)
 PROFILE_EXECUTION_CONTRACTS = PROFILE_CONTRACT["profile_execution_contracts"]
+MODE_OVERLAYS = PROFILE_CONTRACT.get("mode_overlays", {})
 SHARED_WORKER_CONTRACT = PROFILE_CONTRACT.get("shared_worker_contract", {})
 CODEBASE_MEMORY_REFRESH_PROFILES = set(SHARED_WORKER_CONTRACT.get("codebase_memory_refresh_profiles", []))
+RETRY_POLICY = SHARED_WORKER_CONTRACT.get("retry_policy", {})
+PROMPT_BUDGETS = SHARED_WORKER_CONTRACT.get("prompt_budgets", {})
 if (
     SHARED_WORKER_CONTRACT.get("repository_intelligence")
     != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
@@ -270,6 +273,19 @@ if (
     != "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
     or not CODEBASE_MEMORY_REFRESH_PROFILES.issubset(AGENTS)
+    or RETRY_POLICY != {"phase_attempt_limit": 3, "same_strategy_limit": 2}
+    or set(MODE_OVERLAYS) != {"harvest"}
+    or set(MODE_OVERLAYS["harvest"]) != {
+        "planner", "explorer", "architect", "technical_writer", "code_reviewer", "build_verification"
+    }
+    or not all(isinstance(value, str) and value.strip() for value in MODE_OVERLAYS["harvest"].values())
+    or PROMPT_BUDGETS != {
+        "bootstrap_hard_bytes": 1500,
+        "ordinary_briefing_soft_bytes": 10000,
+        "ordinary_briefing_hard_bytes": 14000,
+        "harvest_briefing_soft_bytes": 11000,
+        "harvest_briefing_hard_bytes": 15000,
+    }
 ):
     raise RuntimeError("bundled Cortex shared worker contract is invalid")
 AVAILABLE_GATES = {
@@ -554,8 +570,9 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 MAX_CONTEXT_REPORTS = 8
 MAX_CONTEXT_REPORT_CHARS = 32000
-MAX_GATE_RECOVERY_FAILURES = 3
-MAX_ORCHESTRATE_GATE_FAILURES = 3
+MAX_GATE_RECOVERY_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
+MAX_ORCHESTRATE_GATE_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
+MAX_SAME_STRATEGY_FAILURES = int(RETRY_POLICY["same_strategy_limit"])
 MAX_GATE_RECOVERY_EVENTS = 64
 MAX_TOOL_ERROR_LOG_INPUT_BYTES = 16384
 MAX_TOOL_ERROR_LOG_BYTES = 10 * 1024 * 1024
@@ -3665,12 +3682,7 @@ def _validate_knowledge_review(report: dict[str, Any], knowledge_indexes: list[s
 
 def _is_knowledge_harvest_task(task: dict[str, Any]) -> bool:
     routing_text = "\n".join(_task_routing_items(task)).lower()
-    return (
-        "harvest" in routing_text
-        or "feature census" in routing_text
-        or "repository knowledge" in routing_text
-        or "knowledge documentation" in routing_text
-    )
+    return re.search(r"(?<![a-z0-9])harvest(?:-refresh)?(?![a-z0-9])", routing_text) is not None
 
 
 def _required_task_result_contract(task: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -7116,6 +7128,7 @@ def _v3_compact_waves(
     allowed_worker_keys = {
         "phase", "profile", "objective", "paths", "acceptance", "verification",
         "model", "user_requested_model", "effort", "visible", "isolated_checkout", "depends_on", "context_files",
+        "strategy",
     }
     phase_waves: dict[str, tuple[int, str]] = {}
     available_context_gates = set(completed_gates or set())
@@ -7211,7 +7224,7 @@ def _v3_compact_waves(
             for source, target in (
                 ("objective", "objective"), ("paths", "allowed_paths"),
                 ("acceptance", "acceptance_criteria"), ("verification", "verification"),
-                ("context_files", "context_files"),
+                ("context_files", "context_files"), ("strategy", "strategy"),
             ):
                 if source in worker:
                     if source == "context_files" and project_root is not None:
@@ -7724,7 +7737,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         for index, result in enumerate(results, 1):
             if not isinstance(result, dict):
                 raise ValueError("every result must be an object")
-            allowed_result = {"worker", "report_ref", "dispatch_ref", "status", "reason"}
+            allowed_result = {"worker", "report_ref", "dispatch_ref", "status", "reason", "next_strategy"}
             unknown_result = sorted(set(result) - allowed_result)
             if unknown_result:
                 raise ValueError("unsupported result fields: " + ", ".join(unknown_result))
@@ -7749,6 +7762,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 _pre_recorded_report(task_dir, state, attempt_ids[slot - 1], report_ref)
                 if str(result.get("reason") or "").strip():
                     raise ValueError("successful results must not include reason")
+                if str(result.get("next_strategy") or "").strip():
+                    raise ValueError("successful results must not include next_strategy")
             else:
                 if report_ref:
                     raise ValueError("non-success results must omit report_ref")
@@ -7791,6 +7806,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 completion["report_ref"] = report_ref
             else:
                 completion["reason"] = str(result["reason"])
+                if str(result.get("next_strategy") or "").strip():
+                    completion["next_strategy"] = redact(result["next_strategy"], 1000)
             completions.append(completion)
         old_params["completions"] = completions
         if future_waves is not None:

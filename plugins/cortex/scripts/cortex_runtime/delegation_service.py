@@ -24,12 +24,15 @@ bind_symbols(
         "AGENTS",
         "AWAITING_HOST_SPAWN",
         "DOCUMENTATION_EVIDENCE_KINDS",
+        "MAX_ORCHESTRATE_GATE_FAILURES",
+        "MAX_SAME_STRATEGY_FAILURES",
         "PROFILES",
         "QUESTION_SCHEMA",
         "REPORT_SCHEMA",
         "SCHEMA",
         "_contained_path",
         "_delegation_report_index",
+        "_is_knowledge_harvest_task",
         "_project_knowledge_context",
         "_report_index",
         "_v3_task_ref",
@@ -213,12 +216,24 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                     "recoverable": True,
                     "state": state,
                 }
-        prior_failures = sum(
-            1 for attempt in state["attempts"]
+        prior_failed_attempts = [
+            attempt for attempt in state["attempts"]
             if attempt["gate"] == gate and attempt["status"] == "failed" and not attempt.get("invalidated")
-        )
-        if prior_failures >= 2:
+        ]
+        if len(prior_failed_attempts) >= MAX_ORCHESTRATE_GATE_FAILURES:
             raise ValueError(f"retry budget exhausted for gate '{gate}'")
+        requested_strategy = redact(params.get("strategy", ""), 1000) or "default"
+        same_strategy_failures = sum(
+            str(attempt.get("strategy") or "default").strip().casefold() == requested_strategy.casefold()
+            for attempt in prior_failed_attempts
+        )
+        if (
+            len(prior_failed_attempts) >= MAX_SAME_STRATEGY_FAILURES
+            and same_strategy_failures >= MAX_SAME_STRATEGY_FAILURES
+        ):
+            raise ValueError(
+                "same_strategy_limit reached; the third phase attempt requires a materially different strategy"
+            )
         briefing = render_gate_briefing(gate, task_definition.get("objective", ""), agent)
         ownership = str(params.get("ownership", "")).strip() or briefing["ownership"]
         objective = str(params.get("objective", "")).strip() or briefing["objective"]
@@ -288,7 +303,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         )[:24]
         briefing_file = f"delegations/{attempt_id}.{dispatch_ref}.briefing.md"
         briefing_path = _contained_path(task_dir, task_dir / briefing_file, "dispatch briefing")
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "report_index": "sqlite:task_documents/report_index", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": [redact(item, 1000) for item in task_definition.get("requirements", [])][:100], "task_scope": [redact(item, 500) for item in task_definition.get("scope", [])][:100], "task_acceptance_criteria": [redact(item, 1000) for item in task_definition.get("acceptance_criteria", [])][:100], "task_verification": [redact(item, 1000) for item in task_definition.get("verification", [])][:100], "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100], "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "report_index": "sqlite:task_documents/report_index", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100]
@@ -335,7 +350,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             spawn_request["prompt"] = spawn_request["message"]
             spawn_request["title"] = display_name
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
         _, delegation_index = _delegation_report_index(report_paths, state["task_id"], attempt_id)
         delegation_index["context_report_ids"] = context_report_ids
         delegation_index["updated_at"] = now()

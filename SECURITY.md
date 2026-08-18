@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.0.4` source line. The public
+Security fixes are prepared for the current `9.1.0` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -47,6 +47,10 @@ identity mismatch, or expiry. Invalid `record_report` keeps the
 same file for correction; successful `record_report` deletes it and its
 metadata only after the durable report commit. A new template supersedes the
 prior attempt draft.
+Task-controlled prompt values are JSON-serialized into an explicitly untrusted
+assignment block. They are never interpolated as headings, delimiters, or
+protocol lines, so Markdown fences, role-like labels, XML-like tags, control
+phrases, and multilingual text remain data rather than worker instructions.
 Reports retain the strict seven-field
 `cortex/report/v1` contract. The sensitive diagnostic log at
 `~/.codex/logs/cortex-tool-errors.jsonl` is permission-protected and capped at
@@ -55,7 +59,9 @@ first. Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
 Worker-facing caller, input, and schema validation failures are structured as
-same-attempt corrections and do not consume the three-attempt recovery budget.
+same-attempt corrections and do not consume recovery budget. Failed work may
+reuse one strategy at most twice and may fail one phase at most three times;
+the third attempt requires a materially different strategy or pipeline replan.
 Only explicit non-retryable integrity, storage, permission, or unavailable
 identity failures terminate that worker attempt. Bounded briefing, report, and
 coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
@@ -76,6 +82,6 @@ working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This working tree is a source candidate only. The 9.0.4+codex.20260818210000
+This working tree is a source candidate only. The 9.1.0+codex.20260818230853
 changes are not installed into a user's plugin, published, committed, or
 tagged by this task.

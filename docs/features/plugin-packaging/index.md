@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `9.0.4`. This
+The current source manifest and server are intended for plugin version `9.1.0`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -65,12 +65,16 @@ remove/add, then writes and verifies `approve`; `--check` fails when the
 effective setting is missing or weaker.
 
 The marketplace validator also enforces the machine-readable shared worker
-contract: one strict seven-field report, worker `worker_question`,
+contract: explicit-opt-in skill descriptions, one strict seven-field report, worker `worker_question`,
 `get_report_template`, `record_report`, the three
 coordinator lifecycle operations, and scoped predecessor `read_worker_report`,
 compact native acknowledgement, exact-root Codebase
 Memory resolution, the four profiles allowed one index refresh, and bounded
-non-looping fallback. The compact worker schema accepts only validated
+non-looping fallback. It also rejects coordinator routing language and harvest
+specialization in selected-worker TOMLs, duplicate long prompt paragraphs,
+historical normative HTML comments, and raw task-value interpolation in the
+briefing compiler; the contract declares representative prompt byte budgets.
+The compact worker schema accepts only validated
 project-relative `context_files`, automatically injects available repository
 knowledge indexes, and requires `Knowledge reviewed:` evidence. Repository
 invariants separately require the bundled
@@ -80,5 +84,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 9.0.4 results are recorded there, and remaining gates are not implied by this page. The 9.0.4 source candidate requires resolver, launcher, marketplace, shell, cold-boot, deterministic fixtures, benchmark, fresh-plugin, full lifecycle live, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
+Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 9.1.0 results are recorded there, and remaining gates are not implied by this page. The 9.1.0 source candidate passed resolver/launcher regressions, marketplace and shell validation, cold boot, deterministic fixtures, the composite benchmark, and the isolated fresh-plugin probe. Full lifecycle live, installed-plugin, and tracked-release checks remain. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

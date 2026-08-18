@@ -922,7 +922,7 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             next_action = (
                 "Correct only the report fields named by the diagnostic and retry record_report on this same task "
                 "and attempt. Repeat for every later caller-correctable validation diagnostic until the report is "
-                "accepted; rejected validation calls do not consume the three-attempt recovery budget. Do not guess "
+                "accepted; rejected validation calls do not consume the failed phase-attempt budget. Do not guess "
                 "identity, remove required evidence, end the worker, or paste the report into the parent channel."
             )
         else:

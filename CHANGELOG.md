@@ -1,5 +1,28 @@
 # Changelog
 
+## [9.1.0] - 2026-08-19
+
+- Make orchestration and every supporting overlay explicitly opt-in. The
+  orchestrator keeps invocation, harvest routing, isolation, and team policy;
+  `cortex-control` is now the single coordinator state-machine and runtime core.
+- Compile Worker Briefing v2 from fixed authority/protocol sections, one
+  selected-role playbook, conditional mode and phase overlays, and a
+  JSON-serialized untrusted Assignment data block. Remove worker-irrelevant
+  model/effort and manifest-baseline metadata, duplicated team/profile policy,
+  and raw task-value interpolation.
+- Move harvest-only specialization out of ordinary agent TOMLs into validated
+  conditional overlays, narrow harvest detection to explicit harvest tokens,
+  fix discovery dependencies to begin at Scope, and remove obsolete normative
+  history from the harvest skill.
+- Split automatic recovery into `same_strategy_limit=2` and
+  `phase_attempt_limit=3`; a third phase attempt now requires a materially
+  different `next_strategy` or a future-wave replan. Add prompt-duplication,
+  prompt-injection, overlay-isolation, description, and representative byte-
+  budget regression checks.
+- Rename the misleading `token-monitoring` skill to `progress-accounting`; its
+  policy still forbids collecting token counts, hidden reasoning, or private
+  telemetry.
+
 ## [9.0.4] - 2026-08-19
 
 - Treat localized batch questions and option IDs as display projections. A

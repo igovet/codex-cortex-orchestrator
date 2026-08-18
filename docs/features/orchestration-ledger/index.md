@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.0.4 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 9.1.0 `cortex/v8` task ledger and
 public `cortex/orchestration/v5` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly eight public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -28,13 +28,14 @@ to the content checksum; inconsistent history fails closed.
 - [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v8, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
-- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, scope/plan gate briefings, and the `cortex/report/v1` field contract.
+- [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, scope/plan gate briefings, conditional harvest mode overlays, and the `cortex/report/v1` field contract.
 - [test_cortex_control.py](../../../tests/test_cortex_control.py) covers report-bus scoping/reconciliation and lane lifecycle behavior.
 
 Repository-root `AGENTS.md` is development-only and is not installed. Runtime
 guarantees come exclusively from the installable `plugins/cortex/` tree; the
-bundled orchestrator explicitly loads `cortex-control` for root isolation,
-dispatch, ownership, verification, recovery, and private diagnostics.
+bundled orchestrator is explicit opt-in and hands the runtime protocol to
+`cortex-control`, the single runtime core for root isolation, dispatch,
+ownership, verification, recovery, and private diagnostics.
 
 ## Canonical artifact layout
 
@@ -297,11 +298,13 @@ is handled through recovery, rework, or a blocker; it never authorizes direct
 root project work or source inspection. `SessionStart` and every public v5
 `next_action`, including caller-correctable failures, reassert this lock.
 
-Host spawn prompts first de-duplicate the exact user request, then add the
-worker contract. `start_orchestration.next_action` is serialized before dispatch
-payloads. The compact native bootstrap is below 1,500 bytes; the full immutable
-briefing is regression-tested below 11,500 bytes and the complete public start response below 8,000 UTF-8
-bytes to prevent Codex tool-output truncation. A worker is not considered sent
+Host spawn prompts use one JSON-serialized, explicitly untrusted assignment
+envelope; task-controlled text cannot become headings, fences, or protocol
+instructions. `start_orchestration.next_action` is serialized before dispatch
+payloads. Representative budgets are 1,500 bytes for the compact native
+bootstrap, 10,000/14,000 bytes for ordinary briefings, and 11,000/15,000 bytes
+for harvest briefings (soft/hard), with validator and regression lints for
+duplicate prompt paragraphs and adversarial assignment data. A worker is not considered sent
 until native `spawn_agent` returns a child id; the coordinator must not announce
 a dispatch or call wait with an empty target list, and native dispatch failure
 is a blocker. Worker prompts have
@@ -333,7 +336,8 @@ choices.
 
 A deterministic preflight recognizes short underspecified product-surface
 creation requests. It marks the task as requiring intent clarification and
-places the exact user request and blocking reason in every worker briefing.
+places the exact user request and blocking reason in the JSON-serialized,
+untrusted assignment data of every worker briefing.
 Discovery may gather bounded evidence needed to ask well, but plan and all
 other decision-bearing phases cannot report completion until a blocking
 `worker_question` has been answered and the same attempt resumes. A detailed
@@ -350,10 +354,11 @@ then `backend_dev`, with `general` only when no specialist signal is strong
 enough. The initial selection is provisional rather than a substitute for
 repository evidence: `planner` or `explorer` may recommend a narrower owner and
 the coordinator alone decides whether to replace not-yet-started
-`future_waves`, with a concise evidence-based reason. Both
-profiles receive the complete generated team catalog; the root orchestrator
-skill carries the same generated roster and routing rules while the root
-remains coordination-only.
+`future_waves`, with a concise evidence-based reason. The selected worker
+receives only its role playbook and task-relevant routing context; the root
+orchestrator remains coordination-only. Harvest-only specialization is supplied
+by conditional `mode_overlays.harvest` entries in `profiles.json`, keeping
+ordinary profile prompts focused.
 
 The compact public worker schema exposes the exact enum of all 21 canonical
 profile names. Legacy aliases remain compatibility input only. Cortex rejects
@@ -371,10 +376,11 @@ reports remain available only through scoped `read_worker_report` reads.
 
 The machine-validated profile contract also records required inputs, the
 project artifact each profile owns, and its completion deliverable. The attempt
-baseline is included in the worker prompt: implementation phases must reconcile
-real writes, while read-only profiles and phases must leave the project
-unchanged. This includes `build_verification` when assigned to the read-only
-`qa` profile; sandbox enforcement rejects writes that violate the contract.
+baseline is enforced by the ledger and report validation: implementation phases
+reconcile real writes, while read-only profiles and phases must leave the
+project unchanged. It is not repeated as prompt-baseline metadata. This
+includes `build_verification` when assigned to the read-only `qa` profile;
+sandbox enforcement rejects writes that violate the contract.
 
 Every worker calls `worker_question` and `record_report`; a successor may also
 call `read_worker_report` only for predecessor refs explicitly supplied in its
@@ -391,7 +397,7 @@ closed. After the answer, the coordinator resumes the exact worker through
 `followup_task`; the worker polls the same ref and continues the same attempt.
 Caller/input/schema validation from allowed worker tools is returned as a
 structured correction and retried on that same attempt without consuming the
-three-attempt budget. `get_report_template` and `worker_question` preserve this
+failed-worker budget. `get_report_template` and `worker_question` preserve this
 contract instead of turning malformed requests into terminal errors; only
 explicit non-retryable integrity, storage, permission, or unavailable-identity
 failures are terminal.
@@ -420,7 +426,7 @@ or complete replacement through `record_report`. The same canonical content
 checks run during recording; invalid records return field paths and fixes while
 leaving the same file in place. Recording consumes no failed-worker attempt;
 only failed worker attempts count toward the
-three-attempt recovery budget. A new template supersedes an old or expired
+failed phase-attempt budget. A new template supersedes an old or expired
 draft. The worker then sends its exact identity and `draft_ref` to one atomic
 `record_report`, which rereads and revalidates current state,
 and deletes the file and metadata only after commit,
@@ -505,9 +511,11 @@ reportless stop is terminal failed as
 its exact `dispatch_ref`, `status="failed"`, and reason, then use only a fresh
 top-level dispatch returned by Cortex. Never wait on, respawn, or send
 `followup_task` to the dead child. `MAX_ORCHESTRATE_GATE_FAILURES` bounds this
-repair to three failed attempts for one active phase: the first two exact
-failed continuations may each yield one fresh authorized top-level dispatch;
-the third failure blocks the task with a durable handoff instead of looping.
+repair to three failed attempts for one active phase (`phase_attempt_limit=3`)
+and two failures using one strategy (`same_strategy_limit=2`): before a third
+phase attempt the coordinator must provide a materially different
+`next_strategy` or replan. The third failure blocks the task with a durable
+handoff instead of looping.
 The PostToolUse wait-recovery hook filters every matching reportless stop in
 the current gate rather than assuming the newest attempt is relevant. An
 earlier failed attempt therefore remains surfaced even when a later retry has
@@ -691,8 +699,9 @@ during retirement.
 The focused plan-approval regression set passes with 14 tests, covering native
 and direct-fallback controls, approval continuation, silent cancellation,
 request-ID freshness, stale-basis rejection, revision, localization, and
-transport compatibility. The full control suite (285 tests), invariant suite
-(81 tests), and cold-boot smoke also pass. These checks exercise the source
+transport compatibility. The full control suite (292 tests), invariant suite
+(83 tests), complete discovery suite (514 tests), and cold-boot smoke also
+pass. These checks exercise the source
 MCP server and mocked/native JSON-RPC exchanges; this checkout does not include
 a live Codex Desktop renderer, so installed-plugin and live-host button
 rendering remain separate release/integration checks. Related commands and

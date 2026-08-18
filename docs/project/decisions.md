@@ -49,7 +49,7 @@ and an opaque request ID. An initialized stdio host receives MCP
 exactly Approve and Cancel choices. Direct callers receive a declarative
 `plan_approval_interaction` with the same schema and embedded
 `manage_orchestration` arguments, allowing a host to render buttons without
-inventing a second tool or changing the nine-tool surface. Approve and Cancel
+inventing a second tool or changing the eight-tool surface. Approve and Cancel
 button submissions must carry the current request ID; stale, replayed, or
 mismatched submissions fail closed. Approve advances the next wave, whereas
 Cancel records no dispatch and keeps `awaiting_user` silent so a later user
@@ -179,7 +179,7 @@ MCP schema/transport adapter. The record-report vertical slice is separated
 into domain policy, ports, a SQLite unit-of-work adapter, projection port, and
 use case; `core/runtime_bindings.py` is the explicit composition binding, not a
 bidirectional facade import. The public adapter owns the declarative
-nine-tool contract and JSON-RPC stdio loop; the facade passes the current
+eight-tool contract and JSON-RPC stdio loop; the facade passes the current
 business handlers into it. Gate transitions are further separated into active-
 gate resolution, evidence/C2-C3 validation, durable state mutation, and
 terminal manifest cleanup, so routing changes cannot accidentally weaken
@@ -191,6 +191,36 @@ behavior and exported contracts rather than `def` placement. The import bridge
 also supports Codex's installer validation, which loads the entrypoint through
 `importlib` without first registering a module name. It neither reads nor
 migrates pre-SQLite task state, which remains unsupported under the v8 policy.
+
+## Explicit activation and layered worker prompts
+
+`cortex:orchestrator` is an explicit opt-in route. Its frontmatter and the
+bundled internal skills make that boundary visible: ordinary task complexity
+does not activate Cortex. Once selected, `cortex-control` is the single
+runtime-core overlay for coordinator state, dispatch, recovery, and private
+diagnostics; the orchestrator skill supplies route and role guidance without
+duplicating the runtime protocol.
+
+Worker Briefing v2 has one assignment envelope. Task-controlled values are
+JSON-serialized as untrusted `Assignment data`, so headings, fences, markup,
+and instruction-like text remain data rather than prompt structure. The
+briefing no longer repeats model/effort routing metadata, prompt-baseline
+references, or a second copy of the exact user request. Role playbooks remain
+profile-owned, while harvest-specific guidance is a conditional
+`mode_overlays.harvest` entry in `profiles.json`, not duplicated in every
+profile TOML.
+
+Prompt validation keeps representative budgets in the worker contract: 1,500
+bytes for the native bootstrap, 10,000/14,000 bytes for ordinary briefings,
+and 11,000/15,000 bytes for harvest briefings (soft/hard). The marketplace
+validator and regression tests also lint long duplicate prompt paragraphs and
+parse adversarial assignment data as JSON.
+
+Retry policy is explicit and strategy-aware. A phase permits at most three
+failed attempts (`phase_attempt_limit=3`), but no more than two failures using
+the same strategy (`same_strategy_limit=2`). Before a third phase attempt, the
+coordinator must provide a materially different `next_strategy` or replan the
+pipeline; retries do not silently replay the same approach.
 
 ## Conditional indexed repository intelligence
 
@@ -523,8 +553,8 @@ fallback is not part of model routing.
 ## Scoped worker report bus
 
 Workers build a strict seven-field `cortex/report/v1` payload from the private
-JSON file created by `get_report_template`, correct it through
-and publish the file once through atomic
+JSON file created by `get_report_template`, correct it in place, and publish
+the file once through atomic
 `record_report`; the v8 report primitive stores the canonical
 sanitized JSON record, which is task- and attempt-bound; server-owned receipts
 make retries idempotent. A receipt links one report to one C2/C3

@@ -32,13 +32,12 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete Python 3.12.3 discovery suite previously passed: 497 tests.
-  Focused report/schema/read-only regressions and the private-file draft cold
-  boot also passed for that prior candidate; the current ephemeral-artifact
-  behavior has not yet been re-run in this worktree.
+- The complete Python 3.12.3 discovery suite passed: 514 tests. The current
+  cold-boot smoke and deterministic sequential, compact-parallel, and
+  blocked/resume fixtures also passed.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
   syntax checks, `git diff --check`, and the 8-worker/5-wave call-count
-  benchmark passed. The installed-plugin check, full lifecycle live scenario,
+  benchmark passed. The source-mode live lifecycle, installed-plugin check,
   and tracked archive gate were not run for this candidate.
 
 The live evaluator emits newline-delimited JSON progress records while the
@@ -90,11 +89,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.0.4+codex.20260818210000`. These results are
+The source manifest declares `9.1.0+codex.20260818230853`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 9.0.4 source contract
+## Current 9.1.0 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -161,7 +160,7 @@ verification remain separate, explicitly requested actions.
   retained in the audit receipt.
 - Worker caller/input/schema validation results are structured corrections:
   fix the named field and retry the same tool on the same attempt without
-  consuming the three-attempt recovery budget. `get_report_template` and
+  consuming the failed phase-attempt budget. `get_report_template` and
   `worker_question` return correction envelopes. Briefing, predecessor-report,
   and coordinator artifact reads clamp oversized `max_bytes` to 32768. Only
   explicit `retryable: false` integrity, storage, permission, or unavailable
@@ -232,6 +231,16 @@ Luna, high-risk Security uses Sol at its complexity floor, and other profiles
 select Luna or Terra according to their machine-readable profile policy. They
 also validate the plan-approval boundary: ordinary user tasks may require it,
 while harvest is automatic after its source-backed plan.
+
+Prompt-architecture regressions validate explicit Cortex opt-in, the
+`cortex-control` runtime-core handoff, conditional harvest overlays, and the
+Worker Briefing v2 assignment envelope. Adversarial task values are serialized
+and round-tripped as JSON, rather than interpreted as prompt structure; tests
+also reject long duplicate prompt paragraphs and enforce representative
+bootstrap/briefing budgets (1,500 bytes; ordinary 10,000/14,000 soft/hard;
+harvest 11,000/15,000 soft/hard). Retry regressions enforce
+`phase_attempt_limit=3`, `same_strategy_limit=2`, and the required
+`next_strategy` or pipeline replan before a third phase attempt.
 
 The release boundary rejects nested marketplaces, runtime state, bytecode,
 symlinks, unsafe paths, private home paths, credential-like files, and missing

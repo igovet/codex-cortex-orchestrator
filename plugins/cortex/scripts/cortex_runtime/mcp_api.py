@@ -283,6 +283,12 @@ def build_public_schemas(
                 "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
             },
             "objective": {"type": "string"},
+            "strategy": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+                "description": "Optional concise name for the initial worker approach; Cortex uses it only for bounded retry-strategy accounting.",
+            },
             "paths": {"type": "array", "items": {"type": "string"}},
             "acceptance": {"type": "array", "items": {"type": "string"}},
             "verification": {"type": "array", "items": {"type": "string"}},
@@ -364,7 +370,7 @@ def build_public_schemas(
                     {
                         "properties": {
                             "user_request": {
-                                "pattern": "(?:[Hh][Aa][Rr][Vv][Ee][Ss][Tt](?:-[Rr][Ee][Ff][Rr][Ee][Ss][Hh])?|[Ff][Ee][Aa][Tt][Uu][Rr][Ee] [Cc][Ee][Nn][Ss][Uu][Ss]|[Rr][Ee][Pp][Oo][Ss][Ii][Tt][Oo][Rr][Yy] [Kk][Nn][Oo][Ww][Ll][Ee][Dd][Gg][Ee]|[Kk][Nn][Oo][Ww][Ll][Ee][Dd][Gg][Ee] [Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt][Aa][Tt][Ii][Oo][Nn])",
+                                "pattern": "(?:[Hh][Aa][Rr][Vv][Ee][Ss][Tt](?:-[Rr][Ee][Ff][Rr][Ee][Ss][Hh])?)",
                             }
                         },
                         "description": "Knowledge-harvest routes may omit either list because Cortex supplies the exhaustive census contract.",
@@ -394,6 +400,12 @@ def build_public_schemas(
                         "dispatch_ref": {"type": "string", "minLength": 1, "description": "Exact dispatch ref returned by Cortex; required only for a non-success result so stale failures cannot target a replacement attempt."},
                         "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
                         "reason": {"type": "string", "description": "Required for a non-success result."},
+                        "next_strategy": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000,
+                            "description": "Materially different approach required after two failures of the current strategy and before the third phase attempt.",
+                        },
                     },
                 },
             },

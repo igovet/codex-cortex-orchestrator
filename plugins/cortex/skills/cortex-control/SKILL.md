@@ -1,6 +1,6 @@
 ---
 name: cortex-control
-description: Use this skill when coordinating a non-trivial task across Codex agents and durable gate, delegation, lock, or handoff state is useful. It uses the local cortex MCP server; apply Cortex model policy and bounded coordinator overrides at dispatch time.
+description: Internal Cortex runtime protocol. Load only after cortex:orchestrator has been explicitly activated. Never select directly for an ordinary task.
 ---
 
 # Cortex Control
@@ -23,6 +23,19 @@ for predecessor refs explicitly supplied in its dispatch. Workers must not call 
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
 opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
+
+## Coordinator state machine
+
+| Current state | Event | Only allowed action | User output |
+| --- | --- | --- | --- |
+| inactive | explicit orchestrator activation | call `start_orchestration` once | concise activation summary |
+| waiting_workers | wait timeout | wait again | silent |
+| waiting_workers | worker question | use the durable question flow | native UI only |
+| active or blocked | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise acknowledgement |
+| awaiting_plan_approval | approve | invoke only the returned next wave | approval acknowledgement |
+| awaiting_plan_approval | cancel | make no lifecycle call | silent |
+| completed | user asks to correct the result | `manage_orchestration(intent="follow_up")` | linked-task summary |
+| context uncertain | compaction or reset | `manage_orchestration(intent="inspect")` once | recovered-state summary only when action is needed |
 
 ## Root coordinator lock
 
@@ -75,7 +88,7 @@ paths forbidden above.
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
    returns, and validates that plan and enforces documentation and close. An override uses only
    `waves: [{workers: [{phase, ...}]}]`. `phase` is required; optional fields
-   are `profile`, `objective`, `paths`, `acceptance`, `verification`, `model`,
+   are `profile`, `objective`, `strategy`, `paths`, `acceptance`, `verification`, `model`,
    `user_requested_model`, `effort`, `depends_on`, `context_files`, `visible`,
    and `isolated_checkout`. `depends_on`
    names exact completed or earlier prerequisite phases; omit it to receive all
@@ -165,7 +178,7 @@ paths forbidden above.
    read-only worker instead sends a small JSON Merge Patch or complete report
    replacement through `record_report`. Invalid records keep the file and
    consume no worker attempt. Only failed worker attempts count toward the
-   three-attempt recovery budget. `record_report` rereads and revalidates the
+   phase-attempt budget. `record_report` rereads and revalidates the
    current state, then atomically persists and deletes that same file only
    after successful persistence. The
    worker never resends, reconstructs, or reconsiders the strict report payload. It returns only
@@ -218,9 +231,12 @@ paths forbidden above.
    report, route the durable question, or submit the exact failed result that
    inspect returns. Only a newly returned top-level dispatch authorizes rework
    after a worker is no longer resumable.
-   Cortex permits at most three automatic failed attempts for one active phase;
-   it then blocks with a durable handoff. Resume only after repairing the
-   recorded cause, which resets that phase's bounded recovery counter.
+   Cortex uses `same_strategy_limit=2` and `phase_attempt_limit=3`. After two
+   failures of the same strategy, the next non-success result must supply a
+   materially different `next_strategy` or replan future waves before Cortex
+   issues the third phase attempt. The third failed phase attempt blocks with a
+   durable handoff. Resume only after repairing the recorded cause, which
+   resets that phase's bounded recovery counter.
 5. After all workers finish, read every ref with `read_worker_report`. Each
    result includes Cortex's derived absolute `report_markdown_path` for the
    persisted `reports/markdown/<report-ref>.md` artifact. After reading each
@@ -244,6 +260,16 @@ paths forbidden above.
    resumable; any other stop is durably failed and must be submitted as a
    non-success result for canonical rework. Never wait on or respawn a stopped
    child directly.
+
+   Native agent slots have their own lifecycle. Before every new native
+   `spawn_agent`, use `close_agent` when available to release each known
+   completed child whose durable report was already read and consumed, or whose
+   exact failed result Cortex already accepted. Never close a running child or
+   one paused on a durable question. If recovery may have missed a terminal
+   child, use `list_agents` defensively and apply the same eligibility rule.
+   After a durable report is read and no question or follow-up remains, close
+   that exact completed native child; the ledger and report bus are then
+   authoritative.
 6. Repeat one continue per completed wave. Finish only when `outcome` is
    `completed`; Cortex has then reconciled reports, evidence, documentation,
    close verification, the manifest, and handoff.

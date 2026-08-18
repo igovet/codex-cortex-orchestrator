@@ -2332,7 +2332,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotEqual(delegation["spawn_request"]["task_name"], delegation["spawn_request"]["display_name"])
         self.assertEqual({key: package["spawn_request"][key] for key in expected}, expected)
         self.assertEqual({key: delegation["state"]["attempts"][-1]["spawn_request"][key] for key in expected}, expected)
-        self.assertIn("internal Cortex worker with profile `general`", self.briefing_from_request(delegation["spawn_request"]))
+        briefing = self.briefing_from_request(delegation["spawn_request"])
+        self.assertIn("# Cortex Worker Briefing v2", briefing)
+        assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["profile"], "general")
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
 
     def test_delegation_ignores_orphan_briefing_export_when_allocating_attempt(self):
@@ -2727,7 +2730,7 @@ class ControlPlaneTests(unittest.TestCase):
             "attempt_id": second["attempt_id"], "status": "failed", "reason": "second failed",
         })
         observed = control.status({"task_id": "retry-rework", "principal": "thread-a"})
-        with self.assertRaisesRegex(ValueError, "retry budget exhausted"):
+        with self.assertRaisesRegex(ValueError, "same_strategy_limit reached"):
             control.record_delegation({
                 "task_id": "retry-rework", "principal": "thread-a", "expected_revision": failed["state"]["revision"],
                 "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
@@ -3240,24 +3243,22 @@ class ControlPlaneTests(unittest.TestCase):
             pause_conditions=["A public schema change becomes necessary"],
         )
         prompt = self.briefing_from_response(started)
-        self.assertIn("## Specialist playbook", prompt)
-        self.assertIn("## Assignment", prompt)
-        self.assertIn("Overall task outcome: satisfy the exact user-authored request above", prompt)
-        self.assertIn("Current mission: Build an evidence-backed map of the code and contracts relevant to: the exact user-authored request above", prompt)
-        self.assertIn("Task requirements: Preserve the public facade", prompt)
-        self.assertIn("Task scope: plugins/cortex", prompt)
-        self.assertIn("Task-level success criteria: Every agent receives the overall outcome", prompt)
-        self.assertIn("Gate success criteria: Identify entry points", prompt)
-        self.assertIn("Task-level validation: Run prompt contract tests", prompt)
+        self.assertIn("## Role playbook", prompt)
+        self.assertIn("## Assignment data", prompt)
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["user_request"], "add a durable worker prompt contract")
+        self.assertEqual(assignment["requirements"], ["Preserve the public facade"])
+        self.assertEqual(assignment["scope"], ["plugins/cortex"])
+        self.assertEqual(assignment["task_acceptance_criteria"], ["Every agent receives the overall outcome"])
+        self.assertIn("Identify entry points", assignment["gate_acceptance_criteria"][0])
+        self.assertEqual(assignment["task_verification"], ["Run prompt contract tests"])
         self.assertIn("Judge only this gate; unfinished downstream task outcomes are not blockers", prompt)
         self.assertIn("Optional `gate_result`: pass findings=[]", prompt)
         self.assertIn("no info entries or `closure` except review/close", prompt)
-        self.assertIn("Pause conditions: A public schema change becomes necessary", prompt)
-        self.assertIn("Budget or operating limit: No external writes", prompt)
+        self.assertEqual(assignment["pause_conditions"], ["A public schema change becomes necessary"])
+        self.assertEqual(assignment["budget"], "No external writes")
         self.assertNotIn("Complete and report the discover gate", prompt)
-        self.assertIn("## Canonical Cortex team", prompt)
-        for profile in control.AGENTS:
-            self.assertIn(f"- {profile} [", prompt)
+        self.assertNotIn("## Canonical Cortex team", prompt)
 
     def test_scheduler_contract_is_complete_in_the_immutable_worker_briefing(self):
         docs = self.project / "docs"
@@ -3296,18 +3297,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(package["verification"], ["Compare the package and rendered briefing."])
         self.assertEqual(package["depends_on_phases"], [])
         self.assertIn("selection_reason", package)
-        for expected in (
-            "Phase/profile: discover / explorer",
-            "Selection rationale:",
-            "Current mission: Trace the constructor-to-worker data path.",
-            "Allowed paths: plugins/cortex/scripts",
-            "Context files: docs/contract.md",
-            "Gate success criteria: Every scheduler-owned assignment field is present.",
-            "Required gate verification: Compare the package and rendered briefing.",
-            "Model route and reasoning effort: gpt-5.6-luna / high",
-            "Phase dependencies: all verified predecessor phases",
-        ):
-            self.assertIn(expected, prompt)
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["phase"], "discover")
+        self.assertEqual(assignment["profile"], "explorer")
+        self.assertEqual(assignment["mission"], "Trace the constructor-to-worker data path.")
+        self.assertEqual(assignment["allowed_paths"], ["plugins/cortex/scripts"])
+        self.assertEqual(assignment["context_files"], ["docs/contract.md"])
+        self.assertEqual(assignment["gate_acceptance_criteria"], ["Every scheduler-owned assignment field is present."])
+        self.assertEqual(assignment["gate_verification"], ["Compare the package and rendered briefing."])
+        self.assertEqual(assignment["phase_dependencies"], [])
+        self.assertTrue(assignment["selection_rationale"])
+        self.assertNotIn("Model route and reasoning effort:", prompt)
         bootstrap = started["dispatches"][0]["arguments"]["message"]
         self.assertIn(started["dispatches"][0]["dispatch_ref"], bootstrap)
         self.assertIn(started["dispatches"][0]["briefing_digest"], bootstrap)
@@ -3625,10 +3625,11 @@ class ControlPlaneTests(unittest.TestCase):
             acceptance_criteria=["Public behavior remains compatible"],
         )
         prompt = self.briefing_from_response(started)
-        self.assertIn("Current mission: Plan the exact adapter change", prompt)
-        self.assertIn("Gate success criteria: Adapter plan is decision complete", prompt)
-        self.assertIn("Required gate verification: Cite adapter tests", prompt)
-        self.assertIn("Task-level success criteria: Public behavior remains compatible", prompt)
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["mission"], "Plan the exact adapter change")
+        self.assertEqual(assignment["gate_acceptance_criteria"], ["Adapter plan is decision complete"])
+        self.assertEqual(assignment["gate_verification"], ["Cite adapter tests"])
+        self.assertEqual(assignment["task_acceptance_criteria"], ["Public behavior remains compatible"])
         self.assertNotIn("Produce a decision-complete implementation plan", prompt)
 
     def test_v3_repeated_exact_start_is_idempotent_but_changed_work_creates_a_new_task(self):
@@ -4043,7 +4044,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(started["ok"])
         briefing = self.briefing_from_response(started)
         self.assertIn("Cortex intent preflight: BLOCKING", briefing)
-        self.assertIn("Exact user-authored request", briefing)
+        self.assertIn("## Assignment data", briefing)
+        assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["user_request"], "создай лендинг")
         self.assertIn("idle and resumable", briefing)
         self.assertIn("followup_task", briefing)
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -4528,7 +4531,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("use list_agents defensively", started["next_action"])
         self.assertIn("THEN call every dispatch.call", started["next_action"])
         self.assertIn("close that exact completed native child with close_agent", started["next_action"])
-        self.assertEqual(prompt.count(request), 1)
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["user_request"], request)
+        self.assertEqual(prompt.count(request), 0)
         self.assertNotIn(request, serialized)
         self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
         self.assertIn("Dispatch briefing reviewed:", bootstrap)
@@ -4808,7 +4813,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn(f"Predecessor review: {published['report_ref']}", prompt)
         self.assertIn(f"attempt_id='implementation-02'", prompt)
         self.assertIn("profile='general'", prompt)
-        self.assertIn("Attempt baseline ref: 'manifest-", prompt)
+        self.assertNotIn("Attempt baseline ref:", prompt)
         state = control.load_task_state_for_artifact(task_dir)
         successor = next(item for item in state["attempts"] if item["gate"] == "implementation")
         worker_read = control.read_worker_report({
@@ -6431,9 +6436,10 @@ class ControlPlaneTests(unittest.TestCase):
         ])
         self.assertTrue(started["ok"])
         prompt = self.briefing_from_response(started)
-        self.assertIn(
-            "Context files: docs/project/index.md; docs/features/index.md; docs/features/trading/index.md",
-            prompt,
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(
+            assignment["context_files"],
+            ["docs/project/index.md", "docs/features/index.md", "docs/features/trading/index.md"],
         )
         self.assertIn("Before broad source search, design, or edits", prompt)
         self.assertIn("docs/features/index.md as the capability/coverage catalog", prompt)
@@ -6953,15 +6959,18 @@ class ControlPlaneTests(unittest.TestCase):
     def test_v3_automatic_gate_rework_is_bounded_and_resume_resets_its_budget(self):
         current = self.v3_start("bounded worker retry", waves=[{"workers": [{"phase": "discover"}]}])
         for failure_number in range(1, control.MAX_ORCHESTRATE_GATE_FAILURES + 1):
+            result = {
+                "status": "failed",
+                "reason": f"worker failure {failure_number}",
+                "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
+            }
+            if failure_number == control.MAX_SAME_STRATEGY_FAILURES:
+                result["next_strategy"] = "use an alternate repository evidence path"
             current = control.continue_orchestration({
                 "project_root": str(self.project),
                 "task_ref": current["task_ref"],
                 "step": current["step"],
-                "results": [{
-                    "status": "failed",
-                    "reason": f"worker failure {failure_number}",
-                    "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
-                }],
+                "results": [result],
             })
             self.assertTrue(current["ok"], current)
             if failure_number < control.MAX_ORCHESTRATE_GATE_FAILURES:
@@ -7004,7 +7013,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(first_replay["replayed"])
         self.assertEqual(first_replay["dispatches"], [])
 
-        second_payload = {
+        unchanged_strategy_payload = {
             **first_payload,
             "results": [{
                 "status": "failed",
@@ -7012,10 +7021,26 @@ class ControlPlaneTests(unittest.TestCase):
                 "dispatch_ref": first["dispatches"][0]["dispatch_ref"],
             }],
         }
+        unchanged_strategy = control.continue_orchestration(unchanged_strategy_payload)
+        self.assertFalse(unchanged_strategy["ok"], unchanged_strategy)
+        self.assertEqual(unchanged_strategy["code"], "orchestrate_validation_failed")
+        self.assertIn("same_strategy_limit reached", unchanged_strategy["diagnostics"][0]["message"])
+
+        second_payload = {
+            **unchanged_strategy_payload,
+            "results": [{
+                **unchanged_strategy_payload["results"][0],
+                "next_strategy": "inspect an alternate repository evidence path",
+            }],
+        }
         second = control.continue_orchestration(second_payload)
         self.assertTrue(second["ok"], second)
         self.assertEqual(second["outcome"], "ready_to_spawn")
         self.assertEqual(len(second["dispatches"]), 1)
+        retry_assignment = json.loads(
+            self.briefing_from_response(second).split("```json\n", 1)[1].split("\n```", 1)[0]
+        )
+        self.assertEqual(retry_assignment["strategy"], "inspect an alternate repository evidence path")
         replay = control.continue_orchestration(second_payload)
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["dispatches"], [])
@@ -8584,7 +8609,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.0.4")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.1.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -8600,7 +8625,9 @@ class ControlPlaneTests(unittest.TestCase):
             }
             started = call(request)["result"]["structuredContent"]
             self.assertTrue(started["ok"])
-            self.assertIn("Select this profile", self.briefing_from_response(started))
+            briefing = self.briefing_from_response(started)
+            self.assertIn("Role and mission: You are the read-only repository explorer", briefing)
+            self.assertNotIn("Select this profile", briefing)
         finally:
             if proc.stdin and not proc.stdin.closed:
                 proc.stdin.close()
