@@ -538,7 +538,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertIsNone(recovered)
 
-    def test_subagent_stop_without_report_is_durably_failed_and_not_waitable(self):
+    def test_subagent_stop_without_report_remains_exactly_resumable(self):
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         with mock.patch.dict(
             os.environ,
@@ -576,8 +576,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(stopped.stdout.strip(), "{}", stopped.stderr)
         state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
-        self.assertEqual(attempt["status"], "failed")
-        self.assertEqual(attempt["finalization_reason"], "native_worker_stopped_without_report")
+        self.assertEqual(attempt["status"], "running")
+        self.assertEqual(attempt["host_stop_outcome"], "native_worker_stopped_recoverable")
+        self.assertTrue(attempt["host_resumable"])
         waited = subprocess.run(
             [sys.executable, str(hook)],
             input=json.dumps({
@@ -596,26 +597,29 @@ class ControlPlaneTests(unittest.TestCase):
         wait_output = json.loads(waited.stdout)
         wait_context = wait_output["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(wait_output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        self.assertIn("durably failed without a report", wait_context)
-        self.assertIn("Do not call followup_task", wait_context)
+        self.assertIn("stopped without a report but remains resumable", wait_context)
+        self.assertIn("followup_task", wait_context)
+        self.assertIn("native.Stop:01", wait_context)
         self.assertIn(started["task_ref"], wait_context)
         inspected = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
         })
         self.assertEqual(inspected["context_handoff"]["active_workers"], [])
         self.assertEqual(inspected["context_handoff"]["stopped_workers"][0]["host_agent_id"], "native.Stop:01")
-        self.assertIn("status=failed", inspected["next_action"])
+        self.assertIn("followup_task", inspected["next_action"])
+        self.assertIn("native.Stop:01", inspected["next_action"])
         self.assertNotIn("Wait only on", inspected["next_action"])
 
     def test_post_wait_stop_context_ignores_passed_and_running_attempts(self):
         event = {"hook_event_name": "PostToolUse", "tool_name": "wait"}
-        failed = {"attempts": [{
+        resumable = {"attempts": [{
             "attempt_id": "close-01",
-            "status": "failed",
-            "host_stop_outcome": "native_worker_stopped_without_report",
+            "status": "running",
+            "host_stop_outcome": "native_worker_stopped_recoverable",
+            "host_spawn": {"agent_id": "native.Close:01", "task_name": "close_01_abcd1234"},
         }]}
-        context = cortex_hook.stopped_worker_after_wait_context(event, failed, "task-test")
-        self.assertIn("Do not call followup_task", context)
+        context = cortex_hook.stopped_worker_after_wait_context(event, resumable, "task-test")
+        self.assertIn("followup_task", context)
         self.assertIn("manage_orchestration(intent='inspect'", context)
 
         for status, outcome in (("passed", "report_recorded"), ("running", None)):
@@ -2557,7 +2561,10 @@ class ControlPlaneTests(unittest.TestCase):
         pending = control.cortex_question({
             "task_id": "question-ui", "principal": "thread-a", "attempt_id": delegated["attempt_id"],
             "submission_id": "explorer-question-1", "question": "Which paths should be changed?",
-            "options": [{"label": "src", "description": "Update source files"}, {"label": "tests", "description": "Update tests"}],
+            "options": [
+                {"option_id": "source_paths", "label": "src", "description": "Update source files"},
+                {"option_id": "test_paths", "label": "tests", "description": "Update tests"},
+            ],
             "multiple": True, "custom_label": "Additional direction", "context": {"reason": "scope"},
         })
         self.assertEqual(pending["status"], "pending_user_input")
@@ -2567,14 +2574,14 @@ class ControlPlaneTests(unittest.TestCase):
         question = listed["questions"][0]
         self.assertEqual(question["options"][0]["label"], "src")
         self.assertTrue(question["multiple"])
-        with mock.patch.object(control, "_request_mcp_elicitation", return_value=("accept", {"selections": ["src", "tests"], "custom_response": {"image": {"path": "/tmp/shot.png"}}}, "elicitation-1")):
+        with mock.patch.object(control, "_request_mcp_elicitation", return_value=("accept", {"selections": ["source_paths", "test_paths"], "custom_response": {"image": {"path": "/tmp/shot.png"}}}, "elicitation-1")):
             answered = control.cortex_question({"task_id": "question-ui", "principal": "thread-a", "question_id": question_id})
         self.assertEqual(answered["status"], "answered")
-        self.assertEqual(answered["answer"]["selections"], ["src", "tests"])
+        self.assertEqual(answered["answer"]["option_ids"], ["source_paths", "test_paths"])
         self.assertEqual(answered["answer"]["custom_response"]["image"]["path"], "/tmp/shot.png")
         updates = control.get_worker_question_updates({"task_id": "question-ui", "principal": "thread-a", "attempt_id": delegated["attempt_id"]})
         self.assertEqual(updates["updates"][-1]["kind"], "question_answered")
-        self.assertEqual(updates["updates"][-1]["answer"]["selections"], ["src", "tests"])
+        self.assertEqual(updates["updates"][-1]["answer_option_ids"], ["source_paths", "test_paths"])
 
     def test_cortex_question_form_always_puts_custom_field_last(self):
         single = control._question_form_schema(control._question_config({"header": "Pick one", "options": ["A", "B"]}))
@@ -6856,7 +6863,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.5.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "6.6.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

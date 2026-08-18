@@ -433,8 +433,13 @@ def _closure_rework_target(
         ),
         "",
     )
-    if requested in pipeline:
+    gate_index = pipeline.index(gate) if gate in pipeline else len(pipeline) - 1
+    if requested in pipeline and pipeline.index(requested) <= gate_index:
         return requested
+    if gate == "qa" and "implementation" in pipeline:
+        return "implementation"
+    if gate in {"review", "close", "security", "performance"} and "implementation" in pipeline:
+        return "implementation"
     if "documentation" in pipeline:
         return "documentation"
     return gate
@@ -458,11 +463,12 @@ def _activate_closure_rework(
     """
     target_gate = _closure_rework_target(state, gate, findings)
     pipeline = list(state.get("current_pipeline", []))
-    rework_chain = [target_gate]
-    for required_gate in ("review", "close"):
-        if required_gate in pipeline and required_gate not in rework_chain:
-            rework_chain.append(required_gate)
-    reordered = [item for item in pipeline if item not in rework_chain] + rework_chain
+    # Preserve the corrective target's position so the rework operation makes
+    # it the first incomplete gate. Move only the final review/close checks to
+    # the tail; moving the target itself behind QA or documentation would leave
+    # the just-failed gate active and produce a false ``needs_input`` state.
+    final_checks = [item for item in ("review", "close") if item in pipeline]
+    reordered = [item for item in pipeline if item not in final_checks] + final_checks
     change = apply_pipeline_operations(
         state,
         pipeline=reordered,
@@ -530,7 +536,9 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             outcome=outcome,
             current_attempt_evidence=current_attempt_evidence,
         )
-        if outcome == "passed" and gate in {"review", "close"}:
+        if outcome in {"passed", "failed"} and (
+            gate in {"review", "close"} or bool(params.get("enforce_canonical_findings"))
+        ):
             blockers = db_task_findings_blockers(root, state["task_id"])
             missing = [item for item in db_list_task_findings(root, state["task_id"], include_resolved=False) if item.get("status") == "open" and (item.get("next_action") or {}).get("required")]
             if blockers or missing:
@@ -541,7 +549,7 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
                     gate=gate,
                     findings=actionable,
                 )
-                save_state(task_dir, task_dir / "state.sqlite", state, "closure_rework", f"{gate}: canonical closure blockers require rework")
+                save_state(task_dir, task_dir / "state.sqlite", state, "gate_rework", f"{gate}: canonical gate blockers require rework")
                 # Returning a normal transition shape lets the v3 adapter
                 # finish the current wave bookkeeping and prepare the active
                 # remediation wave.  The gate itself is intentionally absent
@@ -550,8 +558,9 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "state": state,
                     "revision_correction": revision_correction,
-                    "closure_rework": True,
-                    "reason": "closure_blockers",
+                    "gate_rework": True,
+                    "closure_rework": gate in {"review", "close"},
+                    "reason": "gate_blockers",
                     "gate": gate,
                     "target_gate": target_gate,
                     "next_action": "resolve_findings_then_rerun_review_and_close",

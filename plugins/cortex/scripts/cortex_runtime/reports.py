@@ -163,15 +163,24 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         actor_ids = {str(params.get("principal") or "").strip(), str(params.get("profile") or "").strip()}
         actor_ids.update(str(alias).strip() for alias in _attempt_identity_aliases(attempt))
         closure = sanitize_closure_payload(params["closure"], actor_ids={item for item in actor_ids if item}) if params.get("closure") is not None else None
+        gate_result = _runtime.sanitize_gate_result_payload(
+            params["gate_result"], actor_ids={item for item in actor_ids if item}
+        ) if params.get("gate_result") is not None else None
         if closure is not None and attempt.get("gate") not in {"review", "close"}:
             raise ValueError("closure is only valid for review and close attempts")
+        if gate_result is not None and closure is not None:
+            compatible = {key: gate_result[key] for key in ("decision", "findings", "verification", "workspace")}
+            if compatible != closure:
+                raise ValueError("gate_result and closure must describe the same review/close outcome")
         result_validation = None
         if params.get("_require_gate_validation"):
             result_validation = _validate_gate_result_report(task_dir, state, attempt, report)
         if params.get("_require_close_validation"):
             _validate_close_report(task_dir, state, attempt, report)
-        if is_closure_gate and params.get("closure") is None:
-            raise ValueError("review and close reports require a top-level closure sibling")
+        if is_closure_gate and gate_result is None and closure is None:
+            raise ValueError("review and close reports require a top-level closure sibling or canonical gate_result")
+        if gate_result is None and closure is not None:
+            gate_result = {**closure, "failure_class": "product"}
         raw_planning = params.get("planning")
         planning = None
         if raw_planning is not None:
@@ -193,6 +202,8 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         elif params.get("_require_plan_artifact") and attempt.get("gate") == "plan":
             raise ValueError("planner reports require a planning artifact with overview and work_packages")
         digest_payload = {"report": report, "planning": planning}
+        if gate_result is not None:
+            digest_payload["gate_result"] = gate_result
         if closure is not None:
             digest_payload["closure"] = closure
         content_digest = digest_text(json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -299,6 +310,7 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             "gate": attempt["gate"], "attempt_id": attempt_id, "submission_id": submission_id,
             "producer": {"profile": attempt["profile"], "model": attempt["selected_model"], "reasoning_effort": attempt["selected_reasoning_effort"]},
             "report": report, "planning": planning, "result_validation": result_validation,
+            **({"gate_result": gate_result} if gate_result is not None else {}),
             **({"closure": closure} if closure is not None else {}),
             "content_digest": content_digest, "created_at": now(),
         }
@@ -319,10 +331,11 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             export_path=f"reports/records/{report_id}.json",
         )
         record["report_artifact_ref"] = report_artifact["artifact_ref"]
-        if closure is not None:
-            for finding in closure["findings"]:
+        canonical_gate_result = gate_result or closure
+        if canonical_gate_result is not None:
+            for finding in canonical_gate_result["findings"]:
                 _runtime.db_upsert_task_finding(root, state["task_id"], finding, source={"report_id": report_id, "attempt_id": attempt_id})
-            missing_checks = closure["verification"]["required_missing"]
+            missing_checks = canonical_gate_result["verification"]["required_missing"]
             verification_finding = {
                 "fingerprint": "verification-required-missing",
                 "severity": "P1" if missing_checks else "P3",
@@ -411,7 +424,7 @@ def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
 def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Public worker adapter: persist a report and return only a compact receipt."""
     try:
-        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "planning", "closure"})
+        unknown = sorted(set(params) - {"project_root", "task_id", "attempt_id", "profile", "report", "planning", "gate_result", "closure"})
         if unknown:
             raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
         for field in ("project_root", "task_id", "attempt_id", "profile"):
@@ -427,6 +440,7 @@ def publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "principal": profile,
             "report": params.get("report"),
             "planning": params.get("planning"),
+            "gate_result": params.get("gate_result"),
             "closure": params.get("closure"),
             "_require_predecessor_review": True,
             "_require_knowledge_review": True,

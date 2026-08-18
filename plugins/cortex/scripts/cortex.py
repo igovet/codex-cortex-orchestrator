@@ -109,6 +109,10 @@ from cortex_runtime.ledger_db import (
     update_task_plan as db_update_task_plan,
     update_task_state as db_update_task_state,
     upsert_task_finding as db_upsert_task_finding,
+    append_task_revision as db_append_task_revision,
+    append_plan_revision as db_append_plan_revision,
+    append_attempt_message as db_append_attempt_message,
+    put_worker_session as db_put_worker_session,
     list_task_findings as db_list_task_findings,
     task_findings_blockers as db_task_findings_blockers,
     plan_prune as db_plan_prune,
@@ -154,7 +158,7 @@ _STATE_LOCK_LOCAL = threading.local()
 MCP_SERVER_INSTRUCTIONS = (
     "Cortex is opt-in. Root preserves task_ref, follows exact dispatches, and publishes every read_worker_report "
     "report_markdown_link before lifecycle. Internal workers emit English only and read scoped predecessor refs. "
-    "Each dispatch has one immutable briefing+digest plus an exact scoped read fallback; spawn in order so SubagentStart(default) binds child id/model. "
+    "Each dispatch has one immutable briefing+digest plus an exact scoped read fallback; bind native starts by exact task_name/dispatch identity. "
     "After resume, clear, or compaction, inspect once: spawn returned pending dispatches, wait persisted child ids, "
     "use context_handoff, never restart."
 )
@@ -1863,9 +1867,10 @@ def bind_host_worker_from_hook(
             and item.get("status") == AWAITING_HOST_SPAWN
             and str(item.get("expected_model") or item.get("selected_model") or "") == host_model
         ]
-        if matches:
+        if len(matches) == 1:
             host_task_name = str((matches[0].get("spawn_request") or {}).get("task_name") or "")
-            matches = matches[:1]
+        elif len(matches) > 1:
+            return {"bound": False, "reason": "exact_dispatch_identity_required"}
         else:
             matches = [
                 item for item in state.get("attempts", [])
@@ -1874,9 +1879,10 @@ def bind_host_worker_from_hook(
                 and str((item.get("host_spawn") or {}).get("agent_id") or "") == host_agent_id
                 and str((item.get("host_spawn") or {}).get("model") or "") == host_model
             ]
-            if matches:
+            if len(matches) == 1:
                 host_task_name = str((matches[0].get("spawn_request") or {}).get("task_name") or "")
-                matches = matches[:1]
+            elif len(matches) > 1:
+                return {"bound": False, "reason": "exact_dispatch_identity_required"}
     else:
         matches = [
             item for item in state.get("attempts", [])
@@ -1890,14 +1896,14 @@ def bind_host_worker_from_hook(
     existing = attempt.get("host_spawn") or {}
     if attempt.get("status") == "running":
         if existing.get("agent_id") == host_agent_id and existing.get("task_name") == host_task_name:
-            if attempt.get("host_stop_outcome") == "awaiting_user":
+            if attempt.get("host_stop_outcome") in {"awaiting_user", "native_worker_stopped_recoverable"}:
                 with state_lock(root):
                     resumed_loaded = _v3_task_state(root, task_id)
                     if resumed_loaded is None:
                         return {"bound": False, "reason": "task_unavailable"}
                     resumed_task_dir, resumed_state, _ = resumed_loaded
                     resumed_attempt = _attempt(resumed_state, str(attempt.get("attempt_id") or ""))
-                    if _open_blocking_questions(
+                    if resumed_attempt.get("host_stop_outcome") == "awaiting_user" and _open_blocking_questions(
                         resumed_task_dir, resumed_state, str(resumed_attempt.get("attempt_id") or "")
                     ):
                         return {"bound": False, "reason": "worker_question_still_open"}
@@ -1907,8 +1913,18 @@ def bind_host_worker_from_hook(
                         resumed_attempt.pop(field, None)
                     resumed_attempt["host_resumed_at"] = now()
                     package = _delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]))
-                    package["spawn_status"] = "resumed_after_question"
+                    package["spawn_status"] = "resumed_existing_worker"
                     package["host_resumed_at"] = resumed_attempt["host_resumed_at"]
+                    db_put_worker_session(root, {
+                        "task_id": resumed_state["task_id"],
+                        "attempt_id": str(resumed_attempt["attempt_id"]),
+                        "host_agent_id": host_agent_id,
+                        "host_task_name": host_task_name,
+                        "host_tool": str((resumed_attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
+                        "status": "running",
+                        "resumable": True,
+                        "started_at": (resumed_attempt.get("host_spawn") or {}).get("confirmed_at"),
+                    })
                     _write_delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]), package)
                     save_state(
                         resumed_task_dir,
@@ -1956,9 +1972,8 @@ def finalize_host_worker_stop_from_hook(
 
     A worker that has already published a report remains eligible for the
     coordinator's normal ``continue_orchestration`` receipt. A worker paused
-    on a durable question remains resumable. Every other native stop closes
-    the exact bound attempt as failed so compaction recovery never waits on a
-    child that the host has already stopped.
+    on a durable question, or stopped before recording either a question or a
+    report, remains addressable through the exact persisted host identity.
     """
     project = select_project_root({"project_root": str(project_root_value or "")})
     task_id = safe_id(str(task_id_value or ""))
@@ -2027,17 +2042,27 @@ def finalize_host_worker_stop_from_hook(
             detail = f"{attempt_id}: {', '.join(question_refs)}"
             outcome = "awaiting_user"
         else:
-            reason = "native_worker_stopped_without_report"
+            reason = "native_worker_stopped_recoverable"
             attempt["host_stop_outcome"] = reason
-            attempt["status"] = "failed"
-            attempt["finalized_at"] = stopped_at
-            attempt["finalization_reason"] = reason
-            package["spawn_status"] = "stopped_without_report"
+            attempt["host_resumable"] = True
+            package["spawn_status"] = "stopped_recoverable"
             package["host_stopped_at"] = stopped_at
-            package["finalization_reason"] = reason
-            event = "host_stop_without_report"
+            package["resumable"] = True
+            event = "host_stop_recoverable"
             detail = f"{attempt_id}: {reason}"
             outcome = reason
+        session_status = (
+            "completed" if report_refs else "idle_resumable" if open_questions else "stopped_recoverable"
+        )
+        db_put_worker_session(root, {
+            "task_id": state["task_id"], "attempt_id": attempt_id,
+            "host_agent_id": host_agent_id,
+            "host_task_name": str((attempt.get("host_spawn") or {}).get("task_name") or ""),
+            "host_tool": str((attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
+            "status": session_status, "resumable": not bool(report_refs),
+            "started_at": (attempt.get("host_spawn") or {}).get("confirmed_at"),
+            **({"terminated_at": stopped_at} if report_refs else {}),
+        })
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
         save_state(task_dir, task_dir / "state.sqlite", state, event, detail)
         return {
@@ -2410,6 +2435,8 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
 
 
 _CLOSURE_DECISIONS = {"pass", "rework", "fail"}
+_GATE_RESULT_DECISIONS = _CLOSURE_DECISIONS | {"blocked"}
+_GATE_FAILURE_CLASSES = {"product", "infrastructure", "environment", "policy", "worker"}
 _CLOSURE_SEVERITIES = {"P0", "P1", "P2", "P3", "info"}
 _CLOSURE_STATUSES = {"open", "resolved", "waived"}
 
@@ -2477,6 +2504,43 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
     for field in ("modified", "untracked", "staged"):
         if not isinstance(workspace[field], list): raise ValueError("closure workspace file fields must be arrays")
     return {"decision": decision, "findings": findings, "verification": verification, "workspace": workspace}
+
+
+def sanitize_gate_result_payload(value: Any, *, actor_ids: set[str] | None = None) -> dict[str, Any]:
+    """Validate the universal gate envelope while reusing finding semantics."""
+    if not isinstance(value, dict) or set(value) != {"decision", "failure_class", "findings", "verification", "workspace"}:
+        raise ValueError(
+            "gate_result must contain exactly decision, failure_class, findings, verification, and workspace"
+        )
+    decision = str(value.get("decision") or "").strip().lower()
+    failure_class = str(value.get("failure_class") or "").strip().lower()
+    if decision not in _GATE_RESULT_DECISIONS:
+        raise ValueError("gate_result decision must be pass, rework, fail, or blocked")
+    if failure_class not in _GATE_FAILURE_CLASSES:
+        raise ValueError(
+            "gate_result failure_class must be product, infrastructure, environment, policy, or worker"
+        )
+    closure = sanitize_closure_payload(
+        {
+            "decision": "fail" if decision == "blocked" else decision,
+            "findings": value["findings"],
+            "verification": value["verification"],
+            "workspace": value["workspace"],
+        },
+        actor_ids=actor_ids,
+    )
+    if decision in {"rework", "fail", "blocked"} and not (
+        any(
+            item.get("status") == "open"
+            and (item.get("blocking") or (item.get("next_action") or {}).get("required"))
+            for item in closure["findings"]
+        )
+        or closure["verification"]["required_missing"]
+    ):
+        raise ValueError(
+            "non-pass gate_result requires an open blocking finding, a required next action, or required_missing verification"
+        )
+    return {**closure, "decision": decision, "failure_class": failure_class}
 
 
 def _planning_identifier(value: Any, label: str) -> str:
@@ -2827,16 +2891,19 @@ def _question_options(value: object) -> list[dict[str, str]]:
         if isinstance(item, str):
             label = redact(item.strip(), 120)
             description = label
+            option_id = "option_" + digest_text(label)[:12]
         elif isinstance(item, dict):
-            label = redact(str(item.get("label", "")).strip(), 120)
+            label = redact(str(item.get("label_en") or item.get("label") or "").strip(), 120)
             description = redact(str(item.get("description", "")).strip(), 400) or label
+            raw_option_id = str(item.get("option_id") or "").strip().lower()
+            option_id = safe_id(raw_option_id) if raw_option_id else "option_" + digest_text(label)[:12]
         else:
             raise ValueError("question options must be strings or objects")
         if not label:
             raise ValueError("question options require a non-empty label")
-        options.append({"label": label, "description": description})
-    if len({item["label"] for item in options}) != len(options):
-        raise ValueError("question option labels must be unique")
+        options.append({"option_id": option_id, "label": label, "label_en": label, "description": description})
+    if len({item["option_id"] for item in options}) != len(options):
+        raise ValueError("question option IDs must be unique")
     return options
 
 
@@ -2920,12 +2987,37 @@ def _open_blocking_questions(
     # outbox job is pending, so export layout must never decide whether a
     # material question blocks the task.
     records = _question_records(question_bus_paths(task_dir), state)
-    return [
+    blockers = [
         item for item in records
         if item.get("status") == "open"
         and bool(item.get("blocking", True))
         and (attempt_id is None or item.get("attempt_id") == attempt_id)
     ]
+    # Localized batch questions are persisted atomically as one SQLite task
+    # document.  Treat an unsubmitted translation exactly like an unanswered
+    # single question: neither state may allow a worker report or wave advance.
+    document_root = _task_document_root(task_dir, str(state["task_id"]))
+    for document_key, batch in db_list_task_documents(document_root, str(state["task_id"]), "question_batch:"):
+        batch_id = str(batch.get("batch_id") or "")
+        if (
+            batch.get("schema") != "cortex/question-batch/v1"
+            or document_key != "question_batch:" + batch_id
+            or batch.get("task_id") != state["task_id"]
+            or batch.get("status") not in {"open", "awaiting_translation"}
+            or (attempt_id is not None and batch.get("attempt_id") != attempt_id)
+        ):
+            continue
+        _attempt(state, safe_id(str(batch.get("attempt_id") or "")))
+        blockers.append({
+            "question_id": batch_id,
+            "attempt_id": batch.get("attempt_id"),
+            "header": "Question batch",
+            "question": f"Batch {batch.get('batch_key') or batch_id} is {batch.get('status')}",
+            "blocking": True,
+            "status": batch.get("status"),
+            "batch": True,
+        })
+    return blockers
 
 
 def _read_private_text(path: Path, label: str, *, max_bytes: int) -> str:
@@ -2966,12 +3058,18 @@ def _receipt_identity(value: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _report_markdown(record: dict[str, Any]) -> str:
-    def escaped(value: Any) -> str:
-        text = html.escape(str(value), quote=True)
-        return re.sub(r"([\\`*_{}\[\]()#+.!|>-])", r"\\\1", text)
+    def prose(value: Any) -> str:
+        """Escape HTML without corrupting ordinary Markdown punctuation."""
+        return html.escape(str(value), quote=True)
+
+    def scalar_item(value: Any) -> str:
+        text = prose(value).replace("\r\n", "\n").replace("\r", "\n")
+        text = "<br>".join(text.split("\n"))
+        # Only a marker at the start of a list item can alter its structure.
+        return re.sub(r"^(#{1,6}\s|[-+*]\s|>\s|\d+[.)]\s)", r"\\\1", text)
 
     report = record["report"]
-    lines = [f"# Report {escaped(record['report_id'])}", "", f"**Producer:** {escaped(record['producer']['profile'])}", "", "## Summary", "", escaped(report["summary"])]
+    lines = [f"# Report {prose(record['report_id'])}", "", f"**Producer:** {prose(record['producer']['profile'])}", "", "## Summary", "", prose(report["summary"])]
     for field in ("findings", "questions", "changed_files", "tests", "evidence", "uncertainty"):
         lines.extend(["", f"## {field.replace('_', ' ').title()}", ""])
         items = report[field]
@@ -2979,16 +3077,18 @@ def _report_markdown(record: dict[str, Any]) -> str:
             lines.append("- None")
         else:
             for item in items:
-                rendered = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, (dict, list)) else str(item)
-                lines.append(f"- {escaped(rendered)}")
-    lines.extend(["", "## Next Action", "", escaped(report["next_action"]), ""])
+                if isinstance(item, (dict, list)):
+                    lines.extend(["```json", json.dumps(item, ensure_ascii=False, sort_keys=True, indent=2), "```"])
+                else:
+                    lines.append(f"- {scalar_item(item)}")
+    lines.extend(["", "## Next Action", "", prose(report["next_action"]), ""])
     validation = record.get("result_validation")
     if isinstance(validation, dict):
         lines.extend([
             "## Result Validation", "",
-            f"- Status: {escaped(validation.get('status'))}",
-            f"- Contract digest: {escaped(validation.get('contract_digest'))}",
-            f"- Reported changed files: {escaped((validation.get('artifacts') or {}).get('reported_change_count'))}",
+            f"- Status: {scalar_item(validation.get('status'))}",
+            f"- Contract digest: {scalar_item(validation.get('contract_digest'))}",
+            f"- Reported changed files: {scalar_item((validation.get('artifacts') or {}).get('reported_change_count'))}",
             "",
         ])
     return "\n".join(lines)
@@ -3556,6 +3656,15 @@ def _validate_gate_result_report(
             )
 
     evidence_items = [item for item in report.get("evidence", []) if isinstance(item, str)]
+    started_revision = int(attempt.get("task_revision_started") or 1)
+    latest_material_revision = int(attempt.get("latest_material_revision") or started_revision)
+    if latest_material_revision > started_revision:
+        revision_marker = f"Task revision reviewed: {latest_material_revision}"
+        if revision_marker not in evidence_items:
+            raise ValueError(
+                "report is stale after a material steer; add exactly " + repr(revision_marker)
+                + " after reconciling the same worker attempt"
+            )
     missing_markers: list[str] = []
     invalid_markers: list[str] = []
     weak_detail = ("<specific", "todo", "tbd", "unverified", "not run", "not tested", "unknown")
@@ -4700,8 +4809,17 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
             else:
                 planning = None
                 digest_input: Any = ({"report": sanitized, "planning": planning} if "planning" in record else sanitized)
+            if "gate_result" in record:
+                digest_input = {
+                    "report": sanitized,
+                    "planning": planning,
+                    "gate_result": sanitize_gate_result_payload(record.get("gate_result")),
+                }
             if "closure" in record:
-                digest_input = {"report": sanitized, "closure": sanitize_closure_payload(record.get("closure")), "planning": planning}
+                digest_input = {
+                    **(digest_input if isinstance(digest_input, dict) else {"report": sanitized, "planning": planning}),
+                    "closure": sanitize_closure_payload(record.get("closure")),
+                }
             digest = digest_text(json.dumps(digest_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
             if record.get("schema") != REPORT_SCHEMA or record.get("task_id") != state["task_id"] or not report_id or record.get("gate") != attempt.get("gate") or record.get("content_digest") != digest:
                 raise ValueError("SQLite report record failed reconciliation")
@@ -5006,6 +5124,12 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             package["host_spawn"] = host_spawn
             package["model_verification"] = model_verification
             _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+            db_put_worker_session(root, {
+                "task_id": state["task_id"], "attempt_id": attempt_id,
+                "host_agent_id": host_agent_id, "host_task_name": expected_task_name, "host_tool": host_tool,
+                "status": "terminated_unavailable", "resumable": False,
+                "started_at": host_spawn["confirmed_at"], "terminated_at": host_spawn["confirmed_at"],
+            })
             save_state(task_dir, task_dir / "state.sqlite", state, "host_spawn_model_mismatch", f"{attempt_id}: {mismatch_reason}")
             return {
                 "confirmed": False,
@@ -5030,6 +5154,11 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
         package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
         package["host_spawn"] = host_spawn
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+        db_put_worker_session(root, {
+            "task_id": state["task_id"], "attempt_id": attempt_id,
+            "host_agent_id": host_agent_id, "host_task_name": expected_task_name, "host_tool": host_tool,
+            "status": "running", "resumable": True, "started_at": host_spawn["confirmed_at"],
+        })
         save_state(task_dir, task_dir / "state.sqlite", state, "host_spawn", f"{attempt_id}: {expected_task_name}")
         return {"confirmed": True, "attempt_id": attempt_id, "idempotent": False, "host_spawn": host_spawn, "task_name_correction": task_name_correction, "revision_correction": revision_correction, "state": state}
 
@@ -6237,9 +6366,121 @@ def _remove_prune_directory(path: Path) -> None:
 def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
     """Delete only completed task-scoped Cortex state older than a confirmed age floor."""
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    unknown = sorted(set(payload) - {"confirmation", "older_than_days"})
+    unknown = sorted(set(payload) - {"confirmation", "older_than_days", "period", "full_confirmation"})
     if unknown:
         raise ValueError("unsupported prune payload fields: " + ", ".join(unknown))
+    period = str(payload.get("period") or "").strip().lower()
+    if not period and "older_than_days" not in payload:
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": True,
+            "outcome": "awaiting_prune_selection",
+            "question": "How much terminal Cortex orchestration state should be retained?",
+            "options": [
+                {"option_id": "keep_1d", "label": "1 day"},
+                {"option_id": "keep_7d", "label": "7 days"},
+                {"option_id": "keep_30d", "label": "30 days"},
+                {"option_id": "full_reset", "label": "Full reset"},
+            ],
+            "next_action": "Choose one stable option_id. full_reset requires a second exact confirmation.",
+        }
+    if period:
+        period_days = {"keep_1d": 1, "keep_7d": 7, "keep_30d": 30}
+        if period == "full_reset":
+            if payload.get("full_confirmation") != "RESET CORTEX":
+                return {
+                    "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                    "ok": True,
+                    "outcome": "awaiting_full_reset_confirmation",
+                    "confirmation_required": "RESET CORTEX",
+                    "next_action": "Confirm the destructive full reset exactly; active workers make reset fail closed.",
+                }
+            if str(params.get("task_ref") or "").strip():
+                raise ValueError("full reset is project-scoped and must omit task_ref")
+            project = select_project_root(params)
+            root = _contained_path(project, project / ".codex" / "cortex", "Cortex root")
+            if root.is_symlink() or (root.exists() and not root.is_dir()):
+                raise ValueError("full reset refuses a symlinked or non-directory Cortex root")
+            active = []
+            if root.exists():
+                for task_id in read_task_index(root):
+                    loaded = db_load_task(root, task_id)
+                    if loaded is not None and loaded[1].get("status") in {"active", "blocked"}:
+                        active.append(_v3_task_ref(task_id))
+            if active:
+                return {
+                    "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                    "ok": False,
+                    "outcome": "active_workers_block_full_reset",
+                    "active_task_refs": active,
+                    "next_action": "Complete or explicitly cancel every active task before retrying full reset.",
+                }
+            operation_id = digest_text(str(project) + ":full-reset")[:16]
+            journal = root.parent / f".cortex-reset-{operation_id}.json"
+            quarantine = root.parent / f".cortex-quarantine-{operation_id}"
+            if journal.is_symlink() or quarantine.is_symlink():
+                raise ValueError("full reset journal or quarantine target is unsafe")
+            journal_state = ""
+            if journal.exists():
+                info = journal.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024:
+                    raise ValueError("full reset journal is unsafe")
+                try:
+                    receipt = json.loads(journal.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("full reset journal is invalid") from exc
+                if (
+                    not isinstance(receipt, dict)
+                    or receipt.get("schema") != "cortex/full-reset/v1"
+                    or receipt.get("operation_id") != operation_id
+                    or receipt.get("root") != str(root)
+                    or receipt.get("quarantine") != str(quarantine)
+                ):
+                    raise ValueError("full reset journal identity is invalid")
+                journal_state = str(receipt.get("state") or "")
+                if journal_state not in {"selection_received", "root_quarantined"}:
+                    raise ValueError("full reset journal state is invalid")
+            elif quarantine.exists():
+                raise ValueError("full reset quarantine exists without its recovery journal")
+
+            if not root.exists() and not quarantine.exists() and not journal.exists():
+                return {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": True, "outcome": "full_reset", "removed": False, "next_action": "Cortex state was already absent."}
+            if not journal.exists():
+                write_json(journal, {
+                    "schema": "cortex/full-reset/v1", "operation_id": operation_id,
+                    "state": "selection_received", "root": str(root), "quarantine": str(quarantine), "updated_at": now(),
+                })
+                journal_state = "selection_received"
+            if root.exists():
+                if quarantine.exists():
+                    raise ValueError("full reset cannot quarantine two Cortex roots")
+                os.replace(root, quarantine)
+                _fsync_directory(root.parent)
+                write_json(journal, {
+                    "schema": "cortex/full-reset/v1", "operation_id": operation_id,
+                    "state": "root_quarantined", "root": str(root), "quarantine": str(quarantine), "updated_at": now(),
+                })
+                journal_state = "root_quarantined"
+            elif journal_state == "selection_received" and quarantine.exists():
+                # A crash can land after the atomic rename but before the next
+                # journal replacement. The unique quarantine path is enough to
+                # prove which tree must be finished.
+                write_json(journal, {
+                    "schema": "cortex/full-reset/v1", "operation_id": operation_id,
+                    "state": "root_quarantined", "root": str(root), "quarantine": str(quarantine), "updated_at": now(),
+                })
+            if not quarantine.exists():
+                raise ValueError("full reset recovery journal has no matching quarantined tree")
+            _remove_prune_directory(quarantine)
+            journal.unlink()
+            _fsync_directory(root.parent)
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": True, "outcome": "full_reset", "removed": True,
+                "next_action": "All project-scoped Cortex state was removed; a later orchestration starts from a fresh database.",
+            }
+        if period not in period_days:
+            raise ValueError("prune period must be keep_1d, keep_7d, keep_30d, or full_reset")
+        payload = {**payload, "older_than_days": period_days[period]}
     if payload.get("confirmation") != "PRUNE":
         raise ValueError("prune requires payload.confirmation='PRUNE'")
     days = payload.get("older_than_days", 7)
@@ -7202,6 +7443,10 @@ def _v3_question_management_payload(value: object) -> dict[str, Any]:
     if question_ref:
         payload["question_id"] = safe_id(question_ref)
     command = str(payload.get("command") or "ask").strip().lower()
+    # A batch translation resumes the existing durable batch through the same
+    # coordinator UI route; it is not a legacy single-question answer call.
+    if command == "answer" and "canonical_answers" in payload:
+        command = "ask"
     payload["command"] = command
     if command == "ask" and not payload.get("question_id") and not str(payload.get("question") or "").strip():
         raise ValueError("question ask requires the worker's exact question_ref")
@@ -7215,9 +7460,11 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
     status_value = str(result.get("status") or "").strip()
     if status_value == "answered":
         response["outcome"] = "question_answered"
+        poll_action = "poll_batch" if result.get("batch_ref") else "poll"
+        poll_ref = "batch_ref" if result.get("batch_ref") else "question_ref"
         response["next_action"] = (
             f"{COORDINATOR_LOCK} Resume the exact same native worker with followup_task. Tell it the durable answer "
-            "is recorded, require worker_question(action=poll) with the same question_ref and attempt, and do not "
+            f"is recorded, require worker_question(action={poll_action}) with the same {poll_ref} and attempt, and do not "
             "spawn a replacement worker or advance the wave before its report is recorded."
         )
     elif status_value == "elicitation_unavailable":
@@ -7227,6 +7474,20 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
         response["next_action"] = (
             f"{COORDINATOR_LOCK} Keep the durable question open and stop. Do not ask it through commentary, a final "
             "message, or a worker-local UI; retry only in a main-chat host that supports MCP elicitation."
+        )
+    elif status_value == "awaiting_translation":
+        response["outcome"] = "awaiting_translation"
+        translation_field = "canonical_answers" if result.get("batch_ref") else "answer plus answer_en"
+        response["next_action"] = (
+            f"{COORDINATOR_LOCK} Translate only result.answer_original free text into canonical English, preserve "
+            f"result.answer_option_ids, then answer the same question_ref with {translation_field}. Do not resume "
+            "the worker until Cortex records both representations."
+        )
+    elif status_value == "superseded":
+        response["outcome"] = "batch_superseded"
+        response["next_action"] = (
+            f"{COORDINATOR_LOCK} Do not resume the worker from this superseded batch. Keep the durable task revision "
+            "as the source of truth and wait for its current dispatch or question batch."
         )
     elif status_value in {"decline", "cancel", "invalid_answer", "pending_user_input"}:
         response["outcome"] = "awaiting_user"
@@ -7321,6 +7582,138 @@ def _v3_follow_up_context(
     }
 
 
+def _v3_active_steer(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    task_definition: dict[str, Any],
+    task_ref: str,
+) -> dict[str, Any]:
+    """Amend an active task and resume addressable native workers in place."""
+    payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+    unknown = sorted(set(payload) - {"user_message", "user_language", "message_en", "canonical_en", "received_at"})
+    if unknown:
+        raise ValueError("unsupported steer payload fields: " + ", ".join(unknown))
+    original = str(payload.get("user_message") or "").strip()
+    language = normalize_user_language(
+        payload.get("user_language") or task_definition.get("user_language"), original
+    )
+    canonical = str(payload.get("message_en") or payload.get("canonical_en") or "").strip()
+    if not original:
+        raise ValueError("steer payload.user_message is required")
+    if not canonical:
+        if str(language).lower().startswith("en"):
+            canonical = original
+        else:
+            raise ValueError("non-English steer requires payload.message_en with the canonical English worker message")
+    if state.get("status") not in {"active", "blocked"}:
+        raise ValueError("steer applies only to an active Cortex task; completed tasks use follow_up")
+
+    root = ledger_root(params)
+    with state_lock(root):
+        loaded = _v3_task_state(root, state["task_id"])
+        if loaded is None:
+            raise ValueError("active steer task is unavailable")
+        task_dir, state, task_definition = loaded
+        task_revision = db_append_task_revision(
+            root,
+            state["task_id"],
+            source="user_steer",
+            message_original=original,
+            message_language=str(language),
+            message_en=canonical,
+        )
+        revision_number = int(task_revision["task_revision"])
+        current_gates = active_gates(state)
+        active_attempts = [
+            item for item in state.get("attempts", [])
+            if item.get("gate") in current_gates
+            and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
+            and not item.get("invalidated")
+        ]
+        impact = {
+            "classification": "affects_active_gate" if active_attempts else "affects_future_gate",
+            "earliest_affected_gate": current_gates[0] if current_gates else None,
+            "affected_work_packages": [str(item.get("attempt_id")) for item in active_attempts],
+            "new_work_packages": [],
+            "obsolete_work_packages": [],
+            "dependency_changes": [],
+            "active_attempt_actions": [
+                {"attempt_id": str(item.get("attempt_id")), "action": "resume_worker"}
+                for item in active_attempts if (item.get("host_spawn") or {}).get("agent_id")
+            ],
+        }
+        plan = _load_orchestrate_plan(task_dir, state)
+        plan_revision = None
+        if "plan" in current_gates:
+            impact["classification"] = "requires_plan_revision"
+            plan_revision = db_append_plan_revision(
+                root, state["task_id"], task_revision=revision_number,
+                impact=impact, plan=plan, status="active",
+            )
+        task_definition["task_revision"] = revision_number
+        task_definition.setdefault("active_steers", []).append({
+            "task_revision": revision_number,
+            "message_original": original,
+            "message_language": language,
+            "message_en": canonical,
+            "received_at": payload.get("received_at") or now(),
+        })
+        db_update_task_definition(root, task_definition)
+
+        dispatches = []
+        for attempt in active_attempts:
+            attempt.setdefault("task_revision_started", revision_number - 1)
+            attempt["latest_material_revision"] = revision_number
+            host_spawn = attempt.get("host_spawn") or {}
+            host_agent_id = str(host_spawn.get("agent_id") or "")
+            if not host_agent_id:
+                continue
+            message = (
+                f"Cortex active steer for task revision {revision_number}: {canonical}\n\n"
+                f"Continue the same attempt {attempt['attempt_id']}. Reconcile this steer with completed work and "
+                f"include exactly `Task revision reviewed: {revision_number}` in report.evidence. Do not spawn or "
+                "create a new attempt."
+            )
+            durable = db_append_attempt_message(root, {
+                "task_id": state["task_id"], "attempt_id": attempt["attempt_id"],
+                "source": "user", "kind": "steer", "original_text": original,
+                "original_language": str(language), "canonical_en": canonical,
+                "task_revision": revision_number,
+            })
+            dispatches.append({
+                "worker": len(dispatches) + 1,
+                "dispatch_kind": "resume_worker",
+                "dispatch_ref": str(attempt.get("dispatch_ref") or ""),
+                "attempt_id": attempt["attempt_id"],
+                "host_agent_id": host_agent_id,
+                "host_task_name": str(host_spawn.get("task_name") or ""),
+                "message_id": durable["message_id"],
+                "call": "followup_task",
+                "arguments": {"target": host_agent_id, "message": message},
+            })
+        state["task_revision"] = revision_number
+        state.setdefault("task_revision_history", []).append({
+            "task_revision": revision_number, "source": "user_steer", "impact": impact, "at": now(),
+        })
+        save_state(task_dir, task_dir / "state.sqlite", state, "active_steer", f"task revision {revision_number}")
+    return {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": True,
+        "outcome": "ready_to_resume" if dispatches else "steer_recorded",
+        "task_ref": task_ref,
+        "task_revision": revision_number,
+        "plan_revision": plan_revision["plan_revision"] if plan_revision else None,
+        "impact": impact,
+        "dispatches": dispatches,
+        "next_action": (
+            "Call every returned followup_task once with its exact arguments; do not spawn a replacement worker."
+            if dispatches else
+            "The steer is durable. Inspect once to recover an unstarted dispatch or continue the revised pipeline."
+        ),
+    }
+
+
 def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Keep recovery and rare control-plane capabilities outside the normal flow."""
     resolved_task_ref = str(params.get("task_ref") or "").strip() or None
@@ -7338,6 +7731,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "lane": "lane", "resource": "resource", "question": "question",
             "plan_approval": "plan_approval", "approve_plan": "plan_approval", "plan_review": "plan_approval",
             "follow_up": "follow_up", "followup": "follow_up", "correct": "follow_up", "corrective_task": "follow_up",
+            "steer": "steer", "amend": "steer", "revise_active_task": "steer",
             "prune": "prune", "cleanup": "prune",
             "legacy": "legacy", "legacy_lifecycle": "legacy", "legacy_cleanup": "legacy",
             "maintenance": "maintenance", "health": "maintenance", "sqlite_health": "maintenance",
@@ -7380,6 +7774,8 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         resolved_task_ref = task_ref
         if intent == "artifacts":
             return manage_task_artifacts(params, task_dir, state, task_ref)
+        if intent == "steer":
+            return _v3_active_steer(params, task_dir, state, task_definition, task_ref)
         if intent == "follow_up":
             follow_up = _v3_follow_up_payload(params.get("payload"))
             source_context = _v3_follow_up_context(
@@ -7516,7 +7912,7 @@ PIPELINE_OPERATION_SCHEMA = {"type": "object", "properties": {"op": {"type": "st
 QUESTION_OPTION_SCHEMA = {
     "anyOf": [
         {"type": "string", "minLength": 1},
-        {"type": "object", "additionalProperties": False, "properties": {"label": {"type": "string", "minLength": 1}, "description": {"type": "string"}}, "required": ["label"]},
+        {"type": "object", "additionalProperties": False, "properties": {"option_id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}, "label_en": {"type": "string", "minLength": 1}, "label_localized": {"type": "string", "minLength": 1}, "description": {"type": "string"}}, "anyOf": [{"required": ["label"]}, {"required": ["label_en"]}]},
     ]
 }
 QUESTION_TOOL_SCHEMA = {
@@ -7533,7 +7929,12 @@ QUESTION_TOOL_SCHEMA = {
         "localized_header": {"type": "string"},
         "localized_options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA},
         "localized_custom_label": {"type": "string"},
+        "localized_questions": {"type": "array", "maxItems": 32, "items": {"type": "object"}, "description": "Batch-only localized form projection. Each item identifies its stable question_key and may change titles/options display labels only."},
+        "localized_batch": {"type": "object", "description": "Batch-only alias containing localized_questions under questions."},
         "answer_submission_id": {"type": "string", "description": "Stable id for an answer replay."},
+        "canonical_answer": {"type": "string", "description": "Coordinator-supplied English translation of localized free text."},
+        "canonical_answers": {"type": "object", "description": "Batch-only map of localized free-text question_key to its canonical English translation. Option-only answers derive English from stable option_id and must not be translated."},
+        "translated_by": {"type": "string", "description": "Audit label for the coordinator that supplied batch free-text translations."},
         "attempt_id": {"type": "string", "description": "Worker attempt. Supplying it routes the question to the coordinator instead of opening a worker UI."},
         "submission_id": {"type": "string", "description": "Stable worker-question submission id."},
         "question": {"type": "string", "minLength": 1},

@@ -663,6 +663,13 @@ def _orchestrate_response(
         "diagnostics": diagnostics or [],
         "next_action": next_action,
     }
+    if facade_state == "waiting_workers":
+        response.update({
+            "output_policy": "silent",
+            "allowed_visible_events": [
+                "user_message", "worker_question", "worker_completed", "worker_failed", "blocking_error",
+            ],
+        })
     if isinstance(plan, dict):
         response["pipeline"] = _orchestrate_pipeline_snapshot(state, plan)
     if result is not None:
@@ -1148,6 +1155,29 @@ def _ensure_attempt_evidence(
     return result["state"]
 
 
+def _canonical_gate_decision(task_dir: Path, state: dict[str, Any], gate: str) -> str | None:
+    """Read the strongest canonical decision published by passed gate attempts."""
+    priority = {"pass": 0, "rework": 1, "fail": 2, "blocked": 3}
+    decisions: list[str] = []
+    for attempt in state.get("attempts", []):
+        if attempt.get("gate") != gate or attempt.get("invalidated") or attempt.get("status") != "passed":
+            continue
+        for report_ref in attempt.get("report_ids", []):
+            record, _ = read_immutable_json_artifact(
+                task_dir,
+                state["task_id"],
+                f"reports/records/{safe_id(str(report_ref))}.json",
+                kinds={"worker_report", "report_record"},
+            )
+            envelope = record.get("gate_result") or record.get("closure")
+            if not isinstance(envelope, dict):
+                continue
+            decision = str(envelope.get("decision") or "").strip().lower()
+            if decision in priority:
+                decisions.append(decision)
+    return max(decisions, key=priority.__getitem__) if decisions else None
+
+
 def _replace_future_orchestrate_waves(
     params: dict[str, Any],
     task_dir: Path,
@@ -1322,6 +1352,15 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
             statuses = {item.get("status") for item in gate_attempts}
             default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
+            gate_decision = _canonical_gate_decision(task_dir, state, gate)
+            if gate_decision == "blocked":
+                default_outcome = "blocked"
+            elif gate_decision == "fail":
+                default_outcome = "failed"
+            elif gate_decision == "rework":
+                # record_gate consults canonical blockers and performs the
+                # fail-back transition instead of completing this gate.
+                default_outcome = "passed"
             outcome = str(gate_outcomes.get(gate, default_outcome))
             failure_counts = state.setdefault("orchestrate_gate_failure_counts", {})
             failure_count_changed = False
@@ -1371,6 +1410,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 "gate": gate,
                 "outcome": outcome,
                 "summary": gate_summary,
+                "enforce_canonical_findings": gate_decision in {"rework", "fail"},
             })
             if recorded.get("recorded") is False:
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))

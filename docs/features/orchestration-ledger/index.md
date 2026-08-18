@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 6.5.0 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 6.6.0 `cortex/v8` task ledger and
 public `cortex/orchestration/v4` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly seven public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -24,7 +24,7 @@ to the content checksum; inconsistent history fails closed.
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the stable executable and public facade for task, report, and lane tools.
 - [gate_transitions.py](../../../plugins/cortex/scripts/cortex_runtime/gate_transitions.py) owns active-gate resolution, evidence policy, C2/C3 completion requirements, durable transitions, and terminal manifest cleanup behind the `record_gate` facade.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns orchestration start/continue/inspect transitions, transaction checkpoints, waves, and native dispatch assembly.
-- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v7, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, and signed artifact cursors without importing the MCP entrypoint.
+- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v8, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
 - [profiles.json](../../../plugins/cortex/profiles.json) is the canonical machine-validated source for all 21 profiles, their descriptions, sandboxes, route categories, gates, selection/avoidance guidance, adaptive model/effort routing, ordered implementation routing, 13 gate briefings, and the `cortex/report/v1` field contract.
@@ -39,7 +39,11 @@ The root ledger owns private `cortex.db` (mode `0600`) and the advisory
 `.state.lock`. SQLite is the sole mutable source for tasks, state, plans,
 operations, report/delegation indexes, questions, snapshots, classifications,
 lanes, activations, resource claims, findings, projection jobs, prune
-tombstones, and immutable artifact content. Schema v7 separates three durable
+tombstones, revisions, worker sessions, attempt messages, trace observations,
+and immutable artifact content. Schema v8 adds revision-aware task/plan
+records, native worker-session identity, attempt messages, trace/tool
+observations, and atomic question-batch storage exposed through
+`ask_batch`/`poll_batch`. Schema v7 separates three durable
 identities: a digest-addressed content blob with 32 KiB verified chunks, a
 task-scoped logical artifact (kind/title/immutability), and an authorized
 filesystem export path. Historic v2 artifact tables remain migration evidence;
@@ -60,6 +64,13 @@ its Desktop link. An export is authorized and placed in the SQLite outbox
 before a materializer claims a lease, atomically writes and fsyncs it, verifies
 the digest, and acknowledges it. Full content is only assembled internally for
 state-machine validation, where every chunk and full digest is verified.
+
+Hook/tool observations are deduplicated by task, attempt, context epoch, and
+normalized fingerprint in the v8 ledger. A successful full-coverage
+observation is reusable for the same workspace generation; repeats increment
+the duplicate count without replacing the successful observation. A later
+success may supersede a failed observation, while partial coverage never
+authorizes reuse.
 
 The runtime deliberately does not create `v3-operations.json`, active-task or
 status-receipt files, `reports/grants`, `metrics.json`, task lock files,
@@ -89,8 +100,9 @@ defaults complexity to safe C2, builds the standard pipeline when waves are
 omitted, and prepares the first wave. Each
 `continue_orchestration` call supplies the relative active-wave `step`, the
 opaque `task_ref`, and persisted worker `report_ref` values. A single-worker
-wave needs no slot; a parallel wave
-uses short relative `worker: 1..N` slots. The server validates completeness,
+completion may omit its slot; a parallel completion uses short relative
+`worker: 1..N` slots, while a non-success completion also carries the exact
+`dispatch_ref` for its attempt. The server validates completeness,
 uniqueness, and ownership atomically before state writes, then returns the
 next step and native dispatch arguments. Future-wave replacement and explicit
 rework retain invalidation semantics; a semantically unchanged replacement is
@@ -98,7 +110,7 @@ recorded as `unchanged` instead of failing after gate writes, and relative
 future steps remain monotonic. Human-readable language aliases such as
 `English` normalize before ledger creation. `manage_orchestration` is reserved for
 inspect/resume/deactivate, lanes, resources, durable questions, and confirmed
-project-scoped prune, and completed-task `follow_up`; it is not
+project-scoped prune, active-task `steer`, and completed-task `follow_up`; it is not
 part of normal wave progression. Host `spawn_agent` and user-authorized
 `create_thread` are still performed by Codex, never by public MCP lifecycle
 calls.
@@ -121,6 +133,15 @@ task. Replayed continue calls also return no dispatches and cannot authorize a
 duplicate wave. Omitting the ref when several tasks are selectable returns
 `needs_selection` with bounded objective/ref candidates. The project registry
 is lock-serialized so concurrent process starts do not overwrite one another.
+
+An active or blocked task accepts a user correction through
+`manage_orchestration(intent="steer")`. Cortex increments `task_revision`,
+stores original and canonical-English messages, computes a bounded impact
+summary, and returns `followup_task` calls only for active attempts with an
+addressable native `host_agent_id`; the same attempt/session is resumed rather
+than replaced. If the native session is unavailable, the steer remains durable
+and the coordinator must inspect/continue the revised pipeline. A completed
+source is immutable and uses the separate linked `follow_up` task route.
 
 A user request to correct a task that is already `completed` uses
 `manage_orchestration(intent="follow_up")` with the exact completed source
@@ -305,6 +326,13 @@ blocking questions reject both report publication and wave
 continuation. This applies to every profile, not only Planner. Repository facts
 are investigated, low-impact reversible choices may be documented, and
 material intent/product/security/irreversible decisions must not be guessed.
+Localized labels are transient UI projections; answers retain original
+value/language and require canonical `answer_en` for localized free text.
+Workers may submit 1–32 stable questions through `ask_batch` and poll the
+same `batch_ref` with `poll_batch`; localized UI is a transient projection,
+all answers commit atomically, and localized free text requires canonical
+English translation before resumption. A task revision supersedes an
+unresolved batch.
 
 After questions are resolved, every worker uses `record_report` to persist exactly `summary`,
 `findings`, `questions`, `changed_files`, `tests`, `evidence`, `uncertainty`,
@@ -326,6 +354,12 @@ unrelated files. If the worker is interrupted after persistence but before its
 acknowledgement, `manage_orchestration` inspect returns the compact entry in
 `available_reports`, including the same path, for recovery.
 
+Every gate report carries a separate top-level `gate_result` envelope with
+`decision`, `failure_class`, `findings`, `verification`, and `workspace` for
+every gate. The older top-level `closure` sibling is retained only as a
+review/close compatibility alias; neither envelope is nested in the strict
+eight-field report.
+
 For C2/C3 close attempts, Cortex additionally requires at least one executed
 test or verification result and observed evidence. Completion markers such as
 “not run” or “unverified” fail closed, and the report must map every task-level
@@ -344,8 +378,8 @@ and continue the existing relative step. Cortex explicitly forbids restarting
 the task or replaying completed dispatches during this recovery.
 
 The documented `SubagentStart` event binds the parent session, native
-`agent_id`, and observed `model` to the next sequentially issued dispatch
-before a worker is considered active; dynamic workers report generic
+`agent_id`, observed `model`, and exact returned dispatch identity before a
+worker is considered active; dynamic workers report generic
 `agent_type=default`. The handoff separates `pending_dispatches` from `active_workers`:
 only matching top-level `inspect` dispatches authorize new spawns, while
 active workers expose exact persisted child wait IDs. Missing binding fails
@@ -362,9 +396,9 @@ and attempt, and must satisfy the host's strict `[a-z0-9_]{1,80}` name contract.
 The deterministic digest preserves uniqueness without copying durable IDs,
 request text, or skill paths into the host-visible name. `followup_task` is
 reserved for the exact confirmed native worker being resumed; a reused
-`host_agent_id` is rejected for another attempt. Lifecycle hooks use required
-sequential spawn order to associate the opaque child ID with the issued native
-task key and canonical profile before emitting worker context.
+`host_agent_id` is rejected for another attempt. Lifecycle hooks use the exact
+returned dispatch identity to associate the opaque child ID with the issued
+native task key and canonical profile before emitting worker context.
 
 `manage_orchestration(intent="prune")` is project-scoped maintenance and must
 omit `task_ref`. With exact `confirmation: "PRUNE"`, it creates a durable
@@ -376,8 +410,12 @@ reconcile task, activation, operation, classification, resource-claim, and lane
 records. A failed filesystem operation leaves a retryable tombstone and intact
 canonical state. A classification receipt referenced by any retained task is
 preserved. Recent completed tasks, lane objects, project source/docs, and plugin
-content are preserved. Repeating prune is idempotent; Cortex intentionally has
-no clear-all route.
+content are preserved. Repeating prune is idempotent; Cortex has no implicit
+clear-all route. With no retention period, the public route instead offers
+`keep_1d`, `keep_7d`, `keep_30d`, or `full_reset`. The explicit `full_reset`
+choice requires the exact second confirmation `RESET CORTEX`, is blocked by
+active tasks, and removes only project-scoped `.codex/cortex` state; project
+source and documentation remain untouched.
 
 Predecessor handoffs are an enforced worker contract. Omitted `depends_on`
 supplies every verified predecessor report ref, an explicit phase list selects
@@ -471,7 +509,7 @@ and verification lists. Runtime validation also checks complete routing
 metadata, TOML identity/description/sandbox parity, and unique implementation
 specialist rules. Recovery and nested
 operations are `inspect`, `resume`, `deactivate`, `lane`, `resource`,
-`question`, and `follow_up`.
+`question`, `steer`, and `follow_up`.
 
 Ledger, report-bus, and journal paths reject symlink ancestry and require
 regular-file targets, so journal or report-bus links cannot redirect state

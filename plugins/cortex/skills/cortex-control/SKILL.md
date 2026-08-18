@@ -51,10 +51,13 @@ signal, never permission for the root to perform the work directly.
    names exact completed or earlier prerequisite phases; omit it to receive all
    verified predecessor reports. `context_files` carries exact project/feature
    knowledge pages selected by the planner for that worker.
-3. Invoke each returned dispatch with its exact `call` and `arguments`, one
-   native call at a time in returned worker order. The children still execute
-   concurrently after each spawn returns; the deterministic call order lets
-   generic host `SubagentStart` events bind to the matching issued dispatch.
+3. Invoke every returned dispatch with its exact `call` and `arguments` in one
+   model turn when the host supports parallel tool calls. The children execute
+   concurrently; correlate each `SubagentStart` by the exact returned
+   `task_name`/`dispatch_ref` (and the host child id), never by a guessed
+   ordinal or a display label. If the host cannot batch calls, issue them in
+   the returned order as a transport fallback, but preserve the same exact
+   correlation contract.
    Before invoking it, check the sibling `phase`, `profile`, `capability`,
    `sandbox`, `selection_reason`, `dispatch_ref`, `briefing_path`, and
    `briefing_digest` against the latest worker evidence and
@@ -68,11 +71,11 @@ signal, never permission for the root to perform the work directly.
    complete worker context, and inheriting the coordinator transcript can leak
    localized user-language messages into the English-only worker channel.
    A dispatch is successful only when the native call returns its child id.
-   Never announce that a worker was sent or wait before at least one returned
-   child id is durably bound. A host-level wait-any representation may omit an
-   explicit target list only while Cortex has a bound running child; otherwise
-   it is denied as an unspawned dispatch. If the native call is unavailable or
-   fails, stop with that blocker; otherwise wait only for bound children.
+   Never announce that a worker was sent or wait before the returned child id
+   is durably bound. A host-level wait-any representation may omit an explicit
+   target list only while Cortex has a bound running child; otherwise it is
+   denied as an unspawned dispatch. If a native call is unavailable or fails,
+   stop with that blocker; otherwise wait only for bound children.
 4. Workers do not call lifecycle operations. A worker first reads only its
    exact briefing path, confirms the file is
    read-only and its SHA-256 equals `briefing_digest`, and stops on any
@@ -95,7 +98,10 @@ signal, never permission for the root to perform the work directly.
    cleanup script. The result validator compares both ordinary files and
    generated/gitignored artifact sentinels against the attempt baseline.
    Predecessor reports remain accessible only through scoped
-   `read_worker_report`.
+   `read_worker_report`. While the wave is active, the coordinator is in
+   `waiting_workers` with `output_policy="silent"`: repeated wait timeouts
+   produce no heartbeat or status commentary. Visible output is limited to a
+   worker question, worker completion/failure, or a blocking error.
 
    Any worker may call
    `worker_question(action="ask")` when repository evidence cannot resolve a
@@ -125,14 +131,23 @@ signal, never permission for the root to perform the work directly.
    A final report always has `questions: []`: material decisions must complete
    the durable question lifecycle first, and non-blocking evidence gaps belong
    in `uncertainty`.
-   `followup_task` is authorized only for a stopped attempt whose durable open
-   question has just been answered. If native worker completion contains a
+   Every gate report must carry a separate top-level `gate_result` with
+   `decision`, `failure_class`, `findings`, `verification`, and `workspace`.
+   This is the canonical result envelope for implementation, QA, review, close,
+   and every other gate. The older top-level `closure` sibling is retained only
+   as a temporary compatibility alias for review/close and must not be placed
+   inside the strict eight-field report; when both are supplied they must agree.
+   `followup_task` resumes the same addressable native worker for an answered
+   durable question or an explicit active steer. Active steer is recorded as a
+   new task revision and delivered to the existing `host_agent_id`; it does
+   not create an attempt or a replacement worker. If native worker completion contains a
    `record_report` error or anything other than `REPORT_RECORDED` or
    `QUESTION_RECORDED`, do not send a corrective follow-up: `SubagentStop` has
    already classified that attempt. Call
    `manage_orchestration(intent="inspect")` once, then consume a recovered
    report, route the durable question, or submit the exact failed result that
-   inspect returns. Only a newly returned top-level dispatch authorizes rework.
+   inspect returns. Only a newly returned top-level dispatch authorizes rework
+   after a worker is no longer resumable.
    Cortex permits at most three automatic failed attempts for one active phase;
    it then blocks with a durable handoff. Resume only after repairing the
    recorded cause, which resets that phase's bounded recovery counter.
@@ -147,9 +162,9 @@ signal, never permission for the root to perform the work directly.
    files. Then evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
-   prior response, and all `report_ref` results. A single result needs no worker reference.
-   Parallel results repeat only the returned integer `worker` slot. Omit
-   status for success; non-success requires normalized `status`, `reason`, and
+   prior response, and all `report_ref` results. A single-worker result may omit
+   its slot; parallel results repeat only the returned integer `worker` slot.
+   Omit status for success; non-success requires normalized `status`, `reason`, and
    the exact `dispatch_ref` from that stopped worker's returned dispatch (or
    from `context_handoff.stopped_workers`). It omits `report_ref`. This binds a
    failure to one attempt, so a duplicate stale failure can never be applied to
@@ -175,7 +190,7 @@ as the authoritative recovery snapshot. Invoke only top-level inspect
 handoff itself is descriptive, not spawn authority. Never respawn entries in
 `active_workers`; wait only on their exact persisted `host_agent_id` values.
 The documented `SubagentStart` hook binds each native child id/model to the
-next sequentially issued attempt before project work (`agent_type` is
+exact returned dispatch identity before project work (`agent_type` is
 `default` for dynamic workers), so inspect can distinguish those states.
 If a running attempt has no child id, fail closed instead of spawning or
 waiting without a target. Do not call `start_orchestration`
@@ -216,6 +231,20 @@ approved or revised plans. `plan_review` exposes compact
 `planning_artifacts` for approval. Treat this as a durable catalog for
 ownership/dependency-aware scheduling within the canonical phase/wave safety
 model, not as an unconstrained auto-executor.
+
+### Active steer and correcting a completed task
+
+While a task is active or blocked, a material user correction uses
+`manage_orchestration(intent="steer")` (aliases `amend` and
+`revise_active_task`) with `payload.user_message`. English worker delivery is
+required; for another user language the coordinator supplies canonical
+English `message_en`. Cortex appends a task revision, retains the original and
+canonical messages, computes a bounded impact summary, and returns
+`followup_task` calls only for addressable active native workers. If a worker
+session has no `host_agent_id`, the steer remains durable and the coordinator
+must inspect/continue the revised pipeline rather than guessing a resume target.
+This is distinct from `follow_up`, which creates a linked task only for a
+completed source.
 
 ### Correcting a completed task
 
@@ -281,7 +310,16 @@ Follow recoverable diagnostics and never fall back to private tools.
 
 The question intent accepts only the worker's exact `question_ref` on the
 normal path, resolves all durable identity internally, and requests main-chat
-MCP UI elicitation through `elicitation/create`. Every
+MCP UI elicitation through `elicitation/create`. The coordinator may pass
+`localized_question`, `localized_header`, `localized_options`, and
+`localized_custom_label` as transient user-language labels; the stored
+question remains canonical English. Answers preserve the user's original
+value and language and require `answer_en` for localized free text before the
+worker receives the canonical English answer. Workers may use
+`worker_question(action="ask_batch")` with 1–32 stable questions and poll the
+same `batch_ref` with `action="poll_batch"`; the host form answers every item
+in one atomic batch. A task revision supersedes an unresolved batch rather
+than resuming stale user intent. Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;
 existing code is current-state evidence, not evidence of desired product
@@ -301,7 +339,12 @@ Active and blocked tasks are preserved regardless of age, as is every
 classification receipt referenced by a retained task. Recent completed tasks,
 lanes, plugin files, project source, and documentation are also preserved. It
 is project-scoped, requires exact `PRUNE`, must omit `task_ref`, and is safe to
-run weekly; do not use an unbounded clear operation.
+run weekly; do not use an unbounded clear operation. When no retention period
+is supplied, the route presents `keep_1d`, `keep_7d`, `keep_30d`, and
+`full_reset`. The first three are bounded retention selections. `full_reset`
+is separately destructive and requires the exact confirmation `RESET CORTEX`;
+it fails closed while active workers exist and removes only project-scoped
+`.codex/cortex` state, never project source or documentation.
 
 ## Dispatch and evidence policy
 

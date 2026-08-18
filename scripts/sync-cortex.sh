@@ -180,8 +180,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "6.5.0":
-    raise SystemExit("plugin/server version must match the 6.5.0 release manifest")
+if module.SERVER_VERSION != version or base_version != "6.6.0":
+    raise SystemExit("plugin/server version must match the 6.6.0 release manifest")
 PY
 }
 
@@ -442,10 +442,6 @@ restore_cortex_mcp_approval_override() {
     echo "would preserve Cortex MCP default_tools_approval_mode=${cortex_mcp_approval_override}"
     return 0
   fi
-  [[ -f "${config_path}" && ! -L "${config_path}" ]] || {
-    echo "error: Codex config disappeared or became non-regular during Cortex update: ${config_path}" >&2
-    return 1
-  }
   "${cortex_python}" - "${config_path}" "${cortex_mcp_approval_override}" <<'PY'
 import os
 import re
@@ -460,10 +456,11 @@ value = sys.argv[2]
 allowed = {"auto", "prompt", "writes", "approve"}
 if value not in allowed:
     raise SystemExit(f"error: invalid captured Cortex MCP approval mode: {value}")
-if path.is_symlink() or not path.is_file():
+path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+if path.is_symlink() or (path.exists() and not path.is_file()):
     raise SystemExit(f"error: refusing to update non-regular Codex config: {path}")
 
-original = path.read_text(encoding="utf-8")
+original = path.read_text(encoding="utf-8") if path.exists() else ""
 text = original
 lines = text.splitlines(keepends=True)
 header = '[plugins."cortex@cortex".mcp_servers.cortex]'
@@ -517,7 +514,7 @@ if observed != value:
 if text == original:
     raise SystemExit(0)
 
-mode = stat.S_IMODE(path.stat().st_mode)
+mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
 fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
 try:
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
@@ -533,6 +530,30 @@ except Exception:
         pass
     raise
 PY
+}
+
+check_cortex_mcp_approval_mode() {
+  capture_cortex_mcp_approval_override || return 1
+  if [[ "${cortex_mcp_approval_override}" != "approve" ]]; then
+    echo "outdated Codex global config: Cortex default_tools_approval_mode must be approve (found ${cortex_mcp_approval_override:-missing})" >&2
+    return 1
+  fi
+  echo "ok      Cortex default_tools_approval_mode=approve"
+}
+
+ensure_cortex_mcp_approval_mode() {
+  local config_path="${codex_home}/config.toml" captured="${cortex_mcp_approval_override}"
+  if [[ "${mode}" == "dry-run" ]]; then
+    echo "would set Cortex MCP default_tools_approval_mode=approve"
+    return 0
+  fi
+  cortex_mcp_approval_override="approve"
+  restore_cortex_mcp_approval_override || {
+    cortex_mcp_approval_override="${captured}"
+    return 1
+  }
+  cortex_mcp_approval_override="${captured}"
+  echo "configured Cortex MCP default_tools_approval_mode=approve"
 }
 
 installed_version() {
@@ -551,6 +572,7 @@ install_or_check() {
   if [[ "${mode}" == "check" ]]; then
     [[ "${version}" == "${expected_version}" ]] || { echo "outdated ${plugin_name}@${marketplace_name}: expected ${expected_version}, found ${version:-missing}" >&2; return 1; }
     content_matches || { echo "outdated ${plugin_name}@${marketplace_name}: same-version content drift"; return 1; }
+    check_cortex_mcp_approval_mode || return 1
     check_global_subagent_model || return 1
     sync_cortex_hook_trust || return 1
     echo "ok      ${plugin_name}@${marketplace_name} (${expected_version}, content verified)"; return 0
@@ -572,8 +594,8 @@ install_or_check() {
     restore_cortex_mcp_approval_override || true
     return 1
   fi
-  restore_cortex_mcp_approval_override || return 1
   ensure_global_subagent_model || return 1
+  ensure_cortex_mcp_approval_mode || return 1
   [[ "${mode}" == "dry-run" ]] || content_matches || { echo "error: installed plugin content differs from source" >&2; return 1; }
   sync_cortex_hook_trust || return 1
   if [[ "${mode}" == "dry-run" ]]; then

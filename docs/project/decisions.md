@@ -32,7 +32,9 @@ persisted `available_reports`.
 ## Chunked immutable artifact transport
 
 Large coordination evidence is stored as immutable SQLite artifacts, not as a
-large JSON field returned from MCP. Schema v7 separates a deduplicated content
+large JSON field returned from MCP. Schema v8 adds task/plan revisions, native
+worker sessions, attempt messages, trace/tool observations, and question-batch
+storage; schema v7 separates a deduplicated content
 blob, a task-scoped logical artifact, and an authorized export path. Each blob
 has a content SHA-256, MIME type, exact byte size, and 32 KiB `TEXT` or `BLOB`
 chunks; the database schema does not impose a small per-field storage cap.
@@ -290,7 +292,7 @@ initial baseline before replacement dispatches.
 ### SQLite migration contract
 
 `cortex.db` is the sole mutable source of truth for new tasks. The plugin keeps
-numbered, content-checked migrations through v7 in `ledger_db.py`; the first
+numbered, content-checked migrations through v8 in `ledger_db.py`; the first
 MCP call with a new migration takes the project-ledger lock, applies every
 missing migration in order inside one SQLite transaction, and records each
 version in `schema_migrations`. Repeated calls verify history and schema.
@@ -380,9 +382,9 @@ prevents collisions; durable Cortex IDs retain their hyphen-compatible format.
 Cortex rejects reuse of a `host_agent_id` already
 bound to another attempt. Only `followup_task` for the exact confirmed native
 worker may resume it. Dynamic `SubagentStart` events expose
-`agent_type=default`, so lifecycle hooks use required sequential spawn order to
-map each opaque child ID back to the issued native task key and canonical
-profile for worker-context injection.
+`agent_type=default`, so lifecycle hooks use the exact returned dispatch
+identity to map each opaque child ID back to the issued native task key and
+canonical profile for worker-context injection.
 
 ## Visible-thread checkout selection
 

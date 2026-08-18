@@ -147,16 +147,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "short blocker description."
         )
     closure_contract = (
-        "Review/close closure contract: because this is a review or close gate, include a separate top-level `closure` "
-        "sibling in the `record_report` request. It must contain decision (pass|rework|fail), findings, verification "
-        "(executed, not_executed, required_missing, limitations), and workspace (modified, untracked, staged, "
-        "committed). Each closure finding uses fingerprint, severity (P0|P1|P2|P3|info), status (open|resolved|waived), "
-        "blocking, summary, and optional details/next_action/resolved_at. A waived finding must carry top-level "
-        "waiver_reason, waived_by, and waived_at; the worker may not waive its own finding. Keep `report` "
-        "strictly to its exact eight keys; never put closure inside report. Non-review/non-close reports may omit closure."
-        if package.get("gate") in {"review", "close"}
-        else
-        "Closure is not required for this gate. If supplied, it is a separate top-level `closure` sibling; never add it inside the strict eight-key report."
+        "`record_report` needs top-level `gate_result` (not inside the eight-key report); "
+        "follow the tool schema. Top-level `closure` remains review/close compatibility only."
     )
     briefing_transport_contract = (
         "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "

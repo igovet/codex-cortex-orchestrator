@@ -529,12 +529,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "intent_clarification_reason": None,
         }
         review_prompt = control.host_spawn_prompt("code_reviewer", package)
-        self.assertIn("Review/close closure contract", review_prompt)
-        self.assertIn("separate top-level `closure` sibling", review_prompt)
-        self.assertIn("never put closure inside report", review_prompt)
+        self.assertIn("top-level `gate_result`", review_prompt)
+        self.assertIn("Top-level `closure` remains review/close compatibility only", review_prompt)
         package["gate"] = "close"
         close_prompt = control.host_spawn_prompt("build_verification", package)
-        self.assertIn("Review/close closure contract", close_prompt)
+        self.assertIn("top-level `gate_result`", close_prompt)
 
     def test_sync_detects_and_repairs_same_version_plugin_content_drift(self):
         if not shutil.which("codex"):
@@ -557,7 +556,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         before_preview = config.read_text(encoding="utf-8")
         preview = subprocess.run(["bash", str(script), "--dry-run"], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(preview.returncode, 0, preview.stderr)
-        self.assertIn("would preserve Cortex MCP default_tools_approval_mode=approve", preview.stdout)
+        self.assertIn("would set Cortex MCP default_tools_approval_mode=approve", preview.stdout)
         self.assertIn("would set agents.default_subagent_model=gpt-5.6-luna", preview.stdout)
         self.assertEqual(config.read_text(encoding="utf-8"), before_preview)
         installed = subprocess.run(["bash", str(script)], cwd=Path(__file__).parents[1], env=environment, text=True, capture_output=True, check=False)
@@ -1138,7 +1137,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("The public Cortex API exposes three coordinator lifecycle operations plus scoped worker", skill)
         self.assertIn("Coordinators use `start_orchestration`", skill)
         self.assertIn("`continue_orchestration` for normal work", skill)
-        self.assertIn("Invoke each returned dispatch", skill)
+        self.assertIn("Invoke every returned dispatch", skill)
         self.assertIn("Expected routes are metadata, not proof", skill)
         self.assertIn("Workers do not call lifecycle operations", skill)
         self.assertIn("`record_report`", skill)
@@ -1163,7 +1162,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         markers = [
             "## Normal flow",
             "Call `start_orchestration` once",
-            "Invoke each returned dispatch",
+            "Invoke every returned dispatch",
             "Workers do not call lifecycle operations",
             "After all workers finish",
             "then call `continue_orchestration` exactly",
@@ -1202,7 +1201,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("bind_host_worker_from_hook", hook)
         self.assertIn("Dispatch briefing reviewed digest", hook)
         self.assertIn("def stopped_worker_after_wait_context(", hook)
-        self.assertIn("even when its native final text is a report-tool error", hook)
+        self.assertIn("stopped without a report but remains resumable", hook)
         for relative in (
             "skills/cortex-control/SKILL.md",
             "skills/orchestrator/SKILL.md",

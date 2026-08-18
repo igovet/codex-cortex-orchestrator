@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 7
+DATABASE_SCHEMA_VERSION = 8
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
@@ -482,6 +482,25 @@ _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS = (
     "INSERT OR IGNORE INTO artifact_exports(artifact_id, task_id, export_path, created_at) SELECT artifact_id, task_id, export_path, created_at FROM artifacts WHERE export_path IS NOT NULL",
 )
 
+_REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS task_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), base_revision INTEGER, source TEXT NOT NULL CHECK(source IN ('initial','user_steer','recovery','system')), message_original TEXT NOT NULL, message_language TEXT NOT NULL, message_en TEXT, translation_status TEXT NOT NULL DEFAULT 'not_required' CHECK(translation_status IN ('not_required','pending','translated')), created_at TEXT NOT NULL, PRIMARY KEY(task_id, task_revision))",
+    "CREATE TABLE IF NOT EXISTS plan_revisions(task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, plan_revision INTEGER NOT NULL CHECK(plan_revision >= 1), base_plan_revision INTEGER, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), impact_json TEXT NOT NULL, plan_json TEXT, status TEXT NOT NULL CHECK(status IN ('active','superseded','approved','pending')), created_at TEXT NOT NULL, PRIMARY KEY(task_id, plan_revision))",
+    "CREATE TABLE IF NOT EXISTS worker_sessions(session_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, host_agent_id TEXT, host_task_name TEXT NOT NULL, host_tool TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1 CHECK(generation >= 1), status TEXT NOT NULL CHECK(status IN ('awaiting_spawn','running','idle_resumable','stopped_recoverable','terminated_unavailable','completed')), resumable INTEGER NOT NULL DEFAULT 1 CHECK(resumable IN (0,1)), started_at TEXT, last_seen_at TEXT NOT NULL, terminated_at TEXT, UNIQUE(task_id, attempt_id, generation), UNIQUE(task_id, host_agent_id))",
+    "CREATE TABLE IF NOT EXISTS attempt_messages(message_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('user','coordinator','system')), kind TEXT NOT NULL CHECK(kind IN ('question_answer','steer','correction','recovery')), original_text TEXT NOT NULL, original_language TEXT NOT NULL, canonical_en TEXT NOT NULL, task_revision INTEGER NOT NULL CHECK(task_revision >= 1), created_at TEXT NOT NULL, delivered_at TEXT, acknowledged_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS question_batches(batch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, batch_key TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open','answered','superseded')), language TEXT NOT NULL, created_at TEXT NOT NULL, answered_at TEXT, UNIQUE(task_id, attempt_id, batch_key))",
+    "CREATE TABLE IF NOT EXISTS question_items(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, question_type TEXT NOT NULL CHECK(question_type IN ('single_select','multi_select','text')), canonical_question TEXT NOT NULL, localized_question TEXT NOT NULL, options_json TEXT NOT NULL, ordinal INTEGER NOT NULL CHECK(ordinal >= 1), PRIMARY KEY(batch_id, question_key), UNIQUE(batch_id, ordinal))",
+    "CREATE TABLE IF NOT EXISTS question_answers(batch_id TEXT NOT NULL REFERENCES question_batches(batch_id) ON DELETE CASCADE, question_key TEXT NOT NULL, answer_original TEXT NOT NULL, answer_original_language TEXT NOT NULL, answer_option_ids_json TEXT NOT NULL, answer_en TEXT, translation_status TEXT NOT NULL CHECK(translation_status IN ('not_required','awaiting_translation','translated')), translated_by TEXT, translated_at TEXT, PRIMARY KEY(batch_id, question_key), FOREIGN KEY(batch_id, question_key) REFERENCES question_items(batch_id, question_key) ON DELETE CASCADE)",
+    "CREATE TABLE IF NOT EXISTS orchestration_trace(trace_id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT, event TEXT NOT NULL, occurred_at TEXT NOT NULL, metadata_json TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS tool_observations(observation_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, context_epoch INTEGER NOT NULL CHECK(context_epoch >= 0), fingerprint TEXT NOT NULL, tool_name TEXT NOT NULL, normalized_arguments TEXT NOT NULL, workspace_generation TEXT NOT NULL, result_digest TEXT, coverage TEXT, status TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, repeat_count INTEGER NOT NULL DEFAULT 0 CHECK(repeat_count >= 0), UNIQUE(task_id, attempt_id, context_epoch, fingerprint))",
+    "CREATE INDEX IF NOT EXISTS task_revisions_created_idx ON task_revisions(task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS plan_revisions_created_idx ON plan_revisions(task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS worker_sessions_status_idx ON worker_sessions(task_id, status, last_seen_at)",
+    "CREATE INDEX IF NOT EXISTS attempt_messages_delivery_idx ON attempt_messages(task_id, attempt_id, delivered_at, created_at)",
+    "CREATE INDEX IF NOT EXISTS question_batches_status_idx ON question_batches(task_id, status, created_at)",
+    "CREATE INDEX IF NOT EXISTS orchestration_trace_task_idx ON orchestration_trace(task_id, occurred_at)",
+    "CREATE INDEX IF NOT EXISTS tool_observations_attempt_idx ON tool_observations(task_id, attempt_id, context_epoch, last_seen_at)",
+)
+
 
 def _migration_plan() -> tuple[_Migration, ...]:
     return (
@@ -492,6 +511,7 @@ def _migration_plan() -> tuple[_Migration, ...]:
         _Migration(5, "projection-jobs", _PROJECTION_SCHEMA_STATEMENTS),
         _Migration(6, "crash-safe-prune-tombstones", _PRUNE_SCHEMA_STATEMENTS),
         _Migration(7, "canonical-content-blobs-and-logical-artifacts", _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS),
+        _Migration(8, "revision-aware-orchestration", _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS),
     )
 
 
@@ -511,6 +531,13 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "artifact_blobs", "artifact_blob_chunks", "logical_artifacts", "artifact_exports",
             "logical_artifacts_task_kind_created_idx", "logical_artifacts_task_created_idx",
             "logical_artifacts_blob_idx", "artifact_exports_task_path_idx",
+        },
+        8: {
+            "task_revisions", "plan_revisions", "worker_sessions", "attempt_messages",
+            "question_batches", "question_items", "question_answers", "orchestration_trace",
+            "tool_observations", "task_revisions_created_idx", "plan_revisions_created_idx",
+            "worker_sessions_status_idx", "attempt_messages_delivery_idx", "question_batches_status_idx",
+            "orchestration_trace_task_idx", "tool_observations_attempt_idx",
         },
     }
     present = {
@@ -553,6 +580,17 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "artifact_blob_chunks": {"blob_id", "chunk_no", "text_content", "blob_content", "byte_size", "digest_sha256"},
             "logical_artifacts": {"artifact_id", "task_id", "kind", "title", "mime_type", "digest_sha256", "byte_size", "chunk_count", "immutable", "blob_id", "export_path", "created_at"},
             "artifact_exports": {"artifact_id", "task_id", "export_path", "created_at"},
+        },
+        8: {
+            "task_revisions": {"task_id", "task_revision", "base_revision", "source", "message_original", "message_language", "message_en", "translation_status", "created_at"},
+            "plan_revisions": {"task_id", "plan_revision", "base_plan_revision", "task_revision", "impact_json", "plan_json", "status", "created_at"},
+            "worker_sessions": {"session_id", "task_id", "attempt_id", "host_agent_id", "host_task_name", "host_tool", "generation", "status", "resumable", "started_at", "last_seen_at", "terminated_at"},
+            "attempt_messages": {"message_id", "task_id", "attempt_id", "source", "kind", "original_text", "original_language", "canonical_en", "task_revision", "created_at", "delivered_at", "acknowledged_at"},
+            "question_batches": {"batch_id", "task_id", "attempt_id", "batch_key", "status", "language", "created_at", "answered_at"},
+            "question_items": {"batch_id", "question_key", "question_type", "canonical_question", "localized_question", "options_json", "ordinal"},
+            "question_answers": {"batch_id", "question_key", "answer_original", "answer_original_language", "answer_option_ids_json", "answer_en", "translation_status", "translated_by", "translated_at"},
+            "orchestration_trace": {"trace_id", "task_id", "attempt_id", "event", "occurred_at", "metadata_json"},
+            "tool_observations": {"observation_id", "task_id", "attempt_id", "context_epoch", "fingerprint", "tool_name", "normalized_arguments", "workspace_generation", "result_digest", "coverage", "status", "first_seen_at", "last_seen_at", "repeat_count"},
         },
     }
     for table, expected_columns in column_requirements.get(version, {}).items():
@@ -750,6 +788,23 @@ def create_task(root: Path, definition: dict[str, Any], state: dict[str, Any], a
              str(state.get("status") or "active"), int(state.get("revision") or 0),
              str(definition.get("created_at") or _now()), str(state.get("updated_at") or _now())),
         )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_revisions'"
+        ).fetchone() is not None:
+            original = str(definition.get("user_request") or definition.get("objective") or "")
+            language = str(definition.get("user_language") or "en")
+            connection.execute(
+                """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
+                   VALUES (?, 1, NULL, 'initial', ?, ?, ?, ?, ?)""",
+                (
+                    task_id,
+                    original,
+                    language,
+                    original if language.lower().startswith("en") else None,
+                    "not_required" if language.lower().startswith("en") else "pending",
+                    str(definition.get("created_at") or _now()),
+                ),
+            )
 
 
 def update_task_state(root: Path, state: dict[str, Any], *, event: str | None = None, detail: str = "") -> None:
@@ -786,6 +841,153 @@ def update_task_plan(root: Path, task_id: str, plan: dict[str, Any]) -> None:
         cursor = connection.execute("UPDATE tasks SET plan_json = ? WHERE task_id = ?", (_canonical_json(plan), task_id))
         if cursor.rowcount != 1:
             raise ValueError("SQLite orchestration plan refers to an unknown task")
+        has_revisions = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='plan_revisions'"
+        ).fetchone() is not None
+        existing = connection.execute(
+            "SELECT 1 FROM plan_revisions WHERE task_id = ? LIMIT 1", (task_id,)
+        ).fetchone() if has_revisions else None
+        if has_revisions and existing is None:
+            task_revision = connection.execute(
+                "SELECT COALESCE(MAX(task_revision), 1) FROM task_revisions WHERE task_id = ?", (task_id,)
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO plan_revisions(task_id, plan_revision, base_plan_revision, task_revision, impact_json, plan_json, status, created_at)
+                   VALUES (?, 1, NULL, ?, ?, ?, 'active', ?)""",
+                (task_id, int(task_revision), _canonical_json({"classification": "initial"}), _canonical_json(plan), _now()),
+            )
+
+
+def append_task_revision(
+    root: Path,
+    task_id: str,
+    *,
+    source: str,
+    message_original: str,
+    message_language: str,
+    message_en: str | None,
+) -> dict[str, Any]:
+    """Append one immutable task revision and return its canonical row."""
+    ensure_database(root)
+    if source not in {"initial", "user_steer", "recovery", "system"}:
+        raise ValueError("task revision source is invalid")
+    original = str(message_original).strip()
+    language = str(message_language or "en").strip().lower()
+    canonical = str(message_en or "").strip() or None
+    if not original:
+        raise ValueError("task revision message_original is required")
+    with _connection(root, write=True) as connection:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(task_revision), 0) AS value FROM task_revisions WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        next_revision = int(row["value"]) + 1
+        if next_revision == 1:
+            task = connection.execute("SELECT definition_json, created_at FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise ValueError("task revision refers to an unknown task")
+            definition = _decode_json(str(task["definition_json"]), "task definition")
+            initial = str(definition.get("user_request") or definition.get("objective") or "")
+            initial_language = str(definition.get("user_language") or "en").lower()
+            connection.execute(
+                """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
+                   VALUES (?, 1, NULL, 'initial', ?, ?, ?, ?, ?)""",
+                (
+                    task_id, initial, initial_language,
+                    initial if initial_language.startswith("en") else None,
+                    "not_required" if initial_language.startswith("en") else "pending",
+                    str(task["created_at"]),
+                ),
+            )
+            next_revision = 2
+        created_at = _now()
+        connection.execute(
+            """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                task_id, next_revision, next_revision - 1, source, original, language, canonical,
+                "translated" if canonical and not language.startswith("en") else "not_required" if language.startswith("en") else "pending",
+                created_at,
+            ),
+        )
+    return {
+        "task_id": task_id, "task_revision": next_revision, "base_revision": next_revision - 1,
+        "source": source, "message_original": original, "message_language": language,
+        "message_en": canonical, "created_at": created_at,
+    }
+
+
+def append_plan_revision(
+    root: Path,
+    task_id: str,
+    *,
+    task_revision: int,
+    impact: dict[str, Any],
+    plan: dict[str, Any] | None,
+    status: str = "active",
+) -> dict[str, Any]:
+    ensure_database(root)
+    if status not in {"active", "superseded", "approved", "pending"}:
+        raise ValueError("plan revision status is invalid")
+    with _connection(root, write=True) as connection:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(plan_revision), 0) AS value FROM plan_revisions WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        next_revision = int(row["value"]) + 1
+        connection.execute("UPDATE plan_revisions SET status = 'superseded' WHERE task_id = ? AND status = 'active'", (task_id,))
+        created_at = _now()
+        connection.execute(
+            """INSERT INTO plan_revisions(task_id, plan_revision, base_plan_revision, task_revision, impact_json, plan_json, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                task_id, next_revision, next_revision - 1 if next_revision > 1 else None, int(task_revision),
+                _canonical_json(impact), _canonical_json(plan) if plan is not None else None, status, created_at,
+            ),
+        )
+    return {"task_id": task_id, "plan_revision": next_revision, "task_revision": task_revision, "impact": impact, "status": status, "created_at": created_at}
+
+
+def put_worker_session(root: Path, session: dict[str, Any]) -> dict[str, Any]:
+    ensure_database(root)
+    task_id = str(session.get("task_id") or "")
+    attempt_id = str(session.get("attempt_id") or "")
+    generation = int(session.get("generation") or 1)
+    session_id = str(session.get("session_id") or f"session-{task_id}-{attempt_id}-{generation}")
+    status = str(session.get("status") or "running")
+    if status not in {"awaiting_spawn", "running", "idle_resumable", "stopped_recoverable", "terminated_unavailable", "completed"}:
+        raise ValueError("worker session status is invalid")
+    timestamp = _now()
+    with _connection(root, write=True) as connection:
+        connection.execute(
+            """INSERT INTO worker_sessions(session_id,task_id,attempt_id,host_agent_id,host_task_name,host_tool,generation,status,resumable,started_at,last_seen_at,terminated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(session_id) DO UPDATE SET host_agent_id=excluded.host_agent_id, host_task_name=excluded.host_task_name,
+                 host_tool=excluded.host_tool, status=excluded.status, resumable=excluded.resumable, last_seen_at=excluded.last_seen_at,
+                 terminated_at=excluded.terminated_at""",
+            (
+                session_id, task_id, attempt_id, session.get("host_agent_id"), str(session.get("host_task_name") or ""),
+                str(session.get("host_tool") or "spawn_agent"), generation, status, int(bool(session.get("resumable", True))),
+                session.get("started_at") or timestamp, timestamp, session.get("terminated_at"),
+            ),
+        )
+    return {**session, "session_id": session_id, "status": status, "last_seen_at": timestamp}
+
+
+def append_attempt_message(root: Path, message: dict[str, Any]) -> dict[str, Any]:
+    ensure_database(root)
+    created_at = _now()
+    message_id = str(message.get("message_id") or "message-" + secrets.token_hex(12))
+    with _connection(root, write=True) as connection:
+        connection.execute(
+            """INSERT INTO attempt_messages(message_id,task_id,attempt_id,source,kind,original_text,original_language,canonical_en,task_revision,created_at,delivered_at,acknowledged_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                message_id, message["task_id"], message["attempt_id"], message.get("source", "coordinator"),
+                message["kind"], message["original_text"], message.get("original_language", "en"),
+                message["canonical_en"], int(message["task_revision"]), created_at,
+                message.get("delivered_at"), message.get("acknowledged_at"),
+            ),
+        )
+    return {**message, "message_id": message_id, "created_at": created_at}
 
 
 def delete_tasks(root: Path, task_ids: set[str]) -> int:
@@ -1749,3 +1951,114 @@ def fail_prune(root: Path, tombstone_id: str, error: str) -> dict[str, Any]:
         row = connection.execute("SELECT * FROM prune_tombstones WHERE tombstone_id=?", (tombstone_id,)).fetchone()
     if row is None: raise ValueError("prune tombstone is unavailable")
     return dict(row)
+
+
+# Tool observations are intentionally narrow hook telemetry.  They retain
+# neither raw tool inputs nor response text: callers supply already-redacted
+# digests and bounded argument summaries.
+def tool_context_epoch(root: Path, task_id: str, *, bump: bool = False) -> int:
+    """Return a task-scoped durable tool context epoch, optionally rolling it."""
+    ensure_database(root)
+    with _connection(root, write=bump) as connection:
+        rows = connection.execute(
+            "SELECT metadata_json FROM orchestration_trace WHERE task_id=? AND event='tool_context_epoch' ORDER BY trace_id DESC",
+            (task_id,),
+        ).fetchall()
+        epoch = 0
+        for row in rows:
+            try:
+                candidate = json.loads(str(row["metadata_json"])).get("epoch")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                epoch = candidate
+                break
+        if bump:
+            epoch += 1
+            connection.execute(
+                "INSERT INTO orchestration_trace(task_id,attempt_id,event,occurred_at,metadata_json) VALUES(?,?,?,?,?)",
+                (task_id, None, "tool_context_epoch", _now(), _canonical_json({"epoch": epoch})),
+            )
+    return epoch
+
+
+def find_successful_tool_observation(
+    root: Path,
+    task_id: str,
+    attempt_id: str,
+    context_epoch: int,
+    fingerprint: str,
+    workspace_generation: str,
+) -> bool:
+    """Return whether an identical full-file read completed successfully."""
+    ensure_database(root)
+    with _connection(root) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM tool_observations WHERE task_id=? AND attempt_id=? AND context_epoch=? "
+            "AND fingerprint=? AND workspace_generation=? AND coverage='full' AND status='success'",
+            (task_id, attempt_id, context_epoch, fingerprint, workspace_generation),
+        ).fetchone()
+    return row is not None
+
+
+def mark_tool_observation_duplicate(
+    root: Path, task_id: str, attempt_id: str, context_epoch: int, fingerprint: str,
+) -> bool:
+    """Count a denied duplicate without replacing the successful observation."""
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        cursor = connection.execute(
+            "UPDATE tool_observations SET repeat_count=repeat_count+1,last_seen_at=? WHERE task_id=? AND attempt_id=? "
+            "AND context_epoch=? AND fingerprint=? AND coverage='full' AND status='success'",
+            (_now(), task_id, attempt_id, context_epoch, fingerprint),
+        )
+    return cursor.rowcount == 1
+
+
+def record_tool_observation(
+    root: Path,
+    *,
+    task_id: str,
+    attempt_id: str,
+    context_epoch: int,
+    fingerprint: str,
+    tool_name: str,
+    normalized_arguments: str,
+    workspace_generation: str,
+    result_digest: str | None,
+    coverage: str,
+    status: str,
+) -> None:
+    """Upsert one bounded hook observation; a later success supersedes failure."""
+    if not task_id or not attempt_id or context_epoch < 0:
+        raise ValueError("tool observation identity is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise ValueError("tool observation fingerprint is invalid")
+    if len(normalized_arguments.encode("utf-8")) > 2048:
+        raise ValueError("tool observation arguments are too large")
+    try:
+        parsed_arguments = json.loads(normalized_arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError("tool observation arguments are invalid") from exc
+    if not isinstance(parsed_arguments, dict):
+        raise ValueError("tool observation arguments are invalid")
+    if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
+        raise ValueError("tool observation status is invalid")
+    if result_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", result_digest):
+        raise ValueError("tool observation result digest is invalid")
+    observation_id = "tool-" + hashlib.sha256(
+        f"{task_id}\0{attempt_id}\0{context_epoch}\0{fingerprint}".encode("utf-8")
+    ).hexdigest()[:48]
+    ensure_database(root)
+    now = _now()
+    with _connection(root, write=True) as connection:
+        connection.execute(
+            "INSERT INTO tool_observations(observation_id,task_id,attempt_id,context_epoch,fingerprint,tool_name,normalized_arguments,"
+            "workspace_generation,result_digest,coverage,status,first_seen_at,last_seen_at,repeat_count) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0) "
+            "ON CONFLICT(task_id,attempt_id,context_epoch,fingerprint) DO UPDATE SET "
+            "tool_name=excluded.tool_name,normalized_arguments=excluded.normalized_arguments,workspace_generation=excluded.workspace_generation,"
+            "result_digest=excluded.result_digest,coverage=excluded.coverage,status=excluded.status,last_seen_at=excluded.last_seen_at",
+            (observation_id, task_id, attempt_id, context_epoch, fingerprint, tool_name, normalized_arguments,
+             workspace_generation, result_digest, coverage, status, now, now),
+        )

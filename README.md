@@ -4,7 +4,7 @@ Cortex is a repo-source Codex plugin for explicit, durable orchestration. It
 ships 21 agent profiles, 10 skills, the local `cortex` MCP server, and
 privacy-limited lifecycle hooks. It uses canonical task-ledger schema
 `cortex/v8`, public lifecycle schema `cortex/orchestration/v4`, and plugin
-version **6.5.0**. The public MCP surface has exactly seven tools: three coordinator
+version **6.6.0**. The public MCP surface has exactly seven tools: three coordinator
 lifecycle operations—
 `start_orchestration`, `continue_orchestration`, and
 `manage_orchestration`—plus worker `worker_question`, `record_report`, exact
@@ -145,8 +145,8 @@ marketplace, reinstalls Cortex, and verifies same-version file content. It does
 not scan, import, alter, or clean up prior orchestration state or unrelated
 plugin data. If `~/.codex/config.toml` already contains Cortex's
 `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
-override, the installer preserves that value across the remove/add cycle; it
-does not create the override for users who have not configured it. The same
+override, the installer preserves it across the remove/add cycle and then
+enforces `default_tools_approval_mode = "approve"` even on a clean install. The same
 installer atomically enforces
 `[agents] default_subagent_model = "gpt-5.6-luna"`. Before replacing a
 different existing default it creates a private backup; comments, unrelated
@@ -229,7 +229,7 @@ default. The blocking release check builds a fresh `git archive HEAD` and
 rejects runtime ledger state, bytecode, symlinks, nested marketplace artifacts,
 and secret-prone paths before validating the package again. Run
 `python3 scripts/verify-cortex-release.py --require-tracked` against the exact
-committed Cortex 6.5.0 candidate before any push, tag, or catalog submission;
+committed Cortex 6.6.0 candidate before any push, tag, or catalog submission;
 the command deliberately does not attest mutable working-tree changes.
 
 See [release readiness](docs/release-readiness.md) for the external gates:
@@ -321,9 +321,10 @@ marks an intentionally independent worker. Common human language names
 normalize to compact tags before ledger creation; in particular, `implement` maps to `implementation`
 and `build_verification` maps to the final `close` phase, avoiding repeated
 correction/retry loops around those common labels. `continue_orchestration` is called once per completed
-wave with the prior relative `step` and worker results. A sequential result
-needs no worker reference; a parallel wave uses only the returned slots
-`worker: 1..N`. Any worker can persist a material user decision through
+wave with the prior relative `step` and worker results. A single-worker
+completion may omit its slot; a parallel completion uses only the returned
+`worker: 1..N` slot, and a non-success completion also carries the exact
+`dispatch_ref` for that attempt. Any worker can persist a material user decision through
 `worker_question`, pause without completing its attempt, receive the answer on
 the same `question_ref`, and resume the same native worker. Open blocking
 questions reject both report publication and wave continuation. The
@@ -361,8 +362,8 @@ inspect instead of relying on the model's free-form summary to preserve the
 orchestration protocol.
 
 Compaction recovery relies on the documented `SubagentStart` binding: the
-parent session plus native `agent_id` and observed `model` are persisted
-against the next sequentially issued dispatch before the worker is treated as
+parent session plus native `agent_id`, observed `model`, and exact returned
+dispatch identity are persisted before the worker is treated as
 active (`agent_type` is `default` for these dynamic workers). `context_handoff` separates
 `pending_dispatches` (top-level `inspect` dispatch authority only) from
 `active_workers` (exact persisted child ids to wait on). Missing parent/child
@@ -394,7 +395,7 @@ Caller-generated submission, task, wave, attempt, coordinator, and host IDs
 do not cross the normal-flow boundary. Cortex owns transaction idempotency:
 an identical retry replays, a changed payload conflicts, and a stale relative
 step is rejected. `manage_orchestration` keeps inspect, resume, deactivate,
-lane, resource, durable-question recovery, and confirmed `prune` maintenance
+lane, resource, active `steer`, durable-question recovery, and confirmed `prune` maintenance
 outside the common path.
 The coordinator owns the pipeline: it builds or consciously accepts the
 initial waves, follows the returned `pipeline` snapshot by default, and alone
@@ -578,10 +579,10 @@ native worker; only an explicit
 `followup_task` for the same confirmed host child may resume it. Routing and
 expected-model metadata is never copied into native `model`. Cortex rejects
 reuse of a `host_agent_id` already bound to another attempt. Lifecycle hooks
-map each sequentially observed opaque child ID back to the issued native task
-key and canonical profile before injecting worker context. The main Codex
-agent invokes independent requests in returned order, lets them run in
-parallel, waits for them, and submits their reports in
+correlate the exact returned native task key/dispatch ref and opaque child ID
+with the canonical profile before injecting worker context. The main Codex
+agent invokes independent requests in one model turn when the host supports
+parallel calls, waits for them, and submits their reports in
 one relative continue call. A malformed report, duplicate/foreign slot, or
 incomplete wave is rejected before partial acceptance. Native spawn failures
 are submitted as explicit non-success results with a normalized status and
@@ -598,6 +599,10 @@ a one-use attempt receipt, updates task- and delegation-scoped indexes, and
 generates an escaped Markdown view. Evidence consumption creates an
 irreversible `reports/consumptions/` tombstone; reconciliation may repair
 derived receipts and indexes but never makes a consumed receipt reusable.
+Hook/tool observations use a task/attempt/context-epoch/fingerprint key. A
+successful full-coverage observation may be reused for the same workspace
+generation; duplicate calls increment a bounded repeat count without replacing
+the success, and partial coverage never authorizes reuse.
 For every gate that requires executed checks, every `report.tests` item must
 record integer `exit_code: 0`; one passing command cannot mask another
 nonzero result. A negative-path check is successful only when an assertion
@@ -605,6 +610,11 @@ harness observes the expected rejection and itself exits 0. Workers must
 preserve nonzero outcomes rather than omit, disguise, or relabel them;
 `record_report` returns `worker_verification_failed`, and the gate requires
 repair plus fresh verification or a new Cortex-authorized rework attempt.
+Every gate report must publish a separate top-level `gate_result` envelope with
+`decision`, `failure_class`, `findings`, `verification`, and `workspace`.
+`gate_result` is canonical for all gates; the older top-level `closure` sibling
+is only a review/close compatibility alias and is never part of the strict
+eight-field report.
 Worker briefings contain only the exact task and attempt identifiers required
 for that one report write and explicitly forbid using them with lifecycle or
 pipeline tools. Host spawn prompts de-duplicate the exact user request before
@@ -621,9 +631,15 @@ coordinator reads the durable report and maps its ref
 to the current relative slot. Cortex privately creates
 the durable report receipt, evidence, gate transitions, reconciliation, and
 handoff. The coordinator waits for every native worker in the current wave
-before calling `continue_orchestration`.
-`followup_task` is not a generic report-repair mechanism. It is used only to
-resume the same attempt after a durable question has been answered. If a
+before calling `continue_orchestration`; while waiting, the response contract
+is `waiting_workers` with `output_policy="silent"`, so repeated timeouts do
+not produce heartbeat commentary. Dispatches use one model turn when the host
+supports parallel tool calls and correlate each child by exact `task_name`,
+`dispatch_ref`, and returned child id rather than ordinal position.
+`followup_task` is not a generic report-repair mechanism. It resumes the same
+native worker after a durable question answer or an active steer. An active
+steer appends a task revision and delivers canonical English to the existing
+`host_agent_id`; it does not create a replacement attempt. If a
 worker finishes with a report-tool error, `SubagentStop` has already persisted
 the attempt outcome; the coordinator inspects once and submits the recovered
 report, question, or exact failure. Rework starts only from a fresh Cortex
@@ -651,8 +667,12 @@ generated `Knowledge reviewed:` acknowledgement described above.
 Worker execution is English-only: internal prompts, Cortex arguments, reports,
 questions, handoffs, and audit records are English. The main coordinator uses
 the user's task language (or explicit `user_language`) for all user-facing
-questions and summaries; localized display text does not replace the durable
-English record. The v8 report, evidence, gate, and recovery primitives remain
+questions and summaries. Localized question labels are transient projections;
+answers retain the original value/language and require canonical `answer_en`
+for localized free text. Workers can use `worker_question(action="ask_batch")`
+with 1–32 stable questions and poll the same `batch_ref` with
+`action="poll_batch"`; the host form answers every item in one atomic batch,
+and task revisions supersede unresolved batches. The v8 report, evidence, gate, and recovery primitives remain
 available only inside the server; coordinators and workers must not call them
 directly.
 Individual files are atomically replaced; the whole multi-file publication is
@@ -735,7 +755,11 @@ and lane bindings. Active and blocked tasks are retained regardless of age, and
 a classification receipt referenced by any retained task is never removed. It
 also preserves recent completed tasks, lanes themselves, project source,
 documentation, and plugin files. This bounded weekly prune replaces the unsafe
-idea of clearing the whole ledger.
+idea of clearing the whole ledger. The initial maintenance call can instead
+return the stable choices `keep_1d`, `keep_7d`, `keep_30d`, or `full_reset`.
+`full_reset` is a separate destructive project-scoped operation: it requires
+the exact second confirmation `RESET CORTEX`, fails closed while any task is
+active, and removes only `.codex/cortex` state (never project source or docs).
 
 The native form supports one-choice options, multi-choice checkboxes via
 `multiple: true`, and always appends a final `custom_response` field for free
@@ -745,7 +769,10 @@ workers must not resolve an unresolved user branch themselves.
 Several workers can ask questions at once. The durable bus assigns a global
 sequence while retaining each `attempt_id`; the coordinator answers each open
 question independently in sequence order and keeps polling until `open_count`
-reaches zero.
+reaches zero. A worker may instead submit a `worker_question` batch of 1–32
+stable questions; the coordinator localizes the batch projection, records all
+answers atomically, translates localized free text through `canonical_answers`,
+and resumes the same worker with canonical English answers.
 
 ## Validation
 
@@ -763,8 +790,26 @@ bash -n scripts/sync-cortex.sh
 ```
 
 The source-tree live command starts an isolated temporary project with its MCP
-server pointed at this checkout. It does not install, reinstall, update, or
-verify an installed plugin. The source candidate's resolver and launcher
+server pointed at this checkout and streams newline-delimited, sanitized
+`cortex_live_progress` JSON records. It emits aggregate ledger/tool activity
+and a bounded 15-second heartbeat, but never streams prompts, arguments,
+results, source paths, or arbitrary host diagnostic content. Each scenario
+defaults to a 1,800-second timeout; `--live-timeout-seconds` accepts 10..7200
+seconds and
+terminates the complete process group with a graceful `SIGTERM`/`SIGKILL`
+fallback. `codex exec` uses `--ignore-user-config` and per-run private 0700
+`HOME`/`CODEX_HOME` plus private temporary/cache/config/data directories. Only
+least-privilege runtime variables and a selected `OPENAI_API_KEY` or
+`CODEX_API_KEY` are passed; when neither key is present, a private regular
+non-symlink `auth.json` no larger than 1 MiB is copied with no-follow checks to
+0600 storage, without logging credentials. It does not install, reinstall,
+update, or modify global Codex configuration, and does not verify an installed
+plugin. On normal or supervised exits, private runtime and temporary project
+directories are cleaned; a crash or external `SIGKILL` may leave OS-temp
+residue. Failure metadata is not retained by default; pass
+`--retain-failure-metadata` to opt in to a `/tmp` artifact directory
+containing only sanitized `progress.json`. Raw host output is not retained.
+The source candidate's resolver and launcher
 contract is covered by focused invariant tests, marketplace validation, shell
 syntax, the isolated fresh-plugin probe, and installed-content verification.
 The full regression, cold-boot lifecycle, and tracked-release archive checks
@@ -773,7 +818,8 @@ fail-before-replace diagnostics, the separate 64 MiB manifest bound, bounded
 handoff/reconciliation state, and fail-closed diagnostics for oversized
 artifacts. New tasks use SQLite only: first access creates a fresh database or
 applies a checksummed SQLite-to-SQLite migration; pre-SQLite files are left
-untouched and never become task state. The installer preserves the user MCP
-approval override. The live-model and tracked-release archive checks remain
+untouched and never become task state. The installer enforces Cortex MCP
+approval mode `approve` on clean and existing configurations while preserving
+the value across remove/add. The live-model and tracked-release archive checks remain
 required before push. No commit, tag, push,
 catalog publication, or public release is claimed.

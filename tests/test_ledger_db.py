@@ -336,13 +336,19 @@ class LedgerDatabaseTests(unittest.TestCase):
 
             ledger_db.ensure_database(root)
             history = ledger_db.migration_history(root)
-            self.assertEqual([item["version"] for item in history], list(range(1, 8)))
+            self.assertEqual(
+                [item["version"] for item in history],
+                list(range(1, ledger_db.DATABASE_SCHEMA_VERSION + 1)),
+            )
             self.assertEqual(
                 [item["checksum"] for item in history],
                 [ledger_db._migration_checksum(migration) for migration in migrations],
             )
             with sqlite3.connect(root / "cortex.db") as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 7)
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    ledger_db.DATABASE_SCHEMA_VERSION,
+                )
                 self.assertEqual(
                     connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='logical_artifacts'").fetchone()[0],
                     "logical_artifacts",

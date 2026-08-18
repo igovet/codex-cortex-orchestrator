@@ -39,8 +39,8 @@ Codex thread so the new hook and skill paths are loaded.
 
 Telemetry is bounded to 1,000 events and 256 KiB, keeps a dropped-event count, and writes with regular-file and symlink checks. The hook emits an empty object unless the thread has both an active-task mapping and a matching activation bound to an initialized task. For a matching active task, `SessionStart` injects the coordinator lock: the main/root agent may coordinate, dispatch, wait, evaluate reports, and communicate, but every target-project inspection, edit, build, test, and command belongs to workers. The root remains idle while workers run and cannot treat worker delay or failure as permission to take over project work. A `resume`/`clear`/`compact` start also injects a durable recovery instruction with the registry-backed opaque `task_ref`, requiring one `manage_orchestration(intent="inspect")` call and forbidding duplicate starts or replayed dispatches.
 `SubagentStart` uses the documented parent `session_id`, opaque child id,
-actual model, and deterministic sequential spawn order to bind the exact
-running attempt; dynamically named workers report generic
+actual model, and exact returned dispatch identity to bind the exact running
+attempt; dynamically named workers report generic
 `agent_type=default`, not their native task key. Compaction
 recovery can therefore distinguish an unstarted dispatch from an active child
 and wait only on the exact preserved child id.

@@ -198,6 +198,11 @@ def _context_handoff(
                 ],
                 "reason": redact(attempt.get("finalization_reason", ""), 1000) or None,
                 "host_agent_id": redact((attempt.get("host_spawn") or {}).get("agent_id", ""), 256),
+                "host_task_name": redact((attempt.get("host_spawn") or {}).get("task_name", ""), 128),
+                "resumable": bool(
+                    attempt.get("host_resumable")
+                    or attempt.get("host_stop_outcome") in {"awaiting_user", "native_worker_stopped_recoverable"}
+                ),
                 "stopped_at": attempt.get("host_stopped_at"),
             })
         elif attempt.get("status") == "running":
@@ -226,9 +231,18 @@ def _context_handoff(
             + "."
         )
     if stopped_workers:
+        resumable_ids = [
+            item["host_agent_id"] for item in stopped_workers
+            if item.get("resumable") and item.get("host_agent_id")
+        ]
+        if resumable_ids:
+            recovery_actions.append(
+                "Do not respawn stopped resumable workers; resume only their exact persisted child ids with "
+                "followup_task when the returned action authorizes it: " + ", ".join(resumable_ids) + "."
+            )
         recovery_actions.append(
-            "Never wait on or respawn stopped_workers. Consume their recorded report refs, surface their durable "
-            "questions, or submit their exact non-success result to continue_orchestration as indicated."
+            "For stopped workers with reports, consume the report refs. For durable questions, surface and answer "
+            "the question before resuming the same worker."
         )
     next_action = (
         f"Call manage_orchestration(intent=inspect, task_ref={task_ref}) once after context compaction; "
@@ -262,7 +276,7 @@ def _context_handoff(
             "worker_language": "Worker-authored commentary, tool arguments, reports, questions, and native final output are English-only.",
             "hidden_dispatch": "Hidden spawn_agent requests retain fork_turns=none so the coordinator transcript is not inherited.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",
-            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn; active_workers are waitable exact child ids, while stopped_workers must never be waited on or respawned.",
+            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn. Active workers are waitable exact child ids. A stopped resumable worker is never respawned; it may be resumed only through followup_task to its persisted host_agent_id when the returned action authorizes that resume.",
             "report_publication": "Read each report_ref, then publish the returned report_markdown_link verbatim in the main chat before any other lifecycle call or report read.",
             "instruction_source": "cortex:orchestrator and cortex-control skills; this handoff restores state and invariants, not a replacement skill source.",
         },

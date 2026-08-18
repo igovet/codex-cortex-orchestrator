@@ -18,7 +18,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server declare plugin version `6.5.0`. This
+The current source manifest and server are intended for plugin version `6.6.0`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -35,6 +35,17 @@ final report `questions: []` and routes material ambiguity through durable
 `worker_question`; deterministic preflight holds short underspecified
 product-surface creation requests until the user answers a blocking question.
 
+Every gate report includes canonical top-level `gate_result`; the
+older `closure` sibling remains a review/close compatibility alias. The report
+Markdown renderer escapes HTML and only list-item markers, preserving ordinary
+Markdown punctuation rather than introducing backslashes before dots,
+parentheses, or hyphens.
+
+The installer enforces Cortex MCP `default_tools_approval_mode = "approve"`
+on clean and existing configurations. It preserves the captured value during
+remove/add, then writes and verifies `approve`; `--check` fails when the
+effective setting is missing or weaker.
+
 The marketplace validator also enforces the machine-readable shared worker
 contract: one strict eight-field report, worker `worker_question` and `record_report`, the three
 coordinator lifecycle operations, and scoped predecessor `read_worker_report`,
@@ -50,5 +61,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) only when installation/package validation is in scope. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live command in that document runs against this checkout without installation, reinstallation, or plugin update. The 6.5.0 source candidate requires resolver, launcher, marketplace, shell, cold-boot, fresh-plugin, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v7 blob/logical-artifact/export catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
+Use the marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) only when installation/package validation is in scope. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live command in that document runs against this checkout without installation, reinstallation, or plugin update. The 6.6.0 source candidate requires resolver, launcher, marketplace, shell, cold-boot, fresh-plugin, and tracked-release checks before release. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v8 revision-aware orchestration catalog. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

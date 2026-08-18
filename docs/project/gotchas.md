@@ -26,7 +26,9 @@
   Final receipts retain manifest digests and change proof. If
   `allow_rework` reopens that task, Cortex first captures a fresh active
   baseline; stale deleted snapshots are never reused.
-- Schema v7 does not use one artifact identity for everything. A content blob
+- Schema v8 adds task/plan revisions, native worker sessions, attempt messages,
+  trace/tool observations, and question-batch storage. Schema v7 does not use
+  one artifact identity for everything. A content blob
   may be shared by digest, a logical artifact is task-scoped, and an export
   path is separately authorized. Do not use a filesystem path as canonical
   evidence or infer a blob's lifecycle from an optional projection.
@@ -34,10 +36,16 @@
   not write an export directly or acknowledge a job without its lease and
   digest verification. Required briefing projections are capabilities; all
   other projection files remain rebuildable.
-- Review and close must publish the top-level structured `closure` sibling,
-  not a ninth member of the strict report. An unresolved P0/P1/P2 or blocking
-  finding, or a missing required check, takes the recorded gate back through
-  rework. A waiver needs reason, actor, and timestamp and cannot be self-issued.
+- Tool-observation dedupe is scoped to task, attempt, context epoch,
+  normalized fingerprint, and workspace generation. Only a successful
+  full-coverage observation is reusable; duplicate calls are counted and
+  partial coverage never authorizes reuse.
+- Every gate report must publish the top-level structured `gate_result` sibling, not a
+  ninth member of the strict report. It is canonical for all gates; the older
+  `closure` sibling is only a review/close compatibility alias. An unresolved
+  P0/P1/P2 or blocking finding, or a missing required check, takes the recorded
+  gate back through rework. A waiver needs reason, actor, and timestamp and
+  cannot be self-issued.
 - Prune is deliberately two-phase: a tombstone commits before filesystem work;
   canonical rows remain until that work succeeds. Never remove task records,
   WAL, or SHM directly to "help" a failed prune. Use explicit legacy
@@ -119,6 +127,11 @@
   dispatches, never call it again for that `task_ref`; a replay is a receipt,
   contains no dispatches, and cannot authorize a duplicate wave. A genuinely
   lost first response is recovered once through management inspect.
+- Active corrections use `manage_orchestration(intent="steer")` with the
+  original `user_message` and canonical English `message_en` when needed.
+  Cortex records a task revision and resumes only addressable native workers
+  through returned `followup_task` calls. A completed source is immutable and
+  uses linked `follow_up`; these routes must not be conflated.
 - `prune` is the only cleanup route. It requires exact confirmation `PRUNE`,
   defaults to seven days, omits `task_ref`, and removes only completed
   task-scoped Cortex state older than the threshold. Active and blocked tasks
@@ -140,8 +153,34 @@
   question uses `manage_orchestration(intent="question")` and must return a
   recoverable unsupported result rather than guessing when the host cannot
   render elicitation.
+- Localized question labels are transient UI projections. Answers retain the
+  original value/language and require canonical `answer_en` for localized free
+  text. `ask_batch` accepts 1–32 stable questions and `poll_batch` returns
+  canonical English answers atomically; an active task revision supersedes an
+  unresolved batch so stale intent cannot resume a worker.
 - Fixture Luna-high evaluation covers sequential, compact parallel, and
-  blocked/resume flows. A live `SKIP` means missing release evidence, not pass.
+  blocked/resume flows. The live evaluator is source-mode only: it launches
+  `codex exec --ephemeral --ignore-user-config` against this checkout's MCP
+  server with per-run private 0700 `HOME`/`CODEX_HOME` and temporary/cache/config/data
+  directories. It passes only least-privilege runtime variables and a selected
+  `OPENAI_API_KEY`/`CODEX_API_KEY`; otherwise it copies a private regular
+  non-symlink `auth.json` (at most 1 MiB) through no-follow checks to 0600
+  storage, without logging credentials. It never calls the installer or
+  changes global Codex configuration. It streams only bounded
+  `cortex_live_progress` JSON classifications and aggregate ledger counts;
+  prompts, arguments, results, source paths, and arbitrary host diagnostic
+  content are redacted. Heartbeats are emitted every 15 seconds while the parent runs, and
+  the per-scenario timeout defaults to 1,800 seconds (`--live-timeout-seconds`
+  accepts 10..7200). Timeout or interruption terminates the complete process
+  group, escalating from `SIGTERM` to `SIGKILL` after ten seconds. Normal or
+  supervised exits clean the private runtime and temporary project; a crash or
+  external `SIGKILL` may leave OS-temp residue. A live
+  `SKIP` means missing release evidence, not pass. Failed scenarios retain a
+  sanitized `progress.json` only when the explicit
+  `--retain-failure-metadata` opt-in is supplied; otherwise the result marks
+  failure metadata `not_retained`. Raw event content is not retained. Use the
+  fresh-plugin probe, `sync-cortex.sh --check`, and
+  tracked-release verification for installed/package evidence.
 - The compact worker `profile` value must be one of the 21 canonical
   `profiles.json` names and must support the requested phase. Legacy aliases
   are runtime compatibility only; they are not part of the advertised enum.
@@ -163,14 +202,19 @@
   then pass only `call` and its unchanged `arguments` to the native tool.
   Hidden `spawn_agent` arguments intentionally include `fork_turns: "none"`;
   do not replace it with inherited coordinator context.
+- Dispatches should be issued in one model turn when the host supports
+  parallel calls. Correlate each start by exact `task_name`/`dispatch_ref` and
+  host child id, never by ordinal or display label. While the wave is active,
+  `waiting_workers` carries `output_policy="silent"`; repeated wait timeouts
+  must not generate heartbeat commentary.
 - Keep `profile` as the exact canonical role name, and use the human-readable
   `display_name` is derived from the task domain in the user's request (for
   example, `Planner Authentication`), without an ordinal or digest. Gate
   mission verbs are not used as the display module. The unique native
   `spawn_agent.task_name` carries the lower-
   underscore profile/module, ordinal, and digest (for example,
-  `explorer_auth_02_<digest>`); `followup_task` resumes only that same native
-  worker.
+  `explorer_auth_02_<digest>`); `followup_task` resumes that same native
+  worker after a durable question or active steer, never a dead replacement.
   Host spawn prompts de-duplicate the exact user request; `start_orchestration.next_action`
   is serialized before dispatch payloads. The nested realistic harvest Planner
   prompt is regression-tested below 11,500 bytes, the compact native bootstrap
@@ -451,8 +495,9 @@ and v8 ledger. They are not caller-facing request envelopes.
   discovers the new skills, profiles, hooks, and MCP server. During the managed
   Cortex remove/add cycle, an existing
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode`
-  override is captured and restored; no override is created when the user did
-  not configure one.
+  override is captured and restored during remove/add, then the installer
+  enforces `default_tools_approval_mode = "approve"` even on a clean install.
+  `--check` fails when the effective value is absent or weaker than `approve`.
 - Hook trust is checked independently of plugin file matching. An explicit
   sync queries Codex `hooks/list` and accepts only the five enabled
   `cortex@cortex` hooks from the installed cache, with the installed command
