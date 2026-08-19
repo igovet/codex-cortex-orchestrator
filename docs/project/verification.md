@@ -9,7 +9,8 @@ python3 scripts/cortex-luna-high-eval.py
 # Uses this checkout as the MCP source; it does not install, reinstall, or update Cortex.
 # Fast source-mode transport/follow-up probe used during development.
 python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
-# Narrow real-host finding handoff: review finding -> corrective documentation -> fresh review -> resolved.
+# Narrow real-host finding handoff: a public-API source prelude opens the review
+# finding; real corrective documentation -> fresh review -> resolved.
 # This scenario has a hard 300-second deadline; --live-timeout-seconds may only reduce it.
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
 # Full lifecycle live scenario for a release gate.
@@ -61,12 +62,14 @@ immutable report or receipt is written.
 
 For a real-host counterpart, run the dedicated source-mode scenario below. It
 uses a minimal C1 workspace and exactly one controlled fingerprint,
-`live-documentation-finding-001`: the first Review opens it, Documentation
-performs the correction, and a fresh Review must consume both immutable refs
-before resolving it. The evaluator verifies the persisted trace graph and
-terminates the entire parent process group at **300 seconds**; that timeout can
-only be reduced. It neither installs nor updates the plugin, and a `SKIP` or
-timeout is not evidence of a pass.
+`live-documentation-finding-001`. A deterministic source-mode prelude opens
+that finding through the public report/continue APIs; the real Codex parent
+then runs only corrective Documentation and a fresh Review, which must consume
+both immutable refs before resolving it. The evaluator stops after the server
+prepares Close, verifies the persisted trace graph, and terminates the entire
+parent process group at **300 seconds**; that timeout can only be reduced. It
+neither installs nor updates the plugin, and a `SKIP` or timeout is not
+evidence of a pass.
 
 ```bash
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
@@ -381,7 +384,7 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, or `--live --scenario finding_rework_documentation` for the narrow Review → Documentation → fresh Review finding route. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800, except the finding scenario which is capped at and defaults to 300 seconds; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
+- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, or `--live --scenario finding_rework_documentation` for the narrow finding route. The latter opens its controlled Review finding through a deterministic public-API prelude, then runs real Documentation and fresh Review workers through resolution. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800, except the finding scenario which is capped at and defaults to 300 seconds; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host

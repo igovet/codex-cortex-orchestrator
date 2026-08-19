@@ -998,8 +998,9 @@ does **not** install or update the user's plugin:
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Prove C3 automatically activates and completes full governance.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
-# Narrow live handoff smoke: a Review finding must pass through corrective
-# Documentation and a fresh Review rerun before it is resolved (hard 300 s).
+# Narrow live handoff smoke: a deterministic public-API source prelude opens
+# the finding; real Documentation and fresh Review workers must resolve it
+# through the exact handoff route (hard 300 s).
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
 ```
 

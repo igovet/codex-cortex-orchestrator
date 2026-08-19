@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -78,11 +79,56 @@ class LiveFindingReworkContractTests(unittest.TestCase):
 
     def test_live_prompt_and_timeout_are_intentionally_narrow(self) -> None:
         prompt = EVALUATOR.live_prompt(
-            "finding_rework_documentation", Path("/tmp/cortex-finding-smoke"),
+            "finding_rework_documentation", Path("/tmp/cortex-finding-smoke"), "task-123",
         )
         self.assertIn(EVALUATOR.FINDING_REWORK_FINGERPRINT, prompt)
         self.assertIn("fresh review rerun", prompt)
+        self.assertIn("do not start a task", prompt)
+        self.assertIn("STOP there", prompt)
+        self.assertNotIn("Call start_orchestration exactly once", prompt)
         self.assertEqual(EVALUATOR.FINDING_REWORK_LIVE_TIMEOUT_SECONDS, 300)
+
+    def test_source_prelude_prepares_corrective_documentation_without_a_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+            (project / "README.md").write_text("# finding fixture\n", encoding="utf-8")
+
+            seeded = EVALUATOR.seed_finding_rework_documentation(project)
+
+            task_dirs = list((project / ".codex" / "cortex" / "tasks").glob("*"))
+            self.assertEqual(len(task_dirs), 1)
+            state = EVALUATOR.cortex.load_task_state_for_artifact(task_dirs[0])
+            documentation = next(
+                item for item in state["attempts"]
+                if item["gate"] == "documentation" and not item.get("invalidated")
+            )
+            findings = EVALUATOR.cortex.db_list_task_findings(
+                EVALUATOR.cortex.ledger_root({"project_root": str(project)}), state["task_id"],
+            )
+            self.assertTrue(seeded["task_ref"])
+            self.assertIn(seeded["opening_report_ref"], documentation["context_report_ids"])
+            self.assertEqual(
+                [(item["fingerprint"], item["status"]) for item in findings],
+                [(EVALUATOR.FINDING_REWORK_FINGERPRINT, "open")],
+            )
+
+    def test_live_supervisor_enforces_timeout_on_unterminated_host_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            result = EVALUATOR.run_live_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; sys.stdout.write('{'); sys.stdout.flush(); time.sleep(30)",
+                ],
+                project,
+                "unterminated-output-timeout",
+                timeout_seconds=1,
+            )
+
+        self.assertEqual(result["termination"], "timeout")
+        self.assertLess(result["elapsed_seconds"], 6)
 
 
 if __name__ == "__main__":

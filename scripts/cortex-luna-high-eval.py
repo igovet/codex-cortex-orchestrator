@@ -465,6 +465,7 @@ def run_live_command(
     previous_int = signal.signal(signal.SIGINT, request_termination)
     process: subprocess.Popen[str] | None = None
     selector: selectors.BaseSelector | None = None
+    stream_buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     next_heartbeat = started + HEARTBEAT_SECONDS
     last_ledger_signature = ""
     termination_reason: str | None = None
@@ -508,6 +509,45 @@ def run_live_command(
         retain_event(safe_event)
         emit_stream_event(safe_event, int(now - started))
 
+    def handle_oversized_stream_line(source: str) -> None:
+        """Account for an unterminated over-limit line without reading its text."""
+        nonlocal last_activity, last_activity_kind
+        now = time.monotonic()
+        last_activity, last_activity_kind = now, source
+        safe_event = (
+            {"event": "host_output", "format": "oversized"}
+            if source == "stdout" else {"event": "host_stderr"}
+        )
+        retain_event(safe_event)
+        emit_stream_event(safe_event, int(now - started))
+
+    def drain_stream(source: str, stream: object, *, final: bool = False) -> None:
+        """Consume complete bounded lines without letting ``readline`` block.
+
+        A text ``readline`` can wait forever after ``select`` sees an initial
+        fragment of a JSON event.  This would bypass the live deadline.  Read
+        only ready file descriptors, retain a byte buffer, and process a final
+        fragment at EOF; no arbitrary child output is emitted or retained.
+        """
+        buffer = stream_buffers[source]
+        while True:
+            newline = buffer.find(b"\n")
+            if newline < 0:
+                break
+            raw = bytes(buffer[:newline])
+            del buffer[:newline + 1]
+            if len(raw) > MAX_STREAM_LINE_BYTES:
+                handle_oversized_stream_line(source)
+            else:
+                handle_stream_line(source, raw.decode("utf-8", errors="replace"))
+        if len(buffer) > MAX_STREAM_LINE_BYTES:
+            buffer.clear()
+            handle_oversized_stream_line(source)
+        elif final and buffer:
+            raw = bytes(buffer)
+            buffer.clear()
+            handle_stream_line(source, raw.decode("utf-8", errors="replace"))
+
     try:
         process = subprocess.Popen(
             command, cwd=project, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -516,6 +556,8 @@ def run_live_command(
         emit_live_progress(scenario, "parent_started", elapsed_seconds=0)
         selector = selectors.DefaultSelector()
         assert process.stdout is not None and process.stderr is not None
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
         selector.register(process.stdout, selectors.EVENT_READ, "stdout")
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         while selector.get_map() or process.poll() is None:
@@ -543,11 +585,17 @@ def run_live_command(
                 next_heartbeat = now + HEARTBEAT_SECONDS
             for key, _mask in selector.select(timeout=1):
                 stream = key.fileobj
-                line = stream.readline(MAX_STREAM_LINE_BYTES + 1)
-                if not line:
+                source = str(key.data)
+                try:
+                    chunk = os.read(stream.fileno(), 16 * 1024)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    drain_stream(source, stream, final=True)
                     selector.unregister(stream)
                     continue
-                handle_stream_line(str(key.data), line)
+                stream_buffers[source].extend(chunk)
+                drain_stream(source, stream)
         if process.poll() is None:
             process.wait(timeout=TERMINATION_GRACE_SECONDS)
     finally:
@@ -806,6 +854,158 @@ def report(label: str, project: Path, changed_files: list[str] | None = None) ->
     }
 
 
+def seed_finding_rework_documentation(project: Path) -> dict[str, str]:
+    """Persist the controlled opening finding before the bounded live route.
+
+    The live parent must exercise the two error-prone transport edges: its
+    Documentation worker reports the correction, then a *new real Review*
+    worker receives and resolves that exact finding. Asking the model to
+    author the opening finding as well made the smoke both slow and
+    non-deterministic (it can choose unrelated findings). This source-mode
+    prelude uses only the same public report/continue APIs as a worker and
+    leaves the corrective documentation and fresh review to the real host.
+    """
+    started = cortex.start_orchestration({
+        "project_root": str(project),
+        "task": {
+            "user_request": (
+                "Create docs/finding-fixture.md with exactly one line: "
+                "Corrective documentation fixture fixed. A review must first identify "
+                "the missing line, documentation must correct it, and a fresh review "
+                "must verify the exact correction."
+            ),
+            "complexity": "C1",
+            "acceptance_criteria": [
+                "docs/finding-fixture.md contains exactly the required correction line.",
+                "The original review finding is resolved only by a fresh Review rerun "
+                "after the documentation correction.",
+            ],
+            "verification": [
+                "Read docs/finding-fixture.md and verify its exact one-line content.",
+                "Read the original review report, documentation correction report, "
+                "and fresh review report.",
+            ],
+            "plan_approval": "auto",
+        },
+        "waves": [
+            {"workers": [{
+                "phase": "review",
+                "profile": "code_reviewer",
+                "objective": (
+                    "Open only the controlled P2 documentation finding "
+                    f"{FINDING_REWORK_FINGERPRINT}."
+                ),
+            }]},
+            {"workers": [{
+                "phase": "documentation",
+                "profile": "technical_writer",
+                "objective": (
+                    "Create docs/finding-fixture.md with the exact required line and "
+                    "report that corrective change."
+                ),
+            }]},
+            {"workers": [{
+                "phase": "close",
+                "profile": "build_verification",
+            }]},
+        ],
+    })
+    if not started.get("ok") or started.get("outcome") != "ready_to_spawn":
+        raise AssertionError(f"finding-rework source prelude could not start: {started}")
+
+    task_dirs = list((project / ".codex" / "cortex" / "tasks").glob("*"))
+    if len(task_dirs) != 1:
+        raise AssertionError("finding-rework source prelude did not create exactly one task")
+    task_dir = task_dirs[0]
+    state = cortex.load_task_state_for_artifact(task_dir)
+    review_attempt = next(
+        (
+            item for item in state.get("attempts", [])
+            if isinstance(item, dict)
+            and item.get("gate") == "review"
+            and not item.get("invalidated")
+        ),
+        None,
+    )
+    if not isinstance(review_attempt, dict):
+        raise AssertionError("finding-rework source prelude has no opening review attempt")
+
+    opening_report = report("Controlled review finding opened for the documentation fixture.", project)
+    evidence = list(opening_report["evidence"])
+    for index, _criterion in enumerate(review_attempt.get("acceptance_criteria") or [], 1):
+        evidence.append(
+            f"Gate acceptance {index}: PASS - Controlled source prelude opened the exact finding."
+        )
+    for index, _criterion in enumerate(review_attempt.get("verification") or [], 1):
+        evidence.append(
+            f"Gate verification {index}: PASS - Controlled source prelude check completed with exit code zero."
+        )
+    evidence.append(cortex.dispatch_briefing_review_marker(review_attempt["briefing_digest"]))
+    opening_report["evidence"] = evidence
+    opening_finding = {
+        "fingerprint": FINDING_REWORK_FINGERPRINT,
+        "severity": "P2",
+        "status": "open",
+        "blocking": True,
+        "summary": "The required corrective documentation line is missing.",
+        "details": {"affected_paths": [FINDING_REWORK_DOCUMENTATION_PATH]},
+    }
+    opening = cortex.publish_worker_report({
+        "project_root": str(project),
+        "task_id": state["task_id"],
+        "attempt_id": review_attempt["attempt_id"],
+        "profile": review_attempt["profile"],
+        "report": opening_report,
+        "closure": {
+            "decision": "rework",
+            "findings": [opening_finding],
+            "verification": {
+                "executed": ["Controlled source-prelude review check."],
+                "not_executed": [],
+                "required_missing": [],
+                "limitations": [],
+            },
+            "workspace": {
+                "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+            },
+        },
+    })
+    if not opening.get("ok"):
+        raise AssertionError(f"finding-rework source prelude could not record its opening finding: {opening}")
+    opening_ref = str(opening["report_ref"])
+    corrective = cortex.continue_orchestration({
+        "project_root": str(project),
+        "task_ref": started["task_ref"],
+        "step": started["step"],
+        "results": [{"report_ref": opening_ref}],
+    })
+    phases = [str(item.get("phase") or "") for item in corrective.get("dispatches") or []]
+    if (
+        not corrective.get("ok")
+        or corrective.get("outcome") != "ready_to_spawn"
+        or phases != ["documentation"]
+    ):
+        raise AssertionError(f"finding-rework source prelude did not prepare documentation: {corrective}")
+    current = cortex.load_task_state_for_artifact(task_dir)
+    documentation_attempt = next(
+        (
+            item for item in current.get("attempts", [])
+            if isinstance(item, dict)
+            and item.get("gate") == "documentation"
+            and not item.get("invalidated")
+        ),
+        None,
+    )
+    if not isinstance(documentation_attempt, dict) or opening_ref not in {
+        str(value) for value in documentation_attempt.get("context_report_ids", [])
+    }:
+        raise AssertionError("finding-rework documentation dispatch lost the opening review report")
+    return {
+        "task_ref": str(started["task_ref"]),
+        "opening_report_ref": opening_ref,
+    }
+
+
 def task(user_request: str, complexity: str | None = None) -> dict[str, object]:
     value: dict[str, object] = {
         "user_request": user_request,
@@ -1061,6 +1261,32 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         )
     report_field_names = ", ".join(cortex.REPORT_FIELDS)
     report_contract = f"exactly {len(cortex.REPORT_FIELDS)} report fields: {report_field_names}"
+    if scenario == "finding_rework_documentation":
+        if not source_task_ref:
+            raise ValueError("finding_rework_documentation requires its seeded task_ref")
+        return (
+            "Continue exactly one already-created, isolated Cortex task; do not start a task. "
+            f"The exact project_root is {project}; the task_ref is {source_task_ref!r}. "
+            "The evaluator has already used public Cortex APIs to persist one controlled open P2 Review finding "
+            f"with fingerprint {FINDING_REWORK_FINGERPRINT!r}, then has prepared its corrective Documentation dispatch. "
+            "This real-host smoke is only: corrective documentation -> fresh review rerun -> resolved. "
+            "First call manage_orchestration exactly once with intent=inspect and that task_ref. Execute only the "
+            "still-awaiting Documentation dispatch it returns; never call start_orchestration, steer, replan, or "
+            "private orchestrate. The Documentation worker must create docs/finding-fixture.md whose full exact "
+            "content is `Corrective documentation fixture fixed.\\n`, persist a strict report with "
+            f"{report_contract}, and list docs/finding-fixture.md in changed_files. Read its durable report, close "
+            "that completed native child, and continue the returned step with its exact report_ref. "
+            "Then execute the returned fresh Review dispatch. That Review worker must read the original review and "
+            "corrective documentation report refs from its briefing/context and persist a strict report plus one "
+            "canonical top-level gate_result: decision=pass; its only finding has the exact fingerprint above, "
+            "status=resolved, blocking=false, and resolved_at; verification has executed/not_executed/required_missing/"
+            "limitations arrays with required_missing=[]; workspace has exactly modified/untracked/staged/committed. "
+            "Do not invent any finding. Read the durable fresh-review report, close that completed child, and continue "
+            "with its exact report_ref. Cortex will prepare a Close dispatch after accepting that review: STOP there. "
+            "Do not execute Close, do not create a handoff, and do not wait for another child. For each real child use "
+            "the normal spawn_agent -> wait -> read_worker_report -> close_agent sequence; accept success only when its "
+            "final response starts with REPORT_RECORDED."
+        )
     common = (
         "Use the Cortex MCP public tools to complete this isolated task. "
         "You are the parent orchestrator. The exact task contract is the content inside <cortex_task_contract>; "
@@ -1083,34 +1309,6 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "corrections. "
         f"The exact project_root is {project}. "
     )
-    if scenario == "finding_rework_documentation":
-        return common + (
-            "Run only this narrow finding-handoff scenario. "
-            "The initial review must publish exactly one open P2 finding with fingerprint "
-            f"{FINDING_REWORK_FINGERPRINT!r} and decision=rework. Do not resolve it in documentation. "
-            "After Cortex dispatches corrective documentation, the documentation worker must create "
-            "docs/finding-fixture.md with exactly one line: Corrective documentation fixture fixed. "
-            "The fresh review rerun must read both the original review report and the corrective documentation "
-            "report, then publish decision=pass with exactly that fingerprint status=resolved and blocking=false. "
-            "Do not invent any other findings. Complete close only after the fresh review report is accepted. "
-            "<cortex_task_contract>"
-            "{\"user_request\":\"Create docs/finding-fixture.md with exactly one line: Corrective documentation fixture fixed. "
-            "A review must first identify the missing line, documentation must correct it, and a fresh review must verify the exact correction.\","
-            "\"complexity\":\"C1\","
-            "\"acceptance_criteria\":[\"docs/finding-fixture.md contains exactly the required correction line.\","
-            "\"The original review finding is resolved only by a fresh Review rerun after the documentation correction.\"],"
-            "\"verification\":[\"Read docs/finding-fixture.md and verify its exact one-line content.\","
-            "\"Read the original review report, documentation correction report, and fresh review report.\"],"
-            "\"plan_approval\":\"auto\"}"
-            "</cortex_task_contract> "
-            "Call start_orchestration exactly once with these exact waves: "
-            "[{\"workers\":[{\"phase\":\"review\",\"profile\":\"code_reviewer\",\"objective\":\"If docs/finding-fixture.md is missing the required line, publish the exact controlled finding as open; after correction, resolve that exact fingerprint.\"}]},"
-            "{\"workers\":[{\"phase\":\"documentation\",\"profile\":\"technical_writer\",\"objective\":\"Create or correct docs/finding-fixture.md with the exact required line and report the correction.\"}]},"
-            "{\"workers\":[{\"phase\":\"close\",\"profile\":\"build_verification\"}]}]. "
-            "Use the normal dispatch -> wait -> read_worker_report -> close_agent -> continue_orchestration sequence. "
-            "When the first Review result causes rework, obey the server-selected corrective dispatch; do not replan, "
-            "skip a report, or manually mutate task state. Stop only after Cortex reports completed."
-        )
     if scenario == "automatic_governance":
         return common + (
             "<cortex_task_contract>"
@@ -1268,6 +1466,8 @@ def live_eval(
                 cortex.load_task_definition(source_dir),
                 cortex.load_task_state_for_artifact(source_dir),
             )
+        elif scenario == "finding_rework_documentation":
+            source_task_ref = seed_finding_rework_documentation(project)["task_ref"]
         command = [
             codex, "exec", "--json", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox", "-C", str(project),
@@ -1415,9 +1615,31 @@ def live_eval(
         if scenario == "blocked_resume":
             checks["resume_or_reassessment_exercised"] = adaptive_exercised
         if scenario == "finding_rework_documentation":
-            checks.update(finding_rework_trace_checks(
-                state, report_records, findings=findings, project=project,
-            ))
+            # The deterministic source prelude owns the opening review. The
+            # real host owns the correction and fresh review and deliberately
+            # stops when the server prepares Close, keeping this live smoke
+            # within its 300-second bound.
+            checks = {
+                "process_ok": streamed["returncode"] == 0,
+                "used_seeded_task_inspection": "manage_orchestration" in tool_names,
+                "used_continue": "continue_orchestration" in tool_names,
+                "avoided_start": "start_orchestration" not in tool_names,
+                "avoided_private_tools": "orchestrate" not in tool_names,
+                "single_task": len(task_dirs) == 1,
+                "stopped_after_resolving_review": (
+                    state.get("status") == "active"
+                    and set(cortex.active_gates(state)) == {"close"}
+                ),
+                "strict_worker_reports": strict_reports,
+                "review_gate_results": gate_results_valid,
+                "no_failed_public_calls": not failed_public_calls,
+                "native_dispatch_exercised": "spawn_agent" in completed_native_tool_names,
+                "native_wait_exercised": "wait" in completed_native_tool_names,
+                "native_cleanup_exercised": "close_agent" in completed_native_tool_names,
+                **finding_rework_trace_checks(
+                    state, report_records, findings=findings, project=project,
+                ),
+            }
         if scenario == "planner_work_breakdown":
             package_artifacts = planning_manifest.get("work_packages") if isinstance(planning_manifest, dict) else []
             checks["plan_approval_exercised"] = state.get("plan_approval", {}).get("status") == "approved"

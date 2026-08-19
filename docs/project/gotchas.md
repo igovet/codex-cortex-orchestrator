@@ -247,9 +247,10 @@ brief, context files, and at most eight validated domains.
   content are redacted. Heartbeats are emitted every 15 seconds while the parent runs, and
   the per-scenario timeout defaults to 1,800 seconds (`--live-timeout-seconds`
   accepts 10..7200). The dedicated `finding_rework_documentation` source-mode
-  smoke is an exception: it proves the exact Review finding → corrective
-  Documentation → fresh Review resolution trace and has a hard 300-second
-  maximum (the flag may only reduce it). Timeout or interruption terminates the complete process
+  smoke is an exception: its deterministic public-API source prelude opens the
+  exact Review finding, then real Documentation and fresh Review workers prove
+  the corrective resolution trace. It has a hard 300-second maximum (the flag
+  may only reduce it). Timeout or interruption terminates the complete process
   group, escalating from `SIGTERM` to `SIGKILL` after ten seconds. Normal or
   supervised exits clean the private runtime and temporary project; a crash or
   external `SIGKILL` may leave OS-temp residue. A live
