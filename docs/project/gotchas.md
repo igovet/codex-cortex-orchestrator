@@ -119,6 +119,9 @@ brief, context files, and at most eight validated domains.
   only the exact report-tool error. If persistence succeeds
   but the native acknowledgement is interrupted, inspect with
   `manage_orchestration` and recover the ref from `available_reports`.
+  The server attaches a task-wide `resolved_user_decisions` sibling containing
+  canonical questions, answers, stable option IDs, source refs, and digests.
+  Report Markdown renders the same data under **Resolved User Decisions**.
 - Any profile may call `worker_question(action="ask")` for a material user
   decision that repository evidence cannot resolve. It returns a compact
   question ref plus a complete decision handoff to the parent: why input is
@@ -211,7 +214,9 @@ brief, context files, and at most eight validated domains.
   that configuration.
 - Localized question labels are transient UI projections. Answers retain the
   original value/language and require canonical `answer_en` for localized free
-  text. `ask_batch` accepts 1–32 stable questions but the native UI renders
+  text or a choice's custom response. Every choice step renders optional
+  `custom_response` beside its stable options. `ask_batch` accepts 1–32 stable
+  questions but the native UI renders
   only one step at a time under one durable `batch_ref`; each accepted step is
   checkpointed, and cancellation resumes at the next unanswered question. A
   localized batch is an ordered projection: an exact complete canonical key
@@ -219,6 +224,9 @@ brief, context files, and at most eight validated domains.
   by canonical position and any model-supplied display IDs are ignored.
   `poll_batch` returns canonical English answers; an active task revision
   supersedes an unresolved batch so stale intent cannot resume a worker.
+  Answer resumption remains attempt-scoped, but user authority is task-scoped:
+  successors do not repeat an equivalent resolved question under changed
+  wording or keys unless the current user explicitly reopens it.
 - Fixture Luna-high evaluation covers sequential, compact parallel, and
   blocked/resume flows. The live evaluator is source-mode only: it launches
   `codex exec --ephemeral --ignore-user-config` against this checkout's MCP
@@ -377,8 +385,9 @@ and v8 ledger. They are not caller-facing request envelopes.
 - Use `advance` to submit a reviewed future-wave replacement. A no-op remains
   unchanged; never claim a C2/C3 documentation or reassessment decision was
   applied without the corresponding durable operation. Replacing completed
-  work requires `allow_rework=true`. If final-close evidence supplies an
-  explicit replacement, Cortex reopens the internally completed pipeline and
+  work is recognized as rework from the repeated current or completed gates;
+  callers do not need to supply `allow_rework=true`. If final-close evidence
+  supplies an explicit replacement, Cortex reopens the internally completed pipeline and
   invalidates downstream attempts, evidence records, and report receipts before
   dispatching the replacement waves; returning terminal success while
   those waves remain would be a false completion.
@@ -630,7 +639,8 @@ and v8 ledger. They are not caller-facing request envelopes.
 - The main orchestrator owns the full optional pipeline: `start` receives the
   complete plan and Cortex appends the mandatory `documentation` and `close`
   audit gates. During work, `advance` may replace future waves under a revision
-  guard; changing completed work requires explicit `allow_rework=true`.
+  guard; changing completed work is detected as rework automatically, while
+  the internal `allow_rework` guard remains fail-closed for runtime callers.
 - Pipeline gate IDs are canonical lowercase identifiers (`plan`, `discover`,
   `architecture`, `database_architecture`, `implementation`, `qa`, `security`,
   `performance`, `accessibility`, `ux`, `review`, `documentation`, `close`).

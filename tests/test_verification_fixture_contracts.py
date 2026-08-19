@@ -57,6 +57,9 @@ class VerificationFixtureContractTests(unittest.TestCase):
             luna = LUNA_EVAL.fixture_eval(luna_base)
 
         self.assertEqual(cold_boot["status"], "PASS")
+        self.assertTrue(cold_boot["dynamic_replan_applied"])
+        self.assertTrue(cold_boot["pending_implementation_drop_rejected"])
+        self.assertTrue(cold_boot["implementation_phase_seen"])
         self.assertTrue(luna)
         self.assertTrue(all(item["outcome"] == "completed" for item in luna))
 

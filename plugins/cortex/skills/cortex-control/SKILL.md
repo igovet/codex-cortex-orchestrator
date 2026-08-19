@@ -416,7 +416,19 @@ include a concise `reason`. Planner and explorer ownership recommendations are
 advisory routing evidence, not an automatic rewrite command. Prefer the
 narrowest supported profile and replace a stale route only after that explicit
 decision. `general` is a conservative fallback, not the preferred universal
-writer. Repeating a completed phase requires `rework: true`. Use
+writer. The public facade infers rework when `future_waves` reintroduces a
+current or completed phase; the optional `rework` field is only a compatibility
+hint. A pending implementation phase cannot be silently omitted from a
+replacement: retain it and narrow its report dependencies instead. After an
+exhausted closure-rework budget, ordinary `resume` must not replay the same
+corrective wave. Resume with atomic recovery `payload.future_waves` beginning
+with one Planner wave; Cortex records the replan before returning a dispatch
+and restores every original delivery obligation—implementation, applicable QA,
+security/performance, review, documentation, and close—before requiring fresh
+plan approval. Before documentation or close dispatch, the runtime compares
+the accepted planning catalog with non-invalidated delivery attempts and
+repairs any missing graph instead of accepting documentation as implementation
+evidence. Use
 `manage_orchestration` for `inspect`, `resume`, `deactivate`, `lane`,
 `resource`, or `question`; these intents do not belong in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
@@ -432,7 +444,9 @@ directly: a single question uses the original `answer` plus its translated
 `answer_en`; a batch supplies only the listed `canonical_answers`. Do not
 inspect plugin sources or infer alternative fields. Answers preserve the
 user's original value and language and require `answer_en` for localized free
-text before the worker receives the canonical English answer. Workers may use
+text or a choice's free-form custom response before the worker receives the
+canonical English answer. Every choice question renders that optional custom
+field beside its stable options. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
 same `batch_ref` with `action="poll_batch"`; the host renders one question per
 native step and durably checkpoints each accepted answer before showing the
@@ -448,6 +462,11 @@ question must state the concrete decision, and every option must name its
 outcome or trade-off; generic numbered or recommended/alternative placeholders
 are rejected. A task
 revision supersedes an unresolved batch rather than resuming stale user intent.
+Every worker report automatically includes the task-wide canonical
+`resolved_user_decisions` snapshot. A successor must review it as durable user
+authority and must never ask a materially equivalent question merely because
+the wording, key, phase, or attempt changed; only an explicit current user
+change reopens that decision.
 Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;

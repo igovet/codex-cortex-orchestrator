@@ -434,6 +434,26 @@ def _closure_rework_target(
     """
     pipeline = list(state.get("current_pipeline", []))
     gate_index = pipeline.index(gate) if gate in pipeline else len(pipeline) - 1
+    obligations = {
+        str(item) for item in state.get("pipeline_obligations", []) if str(item)
+    }
+    for change in state.get("pipeline_changes", []):
+        if isinstance(change, dict):
+            obligations.update(str(item) for item in change.get("from", []) if str(item))
+    implementation_passed = any(
+        attempt.get("gate") == "implementation"
+        and attempt.get("status") == "passed"
+        and not attempt.get("invalidated")
+        for attempt in state.get("attempts", [])
+    )
+    approval_status = str((state.get("plan_approval") or {}).get("status") or "")
+    if (
+        gate in {"review", "close"}
+        and approval_status in {"approved", "not_required"}
+        and "implementation" in obligations
+        and not implementation_passed
+    ):
+        return "plan" if "plan" in pipeline else "implementation"
     affected_paths: list[str] = []
     for finding in findings:
         details = finding.get("details")
@@ -476,6 +496,20 @@ def _activate_closure_rework(
     """
     target_gate = _closure_rework_target(state, gate, findings)
     pipeline = list(state.get("current_pipeline", []))
+    if target_gate not in pipeline:
+        recovery_order = [
+            "plan", "implementation", "qa", "security", "performance",
+            "review", "documentation", "close",
+        ]
+        target_index = recovery_order.index(target_gate) if target_gate in recovery_order else -1
+        later = next(
+            (
+                candidate for candidate in recovery_order[target_index + 1:]
+                if candidate in pipeline
+            ),
+            None,
+        )
+        pipeline.insert(pipeline.index(later) if later else len(pipeline), target_gate)
     # Preserve the corrective target's position so the rework operation makes
     # it the first incomplete gate. Move only the final review/close checks to
     # the tail; moving the target itself behind QA or documentation would leave

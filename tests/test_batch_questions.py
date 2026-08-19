@@ -181,7 +181,10 @@ class BatchQuestionTests(unittest.TestCase):
             control,
             "_request_mcp_elicitation",
             side_effect=[
-                ("accept", {"database_strategy": "use_existing_schema"}, "batch-form-1"),
+                ("accept", {
+                    "database_strategy": "use_existing_schema",
+                    "custom_response": "Не менять публичный контракт.",
+                }, "batch-form-1"),
                 ("accept", {"migration_scope": ["data", "code"]}, "batch-form-2"),
                 ("accept", {"extra_context": "Нужно сохранить обратную совместимость."}, "batch-form-3"),
             ],
@@ -198,16 +201,24 @@ class BatchQuestionTests(unittest.TestCase):
             })
         self.assertTrue(pending["ok"], pending)
         self.assertEqual(pending["outcome"], "awaiting_translation")
+        self.assertEqual(
+            pending["result"]["answer_custom_original"]["database_strategy"],
+            "Не менять публичный контракт.",
+        )
+        self.assertEqual(
+            pending["translation_request"]["answer_custom_original"]["database_strategy"],
+            "Не менять публичный контракт.",
+        )
         self.assertEqual(elicitation.call_count, 3)
         self.assertEqual([call.args[0] for call in elicitation.call_args_list], [
             "1 / 3", "2 / 3", "3 / 3",
         ])
         form = elicitation.call_args_list[0].args[1]
-        self.assertEqual(set(form["properties"]), {"database_strategy"})
+        self.assertEqual(set(form["properties"]), {"database_strategy", "custom_response"})
         self.assertEqual(form["properties"]["database_strategy"]["oneOf"][0], {
             "const": "use_existing_schema", "title": "Использовать существующую схему",
         })
-        self.assertEqual(set(elicitation.call_args_list[1].args[1]["properties"]), {"migration_scope"})
+        self.assertEqual(set(elicitation.call_args_list[1].args[1]["properties"]), {"migration_scope", "custom_response"})
         self.assertEqual(set(elicitation.call_args_list[2].args[1]["properties"]), {"extra_context"})
 
         durable = self._record(state, batch_ref)
@@ -215,6 +226,8 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertEqual(durable["questions"][0]["canonical_question"], "Which database strategy should the implementation use?")
         self.assertEqual(durable["questions"][0]["options"][0]["label_en"], "Use the existing schema")
         self.assertEqual(durable["answers"]["database_strategy"]["answer_option_ids"], ["use_existing_schema"])
+        self.assertEqual(durable["answers"]["database_strategy"]["answer_custom_original"], "Не менять публичный контракт.")
+        self.assertEqual(durable["answers"]["database_strategy"]["translation_status"], "awaiting_translation")
         self.assertEqual(durable["answers"]["extra_context"]["answer_original"], "Нужно сохранить обратную совместимость.")
         self.assertEqual(durable["answers"]["extra_context"]["translation_status"], "awaiting_translation")
 
@@ -225,6 +238,7 @@ class BatchQuestionTests(unittest.TestCase):
             "payload": {
                 "question_ref": batch_ref,
                 "canonical_answers": {
+                    "database_strategy": "Do not change the public contract.",
                     "extra_context": "Preserve backwards compatibility.",
                 },
                 "translated_by": "coordinator",
@@ -244,7 +258,7 @@ class BatchQuestionTests(unittest.TestCase):
         })
         self.assertEqual(polled["outcome"], "batch_answered")
         self.assertEqual(polled["answers"]["database_strategy"], {
-            "answer_en": "Use the existing schema",
+            "answer_en": "Use the existing schema\nAdditional user context: Do not change the public contract.",
             "answer_option_ids": ["use_existing_schema"],
         })
         self.assertEqual(polled["answers"]["extra_context"]["answer_en"], "Preserve backwards compatibility.")
@@ -320,6 +334,16 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertFalse(rejected_worker["ok"])
         self.assertEqual(rejected_worker["outcome"], "needs_correction")
         self.assertIn("concrete outcome", rejected_worker["diagnostics"][0]["message"])
+
+        reserved = self._batch("reserved-custom-response")
+        reserved["questions"][0]["question_key"] = "custom_response"
+        rejected_reserved = control.worker_question({
+            **self._identity(state, attempt, self.project),
+            "action": "ask_batch",
+            "batch": reserved,
+        })
+        self.assertFalse(rejected_reserved["ok"])
+        self.assertIn("reserved for free-form input", rejected_reserved["diagnostics"][0]["message"])
 
         asked = self._ask(state, attempt, key="placeholder-localized-options")
         rejected_ui = control.manage_orchestration({
@@ -430,11 +454,11 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertTrue(pending["ok"], pending)
         self.assertEqual(pending["outcome"], "awaiting_translation")
         first_form = elicitation.call_args_list[0].args[1]
-        self.assertEqual(set(first_form["properties"]), {"database_strategy"})
+        self.assertEqual(set(first_form["properties"]), {"database_strategy", "custom_response"})
         self.assertEqual(first_form["properties"]["database_strategy"]["oneOf"][0], {
             "const": "use_existing_schema", "title": "Текущая схема",
         })
-        self.assertEqual(set(elicitation.call_args_list[1].args[1]["properties"]), {"migration_scope"})
+        self.assertEqual(set(elicitation.call_args_list[1].args[1]["properties"]), {"migration_scope", "custom_response"})
         self.assertEqual(set(elicitation.call_args_list[2].args[1]["properties"]), {"extra_context"})
 
     def test_batch_persistence_is_atomic_and_poll_rejects_superseded_revision(self):
@@ -563,6 +587,18 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertEqual(answered["outcome"], "question_answered")
         accepted = control.publish_worker_report(report_payload)
         self.assertTrue(accepted["ok"], accepted)
+        persisted = control.read_worker_report({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "report_ref": accepted["report_ref"],
+        })
+        self.assertEqual(len(persisted["resolved_user_decisions"]), 3)
+        by_key = {item["question_key"]: item for item in persisted["resolved_user_decisions"]}
+        self.assertEqual(by_key["database_strategy"]["answer_en"], "Use the existing schema")
+        markdown = Path(persisted["report_markdown_path"]).read_text(encoding="utf-8")
+        self.assertIn("## Resolved User Decisions", markdown)
+        self.assertIn("Which database strategy should the implementation use?", markdown)
+        self.assertIn("Use the existing schema", markdown)
 
     def test_cancelled_batch_resumes_at_the_next_unanswered_question(self):
         started, _, state, attempt = self._start(user_language="en")
@@ -609,7 +645,7 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertTrue(answered["ok"], answered)
         self.assertEqual(answered["outcome"], "question_answered")
         self.assertEqual(resumed_run.call_count, 2)
-        self.assertEqual(set(resumed_run.call_args_list[0].args[1]["properties"]), {"migration_scope"})
+        self.assertEqual(set(resumed_run.call_args_list[0].args[1]["properties"]), {"migration_scope", "custom_response"})
         self.assertEqual(set(resumed_run.call_args_list[1].args[1]["properties"]), {"extra_context"})
         durable = self._record(state, batch_ref)
         self.assertEqual(durable["status"], "answered")

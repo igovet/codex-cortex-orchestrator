@@ -1,5 +1,18 @@
 # Changelog
 
+## [9.2.1] - 2026-08-19
+
+- Preserve immutable pipeline obligations across context compaction and future-wave
+  reassessment, and reject any replacement that silently drops pending
+  implementation work without consuming a recovery attempt.
+- Infer rework at the public facade and atomically recover exhausted closure
+  routes through a freshly approved Planner-first delivery graph. Missing
+  implementation now restores its QA, audit, review, documentation, and close
+  successors instead of dispatching another writer.
+- Check accepted planning catalogs against verified delivery attempts before
+  documentation or close, and extend the black-box JSON-RPC smoke with a
+  dynamic-replan proof that implementation cannot disappear.
+
 ## [9.2.0] - 2026-08-19
 
 - Remove task-wide report-count and aggregate-byte quotas; reports remain
@@ -8,6 +21,12 @@
   verified transitive DAG frontier: every omitted report is covered by a
   passed report that durably acknowledged it, while full history and the
   Planner evidence digest remain intact.
+- Attach a task-wide `resolved_user_decisions` snapshot to every immutable
+  report, and forbid successors from asking an equivalent resolved question
+  under new wording, keys, phases, or attempts unless the user reopens it.
+- Render optional free-form input beside every batch choice. Preserve and,
+  when needed, translate it into the canonical answer without changing the
+  selected stable option IDs.
 
 ## [9.1.1] - 2026-08-19
 

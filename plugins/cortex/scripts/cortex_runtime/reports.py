@@ -33,6 +33,7 @@ from cortex import (
     _open_blocking_questions,
     _read_private_text,
     _recover_report_receipt,
+    _resolved_user_decisions,
     _report_index,
     _write_delegation_report_index,
     _write_report_index,
@@ -509,6 +510,11 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 "planner scope reports require a scoping artifact with overview, context_files, and discovery_domains"
             )
+        resolved_user_decisions = _resolved_user_decisions(task_dir, state)
+        # Idempotency covers the worker-authored envelope. The automatically
+        # attached decision snapshot is independently bound by the immutable
+        # artifact digest and must not make an identical retry fail merely
+        # because another parallel answer arrived after the first commit.
         digest_payload = {"report": report, "planning": planning}
         if scoping is not None:
             digest_payload["scoping"] = scoping
@@ -624,6 +630,7 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             "gate": attempt["gate"], "attempt_id": attempt_id, "submission_id": submission_id,
             "producer": {"profile": attempt["profile"], "model": attempt["selected_model"], "reasoning_effort": attempt["selected_reasoning_effort"]},
             "report": report, "planning": planning,
+            "resolved_user_decisions": resolved_user_decisions,
             **({"scoping": scoping} if scoping is not None else {}),
             "result_validation": result_validation,
             **({"gate_result": gate_result} if gate_result is not None else {}),
@@ -1714,6 +1721,10 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "phase": phase,
                 "profile": (record.get("producer") or {}).get("profile"),
                 "report": report_payload,
+                "resolved_user_decisions": (
+                    record.get("resolved_user_decisions")
+                    if isinstance(record.get("resolved_user_decisions"), list) else []
+                ),
                 **({"scoping": record["scoping"]} if isinstance(record.get("scoping"), dict) else {}),
                 **({"planning": record["planning"]} if isinstance(record.get("planning"), dict) else {}),
                 "result_validation": record.get("result_validation"),
@@ -1722,8 +1733,10 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             }
         if worker_context:
             result["next_action"] = (
-                "Use this supplied predecessor report only as evidence context, verify consequential claims in the "
-                "current project, and include the exact generated Predecessor review acknowledgement in report.evidence."
+                "Use this supplied predecessor report as evidence context, but treat resolved_user_decisions as "
+                "durable user authority. Never ask a materially equivalent question again unless the user's current "
+                "message explicitly reopens that decision. Verify consequential repository claims in the current "
+                "project, and include the exact generated Predecessor review acknowledgement in report.evidence."
             )
         else:
             markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)

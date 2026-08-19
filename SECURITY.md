@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.0` source line. The public
+Security fixes are prepared for the current `9.2.1` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -58,12 +58,16 @@ Reports retain the strict seven-field
 first. Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
-Each immutable report remains bounded to 64 KiB and each attempt to 32 reports,
-but a task has no artificial report-count or aggregate-report-byte quota.
+Each worker-authored report envelope remains bounded to 64 KiB and each
+attempt to 32 reports. The server-owned decision snapshot may enlarge the
+immutable artifact, whose reads remain paged; a task has no artificial
+report-count or aggregate-report-byte quota.
 Long-running histories grow in project-scoped SQLite subject to real storage
 availability and explicit pruning. Successor prompts receive only the verified
 transitive handoff frontier; covered history remains immutable and included in
-Planner evidence digests.
+Planner evidence digests. Each report automatically carries the complete
+task-wide canonical `resolved_user_decisions` snapshot; replacement briefings
+carry a bounded recent projection so answered intent survives attempt changes.
 
 Worker-facing caller, input, and schema validation failures are structured as
 same-attempt corrections and do not consume recovery budget. Failed work may
@@ -93,13 +97,17 @@ with rendered options. Localized UI text must not alter canonical question or
 answer values. Batch projections accept the documented `localized_question`,
 `localized_header`, `localized_options`, and `localized_custom_label` fields,
 plus the compatibility aliases `question`, `header`, `options`, and
-`custom_label`.
+`custom_label`. Choice forms always include optional free-form input in
+addition to server-owned options. Localized custom text is preserved in its
+original form and withheld from workers until a canonical English translation
+is recorded. Successors may reopen a resolved decision only after an explicit
+current user change.
 
 The archive boundary is validated from `git archive HEAD`, not the mutable
 working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This working tree is a source candidate only. The 9.2.0+codex.20260819085921
-changes are not installed into a user's plugin, published, committed, or
-tagged by this task.
+This repository is a source candidate only. The 9.2.1+codex.20260819110617
+build has not been installed into a user's plugin and is not published or
+tagged.

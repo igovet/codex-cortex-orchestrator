@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
 import cortex_hook
 from cortex_runtime import orchestration_engine
+from cortex_runtime import gate_transitions
 from cortex_runtime import mcp_api
 from cortex_runtime import reports as runtime_reports
 
@@ -4109,6 +4110,17 @@ class ControlPlaneTests(unittest.TestCase):
             "planning": self.v3_planning(),
         })
         self.assertTrue(accepted["ok"])
+        persisted = control.read_worker_report({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "report_ref": accepted["report_ref"],
+        })
+        self.assertEqual(len(persisted["resolved_user_decisions"]), 1)
+        self.assertEqual(
+            persisted["resolved_user_decisions"][0]["question_en"],
+            "What outcome and audience should this landing page prioritize?",
+        )
+        self.assertIn("Lead generation for B2B sales teams", persisted["resolved_user_decisions"][0]["answer_en"])
 
     def test_v3_desktop_skill_link_is_canonicalized_before_task_persistence_and_labeling(self):
         request = (
@@ -4956,6 +4968,24 @@ class ControlPlaneTests(unittest.TestCase):
         report["summary"] = "Close remains blocked on an unresolved dependency."
         with self.assertRaisesRegex(ValueError, "unresolved completion markers: blocked"):
             control._validate_close_report(task_dir, state, attempt, report)
+
+    def test_missing_planned_implementation_routes_closure_finding_back_to_plan(self):
+        state = {
+            "current_pipeline": ["plan", "documentation", "close"],
+            "pipeline_obligations": [
+                "plan", "implementation", "qa", "security", "performance",
+                "review", "documentation", "close",
+            ],
+            "plan_approval": {"status": "approved"},
+            "pipeline_changes": [],
+            "attempts": [{"gate": "plan", "status": "passed"}],
+        }
+        target = gate_transitions._closure_rework_target(
+            state,
+            "close",
+            [{"fingerprint": "implementation-absent", "details": {"affected_paths": ["plugins/cortex"]}}],
+        )
+        self.assertEqual(target, "plan")
 
     def test_closure_finding_is_canonical_across_review_close_and_resolved_rework(self):
         started = self.v3_start(
@@ -5807,6 +5837,8 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[
                 {"workers": [{"phase": "plan"}]},
                 {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "qa"}]},
+                {"workers": [{"phase": "review"}]},
             ],
         )
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -7183,7 +7215,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(inspected["ok"])
         self.assertEqual(inspected["code"], "task_ref_required")
 
-    def test_v3_future_wave_rework_requires_explicit_opt_in(self):
+    def test_v3_future_wave_rework_is_inferred_from_reintroduced_phase(self):
         started = self.v3_start("v3 future rework", waves=[
             {"workers": [{"phase": "discover"}]},
             {"workers": [{"phase": "implementation"}]},
@@ -7194,9 +7226,6 @@ class ControlPlaneTests(unittest.TestCase):
             "future_waves": [{"workers": [{"phase": "discover"}, {"phase": "implementation"}]}],
             "reason": "new evidence requires discovery rework",
         }
-        denied = control.continue_orchestration(common)
-        self.assertFalse(denied["ok"])
-        self.assertIn("allow_rework=true", denied["diagnostics"][0]["message"])
         missing_pipeline = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"],
@@ -7206,7 +7235,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertFalse(missing_pipeline["ok"])
         self.assertIn("requires explicit future_waves", missing_pipeline["diagnostics"][0]["message"])
-        allowed = control.continue_orchestration({**common, "rework": True, "reason": "new evidence"})
+        allowed = control.continue_orchestration(common)
         self.assertTrue(allowed["ok"])
         self.assertEqual(allowed["step"], 1)
 
@@ -7274,6 +7303,182 @@ class ControlPlaneTests(unittest.TestCase):
         plan = control.db_load_task(self.ledger, self.task_state(task_dir)["task_id"])[2]
         wave_ids = [wave["wave_id"] for wave in plan["waves"]]
         self.assertEqual(wave_ids, sorted(set(wave_ids)))
+
+    def test_v3_future_wave_replacement_cannot_drop_pending_implementation(self):
+        started = self.v3_start("retain pending implementation", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+            {"workers": [{"phase": "close"}]},
+        ])
+        discovery_results = self.v3_results(started, self.v3_report("discovery complete"))
+        rejected = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": discovery_results,
+            "future_waves": [{"workers": [{"phase": "close"}]}],
+            "reason": "narrow successor report context",
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("cannot silently drop a pending implementation phase", rejected["diagnostics"][0]["message"])
+        self.assertFalse(rejected["attempt_budget_consumed"])
+
+        corrected = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": discovery_results,
+            "future_waves": [
+                {"workers": [{"phase": "implementation", "depends_on": ["discover"]}]},
+                {"workers": [{"phase": "close", "depends_on": ["implementation"]}]},
+            ],
+            "reason": "retain delivery while narrowing successor report context",
+        })
+        self.assertTrue(corrected["ok"], corrected)
+        self.assertEqual(corrected["dispatches"][0]["phase"], "implementation")
+
+    def test_v3_exhausted_closure_rework_requires_atomic_resume_replan(self):
+        current = self.v3_start(
+            "recover a truncated delivery pipeline",
+            complexity="C1",
+            plan_approval="auto",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        with mock.patch.object(
+            orchestration_engine,
+            "_repair_delivery_graph_before_closure",
+            side_effect=lambda params, task_dir, state, plan: (state, plan),
+        ):
+            current = control.continue_orchestration({
+                "project_root": str(self.project),
+                "task_ref": current["task_ref"],
+                "step": current["step"],
+                "results": self.v3_results(current),
+            })
+        self.assertEqual(current["dispatches"][0]["phase"], "documentation")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        state["status"] = "blocked"
+        state["pipeline_obligations"] = [
+            "plan", "implementation", "qa", "security", "performance",
+            "review", "documentation", "close",
+        ]
+        state["blocked_reason"] = "automatic close rework budget exhausted after 3 failed attempts"
+        state["orchestrate_gate_failure_counts"] = {"close": 3, "security": 2}
+        state["closure_rework"] = {
+            "close": {
+                "status": "rework_required",
+                "target_gate": "documentation",
+                "source_report_refs": ["report-0001"],
+                "finding_fingerprints": ["missing-implementation"],
+            }
+        }
+        self.write_task_state(state)
+
+        stale_resume = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "intent": "resume",
+            "reason": "retry unchanged closure recovery",
+        })
+        self.assertFalse(stale_resume["ok"])
+        self.assertIn("requires an atomic Planner-first recovery replan", stale_resume["diagnostics"][0]["message"])
+        self.assertEqual(self.task_state(task_dir)["status"], "blocked")
+
+        recovered = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "intent": "resume",
+            "reason": "restore the missing delivery pipeline through a newly approved plan",
+            "payload": {
+                "future_waves": [{"workers": [{"phase": "plan"}]}],
+            },
+        })
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["outcome"], "ready_to_spawn")
+        self.assertEqual(recovered["dispatches"][0]["phase"], "plan")
+        recovered_state = self.task_state(task_dir)
+        self.assertEqual(recovered_state["status"], "active")
+        self.assertNotIn("blocked_reason", recovered_state)
+        self.assertEqual(recovered_state["orchestrate_gate_failure_counts"], {"security": 2})
+        self.assertEqual(recovered_state["closure_rework"]["close"]["target_gate"], "plan")
+        self.assertEqual(
+            recovered_state["current_pipeline"],
+            [
+                "plan", "implementation", "qa", "security", "performance",
+                "review", "documentation", "close",
+            ],
+        )
+
+    def test_v3_approved_plan_repairs_complete_delivery_graph_before_documentation(self):
+        current = self.v3_start(
+            "repair a truncated approved delivery graph before documentation",
+            complexity="C2",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "qa"}]},
+                {"workers": [{"phase": "security"}]},
+                {"workers": [{"phase": "performance"}]},
+                {"workers": [{"phase": "review"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        plan = control._load_orchestrate_plan(task_dir, state)
+        retained = {"plan", "documentation", "close"}
+        state.pop("pipeline_obligations", None)
+        state["current_pipeline"] = ["plan", "documentation", "close"]
+        state["parallel_groups"] = [["plan"], ["documentation"], ["close"]]
+        control.sync_current_wave(state)
+        self.write_task_state(state)
+        plan["waves"] = [
+            wave for wave in plan["waves"]
+            if set(wave.get("gates", [])).intersection(retained)
+        ]
+        orchestration_engine._write_orchestrate_plan(task_dir, plan)
+
+        held = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "step": current["step"],
+            "results": self.v3_results(current),
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "intent": "plan_approval",
+            "payload": {"decision": "prompt"},
+        })
+        repaired = control.manage_orchestration(
+            prompt["plan_approval_interaction"]["actions"][0]["arguments"]
+        )
+        self.assertTrue(repaired["ok"], repaired)
+        self.assertEqual(repaired["dispatches"][0]["phase"], "plan")
+        repaired_state = self.task_state(task_dir)
+        self.assertEqual(repaired_state["plan_approval"]["status"], "pending_plan")
+        self.assertEqual(
+            repaired_state["current_pipeline"],
+            [
+                "plan", "implementation", "qa", "security", "performance",
+                "review", "documentation", "close",
+            ],
+        )
+        self.assertTrue(
+            all(
+                attempt.get("gate") not in {"documentation", "close"}
+                for attempt in repaired_state["attempts"]
+                if not attempt.get("invalidated")
+            )
+        )
 
     def test_v3_final_planner_automatically_receives_verified_scope_basis(self):
         started = self.v3_start("planner keeps every verified scope report", waves=[
@@ -8702,7 +8907,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

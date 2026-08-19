@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.0 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 9.2.1 `cortex/v8` task ledger and
 public `cortex/orchestration/v5` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly eight public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -55,6 +55,14 @@ new reads and writes use the normalized model. A task directory holds only
 lazy, materialized human-facing projections—exact briefings, report
 Markdown/JSON, planning revisions, handoffs, and journals—rather than another
 source of truth.
+
+Question answers are stored with their attempt for exact pause/resume, but
+their authority is projected task-wide. Every new report artifact receives an
+automatic `resolved_user_decisions` sibling and Markdown section with the
+canonical questions and answers, selected option IDs, source refs, and
+digests. Successor briefings require review of that ledger before another
+question is published. Choice-based batch steps always render optional
+free-form input and preserve its original and canonical-English forms.
 
 Large bodies are never embedded in a lifecycle response. `manage_orchestration`
 with `intent="artifacts"` lists bounded metadata pages and reads one selected
@@ -278,6 +286,21 @@ Bounded phase aliases normalize `implement` to `implementation` and
 `build_verification` to final `close`; the server also rejects a canonical
 phase repeated across later waves, preventing correction/retry loops caused by
 relabeling the same work.
+
+The v5 adapter derives `allow_rework` whenever supplied `future_waves`
+reintroduce a current or completed phase. This keeps the audited internal
+transition explicit without requiring the coordinator model to remember a
+redundant boolean. It also rejects a replacement that drops a still-pending
+implementation phase. The task retains its initial `pipeline_obligations` so a
+closure finding can restore phases no longer present in `current_pipeline`. If
+canonical close findings exhaust their retry budget, plain resume fails without
+spawning another identical writer; one atomic resume recovery restores plan,
+implementation, applicable QA/security/performance/review, documentation, and
+close, invalidates stale downstream evidence, resets the failed recovery
+counter, and reopens plan approval. The same completeness check runs before any
+documentation or close dispatch when the accepted planning catalog requires
+implementation but verified implementation and successor attempts are absent.
+Request-shape validation failures state that no attempt budget was consumed.
 
 The control plane owns dynamic sequencing. It selects corrective waves, blocks
 environment or policy conditions, carries the originating report into
@@ -714,9 +737,11 @@ during retirement.
 The focused plan-approval regression set passes with 14 tests, covering native
 and direct-fallback controls, approval continuation, silent cancellation,
 request-ID freshness, stale-basis rejection, revision, localization, and
-transport compatibility. The full control suite (295 tests), invariant suite
-(83 tests), complete discovery suite (520 tests), and cold-boot smoke also
-pass. These checks exercise the source
+transport compatibility. The full control suite (299 tests), invariant suite
+(83 tests), complete discovery suite (524 tests), and cold-boot smoke also
+pass. The smoke uses the public JSON-RPC server to reject implementation loss,
+apply a dynamic audit-wave addition, and verify every resulting gate through
+close. These checks exercise the source
 MCP server and mocked/native JSON-RPC exchanges; this checkout does not include
 a live Codex Desktop renderer, so installed-plugin and live-host button
 rendering remain separate release/integration checks. Related commands and
