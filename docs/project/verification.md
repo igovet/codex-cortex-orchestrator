@@ -9,6 +9,9 @@ python3 scripts/cortex-luna-high-eval.py
 # Uses this checkout as the MCP source; it does not install, reinstall, or update Cortex.
 # Fast source-mode transport/follow-up probe used during development.
 python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
+# Narrow real-host finding handoff: review finding -> corrective documentation -> fresh review -> resolved.
+# This scenario has a hard 300-second deadline; --live-timeout-seconds may only reduce it.
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
 # Full lifecycle live scenario for a release gate.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Automatic C3 governance lifecycle: no governance mode is supplied by the caller.
@@ -18,6 +21,7 @@ python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential 
 # Optional, explicit retention of sanitized failure metadata under /tmp.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --retain-failure-metadata
 python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
+python3 -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30
 python3 scripts/probe-fresh-cortex-plugin.py
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py
 python3 scripts/validate-cortex-marketplace.py
@@ -29,10 +33,54 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_cortex_invariants
 python3 scripts/verify-cortex-release.py --require-tracked
 ```
 
+## Focused finding-handoff regression
+
+Run this short deterministic public-transport subset while working on report,
+finding, rework, or briefing contracts. It does not require a Codex model,
+plugin install, or live host session:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -m unittest -v \
+  tests.test_finding_transitions \
+  tests.test_live_finding_rework_contract \
+  tests.test_cortex_control.ControlPlaneTests.test_closure_finding_is_canonical_across_review_close_and_resolved_rework \
+  tests.test_cortex_control.ControlPlaneTests.test_corrective_documentation_cannot_resolve_its_review_finding \
+  tests.test_cortex_control.ControlPlaneTests.test_same_gate_resolution_requires_finding_bound_correction_receipt \
+  tests.test_cortex_control.ControlPlaneTests.test_pass_gate_result_rejects_open_findings_at_report_intake
+```
+
+The first control-plane test proves `review → documentation → fresh review →
+close`, including exact immutable source/correction handoffs, stale semantic
+route rejection, and the server-bound resolved transition. The second is the
+authority negative case: Documentation may report a correction but cannot
+resolve Review's finding, including by repeating its fingerprint as open. The
+third test verifies that every route—including same-gate correction—needs a
+separate correction receipt bound to the exact fingerprint and origin report.
+The final test rejects a self-contradictory `pass` plus open finding before an
+immutable report or receipt is written.
+
+For a real-host counterpart, run the dedicated source-mode scenario below. It
+uses a minimal C1 workspace and exactly one controlled fingerprint,
+`live-documentation-finding-001`: the first Review opens it, Documentation
+performs the correction, and a fresh Review must consume both immutable refs
+before resolving it. The evaluator verifies the persisted trace graph and
+terminates the entire parent process group at **300 seconds**; that timeout can
+only be reduced. It neither installs nor updates the plugin, and a `SKIP` or
+timeout is not evidence of a pass.
+
+```bash
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+```
+
 `verify-cortex-release.py --require-tracked` runs only after a commit exists;
 it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
+
+The evidence bullets below describe the previously validated 9.2.4 source
+candidate. They do not certify the Unreleased/9.2.5 hardening draft above;
+those full-suite, live, archive, and installed-plugin result slots remain
+pending.
 
 - The complete source suite passed **550 tests** with 16 intentional native-UI
   skips. Focused governance/migration coverage includes digest-only
@@ -84,8 +132,10 @@ count. Host stream classification may also emit `parent_completed`,
 `termination_requested`, optional `termination_escalated`, `terminated`, and a
 final `parent_finished` record.
 
-Each live scenario has a 1,800-second default timeout, overridable only from
-10 through 7,200 seconds with `--live-timeout-seconds`. The Codex parent starts
+Ordinary live scenarios have a 1,800-second default timeout, overridable only
+from 10 through 7,200 seconds with `--live-timeout-seconds`. The dedicated
+`finding_rework_documentation` smoke has a hard 300-second maximum and defaults
+to that value; its timeout flag may only reduce the limit. The Codex parent starts
 in its own process group. Timeout, interrupt, or termination cleanup sends
 `SIGTERM`, waits ten seconds, then escalates to `SIGKILL`, reaping the group and
 emitting termination records. On normal or supervised exits, the evaluator
@@ -115,11 +165,32 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.2.4+codex.20260819182839`. These results are
-evidence for the checked-out source only; release publication and installed-plugin
-verification remain separate, explicitly requested actions.
+The source manifest now declares `9.2.5+codex.20260819205849`. Historical
+9.2.4 results above remain evidence for that prior source candidate only;
+release publication and installed-plugin verification remain separate,
+explicitly requested actions.
 
-## Current 9.2.4 source contract
+## Unreleased / 9.2.5 draft evidence status
+
+This section describes the hardening work visible in the source tree. The
+source cachebuster is `9.2.5+codex.20260819205849`.
+The following result slots remain intentionally factual placeholders until the
+candidate is committed and rerun on the exact release SHA:
+
+- Full offline regression suite: **pending**.
+- Source-mode automatic-governance live lifecycle: **pending**.
+- Tracked release archive validation: **pending**.
+- Installed-plugin verification and cachebuster parity: **pending; no install
+  or user `~/.codex` mutation is implied**.
+
+The draft scope covers governance schema v10 integrity, artifact-authoritative
+record bodies, exact scope and linear revisions, scoped capability claims with
+rotation/revocation, no-progress pauses, revision-aware steer/questions,
+bounded/cache-backed manifests, and the required 50,000-file benchmark. A
+benchmark pass or focused local check must not be read as evidence for the
+pending full-suite or live gates.
+
+## Current 9.2.5 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -149,15 +220,17 @@ verification remain separate, explicitly requested actions.
   audit/Desktop projections; altering, deleting, or adding a projection cannot
   restore or modify coordination state. Existing pre-SQLite files are neither
   inspected, imported, resumed, altered, nor deleted.
-- Database schema changes are numbered and checksummed through **schema v9**.
+- Database schema changes are numbered and checksummed through **schema v10**.
   First MCP access takes
   the project-ledger lock and applies only missing SQLite-to-SQLite migrations
   atomically; a failed or mismatched migration fails closed. Checksums cover
   migration version, name, and ordered normalized SQL content. Legacy
   name-only checksums are upgraded only after schema validation. The schema
   uses unbounded SQLite `TEXT`/`BLOB` values for content and indexed 32 KiB
-  immutable artifact chunks for transport. Schema v9 adds the governance
-  ledger; schema v8 added task/plan revisions,
+  immutable artifact chunks for transport. Schema v10 hardens the governance
+  ledger with artifact-authoritative bodies, exact non-null scopes, linear
+  revision indexes/triggers, and idempotent submission receipts; schema v9
+  added the initial governance ledger; schema v8 added task/plan revisions,
   native worker sessions, attempt messages, trace/tool observations, and
   question-batch storage; schema v7 separates deduplicated
   content blobs, task-scoped logical artifacts, and authorized filesystem
@@ -212,6 +285,17 @@ verification remain separate, explicitly requested actions.
   canonical answers. Main chat keeps one durable batch ref, renders every
   question with its required LLM recommendation, checkpoints accepted answers,
   and resumes only after the next user message is recorded.
+- Revision-aware steer classifies the earliest affected gate and invalidates
+  downstream evidence. Questions carry task/plan revision and strategy
+  generation, so unresolved questions from an older revision are superseded
+  and cannot accept stale answers. Corrective work has no fixed attempt quota,
+  but a repeated materially identical no-progress signature pauses autonomous
+  retries for an explicit user strategy without producing a false pass.
+- Manifest capture enforces `max_entries`, `max_hashed_bytes`, and
+  `max_seconds`; a limit produces a partial result with a reason. Unchanged
+  file hashes may use a bounded stat-keyed cache. CI additionally requires
+  `python3 -B scripts/cortex-manifest-benchmark.py --files 50000
+  --max-seconds 30` to report `target_met: true`.
 - Required post-plan review is surfaced through one ordinary final assistant
   message using `cortex/chat-interaction/v1`. It includes the complete bounded
   plan, approve/revise/cancel meanings, opaque request ID, and LLM recommendation.
@@ -297,7 +381,7 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle or `--live --scenario automatic_governance` for the C3 auto-governance lifecycle in a streamed, sanitized source-mode parent run against the workspace source tree. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
+- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, or `--live --scenario finding_rework_documentation` for the narrow Review → Documentation → fresh Review finding route. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800, except the finding scenario which is capped at and defaults to 300 seconds; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host

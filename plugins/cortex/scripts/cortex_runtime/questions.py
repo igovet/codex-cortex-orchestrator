@@ -159,6 +159,129 @@ def _batch_is_stale(record: dict[str, Any], state: dict[str, Any]) -> bool:
     return int(record.get("task_revision") or 1) < _batch_revision(state)
 
 
+def _attempt_generation(attempt: dict[str, Any]) -> int:
+    """Return the durable corrective generation for one worker attempt.
+
+    Attempts created before the revision-aware retry work do not carry an
+    explicit generation.  Their retry escalation already records the number
+    of preceding failed attempts, so use that as a backwards-compatible
+    generation projection instead of treating every legacy attempt as the
+    same lifetime quota bucket.
+    """
+    raw = attempt.get("attempt_generation")
+    try:
+        if raw is not None:
+            return max(1, int(raw))
+    except (TypeError, ValueError):
+        pass
+    escalation = attempt.get("rework_escalation")
+    if isinstance(escalation, dict):
+        try:
+            return max(1, int(escalation.get("prior_failure_count") or 0) + 1)
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _current_plan_revision(state: dict[str, Any], attempt: dict[str, Any]) -> object:
+    """Project the current approved/pending planner revision when present.
+
+    The first non-planning wave intentionally has no plan revision.  Keeping
+    an explicit ``None`` in the question envelope is preferable to inventing
+    a revision number and makes old task ledgers readable without migration.
+    """
+    for value in (
+        attempt.get("plan_revision"),
+        state.get("plan_revision"),
+        (state.get("plan_approval") or {}).get("approved_basis", {}).get("plan_revision")
+        if isinstance((state.get("plan_approval") or {}).get("approved_basis"), dict) else None,
+        (state.get("plan_approval") or {}).get("pending_basis", {}).get("plan_revision")
+        if isinstance((state.get("plan_approval") or {}).get("pending_basis"), dict) else None,
+    ):
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _question_revision_context(state: dict[str, Any], attempt: dict[str, Any]) -> dict[str, object]:
+    return {
+        "task_revision": _batch_revision(state),
+        "plan_revision": _current_plan_revision(state, attempt),
+        "attempt_generation": _attempt_generation(attempt),
+    }
+
+
+def _legacy_question_is_stale(record: dict[str, Any], state: dict[str, Any], attempt: dict[str, Any]) -> bool:
+    """Whether a single-question record can no longer resume its worker.
+
+    Batch questions already had revision semantics.  Legacy single questions
+    must receive the same protection: a material steer, retry generation, or
+    invalidated worker turns an unanswered question into a terminal,
+    explicitly non-resumable record.
+    """
+    if record.get("status") != "open":
+        return False
+    context = _question_revision_context(state, attempt)
+    try:
+        record_revision = int(record.get("task_revision") or 1)
+    except (TypeError, ValueError):
+        record_revision = 1
+    try:
+        record_generation = int(record.get("attempt_generation") or 1)
+    except (TypeError, ValueError):
+        record_generation = 1
+    if record_revision < int(context["task_revision"]):
+        return True
+    if record_generation < int(context["attempt_generation"]):
+        return True
+    return bool(attempt.get("invalidated"))
+
+
+def _supersede_legacy_question(
+    task_dir: Any,
+    state: dict[str, Any],
+    record: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Persist a stale single question as terminal without accepting an answer."""
+    if record.get("status") != "open":
+        return record
+    if reason is None:
+        if attempt.get("invalidated"):
+            reason = "worker attempt was superseded before its question was answered"
+        else:
+            reason = "task revision superseded this unresolved question"
+    record.update({
+        "status": "superseded",
+        "superseded_at": now(),
+        "superseded_reason": redact(reason, 400),
+        "resume": False,
+    })
+    _write_question_record(task_dir, state, record)
+    return record
+
+
+def _supersede_stale_legacy_questions(
+    task_dir: Any,
+    state: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> bool:
+    changed = False
+    for record in records:
+        try:
+            attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        except ValueError:
+            # The normal task-document validator catches this condition.  Do
+            # not silently reclassify a malformed record as a safe stale one.
+            raise
+        if _legacy_question_is_stale(record, state, attempt):
+            _supersede_legacy_question(task_dir, state, record, attempt)
+            changed = True
+    return changed
+
+
 def _supersede_batch(
     task_dir: Any,
     state: dict[str, Any],
@@ -331,16 +454,41 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         question, context, blocking, config, content_digest = _question_payload(params)
         paths = question_bus_paths(task_dir)
         records = _question_records(paths, state)
+        _supersede_stale_legacy_questions(task_dir, state, records)
         existing = next(
-            (item for item in records if item.get("attempt_id") == attempt_id and item.get("submission_id") == submission_id),
+            (
+                item for item in records
+                if item.get("attempt_id") == attempt_id
+                and item.get("submission_id") == submission_id
+                and item.get("status") != "superseded"
+            ),
             None,
         )
         if existing is not None:
             if existing.get("content_digest") != content_digest:
                 raise ValueError("idempotent question submission_id was reused with different content")
             return {"idempotent": True, "question": existing, "cursor": _question_sequence(records)}
-        if len(records) >= MAX_QUESTIONS_PER_TASK or sum(item.get("attempt_id") == attempt_id for item in records) >= MAX_QUESTIONS_PER_ATTEMPT:
-            raise ValueError("question count quota exhausted")
+        revision_context = _question_revision_context(state, attempt)
+        active_revision_records = [
+            item for item in records
+            if int(item.get("task_revision") or 1) == int(revision_context["task_revision"])
+            and item.get("status") != "superseded"
+        ]
+        active_generation_records = [
+            item for item in active_revision_records
+            if item.get("attempt_id") == attempt_id
+            and int(item.get("attempt_generation") or 1) == int(revision_context["attempt_generation"])
+        ]
+        if len(active_revision_records) >= MAX_QUESTIONS_PER_TASK:
+            raise ValueError(
+                "question count quota exhausted for the active task revision; pause automatic work and request a "
+                "new user strategy or task revision instead of reusing historical question capacity"
+            )
+        if len(active_generation_records) >= MAX_QUESTIONS_PER_ATTEMPT:
+            raise ValueError(
+                "question count quota exhausted for the active attempt generation; pause automatic work and request "
+                "a user decision or dispatch a materially revised strategy"
+            )
         numbers = [int(str(item["question_id"]).removeprefix("question-")) for item in records]
         question_id = f"question-{max(numbers, default=0) + 1:04d}"
         sequence = _question_sequence(records) + 1
@@ -350,6 +498,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "task_id": state["task_id"],
             "gate": attempt["gate"],
             "attempt_id": attempt_id,
+            **revision_context,
             "submission_id": submission_id,
             "profile": attempt["profile"],
             "question": question,
@@ -610,6 +759,18 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
         record = next((item for item in records if item.get("question_id") == question_ref), None)
         if record is None or record.get("attempt_id") != attempt_id or record.get("profile") != profile:
             raise ValueError("question_ref does not belong to this worker attempt")
+        if _legacy_question_is_stale(record, state, attempt):
+            _supersede_legacy_question(task_dir, state, record, attempt)
+        if record.get("status") == "superseded":
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "outcome": "question_superseded",
+                "question_ref": question_ref,
+                "status": "superseded",
+                "resume": False,
+                "next_action": "Do not resume this worker from the superseded question; wait for current revision guidance or a replacement dispatch.",
+            }
         if record.get("status") != "answered":
             return {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -710,27 +871,30 @@ def _normalize_question_answer(value: object) -> tuple[Any, str]:
 
 
 def list_worker_questions(params: dict[str, Any]) -> dict[str, Any]:
-    _, task_dir, state = load_state(str(params["task_id"]), params)
-    authorize_principal(state, params)
-    all_records = _question_records(question_bus_paths(task_dir), state)
-    records = list(all_records)
-    attempt_id = str(params.get("attempt_id", "")).strip()
-    if attempt_id:
-        attempt_id = safe_id(attempt_id)
-        _attempt(state, attempt_id)
-        records = [item for item in records if item["attempt_id"] == attempt_id]
-    requested_status = str(params.get("status", "")).strip()
-    if requested_status:
-        records = [item for item in records if item["status"] == requested_status]
-    return {
-        "schema": QUESTION_SCHEMA,
-        "task_id": state["task_id"],
-        "questions": [_question_record_view(item) for item in records],
-        "cursor": _question_sequence(all_records),
-        "open_count": sum(item.get("status") == "open" for item in all_records),
-        "open_question_ids": [item["question_id"] for item in all_records if item.get("status") == "open"],
-        "next_action": "answer each open question in published_sequence order; do not choose on the user's behalf" if any(item.get("status") == "open" for item in all_records) else "continue worker monitoring",
-    }
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize_principal(state, params)
+        all_records = _question_records(question_bus_paths(task_dir), state)
+        _supersede_stale_legacy_questions(task_dir, state, all_records)
+        records = list(all_records)
+        attempt_id = str(params.get("attempt_id", "")).strip()
+        if attempt_id:
+            attempt_id = safe_id(attempt_id)
+            _attempt(state, attempt_id)
+            records = [item for item in records if item["attempt_id"] == attempt_id]
+        requested_status = str(params.get("status", "")).strip()
+        if requested_status:
+            records = [item for item in records if item["status"] == requested_status]
+        return {
+            "schema": QUESTION_SCHEMA,
+            "task_id": state["task_id"],
+            "questions": [_question_record_view(item) for item in records],
+            "cursor": _question_sequence(all_records),
+            "open_count": sum(item.get("status") == "open" for item in all_records),
+            "open_question_ids": [item["question_id"] for item in all_records if item.get("status") == "open"],
+            "next_action": "answer each open question in published_sequence order; do not choose on the user's behalf" if any(item.get("status") == "open" for item in all_records) else "continue worker monitoring",
+        }
 
 
 def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
@@ -752,6 +916,20 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         record = next((item for item in records if item.get("question_id") == question_id), None)
         if record is None:
             raise ValueError("question_id does not belong to this task")
+        attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        if _legacy_question_is_stale(record, state, attempt):
+            _supersede_legacy_question(task_dir, state, record, attempt)
+        if record.get("status") == "superseded":
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "superseded",
+                "question_id": question_id,
+                "idempotent": False,
+                "resume": False,
+                "question": record,
+                "cursor": _question_sequence(records),
+                "next_action": "Do not deliver this stale answer to the worker; ask a replacement question for the current task revision if the decision is still needed.",
+            }
         option_map = {item["option_id"]: item.get("label_en") or item.get("label") for item in record.get("options") or []}
         option_ids = []
         custom_text = ""
@@ -1620,6 +1798,15 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
         if question_id.startswith("batch-"):
             return _cortex_question_batch(params, question_id)
         record = _question_record_for_main(params, question_id)
+        if record.get("status") == "superseded":
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "superseded",
+                "question_id": question_id,
+                "resume": False,
+                "durable": {"question": record},
+                "next_action": "Do not present or answer a question from a superseded task revision.",
+            }
         if record.get("status") == "answered":
             return {
                 "schema": QUESTION_SCHEMA,

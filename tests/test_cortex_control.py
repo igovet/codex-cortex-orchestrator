@@ -5119,7 +5119,7 @@ class ControlPlaneTests(unittest.TestCase):
             "details": {"affected_paths": ["docs/features/example/index.md"]},
         }
         closure = {
-            "decision": "pass", "findings": [finding],
+            "decision": "rework", "findings": [finding],
             "verification": {"executed": ["focused closure regression"], "not_executed": [], "required_missing": [], "limitations": []},
             "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
         }
@@ -5133,16 +5133,30 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rework["dispatches"][0]["phase"], "documentation")
         findings = control.db_list_task_findings(self.ledger, state["task_id"], include_resolved=False)
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["source_evidence"], [{"report_id": "report-0001", "attempt_id": review["attempt_id"]}])
+        origin = findings[0]["source_evidence"]
+        self.assertEqual(len(origin), 1)
+        self.assertEqual(origin[0]["transition"], "opened")
+        self.assertEqual(origin[0]["report_id"], review_ref)
+        self.assertEqual(origin[0]["attempt_id"], review["attempt_id"])
+        self.assertEqual(origin[0]["gate"], "review")
+        self.assertEqual(origin[0]["task_revision"], state.get("task_revision", 1))
         after_rework = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(after_rework["status"], "active")
         self.assertEqual(after_rework["closure_rework"]["review"]["target_gate"], "documentation")
         self.assertEqual(after_rework["closure_rework"]["review"]["rerun_gates"], ["review", "close"])
         self.assertTrue(next(item for item in after_rework["attempts"] if item["attempt_id"] == review["attempt_id"])["invalidated"])
+        documentation = next(
+            item for item in after_rework["attempts"]
+            if item["gate"] == "documentation" and not item.get("invalidated")
+        )
+        self.assertIn(review_ref, documentation["context_report_ids"])
 
+        documentation_results = self.v3_results(
+            rework, self.v3_report("documentation correction completed")
+        )
         rerun_review = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": rework["step"],
-            "results": self.v3_results(rework, self.v3_report("documentation correction completed")),
+            "results": documentation_results,
         })
         self.assertTrue(rerun_review["ok"], rerun_review)
         self.assertEqual(rerun_review["dispatches"][0]["phase"], "review")
@@ -5152,8 +5166,60 @@ class ControlPlaneTests(unittest.TestCase):
             item for item in current["attempts"]
             if item["gate"] == "review" and not item.get("invalidated")
         )
+        self.assertIn(review_ref, replacement_review["context_report_ids"])
+        self.assertIn(documentation_results[0]["report_ref"], replacement_review["context_report_ids"])
+        corrective_trace = [
+            item for item in control.db_list_task_findings(self.ledger, state["task_id"])[0]["source_evidence"]
+            if item["transition"] == "corrective_reported"
+        ]
+        self.assertEqual(len(corrective_trace), 1)
+        self.assertEqual(corrective_trace[0]["origin_report_ref"], review_ref)
+        self.assertEqual(corrective_trace[0]["report_id"], documentation_results[0]["report_ref"])
         resolved = dict(finding, status="resolved", blocking=False, resolved_at="2026-08-17T12:00:00Z")
         resolved_closure = dict(closure, findings=[resolved])
+        resolved_closure["decision"] = "pass"
+        resolved_gate_result = dict(resolved_closure, failure_class="product")
+
+        # Simulate a corrupted predecessor projection.  A fresh reviewer may
+        # retain the historical source report, but it cannot close the issue
+        # without the *current corrective* documentation report in its own
+        # server-scoped context.
+        original_context = list(replacement_review["context_report_ids"])
+        replacement_review["context_report_ids"] = [review_ref]
+        self.write_task_state(current)
+        rejected_report, _ = self._report_for_attempt(
+            task_dir,
+            replacement_review,
+            self.v3_report("review cannot prove a correction it did not receive"),
+        )
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+            "report": rejected_report, "gate_result": resolved_gate_result,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("current corrective report", rejected["diagnostics"][0]["message"])
+
+        # A semantic steer must also prevent an old finding route from being
+        # consumed should a damaged controller fail to supersede it first.
+        replacement_review["context_report_ids"] = original_context
+        current["task_revision"] = 2
+        self.write_task_state(current)
+        stale_report, _ = self._report_for_attempt(
+            task_dir,
+            replacement_review,
+            self.v3_report("review cannot resolve a stale semantic route"),
+        )
+        stale = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+            "report": stale_report, "gate_result": resolved_gate_result,
+        })
+        self.assertFalse(stale["ok"])
+        self.assertIn("stale semantic task revision", stale["diagnostics"][0]["message"])
+        current["task_revision"] = 1
+        self.write_task_state(current)
+
         resolved_report, _ = self._report_for_attempt(
             task_dir,
             replacement_review,
@@ -5172,7 +5238,17 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(close["ok"], close)
         self.assertEqual(close["dispatches"][0]["phase"], "close")
-        self.assertEqual(control.db_list_task_findings(self.ledger, state["task_id"])[0]["status"], "resolved")
+        resolved_finding = control.db_list_task_findings(self.ledger, state["task_id"])[0]
+        self.assertEqual(resolved_finding["status"], "resolved")
+        self.assertEqual(resolved_finding["source_evidence"][-1]["transition"], "resolved")
+        self.assertEqual(resolved_finding["source_evidence"][-1]["report_id"], resolved_ref)
+        self.assertEqual(resolved_finding["source_evidence"][-1]["gate"], "review")
+        self.assertNotEqual(resolved_finding["source_evidence"][-1]["attempt_id"], review["attempt_id"])
+        self.assertEqual(resolved_finding["source_evidence"][-1]["origin_report_ref"], review_ref)
+        self.assertEqual(
+            resolved_finding["source_evidence"][-1]["correction_report_refs"],
+            [documentation_results[0]["report_ref"]],
+        )
 
         completed = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": close["step"],
@@ -5180,6 +5256,140 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(completed["ok"], completed)
         self.assertEqual(completed["outcome"], "completed")
+
+    def test_corrective_documentation_cannot_resolve_its_review_finding(self):
+        started = self.v3_start(
+            "documentation cannot close a review finding",
+            waves=[
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        review = state["attempts"][0]
+        finding = {
+            "fingerprint": "docs-authority-001", "severity": "P2", "status": "open", "blocking": True,
+            "summary": "The reviewed documentation requires a correction.",
+            "details": {"affected_paths": ["docs/features/example/index.md"]},
+        }
+        source_ref = self._publish_closure_report(task_dir, state, review, {
+            "decision": "rework", "findings": [finding],
+            "verification": {"executed": ["focused review"], "not_executed": [], "required_missing": [], "limitations": []},
+            "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+        })
+        rework = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": source_ref}],
+        })
+        self.assertEqual(rework["outcome"], "ready_to_spawn")
+        current = control.load_task_state_for_artifact(task_dir)
+        documentation = next(
+            item for item in current["attempts"]
+            if item["gate"] == "documentation" and not item.get("invalidated")
+        )
+        duplicate_open_report, _ = self._report_for_attempt(
+            task_dir, documentation, self.v3_report("documentation confirms the finding remains open")
+        )
+        duplicate_open = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": documentation["attempt_id"], "profile": documentation["profile"],
+            "report": duplicate_open_report,
+            "gate_result": {
+                "decision": "rework", "failure_class": "product",
+                "findings": [finding],
+                "verification": {"executed": ["focused documentation check"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertTrue(duplicate_open["ok"], duplicate_open)
+        canonical = control.db_list_task_findings(self.ledger, current["task_id"])[0]
+        self.assertEqual(
+            runtime_reports._open_finding_origin(canonical)["gate"], "review",
+        )
+        report, _ = self._report_for_attempt(
+            task_dir, documentation, self.v3_report("documentation correction reported")
+        )
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": documentation["attempt_id"], "profile": documentation["profile"], "report": report,
+            "gate_result": {
+                "decision": "pass", "failure_class": "product",
+                "findings": [dict(finding, status="resolved", blocking=False, resolved_at="2026-08-20T00:00:00Z")],
+                "verification": {"executed": ["focused documentation check"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "report_validation_failed")
+        self.assertIn("fresh rerun of its origin gate", rejected["diagnostics"][0]["message"])
+        stored = control.db_list_task_findings(self.ledger, current["task_id"])
+        self.assertEqual([(item["fingerprint"], item["status"]) for item in stored], [(finding["fingerprint"], "open")])
+        self.assertEqual(stored[0]["source_evidence"][0]["transition"], "opened")
+        self.assertEqual(stored[0]["source_evidence"][0]["gate"], "review")
+        self.assertNotIn("resolved", [item["transition"] for item in stored[0]["source_evidence"]])
+
+    def test_pass_gate_result_rejects_open_findings_at_report_intake(self):
+        started = self.v3_start(
+            "a pass cannot retain an open finding",
+            waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report("review found an open blocker")),
+            "gate_result": {
+                "decision": "pass", "failure_class": "product",
+                "findings": [{
+                    "fingerprint": "open-pass-001", "severity": "P1", "status": "open", "blocking": True,
+                    "summary": "The reviewer found a blocker.",
+                }],
+                "verification": {"executed": ["focused review"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("pass gate_result cannot contain open findings", rejected["diagnostics"][0]["message"])
+
+    def test_same_gate_resolution_requires_finding_bound_correction_receipt(self):
+        finding = {
+            "fingerprint": "documentation-self-rework-001",
+            "source_evidence": [{
+                "transition": "opened", "report_id": "report-origin", "attempt_id": "documentation-origin",
+                "gate": "documentation", "task_revision": 1,
+            }],
+        }
+        state = {
+            "task_revision": 1,
+            "evidence": [{"report_id": "report-correction", "invalidated": False}],
+            "attempts": [{
+                "attempt_id": "documentation-correction", "gate": "documentation", "status": "passed",
+                "invalidated": False, "report_ids": ["report-correction"],
+            }],
+        }
+        rework = {"target_gate": "documentation"}
+        kwargs = {
+            "finding": finding,
+            "origin_attempt_id": "documentation-origin",
+            "origin_report_id": "report-origin",
+            "rework": rework,
+            "rerun_context": {"report-origin", "report-correction"},
+        }
+        self.assertEqual(runtime_reports._current_correction_report_refs(state, **kwargs), [])
+
+        finding["source_evidence"].append({
+            "transition": "corrective_reported", "report_id": "report-correction",
+            "origin_report_ref": "report-origin", "attempt_id": "documentation-correction",
+            "gate": "documentation", "task_revision": 1,
+        })
+        self.assertEqual(
+            runtime_reports._current_correction_report_refs(state, **kwargs),
+            ["report-correction"],
+        )
 
     def test_open_canonical_p2_blocks_a_textually_passing_close_and_reopens_rework(self):
         started = self.v3_start(
@@ -5235,7 +5445,7 @@ class ControlPlaneTests(unittest.TestCase):
         state = control.load_task_state_for_artifact(task_dir)
         review = state["attempts"][0]
         closure = {
-            "decision": "pass", "findings": [],
+            "decision": "rework", "findings": [],
             "verification": {
                 "executed": [], "not_executed": [],
                 "required_missing": ["Run the required package verification."],
@@ -9276,7 +9486,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.4")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.5")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

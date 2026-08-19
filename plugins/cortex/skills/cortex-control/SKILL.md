@@ -206,12 +206,21 @@ paths forbidden above.
    A final report always has `questions: []`: material decisions must complete
    the durable question lifecycle first, and non-blocking evidence gaps belong
    in `uncertainty`.
-   Every gate report must carry a separate top-level `gate_result` with
-   `decision`, `failure_class`, `findings`, `verification`, and `workspace`.
-   This is the canonical result envelope for implementation, QA, review, close,
-   and every other gate. The older top-level `closure` sibling is retained only
-   as a temporary compatibility alias for review/close and must not be placed
-   inside the strict seven-field report; when both are supplied they must agree.
+   Review, governance activation, governance close, and final close reports
+   require a separate top-level `gate_result` with `decision`,
+   `failure_class`, `findings`, `verification`, and `workspace`; other gates
+   may attach the same canonical envelope when they have a gate result. The
+   older top-level `closure` sibling is retained only as a temporary
+   compatibility alias for review/close and must not be placed inside the
+   strict seven-field report; when both are supplied they must agree. A pass
+   contains neither an open finding nor a missing required verification. A
+   corrective worker may report a changed artifact but cannot resolve an
+   inherited finding. Only a fresh rerun of the gate that opened the exact
+   fingerprint, with its immutable origin report and a separate server-bound
+   corrective report in the scoped handoff and an active server-recorded
+   rework route for the current semantic task revision, may report that
+   finding as `resolved`. Repeating an open fingerprint adds evidence but
+   never replaces its original verifier authority.
    For C2/C3 close attempts, each executed test or verification result also
    requires a non-empty concrete summary of observed output or behavior. Concise
    summaries are valid; no arbitrary word count applies, and completion

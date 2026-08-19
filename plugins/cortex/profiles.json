@@ -191,12 +191,12 @@
       "objective": "Independently validate the full-governance activation boundary for: {task_objective}",
       "ownership": "Own the activation review only; verify the initiative, policy snapshot, scope, dependencies, and risk floor before ordinary workers proceed.",
       "acceptance": [
-        "Confirm that the resolved full-governance mode, initiative scope, trigger evidence, and policy snapshot are durable and internally consistent.",
-        "Reject missing, stale, conflicting, or unauthorized governance inputs without approving project work or changing source files."
+        "Confirm that the resolved full-governance mode, autonomous or initiative scope, resolution reasons, policy snapshot, and required lifecycle gates are durable and internally consistent.",
+        "Treat unfinished implementation, absent downstream deliverables, and unrun downstream task verification as expected preconditions rather than findings; reject only missing, stale, conflicting, or unauthorized activation inputs."
       ],
       "verification": [
-        "Trace activation claims to the governance ledger, immutable record digests, dependency links, and the exact task start contract.",
-        "Attempt to falsify the scope, authorization, and policy-floor assumptions using bounded repository and ledger evidence."
+        "Trace activation claims to the server-supplied governance context, immutable policy digest, resolved pipeline, and exact task start contract.",
+        "Attempt to falsify the activation scope, authorization, policy floor, and lifecycle-gate assumptions without evaluating future delivery completion."
       ]
     },
     "plan": {
@@ -360,12 +360,12 @@
       "objective": "Independently verify full-governance closure and retrospective evidence for: {task_objective}",
       "ownership": "Own the final governance review only; verify the acceptance oracle, risk disposition, falsification review, policy snapshot, independent review, and retrospective without editing source files.",
       "acceptance": [
-        "Confirm that every full-governance close obligation has concrete evidence tied to the current initiative/task revision and no superseded or pending policy is treated as active.",
-        "Record residual risk, unresolved questions, and any required corrective route; do not approve closure when the governance evidence is incomplete."
+        "Use this independent report and its verified predecessor receipts to provide concrete evidence for every full-governance close obligation at the current task revision.",
+        "Record residual risk, falsification results, retrospective conclusions, unresolved questions, and any required corrective route; do not require the post-review server evidence projection or final handoff to exist before this report."
       ],
       "verification": [
-        "Cross-check governance records, close evidence, report receipts, dependency state, and final handoff for matching immutable scope and digests.",
-        "Attempt to falsify the oracle, risk, falsifier, independent-review, and retrospective claims before reporting a passed governance close."
+        "Cross-check the supplied governance context, task contract, current source, verification results, predecessor report receipts, and dependency state for matching scope and digests.",
+        "Attempt to falsify the oracle, risk, implementation, documentation, and retrospective claims before reporting; Cortex projects the independent-review evidence and audit receipt only after a valid report is consumed."
       ]
     }
   },

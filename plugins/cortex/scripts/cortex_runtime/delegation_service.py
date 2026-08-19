@@ -374,6 +374,31 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100]
+        if gate in {"governance_activation", "governance_close"}:
+            governance = (
+                task_definition.get("governance")
+                if isinstance(task_definition.get("governance"), dict)
+                else state.get("governance")
+                if isinstance(state.get("governance"), dict)
+                else {}
+            )
+            # Governance workers cannot enumerate server-owned ledger state.
+            # Give them one bounded, immutable-context projection instead of
+            # forcing them to infer activation from unfinished deliverables.
+            package["governance_context"] = sanitize_structured({
+                "schema": governance.get("schema"),
+                "requested_mode": governance.get("requested_mode"),
+                "effective_mode": governance.get("effective_mode"),
+                "complexity": governance.get("complexity") or state.get("complexity"),
+                "reasons": list(governance.get("reasons") or []),
+                "trigger_evidence": list(governance.get("trigger_evidence") or []),
+                "initiative_ref": governance.get("initiative_ref") or "",
+                "autonomous_scope_ref": governance.get("autonomous_scope_ref") or "",
+                "policy_snapshot": governance.get("policy_snapshot") or {},
+                "policy_snapshot_digest": governance.get("policy_snapshot_digest"),
+                "close_obligations": list(governance.get("close_obligations") or []),
+                "current_pipeline": list(state.get("current_pipeline") or []),
+            })
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
         package.pop("task_objective", None)

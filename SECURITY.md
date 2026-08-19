@@ -2,11 +2,16 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.4` source line. The public
+Security fixes are prepared for the current `9.2.5` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
+
+The 9.2.5 source candidate adds governance schema v10 integrity checks. Its
+exact source cachebuster is `9.2.5+codex.20260819205849`; tracked-release and
+installed-plugin parity remain separate gates, and this source-tree note is not
+a publication or installation claim.
 
 ## Reporting a vulnerability
 
@@ -62,11 +67,16 @@ Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
 The governance bearer is returned only with the original successful start
-response. Cortex persists its SHA-256 digest, never the reusable plaintext,
-and does not reissue it on an idempotent retry. Any legacy plaintext bearer is
-deleted and invalidated on first registry access; the affected task fails
-closed instead of preserving a possibly compromised credential. Workers must
-never receive or persist this coordinator-only bearer.
+response. Governance schema v10 persists only a SHA-256 verifier plus
+server-owned claims: exact task/initiative scope, principal, thread, allowed
+actions, generation, expiry, and revocation history. It never persists the
+reusable plaintext or reissues it on an idempotent retry. If the response is
+lost, same-principal/thread recovery rotates a new bearer, revokes the old
+generation, and records a non-secret audit event; it cannot recover a bearer
+for another task or identity. Any legacy plaintext bearer is deleted and
+invalidated on first registry access; the affected task fails closed instead
+of preserving a possibly compromised credential. Workers must never receive or
+persist this coordinator-only bearer.
 
 `governance_mode=off` is fail-closed: C1 callers must submit an exhaustive
 boolean assessment of all documented hard and topology triggers. Keyword
@@ -92,13 +102,23 @@ carry a bounded recent projection so answered intent survives attempt changes.
 
 Worker-facing caller, input, and schema validation failures are structured as
 same-attempt corrections and do not consume recovery budget. Evidence-backed
-pipeline rework has no attempt or same-strategy limit: unresolved acceptance,
-verification, or canonical findings continue to produce corrective dispatches.
-Repeated failures automatically raise reasoning effort and, for eligible
-workers, escalate routing to Terra instead of blocking the task.
+pipeline rework has no fixed attempt or same-strategy quota while acceptance,
+verification, or canonical findings remain unresolved. A materially identical
+no-progress signature is a separate liveness boundary: autonomous retries
+pause for an explicit new strategy, preserving the failed gate and evidence
+instead of synthesizing a pass. Repeated failures automatically raise
+reasoning effort and, for eligible workers, escalate routing to Terra instead
+of silently closing the task.
 Only explicit non-retryable integrity, storage, permission, or unavailable
 identity failures terminate that worker attempt. Bounded briefing, report, and
 coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
+
+Manifest capture is fail-closed and bounded by maximum entries, hashed bytes,
+and elapsed time. Budget exhaustion returns a partial result with a reason and
+cannot authorize a complete handoff. A bounded stat-keyed digest cache is an
+optimization only. The release workflow requires the 50,000-file benchmark to
+report `target_met: true`; benchmark output is temporary and must not contain
+credentials or enter the release archive.
 
 Required plan approval is bound to a specific plan revision, planner report,
 verified predecessor evidence digest, and semantic future-pipeline digest. A
@@ -129,11 +149,18 @@ original form and withheld from workers until a canonical English translation
 is recorded. Successors may reopen a resolved decision only after an explicit
 current user change.
 
+Question records also bind task revision, plan revision, and attempt strategy
+generation. A material steer supersedes unresolved questions and downstream
+evidence; a stale answer cannot be applied to a newer revision. Quotas are
+scoped to the active revision/generation rather than becoming a permanent
+cross-revision denial of a required blocking question.
+
 The archive boundary is validated from `git archive HEAD`, not the mutable
 working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This repository is a source candidate only. The 9.2.4+codex.20260819182839
-build has not been installed into a user's plugin and is not published or
-tagged.
+This repository is a source candidate only. The prior
+9.2.4+codex.20260819182839 build was not installed from this checkout and is
+not published or tagged here. The current source cachebuster is
+`9.2.5+codex.20260819205849`; installation and publication remain pending.

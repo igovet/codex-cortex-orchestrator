@@ -3,8 +3,8 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.4 `cortex/v8` task ledger plus
-the additive v9 governance ledger and public `cortex/orchestration/v5`
+The local MCP server implements the Cortex 9.2.5 `cortex/v8` task ledger plus
+the additive v10 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through exactly nine public tools: coordinator
 lifecycle operations `start_orchestration`, `continue_orchestration`, and
@@ -26,7 +26,7 @@ to the content checksum; inconsistent history fails closed.
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the stable executable and public facade for task, report, and lane tools.
 - [gate_transitions.py](../../../plugins/cortex/scripts/cortex_runtime/gate_transitions.py) owns active-gate resolution, evidence policy, C2/C3 completion requirements, durable transitions, and terminal manifest cleanup behind the `record_gate` facade.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns orchestration start/continue/inspect transitions, transaction checkpoints, waves, and native dispatch assembly.
-- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v9, governance tables, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
+- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v10, governance tables, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
 - [governance.py](../../../plugins/cortex/scripts/cortex_runtime/governance.py) owns mode resolution, initiative/dependency integrity, immutable records and snapshots, constrained exceptions, and coordinator-approved promotion.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
@@ -46,7 +46,9 @@ The root ledger owns private `cortex.db` (mode `0600`) and the advisory
 operations, report/delegation indexes, questions, snapshots, classifications,
 lanes, activations, resource claims, findings, projection jobs, prune
 tombstones, revisions, worker sessions, attempt messages, trace observations,
-and immutable artifact content. Schema v9 adds governance tables and records;
+and immutable artifact content. Schema v10 adds governance integrity indexes,
+scope/revision triggers, and idempotent submission receipts; schema v9 added
+the initial governance tables and records;
 schema v8 added revision-aware task/plan
 records, native worker-session identity, attempt messages, trace/tool
 observations, and atomic question-batch storage exposed through
@@ -171,6 +173,16 @@ complete boolean assessment of every documented hard and topology trigger,
 which is included in the policy snapshot. Text classification can only raise
 the governance floor.
 
+Governance v10 reads each record body from its immutable content artifact and
+checks the digest and cached JSON before policy evaluation. Normalized scope
+keys, exact task/initiative links, one-successor revision chains, strict JSON,
+and immutable-field triggers reject cross-scope, sibling-revision, mutation,
+and non-finite-number corruption. `submission_id` command digests make
+retries conflict-safe. Capability claims are task/initiative-scoped and bind
+principal, thread, generation, expiry, allowed actions, and revocation;
+recovery rotates a lost bearer only for the same active identity and never
+returns an old plaintext value.
+
 Cortex keeps each new v5 task on a generated task-local authorization identity.
 The synchronous `PostToolUse` hook separately binds its returned `task_ref` to
 the documented hook `session_id`; environment identity is only a compatibility
@@ -199,6 +211,12 @@ addressable native `host_agent_id`; the same attempt/session is resumed rather
 than replaced. If the native session is unavailable, the steer remains durable
 and the coordinator must inspect/continue the revised pipeline. A completed
 source is immutable and uses the separate linked `follow_up` task route.
+
+Revision impact is classified from the canonical English steer message. The
+earliest affected gate and all downstream evidence are invalidated, while
+documentation-only changes remain scoped to documentation. Worker questions
+carry task/plan revision and strategy-generation identity; unresolved old
+questions are superseded and cannot be answered after a material steer.
 
 A user request to correct a task that is already `completed` uses
 `manage_orchestration(intent="follow_up")` with the exact completed source
@@ -332,6 +350,11 @@ task-lifetime quota. `replan_count` remains an audit counter, while the old
 `replan_limit` value is accepted only so persisted tasks remain readable.
 Per-gate counts and strategy names remain audit and escalation evidence; they
 never cap repeated corrective work.
+The liveness boundary is instead a no-progress circuit breaker: when the
+finding fingerprint, affected paths, manifest/dispatch digest, verification
+result, and failure class remain materially identical for the configured
+repeat window, autonomous work pauses for an explicit user strategy. The
+failed gate and evidence remain durable; the pause never becomes a false pass.
 Before recording the current attempt or gate, the engine preflights pending
 implementation retention, completed-gate rework, and singleton Planner
 reapproval. If an older runtime already left an active current gate with no
@@ -547,6 +570,25 @@ in the strict seven-field report. Governance review evidence is server-owned,
 bound to the consumed report receipt and independent reviewer identity, and
 covers the gate's typed obligations in one immutable verified artifact.
 
+A `pass` result contains neither an open finding nor a missing required
+verification. The materialized `task_findings.source_evidence` records the
+server-bound opening/resolution transition with report, receipt, immutable
+artifact, attempt, gate, and **semantic task revision** references. The first
+trusted open event is immutable authority: later repeated `open` observations
+add evidence but cannot replace its verifier/gate. A resolved transition
+additionally retains the exact origin report and the current server-bound,
+finding-specific corrective-report refs it consumed. A corrective worker can
+confirm its changed artifact but cannot resolve an inherited finding. Only a
+fresh rerun of the gate that opened the exact fingerprint can report it as
+`resolved`, and only when the immutable origin report and a separate current
+corrective report are in that rerun's scoped predecessor handoff and the
+matching server-recorded rework is still active for the current semantic task
+revision. A different fingerprint, gate, stale attempt/revision, missing or
+unbound correction, or unbound report fails at report intake without mutating
+canonical finding state. An invalidated source receipt never serves as current
+pass evidence; its immutable report artifact is retained only as bounded
+historical provenance for the corrective handoff.
+
 For C2/C3 close attempts, Cortex additionally requires at least one executed
 test or verification result and a non-empty concrete summary of the observed
 output or behavior. Completion markers such as
@@ -693,6 +735,13 @@ read-only result validator. Symlinks are recorded but never followed. Thus the
 receipt remains an independent local changed-file check without treating
 recognized ephemeral outputs as source changes.
 
+Manifest capture is bounded by `max_entries`, `max_hashed_bytes`, and
+`max_seconds`; a limit produces a partial result with a reason and cannot
+authorize a complete handoff. A bounded digest cache reuses unchanged hashes
+only when the full stat identity matches. CI runs
+`scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30` and
+requires its JSON `target_met` field to be true.
+
 Every task-start and per-attempt manifest capture is normalized into an
 immutable content-addressed `cortex.db` record. The snapshot address
 includes the root, frozen policy, entries, entry count, and manifest digest;
@@ -779,11 +828,12 @@ during retirement.
 
 ## Verification
 
-Focused plan-approval, replan, recovery, and read-only artifact regressions
-pass. The cold-boot smoke uses the public JSON-RPC server to reject
+The focused plan-approval, replan, recovery, and read-only artifact regressions
+described here are historical 9.2.4 source evidence; they do not certify the
+Unreleased/9.2.5 hardening draft. The cold-boot smoke uses the public JSON-RPC server to reject
 implementation loss, apply three dynamic pipeline changes beyond the persisted
 legacy replan limit, and verify every resulting gate through close. Complete
-discovery validation remains a separate governance-v9 workstream and is not
+discovery validation remains a separate governance-v10 workstream and is not
 claimed here. These checks exercise the source
 MCP server and mocked/native JSON-RPC exchanges; this checkout does not include
 a live Codex Desktop renderer, so installed-plugin and live-host button

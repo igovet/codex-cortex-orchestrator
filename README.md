@@ -13,10 +13,10 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.4-7c3aed" alt="Cortex 9.2.4" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.5-7c3aed" alt="Cortex 9.2.5" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
-        <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
+        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v10-0f766e" alt="task schema v8 and governance schema v10" />
       </p>
     </td>
   </tr>
@@ -662,6 +662,30 @@ flowchart LR
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
+### Unreleased / 9.2.5 hardening draft
+
+The current source-tree hardening draft extends governance with schema v10
+integrity guarantees. Governance record bodies are read from verified
+immutable content artifacts; exact normalized scope, task/initiative links,
+linear revisions, strict JSON, immutable-field triggers, and idempotent
+submission receipts fail closed on corruption or replay conflict. Coordinator
+capabilities are short-lived scoped claims carrying principal, thread,
+generation, expiry, and allowed actions. A lost bearer can be rotated only for
+the same active identity; old generations are revoked and plaintext is never
+stored.
+
+Corrective work remains open-ended while acceptance or findings require work,
+but a repeated materially identical no-progress signature pauses autonomous
+retries for an explicit user strategy without producing a false pass. Material
+steer classifies the earliest affected gate and invalidates downstream proof;
+worker questions are bound to task/plan revision and strategy generation.
+Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
+reuse a bounded digest cache. CI runs the 50,000-file manifest benchmark and
+requires `target_met: true`. The exact 9.2.5 cachebuster and full release/live
+results remain pending until the candidate is committed and validated. The
+repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
+for runtime, release workflow, scripts, tests, and documentation changes.
+
 ### Why this is more reliable than ordinary multi-agent work
 
 - **State survives compaction and resume.** The goal, decisions, workers,
@@ -848,10 +872,12 @@ the prior plan, approval, and basis digests in history. This makes a changed
 specialist, dependency, path, acceptance criterion, or verification step
 auditable without silently reinterpreting a completed wave.
 
-The root coordinator model is an operator choice separate from worker routing.
-Luna `xhigh` is the practical default for multi-wave orchestration. Terra is a
-better fit when reports conflict, strategy is unclear, or a routing/completion
-mistake would be expensive.
+The root coordinator (the conductor for the orchestration) is an operator
+choice separate from worker routing. Use **Terra** with `high` reasoning effort
+as the default. Raise the conductor to **Terra** with `xhigh` only for very
+large or unusually tangled tasks—for example, when reports conflict, strategy
+is unclear, or a routing/completion mistake would be expensive. This setting
+does not change Cortex's per-worker model policy.
 
 ---
 
@@ -959,6 +985,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 python3 scripts/validate-cortex-marketplace.py
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/cortex-luna-high-eval.py
+python3 -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30
 python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py
 bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --check
@@ -971,6 +998,9 @@ does **not** install or update the user's plugin:
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Prove C3 automatically activates and completes full governance.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
+# Narrow live handoff smoke: a Review finding must pass through corrective
+# Documentation and a fresh Review rerun before it is resolved (hard 300 s).
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
 ```
 
 Run the read-only preflight on a local or SSH host with:

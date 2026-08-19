@@ -581,10 +581,24 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("top-level `gate_result` outside the 7-key report", review_prompt)
         self.assertIn("outside the 7-key report", review_prompt)
         self.assertIn("Do not add closure; it is a legacy input alias only", review_prompt)
-        self.assertIn("Pass requires findings=[]", review_prompt)
+        self.assertIn("Pass permits no open finding", review_prompt)
+        self.assertIn("status=resolved", review_prompt)
         package["gate"] = "close"
         close_prompt = control.host_spawn_prompt("build_verification", package)
         self.assertIn("top-level `gate_result` outside the 7-key report", close_prompt)
+        package["gate"] = "governance_close"
+        package["governance_context"] = {
+            "requested_mode": "auto",
+            "effective_mode": "full",
+            "reasons": ["complexity:C3"],
+            "autonomous_scope_ref": "governance-scope-autonomous",
+            "policy_snapshot_digest": "a" * 64,
+            "current_pipeline": ["governance_activation", "implementation", "governance_close", "close"],
+        }
+        governance_close_prompt = control.host_spawn_prompt("code_reviewer", package)
+        self.assertIn("input to the server-owned immutable governance evidence projection", governance_close_prompt)
+        self.assertIn("MUST NOT be treated as missing prerequisites", governance_close_prompt)
+        self.assertIn("exact fingerprint, status=resolved", governance_close_prompt)
 
     def test_planner_briefing_requires_top_level_planning_sibling(self):
         package = {
@@ -1797,7 +1811,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.4")
+        self.assertEqual(base_version, "9.2.5")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

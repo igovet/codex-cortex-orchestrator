@@ -1,6 +1,6 @@
 # Storage classification ADR
 
-Status: implemented source-tree policy (schema v9; task schema remains cortex/v8).
+Status: implemented source-tree policy (governance schema v10; task schema remains cortex/v8).
 
 ## Decision
 
@@ -15,15 +15,18 @@ requested projection is materialized. It must not create a fixed report or
 planning layout merely because a task exists. Legacy v7/v3 task files are
 unsupported input: they are not imported, resumed, repaired, or deleted.
 
-This ADR records the implemented SQLite-authoritative boundary. It describes
-the workspace source; it is not evidence that a separately installed plugin
-has been updated.
+This ADR records the implemented SQLite-authoritative boundary. Governance
+schema v10 additionally makes immutable artifact bodies authoritative, binds
+records to an exact non-null scope identity, and enforces linear revision
+chains. It describes the workspace source; it is not evidence that a
+separately installed plugin has been updated.
 
 ## Classification matrix
 
 | Data or path | Canonical owner | Creator / reader | Required or optional | Rebuild, retention, security, completion relevance |
 | --- | --- | --- | --- | --- |
-| `cortex.db` | SQLite schema (`tasks`, revisions/state, plans, attempts, operations, receipts, documents, findings, blobs, logical artifacts, exports, tombstones, manifests, audit data) | Runtime creates/updates; runtime and scoped APIs read | Required | Rebuild is not applicable; retain for active and retained completed tasks; private ledger root and mode `0600`; all state transitions and completion proof depend on it |
+| `cortex.db` | SQLite schema (`tasks`, revisions/state, plans, attempts, operations, receipts, documents, findings, blobs, logical artifacts, exports, tombstones, manifests, audit data, governance v10 records/submissions) | Runtime creates/updates; runtime and scoped APIs read | Required | Rebuild is not applicable; retain for active and retained completed tasks; private ledger root and mode `0600`; all state transitions and completion proof depend on it |
+| Governance record body and revision chain | SQLite governance row plus its immutable content artifact; v10 scope/revision indexes and triggers | Governance service writes transactionally; scoped governance APIs read and verify | Required for governance records | The artifact body is authoritative; `content_json` is a checked cache only. Exact initiative/task scope, one successor per predecessor, strict JSON, and immutable-field triggers fail closed on mismatch |
 | `cortex.db-wal`, `cortex.db-shm` | SQLite engine, not Cortex domain data | SQLite creates/reads; runtime must not treat either as a record | Incidental while WAL is active | SQLite lifecycle controls them; retain only as engine requires and never copy, parse, prune independently, or use for completion; inherit private directory controls |
 | `.state.lock` | Runtime advisory coordination, not task state | Runtime creates/reads during serialized access | Required only while coordinating access | Re-creatable and disposable after no holder remains; mode `0600`; never an audit record or completion input |
 | `tasks/<task>/delegations/*.briefing.md` | SQLite artifact catalog plus immutable exported briefing bytes; the file is the host capability | Runtime creates once per dispatch; worker reads exactly the granted file (or scoped paged fallback) | Required for each native dispatch | Not rebuilt in place: digest/path/permissions must remain stable; retain with the attempt until task cleanup policy permits; private regular file (`0400`), no symlink; worker acknowledgement is mandatory close evidence |
@@ -86,13 +89,19 @@ capabilities when a dispatch needs one.
 
 ## Implemented storage workflow
 
-Migrations are append-only through v9 and run in one SQLite transaction with a
+Migrations are append-only through v10 and run in one SQLite transaction with a
 content checksum. Canonical writes first commit content blobs, logical-artifact
 metadata, export authorization, and an outbox job. Projection materialization
 then claims a lease, writes a private regular file by atomic replacement and
 `fsync`, verifies its digest, and acknowledges the job separately. A failure
 leaves retryable canonical state. Required briefings add a hard capability
 check; optional reports, receipts, plans, and journal outputs may be rebuilt.
+
+Governance v10 validates the artifact body and digest before reads, enforces
+non-null scope keys and exact task/initiative links, rejects sibling revisions,
+and retains only canonical lifecycle metadata for status transitions. A
+lost coordinator capability is recovered by same-principal/thread rotation;
+the old generation is revoked and no plaintext bearer is persisted.
 
 Prune similarly records a tombstone before any filesystem operation. It never
 deletes WAL/SHM independently; after safe projection removal, it finalizes the

@@ -1,4 +1,4 @@
-"""Server-owned governance primitives for the v9 Cortex ledger.
+"""Server-owned governance primitives for the v10 Cortex ledger.
 
 The orchestration engine remains responsible for sequencing workers.  This
 module owns the durable governance contract that sits beside that pipeline:
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -73,7 +74,16 @@ def _now() -> str:
 
 
 def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise GovernanceError("governance content must be strict JSON", code="content_invalid") from exc
 
 
 def _digest(value: Any) -> str:
@@ -103,10 +113,34 @@ def _row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return None if row is None else {str(key): row[key] for key in row.keys()}
 
 
+def _strict_json_loads(value: str, label: str) -> Any:
+    """Decode JSON without accepting JavaScript-only constants such as NaN."""
+    try:
+        return json.loads(
+            value,
+            parse_constant=lambda _constant: (_ for _ in ()).throw(ValueError("non-finite JSON constant")),
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise GovernanceError(f"stored governance {label} is invalid", code="ledger_corrupt") from exc
+
+
+def _scope_key(initiative_ref: str | None, task_id: str | None) -> str:
+    """Return the non-null, collision-free database identity for a scope."""
+    initiative = str(initiative_ref or "").strip()
+    task = str(task_id or "").strip()
+    if initiative and task:
+        return f"initiative-task:{len(initiative)}:{initiative}:{len(task)}:{task}"
+    if initiative:
+        return f"initiative:{len(initiative)}:{initiative}"
+    if task:
+        return f"task:{len(task)}:{task}"
+    return "project:"
+
+
 def _connection(root: Path, *, write: bool = False):
     # Keep this wrapper in one place so all governance calls inherit the
     # ledger's private-root, WAL, FK, lock, and transaction policy.
-    return ledger_db._connection(root, write=write)  # type: ignore[attr-defined]
+    return ledger_db.connection(root, write=write)
 
 
 _GOVERNANCE_BLOB_MIME = "application/json"
@@ -114,7 +148,7 @@ _GOVERNANCE_BLOB_MIME = "application/json"
 
 def _governance_blob_chunks(raw: bytes) -> list[bytes]:
     """Return the canonical UTF-8 chunks used by the v7 blob catalog."""
-    return ledger_db._text_chunk_boundaries(raw)  # type: ignore[attr-defined]
+    return ledger_db.text_chunk_boundaries(raw)
 
 
 def _validate_blob_with_connection(
@@ -300,7 +334,7 @@ def _store_governance_artifact(
                 )
         return supplied
     raw = body_json.encode("utf-8")
-    blob_ref = ledger_db._blob_ref(digest, _GOVERNANCE_BLOB_MIME, len(raw))  # type: ignore[attr-defined]
+    blob_ref = ledger_db.content_addressed_blob_ref(digest, _GOVERNANCE_BLOB_MIME, len(raw))
     chunks = _governance_blob_chunks(raw)
     now = _now()
     connection.execute(
@@ -337,10 +371,7 @@ def _record_row(row: sqlite3.Row) -> dict[str, Any]:
     value = _row_dict(row) or {}
     for key in ("content_json", "approval_basis_json"):
         if value.get(key) is not None:
-            try:
-                value[key] = json.loads(str(value[key]))
-            except json.JSONDecodeError as exc:
-                raise GovernanceError(f"stored governance {key} is invalid", code="ledger_corrupt") from exc
+            value[key] = _strict_json_loads(str(value[key]), key)
     return value
 
 
@@ -358,7 +389,7 @@ def _validate_content_shape(value: Any, *, depth: int = 0) -> None:
                 raise GovernanceError("governance content object key is too large", code="content_string_exceeded")
             _validate_content_shape(item, depth=depth + 1)
         return
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, list):
         if len(value) > MAX_GOVERNANCE_COLLECTION_ITEMS:
             raise GovernanceError("governance content has too many array items", code="content_items_exceeded")
         for item in value:
@@ -366,6 +397,13 @@ def _validate_content_shape(value: Any, *, depth: int = 0) -> None:
         return
     if isinstance(value, str) and len(value.encode("utf-8")) > MAX_GOVERNANCE_STRING_BYTES:
         raise GovernanceError("governance content string is too large", code="content_string_exceeded")
+    if value is None or type(value) in {bool, int, str}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise GovernanceError("governance content must not contain non-finite numbers", code="content_invalid")
+        return
+    raise GovernanceError("governance content must use strict JSON types", code="content_invalid")
 
 
 def _validated_artifact_payload(connection: sqlite3.Connection, metadata: dict[str, Any]) -> Any:
@@ -382,9 +420,37 @@ def _validated_artifact_payload(connection: sqlite3.Connection, metadata: dict[s
         for chunk in chunks
     )
     try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(raw.decode("utf-8"), "content artifact")
+        _validate_content_shape(value)
+        return value
+    except (UnicodeDecodeError, GovernanceError) as exc:
         raise GovernanceError("governance evidence artifact must contain canonical JSON", code="artifact_schema_invalid") from exc
+
+
+def _record_from_storage(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    """Read a record from its immutable artifact and verify the cache.
+
+    ``content_json`` remains in the v9 table only for indexed migration
+    compatibility.  It is never authoritative after v10: any disagreement
+    between that cache and the immutable artifact is ledger corruption.
+    """
+    record = _record_row(row)
+    artifact_ref = str(row["content_artifact_ref"] or "").strip()
+    if not artifact_ref:
+        raise GovernanceError("governance revision is missing its immutable content artifact", code="ledger_corrupt")
+    try:
+        metadata = _validate_governance_artifact(
+            connection,
+            artifact_ref,
+            expected_digest=str(row["content_digest"]),
+        )
+        body = _validated_artifact_payload(connection, metadata)
+    except GovernanceError as exc:
+        raise GovernanceError("governance record immutable artifact is invalid", code="ledger_corrupt") from exc
+    if _digest(body) != str(row["content_digest"]) or _canonical(body) != str(row["content_json"]):
+        raise GovernanceError("governance record cache does not match immutable artifact", code="ledger_corrupt")
+    record["content_json"] = body
+    return record
 
 
 def _normalise_trigger_key(value: Any) -> str:
@@ -788,6 +854,27 @@ def add_dependency(
     return dict(row) if row else {"dependency_ref": ref}
 
 
+def _unresolved_completion_dependencies(connection: sqlite3.Connection, initiative_ref: str) -> list[str]:
+    """Return blocking/requires edges whose target has not reached done state."""
+    unresolved: list[str] = []
+    rows = connection.execute(
+        "SELECT dependency_ref,target_type,target_ref FROM initiative_dependencies "
+        "WHERE source_type='initiative' AND source_ref=? AND dependency_type IN ('blocks','requires') "
+        "ORDER BY dependency_ref",
+        (initiative_ref,),
+    ).fetchall()
+    for dependency in rows:
+        target_type = str(dependency["target_type"])
+        target_ref = str(dependency["target_ref"])
+        if target_type == "initiative":
+            target = connection.execute("SELECT status FROM initiatives WHERE initiative_ref=?", (target_ref,)).fetchone()
+        else:
+            target = connection.execute("SELECT status FROM tasks WHERE task_id=?", (target_ref,)).fetchone()
+        if target is None or str(target["status"]) not in {"completed", "closed"}:
+            unresolved.append(str(dependency["dependency_ref"]))
+    return unresolved
+
+
 _CLOSE_EVIDENCE_KEYS = (
     "oracle_evidence",
     "risk_disposition",
@@ -815,6 +902,7 @@ def _validate_independent_review_attestation(
     *,
     initiative_ref: str,
     owner: str,
+    initiative_revision: int,
     metadata: dict[str, Any],
     payload: dict[str, Any],
 ) -> None:
@@ -873,6 +961,42 @@ def _validate_independent_review_attestation(
     ).strip()
     if not reviewer or reviewer == owner or (declared_reviewer and declared_reviewer != reviewer):
         raise GovernanceError("independent review is not bound to an independent completed worker session", code="review_attestation_invalid")
+    try:
+        reviewed_initiative_revision = int(payload.get("reviewed_initiative_revision"))
+    except (TypeError, ValueError) as exc:
+        raise GovernanceError("independent review must bind the initiative revision", code="review_attestation_invalid") from exc
+    if reviewed_initiative_revision != initiative_revision:
+        raise GovernanceError("independent review is stale for the current initiative revision", code="review_attestation_invalid")
+    reviewed_task_revisions = payload.get("reviewed_task_revisions")
+    if not isinstance(reviewed_task_revisions, dict):
+        raise GovernanceError("independent review must bind reviewed task revisions", code="review_attestation_invalid")
+    linked_tasks = connection.execute(
+        "SELECT links.task_id, tasks.revision FROM initiative_task_links AS links "
+        "JOIN tasks ON tasks.task_id=links.task_id WHERE links.initiative_ref=? GROUP BY links.task_id",
+        (initiative_ref,),
+    ).fetchall()
+    expected_task_revisions = {str(item["task_id"]): int(item["revision"]) for item in linked_tasks}
+    actual_task_revisions: dict[str, int] = {}
+    try:
+        actual_task_revisions = {str(key): int(value) for key, value in reviewed_task_revisions.items()}
+    except (TypeError, ValueError) as exc:
+        raise GovernanceError("independent review task revisions are invalid", code="review_attestation_invalid") from exc
+    if actual_task_revisions != expected_task_revisions:
+        raise GovernanceError("independent review is stale for linked task revisions", code="review_attestation_invalid")
+    reviewed_artifacts = payload.get("reviewed_artifact_digests")
+    if not isinstance(reviewed_artifacts, dict) or not reviewed_artifacts:
+        raise GovernanceError("independent review must bind reviewed immutable artifact digests", code="review_attestation_invalid")
+    for artifact_ref, digest in reviewed_artifacts.items():
+        reference = str(artifact_ref or "").strip()
+        expected_digest = str(digest or "").strip().lower()
+        if not reference or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+            raise GovernanceError("independent review artifact digest binding is invalid", code="review_attestation_invalid")
+        _validate_governance_artifact(
+            connection,
+            reference,
+            expected_digest=expected_digest,
+            initiative_ref=initiative_ref,
+        )
 
 
 def _validate_close_evidence(
@@ -967,6 +1091,7 @@ def _validate_close_evidence(
                     connection,
                     initiative_ref=initiative_ref,
                     owner=owner,
+                    initiative_revision=int(initiative["revision"]),
                     metadata=metadata,
                     payload=payload,
                 )
@@ -1016,6 +1141,13 @@ def transition_initiative(
         }
         if target != current and target not in allowed.get(current, set()):
             raise GovernanceError(f"initiative cannot transition from {current} to {target}", code="invalid_transition")
+        if target in {"completed", "closed"}:
+            unresolved = _unresolved_completion_dependencies(connection, ref)
+            if unresolved:
+                raise GovernanceError(
+                    "initiative has unresolved blocks/requires dependencies: " + ", ".join(unresolved),
+                    code="dependency_unresolved",
+                )
         if target == "closed":
             _validate_close_evidence(connection, row, evidence_value)
         now = _now()
@@ -1039,26 +1171,26 @@ def create_record(
     content_artifact_ref: str | None = None,
     record_ref: str | None = None,
     actor_role: str | None = None,
+    submission_id: str | None = None,
 ) -> dict[str, Any]:
     # Promotion evaluation may call this helper while holding the one-writer
     # connection. Re-running migration setup on a nested connection would
     # try to acquire a second BEGIN IMMEDIATE and self-deadlock SQLite.
-    active_connections = ledger_db._active_connections()  # type: ignore[attr-defined]
-    if str(root.resolve()) not in active_connections:
+    if not ledger_db.in_transaction(root):
         ledger_db.ensure_database(root)
     kind = str(record_type or "").lower()
     if kind not in RECORD_TYPES:
         raise GovernanceError("record_type is invalid", code="invalid_record_type")
-    if initiative_ref is None and task_id is None and kind not in {"policy", "promotion"}:
-        raise GovernanceError(
-            "governance record requires initiative_ref or task_id; only project policy and promotion records may use project scope",
-            code="record_scope_required",
-        )
     role = str(actor_role or ("coordinator" if str(created_by or "").strip().lower() in {"", "coordinator", "system"} else "worker")).strip().lower()
     if role not in ACTOR_ROLES:
         raise GovernanceError("actor_role must be coordinator, worker, or reviewer", code="invalid_actor_role")
     initiative = str(initiative_ref or "").strip() or None
     task = str(task_id or "").strip() or None
+    if initiative is None and task is None and kind not in {"policy", "promotion"}:
+        raise GovernanceError(
+            "governance record requires initiative_ref or task_id; only project policy and promotion records may use project scope",
+            code="record_scope_required",
+        )
     if initiative:
         _safe_ref(initiative, "initiative_ref", prefix="initiative-")
     if task:
@@ -1070,7 +1202,7 @@ def create_record(
         raise GovernanceError("record status is invalid", code="invalid_record_status")
     if role != "coordinator" and kind in {"policy", "promotion", "exception"} and status_value in {"active", "approved"}:
         raise GovernanceError("worker and reviewer proposals cannot approve or activate policy governance records", code="coordinator_approval_required")
-    body = content if isinstance(content, (dict, list, str, int, float, bool)) or content is None else str(content)
+    body = content
     _validate_content_shape(body)
     body_json = _canonical(body)
     if len(body_json.encode("utf-8")) > MAX_GOVERNANCE_CONTENT_BYTES:
@@ -1078,11 +1210,40 @@ def create_record(
     digest = _digest(body)
     ref = str(record_ref or "").strip() or "record-" + hashlib.sha256(f"{kind}:{initiative}:{task}:{digest}:{_now()}".encode()).hexdigest()[:24]
     _safe_ref(ref, "record_ref", prefix="record-")
+    submission = str(submission_id or "").strip() or None
+    if submission:
+        _safe_ref(submission, "submission_id")
+    if approval_basis is not None:
+        _validate_content_shape(approval_basis)
+    approval_json = _canonical(approval_basis) if approval_basis is not None else None
+    scope = _scope_key(initiative, task)
+    # Submission idempotency represents caller intent, not server-derived
+    # retention timestamps or generated record refs.  In particular, retries
+    # of a sensitive-record request must not fail merely because ``now`` has
+    # advanced while calculating its retention window.
+    submission_command_digest = _digest({
+        "scope_key": scope,
+        "initiative_ref": initiative,
+        "task_id": task,
+        "record_type": kind,
+        "status": status_value,
+        "supersedes": str(supersedes or "").strip() or None,
+        "content_digest": digest,
+        "content_artifact_ref": str(content_artifact_ref or "").strip() or None,
+        "approval_basis_json": approval_json,
+        "created_by": str(created_by or "coordinator"),
+        "expires_at_requested": str(expires_at or "").strip() or None,
+    })
     with _connection(root, write=True) as connection:
         if initiative and connection.execute("SELECT 1 FROM initiatives WHERE initiative_ref = ?", (initiative,)).fetchone() is None:
             raise GovernanceError("initiative does not exist", code="initiative_not_found")
         if task and connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task,)).fetchone() is None:
             raise GovernanceError("task does not exist", code="task_not_found")
+        if initiative and task and connection.execute(
+            "SELECT 1 FROM initiative_task_links WHERE initiative_ref=? AND task_id=? LIMIT 1",
+            (initiative, task),
+        ).fetchone() is None:
+            raise GovernanceError("task is not linked to the governance initiative", code="record_scope_mismatch")
         record_expires_at = expires_at
         if kind != "policy" and _contains_sensitive_marker(body):
             sensitive_policy = _sensitive_record_policy(
@@ -1099,20 +1260,7 @@ def create_record(
             allowed_roles = set(sensitive_policy["allowed_roles"])
             if role not in allowed_roles:
                 raise GovernanceError("sensitive governance record actor is not allowed by policy", code="sensitive_access_denied")
-            if isinstance(body, dict) and sensitive_policy.get("allowed_fields"):
-                disallowed = sorted(set(body) - set(sensitive_policy["allowed_fields"]))
-                if disallowed:
-                    raise GovernanceError(
-                        "sensitive governance record contains fields not allowed by policy: " + ", ".join(disallowed),
-                        code="sensitive_fields_rejected",
-                    )
-            if isinstance(body, dict) and sensitive_policy.get("redacted_fields"):
-                exposed = sorted(set(body) & set(sensitive_policy["redacted_fields"]))
-                if exposed:
-                    raise GovernanceError(
-                        "sensitive governance record contains fields that policy requires to be redacted: " + ", ".join(exposed),
-                        code="sensitive_redaction_required",
-                    )
+            _validate_sensitive_field_policy(body, sensitive_policy)
             created_at = datetime.now(timezone.utc)
             latest_expiry = created_at + timedelta(days=int(sensitive_policy["retention_days"]))
             if sensitive_policy.get("policy_expires_at"):
@@ -1137,38 +1285,69 @@ def create_record(
                 record_expires_at = latest_expiry.isoformat()
         elif record_expires_at:
             record_expires_at = _parse_timestamp(record_expires_at, "expires_at").isoformat()
+        command_envelope = {
+            "record_ref": ref,
+            "scope_key": scope,
+            "initiative_ref": initiative,
+            "task_id": task,
+            "record_type": kind,
+            "status": status_value,
+            "supersedes": str(supersedes or "").strip() or None,
+            "content_digest": digest,
+            "content_artifact_ref": str(content_artifact_ref or "").strip() or None,
+            "approval_basis_json": approval_json,
+            "created_by": str(created_by or "coordinator"),
+            "expires_at": record_expires_at,
+        }
+        command_digest = submission_command_digest
+        if submission:
+            submitted = connection.execute(
+                "SELECT command_digest, record_ref FROM governance_submissions WHERE submission_id=?",
+                (submission,),
+            ).fetchone()
+            if submitted is not None:
+                if str(submitted["command_digest"]) != command_digest:
+                    raise GovernanceError("submission_id replay conflicts with existing command", code="submission_replay_conflict")
+                stored = connection.execute("SELECT * FROM governance_records WHERE record_ref=?", (submitted["record_ref"],)).fetchone()
+                if stored is None:
+                    raise GovernanceError("submission points to a missing governance record", code="ledger_corrupt")
+                return _record_from_storage(connection, stored)
         existing = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (ref,)).fetchone()
         if existing is not None:
-            if str(existing["content_digest"]) == digest and str(existing["record_type"]) == kind:
-                if not existing["content_artifact_ref"]:
-                    repaired_ref = _store_governance_artifact(
-                        connection,
-                        str(existing["content_json"]),
-                        digest,
-                        content_artifact_ref,
-                        initiative_ref=str(existing["initiative_ref"] or "") or None,
-                        task_id=str(existing["task_id"] or "") or None,
-                    )
+            existing_envelope = {
+                "record_ref": str(existing["record_ref"]),
+                "scope_key": str(existing["scope_key"]),
+                "initiative_ref": str(existing["initiative_ref"] or "") or None,
+                "task_id": str(existing["task_id"] or "") or None,
+                "record_type": str(existing["record_type"]),
+                "status": str(existing["status"]),
+                "supersedes": str(existing["supersedes"] or "") or None,
+                "content_digest": str(existing["content_digest"]),
+                # A server-created blob is not caller-authored; only an
+                # explicit supplied artifact participates in replay equality.
+                "content_artifact_ref": str(existing["content_artifact_ref"] or "") if content_artifact_ref else None,
+                "approval_basis_json": str(existing["approval_basis_json"] or "") or None,
+                "created_by": str(existing["created_by"]),
+                "expires_at": str(existing["expires_at"] or "") or None,
+            }
+            if existing_envelope == command_envelope:
+                result = _record_from_storage(connection, existing)
+                if submission:
                     connection.execute(
-                        "UPDATE governance_records SET content_artifact_ref = ? WHERE record_ref = ? AND content_artifact_ref IS NULL",
-                        (repaired_ref, ref),
+                        "INSERT INTO governance_submissions(submission_id,command_digest,record_ref,created_at) VALUES(?,?,?,?)",
+                        (submission, command_digest, ref, _now()),
                     )
-                    existing = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (ref,)).fetchone()
-                else:
-                    _validate_governance_artifact(
-                        connection,
-                        existing["content_artifact_ref"],
-                        expected_digest=digest,
-                    )
-                return _record_row(existing)
+                return result
             raise GovernanceError("record_ref replay conflicts with existing record", code="record_replay_conflict")
         if supersedes:
             supersedes_ref = _safe_ref(supersedes, "supersedes", prefix="record-")
             predecessor = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (supersedes_ref,)).fetchone()
             if predecessor is None:
                 raise GovernanceError("supersedes record does not exist", code="supersedes_not_found")
-            if str(predecessor["record_type"]) != kind or predecessor["initiative_ref"] != initiative or predecessor["task_id"] != task:
+            if str(predecessor["record_type"]) != kind or str(predecessor["scope_key"]) != scope:
                 raise GovernanceError("supersedes must stay within one record scope and type", code="supersedes_scope_mismatch")
+            if connection.execute("SELECT 1 FROM governance_records WHERE supersedes=? LIMIT 1", (supersedes_ref,)).fetchone() is not None:
+                raise GovernanceError("superseded revision already has a successor", code="supersedes_conflict")
             revision = int(predecessor["revision"]) + 1
             if status_value in {"active", "approved"}:
                 current_ref: str | None = supersedes_ref
@@ -1187,7 +1366,7 @@ def create_record(
                     current_ref = str(current["supersedes"] or "").strip() if current is not None else None
         else:
             supersedes_ref = None
-            row = connection.execute("SELECT COALESCE(MAX(revision),0) AS value FROM governance_records WHERE initiative_ref IS ? AND task_id IS ? AND record_type = ?", (initiative, task, kind)).fetchone()
+            row = connection.execute("SELECT COALESCE(MAX(revision),0) AS value FROM governance_records WHERE scope_key=? AND record_type=?", (scope, kind)).fetchone()
             revision = int(row["value"]) + 1
         created = _now()
         artifact_ref = _store_governance_artifact(
@@ -1199,11 +1378,17 @@ def create_record(
             task_id=task,
         )
         connection.execute(
-            "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, _canonical(approval_basis) if approval_basis is not None else None, str(created_by or "coordinator"), created, record_expires_at),
+            "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at,scope_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, str(created_by or "coordinator"), created, record_expires_at, scope),
         )
+        if submission:
+            connection.execute(
+                "INSERT INTO governance_submissions(submission_id,command_digest,record_ref,created_at) VALUES(?,?,?,?)",
+                (submission, command_digest, ref, created),
+            )
         row = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (ref,)).fetchone()
-    return _record_row(row) if row else {"record_ref": ref}
+        result = _record_from_storage(connection, row) if row else {"record_ref": ref}
+    return result
 
 
 def revise_record(root: Path, *, record_ref: str, content: Any, created_by: str = "coordinator", status: str | None = None, approval_basis: Any = None, actor_role: str | None = None) -> dict[str, Any]:
@@ -1262,19 +1447,17 @@ def list_records(
         rows = connection.execute(query, tuple(values)).fetchall()
         records: list[dict[str, Any]] = []
         for row in rows:
-            artifact_ref = str(row["content_artifact_ref"] or "").strip()
-            if not artifact_ref:
-                raise GovernanceError(
-                    "governance revision is missing its immutable content artifact",
-                    code="artifact_required",
-                )
-            _validate_governance_artifact(
-                connection,
-                artifact_ref,
-                expected_digest=str(row["content_digest"]),
-            )
-            records.append(_record_row(row))
+            records.append(_record_from_storage(connection, row))
     return records
+
+
+def inspect_record(root: Path, record_ref: str) -> dict[str, Any] | None:
+    """Return one exact revision without inheriting list pagination limits."""
+    ledger_db.ensure_database(root)
+    ref = _safe_ref(record_ref, "record_ref", prefix="record-")
+    with _connection(root) as connection:
+        row = connection.execute("SELECT * FROM governance_records WHERE record_ref=?", (ref,)).fetchone()
+        return _record_from_storage(connection, row) if row is not None else None
 
 
 def active_snapshot(
@@ -1309,14 +1492,44 @@ def active_snapshot(
     return payload
 
 
-def _contains_sensitive_marker(content: Any) -> bool:
-    """Identify explicit sensitivity labels in a governance body.
+_CREDENTIAL_KEY_PARTS = {
+    "password", "passwd", "passphrase", "secret", "token", "access_token",
+    "refresh_token", "api_key", "apikey", "private_key", "client_secret",
+    "authorization", "cookie", "session", "credential", "credentials",
+}
 
-    Governance bodies are caller-authored JSON.  Only explicit labels invoke
-    the policy prerequisite; ordinary words such as "private method" in a
-    decision remain normal context and do not silently widen its required
-    authority.
+
+def _json_pointer_join(prefix: str, key: str) -> str:
+    return prefix + "/" + key.replace("~", "~0").replace("/", "~1")
+
+
+def _credential_paths(content: Any, *, prefix: str = "") -> list[tuple[str, Any]]:
+    """Find credential-like fields regardless of caller supplied labels."""
+    matches: list[tuple[str, Any]] = []
+    if isinstance(content, dict):
+        for key, value in content.items():
+            path = _json_pointer_join(prefix, key)
+            normalized = _normalise_trigger_key(key)
+            if normalized in _CREDENTIAL_KEY_PARTS or any(
+                part in normalized.split("_") for part in _CREDENTIAL_KEY_PARTS
+            ):
+                matches.append((path, value))
+            matches.extend(_credential_paths(value, prefix=path))
+    elif isinstance(content, list):
+        for index, value in enumerate(content):
+            matches.extend(_credential_paths(value, prefix=f"{prefix}/{index}"))
+    return matches
+
+
+def _contains_sensitive_marker(content: Any) -> bool:
+    """Identify explicit labels and credential-shaped data recursively.
+
+    Credential-looking keys are sensitive even when a caller omits the old
+    opt-in marker.  This gives record ingestion a default-deny boundary for
+    accidental password/token storage while preserving ordinary prose fields.
     """
+    if _credential_paths(content):
+        return True
     if isinstance(content, dict):
         for key, value in content.items():
             normalized = _normalise_trigger_key(key)
@@ -1334,10 +1547,76 @@ def _contains_sensitive_marker(content: Any) -> bool:
             if isinstance(value, (dict, list)) and _contains_sensitive_marker(value):
                 return True
         return False
-    if isinstance(content, (list, tuple, set)):
+    if isinstance(content, list):
         return any(_contains_sensitive_marker(item) for item in content)
     text = str(content or "").strip().lower()
     return any(marker in text for marker in ("[sensitive]", "[restricted]", "[confidential]", "contains credentials"))
+
+
+def _path_allowed(path: str, allowed: Iterable[str]) -> bool:
+    """Match explicit JSON Pointer policies and legacy top-level field names."""
+    top_level = path.split("/", 2)[1] if path.startswith("/") and path.count("/") >= 1 else ""
+    for raw in allowed:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value == path or value == "*":
+            return True
+        if value.startswith("/") and path.startswith(value.rstrip("/") + "/"):
+            return True
+        if not value.startswith("/") and value == top_level:
+            return True
+    return False
+
+
+def _value_is_safe_credential_projection(value: Any) -> bool:
+    """Accept only redaction metadata or a digest, never a raw credential."""
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        return lowered in {"<redacted>", "[redacted]", "redacted", "<secret-redacted>"} or bool(
+            re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", lowered)
+        )
+    if isinstance(value, dict):
+        if value.get("redacted") is True:
+            return True
+        digest = str(value.get("digest") or value.get("sha256") or "").strip().lower()
+        return bool(re.fullmatch(r"[0-9a-f]{64}", digest))
+    return False
+
+
+def _validate_sensitive_field_policy(body: Any, policy: dict[str, Any]) -> None:
+    """Enforce nested field controls without disclosing sensitive values."""
+    if not isinstance(body, (dict, list)):
+        return
+    allowed_fields = [str(item).strip() for item in policy.get("allowed_fields", [])]
+    redacted_fields = [str(item).strip() for item in policy.get("redacted_fields", [])]
+    credential_paths = _credential_paths(body)
+    if credential_paths and not allowed_fields:
+        raise GovernanceError(
+            "sensitive credential fields require explicit allowed_fields policy paths",
+            code="sensitive_fields_rejected",
+        )
+    for path, value in credential_paths:
+        if not _path_allowed(path, allowed_fields):
+            raise GovernanceError("sensitive credential field is not allowed by policy", code="sensitive_fields_rejected")
+        if not _value_is_safe_credential_projection(value):
+            raise GovernanceError("sensitive credential values must be redacted or represented by a digest", code="sensitive_redaction_required")
+
+    def leaves(value: Any, prefix: str = "") -> list[str]:
+        if isinstance(value, dict):
+            return [leaf for key, item in value.items() for leaf in leaves(item, _json_pointer_join(prefix, key))]
+        if isinstance(value, list):
+            return [leaf for index, item in enumerate(value) for leaf in leaves(item, f"{prefix}/{index}")]
+        return [prefix]
+
+    paths = leaves(body)
+    if allowed_fields:
+        disallowed = [path for path in paths if not _path_allowed(path, allowed_fields)]
+        if disallowed:
+            raise GovernanceError("sensitive governance record contains fields not allowed by policy", code="sensitive_fields_rejected")
+    exposed = [path for path in paths if _path_allowed(path, redacted_fields)]
+    if exposed:
+        raise GovernanceError("sensitive governance record contains fields that policy requires to be redacted", code="sensitive_redaction_required")
 
 
 def _sensitive_record_policy(
@@ -1368,14 +1647,14 @@ def _sensitive_record_policy(
     else:
         return None
     rows = connection.execute(
-        "SELECT record_ref, content_json, expires_at FROM governance_records WHERE " + " AND ".join(clauses) + " ORDER BY created_at DESC",
+        "SELECT * FROM governance_records WHERE " + " AND ".join(clauses) + " ORDER BY created_at DESC",
         tuple(values),
     ).fetchall()
     for row in rows:
         try:
-            body = json.loads(str(row["content_json"]))
-        except json.JSONDecodeError:
-            continue
+            body = _record_from_storage(connection, row).get("content_json")
+        except GovernanceError as exc:
+            raise GovernanceError("sensitive policy ledger record is corrupt", code="ledger_corrupt") from exc
         if not isinstance(body, dict):
             continue
         covered = body.get("record_type")
@@ -1507,8 +1786,9 @@ def evaluate_promotion(
 ) -> dict[str, Any]:
     """Create one pending proposal after repeated equivalent findings.
 
-    ``findings`` is an optional safe projection used by tests and importers;
-    when omitted, the canonical governance record history is consulted.
+    ``findings`` is retained as a compatibility hint for callers, but it is
+    never promotion evidence.  The ledger's immutable risk records and
+    canonical task findings are the only authoritative candidate sources.
     """
     if threshold < 1 or window_days < 1:
         raise GovernanceError("promotion threshold and window must be positive", code="invalid_promotion_policy")
@@ -1518,27 +1798,23 @@ def evaluate_promotion(
         raise GovernanceError("fingerprint is required", code="fingerprint_required")
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     candidates: list[dict[str, Any]] = []
-    if findings is not None:
-        candidates = [item for item in findings if isinstance(item, dict) and str(item.get("fingerprint") or item.get("finding_fingerprint") or "") == needle]
-    else:
-        for record in list_records(root, record_type="risk", active_only=False):
-            body = record.get("content_json") if isinstance(record.get("content_json"), dict) else {}
-            if str(body.get("fingerprint") or body.get("finding_fingerprint") or "") == needle:
-                candidates.append({"task_id": record.get("task_id"), "created_at": record.get("created_at"), "record_ref": record.get("record_ref")})
-        # Closure findings are canonical in task_findings.  Promotion must
-        # inspect that source directly when no importer projection was
-        # supplied; otherwise repeated findings could never become a proposal
-        # through the normal report/closure path.
-        with _connection(root) as connection:
-            for row in connection.execute(
-                "SELECT task_id, fingerprint, first_seen_at, updated_at FROM task_findings WHERE fingerprint = ?",
-                (needle,),
-            ):
-                candidates.append({
-                    "task_id": row["task_id"],
-                    "created_at": row["first_seen_at"] or row["updated_at"],
-                    "record_ref": None,
-                })
+    for record in list_records(root, record_type="risk", active_only=False):
+        body = record.get("content_json") if isinstance(record.get("content_json"), dict) else {}
+        if str(body.get("fingerprint") or body.get("finding_fingerprint") or "") == needle:
+            candidates.append({"task_id": record.get("task_id"), "created_at": record.get("created_at"), "record_ref": record.get("record_ref")})
+    # Closure findings are canonical in task_findings.  Callers may supply a
+    # projection for UI context, but it must never manufacture promotion
+    # evidence absent from this durable source of truth.
+    with _connection(root) as connection:
+        for row in connection.execute(
+            "SELECT task_id, fingerprint, first_seen_at, updated_at FROM task_findings WHERE fingerprint = ?",
+            (needle,),
+        ):
+            candidates.append({
+                "task_id": row["task_id"],
+                "created_at": row["first_seen_at"] or row["updated_at"],
+                "record_ref": None,
+            })
     distinct_scopes: dict[str, dict[str, Any]] = {}
     for item in candidates:
         stamp = str(item.get("created_at") or "")
@@ -1573,7 +1849,7 @@ def evaluate_promotion(
                 (initiative_ref,),
             ).fetchall()
             existing = [
-                item for item in (_record_row(row) for row in existing_rows)
+                item for item in (_record_from_storage(connection, row) for row in existing_rows)
                 if isinstance(item.get("content_json"), dict)
                 and item["content_json"].get("fingerprint") == needle
                 and item.get("status") not in {"rejected", "superseded", "expired"}
@@ -1602,31 +1878,39 @@ def approve_promotion(root: Path, *, proposal_ref: str, actor_role: str, approva
         raise GovernanceError("only the coordinator may approve a policy promotion", code="coordinator_approval_required")
     proposal_id = _safe_ref(proposal_ref, "proposal_ref", prefix="record-")
     ledger_db.ensure_database(root)
-    with _connection(root) as connection:
-        row = connection.execute("SELECT * FROM governance_records WHERE record_ref = ? AND record_type = 'promotion'", (proposal_id,)).fetchone()
-    if row is None:
-        raise GovernanceError("promotion proposal does not exist", code="proposal_not_found")
-    proposal = _record_row(row)
-    body = proposal.get("content_json") if isinstance(proposal.get("content_json"), dict) else {}
-    policy_ref = "record-policy-" + hashlib.sha256(proposal_id.encode("utf-8")).hexdigest()[:24]
-    if proposal.get("status") == "approved":
-        policies = [
-            item for item in list_records(root, record_type="policy", initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), active_only=False)
-            if isinstance(item.get("content_json"), dict) and item["content_json"].get("promoted_from") == proposal_id
-        ]
-        if policies:
-            return {"proposal": proposal, "policy": policies[-1], "policy_snapshot": active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))}
-    if proposal.get("status") != "pending":
-        raise GovernanceError("promotion proposal is no longer pending", code="proposal_not_pending")
-    policy = create_record(root, record_type="policy", content={"promoted_from": proposal_id, "finding": body}, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), created_by=created_by, status="approved", approval_basis=approval_basis or {"proposal_ref": proposal_id, "actor_role": "coordinator"}, record_ref=policy_ref, actor_role="coordinator")
-    with _connection(root, write=True) as connection:
-        connection.execute("UPDATE governance_records SET status='approved', approval_basis_json=? WHERE record_ref=?", (_canonical(approval_basis or {"policy_ref": policy["record_ref"], "actor_role": "coordinator"}), proposal_id))
-        updated = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (proposal_id,)).fetchone()
-    return {"proposal": _record_row(updated) if updated else proposal, "policy": policy, "policy_snapshot": active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))}
+    # Proposal status and the promoted policy form one domain transition.  A
+    # crash must expose either neither change or both, never an active policy
+    # paired with a pending proposal.
+    with ledger_db.transaction(root):
+        with _connection(root) as connection:
+            row = connection.execute("SELECT * FROM governance_records WHERE record_ref = ? AND record_type = 'promotion'", (proposal_id,)).fetchone()
+            if row is None:
+                raise GovernanceError("promotion proposal does not exist", code="proposal_not_found")
+            proposal = _record_from_storage(connection, row)
+            body = proposal.get("content_json") if isinstance(proposal.get("content_json"), dict) else {}
+            policy_ref = "record-policy-" + hashlib.sha256(proposal_id.encode("utf-8")).hexdigest()[:24]
+            if proposal.get("status") == "approved":
+                policies = [
+                    item for item in list_records(root, record_type="policy", initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), active_only=False)
+                    if isinstance(item.get("content_json"), dict) and item["content_json"].get("promoted_from") == proposal_id
+                ]
+                if policies:
+                    return {"proposal": proposal, "policy": policies[-1], "policy_snapshot": active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))}
+                raise GovernanceError("approved promotion has no canonical policy", code="ledger_corrupt")
+            if proposal.get("status") != "pending":
+                raise GovernanceError("promotion proposal is no longer pending", code="proposal_not_pending")
+            policy = create_record(root, record_type="policy", content={"promoted_from": proposal_id, "finding": body}, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), created_by=created_by, status="approved", approval_basis=approval_basis or {"proposal_ref": proposal_id, "actor_role": "coordinator"}, record_ref=policy_ref, actor_role="coordinator")
+            connection.execute("UPDATE governance_records SET status='approved', approval_basis_json=? WHERE record_ref=?", (_canonical(approval_basis or {"policy_ref": policy["record_ref"], "actor_role": "coordinator"}), proposal_id))
+            updated = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (proposal_id,)).fetchone()
+            updated_proposal = _record_from_storage(connection, updated) if updated else proposal
+            snapshot = active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))
+    return {"proposal": updated_proposal, "policy": policy, "policy_snapshot": snapshot}
 
 
 def request_exception(root: Path, *, trigger: str, reason: str, actor_role: str = "coordinator", initiative_ref: str | None = None, task_id: str | None = None, created_by: str = "coordinator") -> dict[str, Any]:
     key = _normalise_trigger_key(trigger)
+    if not key:
+        raise GovernanceError("exception trigger is required", code="exception_trigger_required")
     if key in HARD_TRIGGER_KEYS or key in {
         "hard_invariant", "runtime_invariant", "security_invariant", "c3_downgrade",
         "governance_off", "required_governance", "full_governance",
@@ -1670,7 +1954,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
     if action in {"transition", "transition_initiative"}:
         return {"initiative": transition_initiative(root, initiative_ref=payload.get("initiative_ref", ""), status=payload.get("status", ""), expected_revision=payload.get("expected_revision"), evidence=payload.get("evidence"))}
     if action in {"create_record", "record_create"} or (action == "create" and payload.get("entity") in {"record", "governance_record"}):
-        return {"record": create_record(root, record_type=payload.get("record_type", ""), content=payload.get("content"), initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role), status=payload.get("status"), supersedes=payload.get("supersedes"), expires_at=payload.get("expires_at"), approval_basis=payload.get("approval_basis"), content_artifact_ref=payload.get("content_artifact_ref"), record_ref=payload.get("record_ref"), actor_role=role)}
+        return {"record": create_record(root, record_type=payload.get("record_type", ""), content=payload.get("content"), initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role), status=payload.get("status"), supersedes=payload.get("supersedes"), expires_at=payload.get("expires_at"), approval_basis=payload.get("approval_basis"), content_artifact_ref=payload.get("content_artifact_ref"), record_ref=payload.get("record_ref"), actor_role=role, submission_id=payload.get("submission_id"))}
     if action in {"revise_record", "record_revise", "revise"}:
         return {"record": revise_record(root, record_ref=payload.get("record_ref", ""), content=payload.get("content"), created_by=payload.get("created_by", role), status=payload.get("status"), approval_basis=payload.get("approval_basis"), actor_role=role)}
     if action in {"inspect_record", "record_inspect", "history", "list_records", "snapshot", "snapshot_inspect"}:
@@ -1696,9 +1980,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
                     offset=payload.get("offset", 0),
                 )
             }
-        ref = _safe_ref(payload.get("record_ref"), "record_ref", prefix="record-")
-        records = list_records(root, active_only=False)
-        return {"record": next((item for item in records if item.get("record_ref") == ref), None)}
+        return {"record": inspect_record(root, payload.get("record_ref"))}
     if action in {"request_exception", "exception_request"}:
         return {"exception": request_exception(root, trigger=payload.get("trigger", ""), reason=payload.get("reason", ""), actor_role=actor_role, initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role))}
     if action in {"evaluate_promotion", "promotion_evaluate", "promotion_inspect"}:
@@ -1723,7 +2005,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
 __all__ = [
     "GOVERNANCE_SCHEMA", "GovernanceError", "classify_governance", "resolve_governance",
     "create_initiative", "inspect_initiative", "link_task", "add_dependency",
-    "transition_initiative", "create_record", "revise_record", "list_records",
+    "transition_initiative", "create_record", "revise_record", "list_records", "inspect_record",
     "active_snapshot", "link_record", "evaluate_promotion", "approve_promotion",
     "request_exception", "manage_governance",
 ]

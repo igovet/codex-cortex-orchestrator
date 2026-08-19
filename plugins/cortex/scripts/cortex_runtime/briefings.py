@@ -221,13 +221,16 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         closure_contract = (
             f"This {package.get('gate')} report needs exactly one top-level `gate_result` outside the "
             f"{len(REPORT_FIELDS)}-key report. It has decision/failure_class/findings/verification/workspace. "
-            "Do not add `closure`; that name is accepted only as a legacy input alias. On pass, findings is the "
-            "literal empty array []. A non-pass finding needs severity/status/blocking/summary; Cortex derives a "
-            "stable fingerprint when omitted."
+            "Do not add `closure`; that name is accepted only as a legacy input alias. Pass permits no open finding: "
+            "use [] when there was no inherited finding, or include each inherited finding with its exact fingerprint, "
+            "status=resolved, blocking=false, and resolved_at after verifying the correction. A non-pass finding needs "
+            "severity/status/blocking/summary; Cortex derives a stable fingerprint when omitted. Only the fresh rerun "
+            "of the gate that opened an inherited finding may resolve it, and its exact origin report must be in context."
         )
     else:
         closure_contract = (
-            "Optional `gate_result`: pass findings=[]; never add the legacy `closure` alias."
+            "Optional `gate_result`: pass findings=[]; never add the legacy `closure` alias. A corrective worker may "
+            "report its change but may not resolve an inherited finding."
         )
     briefing_transport_contract = (
         "Dispatch briefing transport: this exact briefing is the complete instruction artifact for "
@@ -417,6 +420,11 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "gate_verification": list(package.get("verification") or []),
         "pause_conditions": list(package.get("pause_conditions") or []),
         "budget": str(package.get("budget") or "").strip() or None,
+        "governance_context": (
+            package.get("governance_context")
+            if isinstance(package.get("governance_context"), dict)
+            else None
+        ),
         "intent_clarification_required": bool(package.get("intent_clarification_required")),
         "intent_clarification_reason": package.get("intent_clarification_reason"),
     }
@@ -452,7 +460,21 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "use worker_question. Treat requirements as user intent only when supported by the exact request, a "
             "durable user answer, or verified external authority."
         )
-    if package.get("gate") == "close":
+    if package.get("gate") == "governance_activation":
+        phase_completion_contract = (
+            "Governance activation runs before delivery. Judge only the supplied governance context: unfinished "
+            "implementation, absent downstream deliverables, and unrun downstream task verification are expected and "
+            "must not become findings. A non-pass decision requires a defect in activation mode, scope, policy digest, "
+            "authorization, or required lifecycle gates."
+        )
+    elif package.get("gate") == "governance_close":
+        phase_completion_contract = (
+            "Governance close is the independent review that creates the evidence consumed by the server projection. "
+            "Judge the task contract, current source, checks, supplied governance context, and predecessor receipts. "
+            "Do not require the post-review governance evidence artifact, audit receipt, final close evidence, or "
+            "handoff to pre-exist; Cortex creates them only after this valid report is consumed."
+        )
+    elif package.get("gate") == "close":
         phase_completion_contract = "Final close evaluates both gate-level and task-level contracts."
     else:
         phase_completion_contract = "Judge only this gate; unfinished downstream task outcomes are not blockers."
@@ -555,8 +577,19 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "verification": _bounded_strings(package.get("verification"), limit=16, item_chars=600),
         "gate_acceptance_criteria": _bounded_strings(package.get("acceptance_criteria"), limit=16, item_chars=600),
         "gate_verification": _bounded_strings(package.get("verification"), limit=16, item_chars=600),
-        "task_acceptance_criteria": _bounded_strings(package.get("task_acceptance_criteria"), limit=16, item_chars=600),
-        "task_verification": _bounded_strings(package.get("task_verification"), limit=16, item_chars=600),
+        "task_acceptance_criteria": (
+            [] if package.get("gate") == "governance_activation"
+            else _bounded_strings(package.get("task_acceptance_criteria"), limit=16, item_chars=600)
+        ),
+        "task_verification": (
+            [] if package.get("gate") == "governance_activation"
+            else _bounded_strings(package.get("task_verification"), limit=16, item_chars=600)
+        ),
+        "governance_context": (
+            package.get("governance_context")
+            if isinstance(package.get("governance_context"), dict)
+            else None
+        ),
         "resolved_user_decisions": list(package.get("resolved_user_decisions") or [])[-8:],
         "plan_feedback": str(package.get("plan_feedback") or "").strip()[:1200] or None,
         "rework_escalation": package.get("rework_escalation") if isinstance(package.get("rework_escalation"), dict) else None,
@@ -572,6 +605,25 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     }
     execution = PROFILE_EXECUTION_CONTRACTS[agent]
     gate = str(package.get("gate") or "")
+    activation_rule = (
+        "This is a pre-delivery governance activation gate. Evaluate only governance_context and the activation "
+        "criteria. Unfinished implementation, absent result files, empty downstream evidence, and unrun task-level "
+        "verification are expected at this point and MUST NOT be reported as findings or used for a non-pass decision. "
+        "For automatic C3 governance, empty initiative_ref and trigger_evidence are valid when effective_mode=full, "
+        "reasons contains complexity:C3, autonomous_scope_ref is present, the policy snapshot requires full, its "
+        "SHA-256 digest is present, and current_pipeline contains governance_activation before governance_close. "
+        "Fail or request rework only for a defect in those activation inputs."
+        if gate == "governance_activation" else ""
+    )
+    governance_close_rule = (
+        "This report is the independent full-governance close review and is an input to the server-owned immutable "
+        "governance evidence projection. Verify the task outcome from current source/checks and every supplied "
+        "predecessor report; map the acceptance oracle, residual risks, falsification attempts, independent review, "
+        "retrospective, and verification evidence in this report. The typed governance evidence artifact, audit receipt, "
+        "final close evidence, and handoff are downstream outputs and MUST NOT be treated as missing prerequisites. "
+        "Create a corrective finding only for an observed task, policy, scope, dependency, risk, or evidence defect."
+        if gate == "governance_close" else ""
+    )
     report_extra = ""
     if gate == "scope" and agent == "planner":
         report_extra = " REQUIRED top-level scoping sibling={overview,context_files,discovery_domains} with 1-8 evidence-backed discovery domains."
@@ -583,8 +635,11 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     elif gate in {"review", "governance_activation", "governance_close", "close"}:
         report_extra = (
             " Add exactly one top-level `gate_result` outside the 7-key report with decision/failure_class/findings/verification/workspace. "
-            "Do not add closure; it is a legacy input alias only. Pass requires findings=[]. Every non-empty finding "
-            "requires severity=P0|P1|P2|P3|info, status=open|resolved|waived, boolean blocking, and a non-empty summary."
+            "Do not add closure; it is a legacy input alias only. Pass permits no open finding: use [] when no inherited "
+            "finding existed, or include inherited findings with their exact fingerprint, status=resolved, "
+            "blocking=false, and resolved_at after verifying the correction. Every non-empty finding requires "
+            "severity=P0|P1|P2|P3|info, status=open|resolved|waived, boolean blocking, and a non-empty summary. "
+            "Only the fresh rerun of the gate that opened an inherited finding may resolve it, with its exact origin report in context."
         )
     predecessor_refs = list(assignment.get("predecessor_report_refs") or [])
     predecessor_rule = (
@@ -666,7 +721,13 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         knowledge_rule,
         follow_up_rule,
         predecessor_rule,
-        "Judge only this gate; unfinished downstream task outcomes are not blockers." if gate != "close" else "Final close evaluates both gate-level and task-level contracts.",
+        activation_rule,
+        governance_close_rule,
+        (
+            "Judge only this gate; unfinished downstream task outcomes are not blockers."
+            if gate != "close" else
+            "Final close evaluates both gate-level and task-level contracts."
+        ),
         "Read the dispatch briefing through read_dispatch_briefing until complete=true when the bootstrap response is paginated.",
         artifact_rule,
         changed_files_rule,
@@ -676,7 +737,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         f"Use attempt_id={package.get('attempt_id')!r} exactly and a stable lowercase submission_id for each semantic payload; reuse it only for a byte-identical retry. Then call the public `get_report_template` tool; it returns draft_path plus draft_ref. Edit that private draft and call `record_report` with this identity and draft_ref; if direct draft editing is unavailable, send one complete replacement or a small JSON Merge Patch. Use task_ref={package.get('task_ref')!r}, "
         f"attempt_id={package.get('attempt_id')!r}, profile={agent!r}, and the exact task identity and draft_ref from this dispatch. "
         "The report object has exactly 7 keys: summary, findings, questions, changed_files, tests, evidence, uncertainty." + report_extra,
-        "Outside review/close, gate_result is optional and pass uses findings=[]; never add the legacy closure alias.",
+        "Outside review/close, gate_result is optional and pass uses findings=[]; corrective workers may not resolve inherited findings; never add the legacy closure alias.",
         "Include `Dispatch briefing reviewed: <briefing_digest>` in report.evidence. Correct retryable schema errors on this same attempt; invalid records consume no worker attempt. Stop only on retryable=false.",
         "After success return only REPORT_RECORDED report_ref=<id> plus at most two sentences; do not paste or reproduce that JSON.",
     )).strip() + "\n"

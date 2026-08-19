@@ -24,6 +24,7 @@ import cortex  # noqa: E402
 
 
 LIVE_TIMEOUT_SECONDS = 1800
+FINDING_REWORK_LIVE_TIMEOUT_SECONDS = 300
 HEARTBEAT_SECONDS = 15
 TERMINATION_GRACE_SECONDS = 10
 MAX_STREAM_LINE_BYTES = 64 * 1024
@@ -59,6 +60,10 @@ SAFE_SESSION_STATUSES = {
 SAFE_NATIVE_AGENT_STATUSES = {
     "pending", "running", "completed", "failed", "cancelled", "shut_down", "unknown",
 }
+
+FINDING_REWORK_FINGERPRINT = "live-documentation-finding-001"
+FINDING_REWORK_DOCUMENTATION_PATH = "docs/finding-fixture.md"
+FINDING_REWORK_DOCUMENTATION_CONTENT = "Corrective documentation fixture fixed.\n"
 
 RESULT_FAILURE_PATTERNS = (
     ("passed completion requires report_ref", "reportless_success"),
@@ -660,6 +665,134 @@ def canonical_artifacts(
         offset = next_offset
 
 
+def finding_rework_trace_checks(
+    state: dict[str, object],
+    report_records: list[dict[str, object]],
+    *,
+    findings: list[dict[str, object]],
+    project: Path,
+) -> dict[str, bool]:
+    """Verify the narrow live finding -> documentation -> review route.
+
+    The evaluator returns booleans only: report bodies, paths, and arbitrary
+    child output stay inside the temporary source-mode project.  This checks
+    the persisted transport graph after the real parent process exits.
+    """
+    opening_reviews = [
+        record for record in report_records
+        if record.get("gate") == "review"
+        and isinstance(record.get("gate_result"), dict)
+        and any(
+            isinstance(finding, dict)
+            and finding.get("fingerprint") == FINDING_REWORK_FINGERPRINT
+            and finding.get("status") == "open"
+            for finding in record["gate_result"].get("findings", [])
+        )
+    ]
+    resolving_reviews = [
+        record for record in report_records
+        if record.get("gate") == "review"
+        and isinstance(record.get("gate_result"), dict)
+        and record["gate_result"].get("decision") == "pass"
+        and any(
+            isinstance(finding, dict)
+            and finding.get("fingerprint") == FINDING_REWORK_FINGERPRINT
+            and finding.get("status") == "resolved"
+            and finding.get("blocking") is False
+            for finding in record["gate_result"].get("findings", [])
+        )
+    ]
+    attempts = [item for item in state.get("attempts", []) if isinstance(item, dict)]
+    attempts_by_id = {str(item.get("attempt_id") or ""): item for item in attempts}
+    opening_record = opening_reviews[0] if len(opening_reviews) == 1 else None
+    resolving_record = resolving_reviews[0] if len(resolving_reviews) == 1 else None
+    opening_ref = str(opening_record.get("report_id") or "") if opening_record else ""
+    resolving_ref = str(resolving_record.get("report_id") or "") if resolving_record else ""
+    opening_attempt = attempts_by_id.get(str(opening_record.get("attempt_id") or "")) if opening_record else None
+    resolving_attempt = attempts_by_id.get(str(resolving_record.get("attempt_id") or "")) if resolving_record else None
+    correction_pairs: list[tuple[dict[str, object], dict[str, object]]] = []
+    for record in report_records:
+        if record.get("gate") != "documentation":
+            continue
+        attempt = attempts_by_id.get(str(record.get("attempt_id") or ""))
+        report_ref = str(record.get("report_id") or "")
+        if not isinstance(attempt, dict) or not report_ref:
+            continue
+        if (
+            attempt.get("gate") == "documentation"
+            and attempt.get("status") == "passed"
+            and not attempt.get("invalidated")
+            and report_ref in {str(value) for value in attempt.get("report_ids", [])}
+            and opening_ref in {str(value) for value in attempt.get("context_report_ids", [])}
+        ):
+            correction_pairs.append((record, attempt))
+    correction_refs = {str(record.get("report_id") or "") for record, _ in correction_pairs}
+    correction_record = correction_pairs[0][0] if len(correction_pairs) == 1 else None
+    correction_report = correction_record.get("report") if isinstance(correction_record, dict) else None
+    correction_describes_change = (
+        isinstance(correction_report, dict)
+        and FINDING_REWORK_DOCUMENTATION_PATH in {
+            str(path) for path in correction_report.get("changed_files", [])
+        }
+    )
+    try:
+        correction_content_matches = (
+            (project / FINDING_REWORK_DOCUMENTATION_PATH).read_text(encoding="utf-8")
+            == FINDING_REWORK_DOCUMENTATION_CONTENT
+        )
+    except OSError:
+        correction_content_matches = False
+    resolved_finding = next(
+        (
+            item for item in findings
+            if item.get("fingerprint") == FINDING_REWORK_FINGERPRINT
+            and item.get("status") == "resolved"
+        ),
+        None,
+    )
+    resolution_sources = resolved_finding.get("source_evidence", []) if isinstance(resolved_finding, dict) else []
+    if not isinstance(resolution_sources, list):
+        resolution_sources = []
+    resolved_source = next(
+        (
+            item for item in reversed(resolution_sources)
+            if isinstance(item, dict) and item.get("transition") == "resolved"
+        ),
+        None,
+    )
+    raw_rework = state.get("closure_rework")
+    active_rework = raw_rework.get("review") if isinstance(raw_rework, dict) else None
+    resolving_context = {
+        str(value) for value in (resolving_attempt or {}).get("context_report_ids", [])
+    }
+    return {
+        "opening_review_finding": len(opening_reviews) == 1,
+        "documentation_correction_reported": len(correction_pairs) == 1,
+        "documentation_correction_describes_change": correction_describes_change,
+        "documentation_content_exact": correction_content_matches,
+        "fresh_review_resolved_exact_fingerprint": len(resolving_reviews) == 1,
+        "opening_review_invalidated": bool(opening_attempt and opening_attempt.get("invalidated")),
+        "fresh_review_passed": bool(
+            resolving_attempt
+            and resolving_attempt.get("status") == "passed"
+            and not resolving_attempt.get("invalidated")
+            and resolving_ref in {str(value) for value in resolving_attempt.get("report_ids", [])}
+        ),
+        "fresh_review_received_correction": bool(
+            opening_ref
+            and correction_refs
+            and opening_ref in resolving_context
+            and correction_refs.issubset(resolving_context)
+        ),
+        "trace_has_exact_direction": isinstance(resolved_source, dict)
+        and resolved_source.get("origin_report_ref") == opening_ref
+        and set(resolved_source.get("correction_report_refs") or []) == correction_refs,
+        "rework_route_resolved": isinstance(active_rework, dict)
+        and active_rework.get("status") == "resolved"
+        and active_rework.get("target_gate") == "documentation",
+    }
+
+
 def report(label: str, project: Path, changed_files: list[str] | None = None) -> dict[str, object]:
     return {
         "summary": label, "findings": [], "questions": [], "changed_files": changed_files or [],
@@ -934,7 +1067,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
         f"never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist {report_contract} with record_report and return only report_ref plus a short summary. "
-        f"For every review, governance review, or close dispatch, record_report must include exactly one canonical top-level gate_result: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Do not add the legacy closure alias, and never place gate_result inside the strict {len(cortex.REPORT_FIELDS)}-key report. "
+        f"For every review, governance review, or close dispatch, record_report must include exactly one canonical top-level gate_result: decision=pass only when there are no open blockers; use findings=[] when no inherited finding existed, otherwise include every verified inherited correction with its exact fingerprint, status=resolved, blocking=false, and resolved_at. Include verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Do not add the legacy closure alias, and never place gate_result inside the strict {len(cortex.REPORT_FIELDS)}-key report. "
         "Read every ref with read_worker_report and advance with report_ref. After a durable report was read and no "
         "question or follow-up remains for that child, close the completed native child with close_agent when that "
         "host tool is available, before dispatching a later wave; never close a running or question-paused child. "
@@ -950,6 +1083,34 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "corrections. "
         f"The exact project_root is {project}. "
     )
+    if scenario == "finding_rework_documentation":
+        return common + (
+            "Run only this narrow finding-handoff scenario. "
+            "The initial review must publish exactly one open P2 finding with fingerprint "
+            f"{FINDING_REWORK_FINGERPRINT!r} and decision=rework. Do not resolve it in documentation. "
+            "After Cortex dispatches corrective documentation, the documentation worker must create "
+            "docs/finding-fixture.md with exactly one line: Corrective documentation fixture fixed. "
+            "The fresh review rerun must read both the original review report and the corrective documentation "
+            "report, then publish decision=pass with exactly that fingerprint status=resolved and blocking=false. "
+            "Do not invent any other findings. Complete close only after the fresh review report is accepted. "
+            "<cortex_task_contract>"
+            "{\"user_request\":\"Create docs/finding-fixture.md with exactly one line: Corrective documentation fixture fixed. "
+            "A review must first identify the missing line, documentation must correct it, and a fresh review must verify the exact correction.\","
+            "\"complexity\":\"C1\","
+            "\"acceptance_criteria\":[\"docs/finding-fixture.md contains exactly the required correction line.\","
+            "\"The original review finding is resolved only by a fresh Review rerun after the documentation correction.\"],"
+            "\"verification\":[\"Read docs/finding-fixture.md and verify its exact one-line content.\","
+            "\"Read the original review report, documentation correction report, and fresh review report.\"],"
+            "\"plan_approval\":\"auto\"}"
+            "</cortex_task_contract> "
+            "Call start_orchestration exactly once with these exact waves: "
+            "[{\"workers\":[{\"phase\":\"review\",\"profile\":\"code_reviewer\",\"objective\":\"If docs/finding-fixture.md is missing the required line, publish the exact controlled finding as open; after correction, resolve that exact fingerprint.\"}]},"
+            "{\"workers\":[{\"phase\":\"documentation\",\"profile\":\"technical_writer\",\"objective\":\"Create or correct docs/finding-fixture.md with the exact required line and report the correction.\"}]},"
+            "{\"workers\":[{\"phase\":\"close\",\"profile\":\"build_verification\"}]}]. "
+            "Use the normal dispatch -> wait -> read_worker_report -> close_agent -> continue_orchestration sequence. "
+            "When the first Review result causes rework, obey the server-selected corrective dispatch; do not replan, "
+            "skip a report, or manually mutate task state. Stop only after Cortex reports completed."
+        )
     if scenario == "automatic_governance":
         return common + (
             "<cortex_task_contract>"
@@ -1166,7 +1327,12 @@ def live_eval(
         gate_results_valid = all(
             isinstance(record.get("gate_result"), dict)
             and record["gate_result"].get("decision") == "pass"
-            and record["gate_result"].get("findings") == []
+            and all(
+                finding.get("status") in {"resolved", "waived"}
+                and finding.get("blocking") is False
+                for finding in record["gate_result"].get("findings", [])
+                if isinstance(finding, dict)
+            )
             and record["gate_result"].get("verification", {}).get("required_missing") == []
             and set(record["gate_result"].get("workspace", {})) == {"modified", "untracked", "staged", "committed"}
             for record in report_records
@@ -1174,6 +1340,29 @@ def live_eval(
                 "review", "governance_activation", "governance_close", "close",
             }
         )
+        findings = cortex.db_list_task_findings(
+            ledger, str(state.get("task_id") or ""), include_resolved=True,
+        ) if task_dir else []
+        if scenario == "finding_rework_documentation":
+            # This route intentionally starts with a review rework; it is
+            # valid only when the later review passes without an open finding.
+            gate_results_valid = all(
+                isinstance(record.get("gate_result"), dict)
+                and record["gate_result"].get("decision") in {"pass", "rework"}
+                and (
+                    record["gate_result"].get("decision") != "pass"
+                    or not any(
+                        isinstance(finding, dict) and finding.get("status") == "open"
+                        for finding in record["gate_result"].get("findings", [])
+                    )
+                )
+                and record["gate_result"].get("verification", {}).get("required_missing") == []
+                and set(record["gate_result"].get("workspace", {})) == {
+                    "modified", "untracked", "staged", "committed",
+                }
+                for record in report_records
+                if record.get("gate") in {"review", "close"}
+            )
         attempts_by_wave: dict[str, set[str]] = {}
         for attempt in state.get("attempts", []):
             if attempt.get("invalidated"):
@@ -1225,6 +1414,10 @@ def live_eval(
             checks["parallel_wave_exercised"] = parallel_exercised
         if scenario == "blocked_resume":
             checks["resume_or_reassessment_exercised"] = adaptive_exercised
+        if scenario == "finding_rework_documentation":
+            checks.update(finding_rework_trace_checks(
+                state, report_records, findings=findings, project=project,
+            ))
         if scenario == "planner_work_breakdown":
             package_artifacts = planning_manifest.get("work_packages") if isinstance(planning_manifest, dict) else []
             checks["plan_approval_exercised"] = state.get("plan_approval", {}).get("status") == "approved"
@@ -1247,6 +1440,16 @@ def live_eval(
                 if isinstance(item, dict)
                 and not item.get("invalidated")
                 and item.get("gate") in {"governance_activation", "governance_close"}
+            ]
+            governance_attempts_by_gate = {
+                gate: [item for item in governance_attempts if item.get("gate") == gate]
+                for gate in ("governance_activation", "governance_close")
+            }
+            reportless_governance_attempts = [
+                item for item in state.get("attempts", [])
+                if isinstance(item, dict)
+                and item.get("gate") in {"governance_activation", "governance_close"}
+                and item.get("report_transport_status") == "not_recorded"
             ]
             governance_evidence = [
                 item for item in state.get("evidence", [])
@@ -1278,9 +1481,19 @@ def live_eval(
                     "governance_activation", "governance_close",
                 }.issubset(set(state.get("completed_gates", []))),
                 "independent_governance_reviewers": (
-                    len(governance_attempts) == 2
-                    and all(item.get("agent") == "code_reviewer" for item in governance_attempts)
-                    and all(item.get("status") == "passed" for item in governance_attempts)
+                    all(
+                        len(attempts) == 1
+                        and attempts[0].get("agent") == "code_reviewer"
+                        and attempts[0].get("status") == "passed"
+                        for attempts in governance_attempts_by_gate.values()
+                    )
+                ),
+                "reportless_governance_recovery_contained": all(
+                    item.get("status") in {"failed", "cancelled", "superseded"}
+                    and item.get("invalidated") is True
+                    and item.get("invalidation_reason") == "retry_after_failure"
+                    and not item.get("report_ids")
+                    for item in reportless_governance_attempts
                 ),
                 "typed_immutable_governance_evidence": (
                     len(governance_evidence) == 2
@@ -1310,6 +1523,47 @@ def live_eval(
                 "no_failed_public_calls": not failed_public_calls,
             }
         passed = all(checks.values())
+        safe_rework_pause = state.get("rework_pause") if isinstance(state.get("rework_pause"), dict) else {}
+        safe_closure_rework = state.get("closure_rework") if isinstance(state.get("closure_rework"), dict) else {}
+        state_diagnostics = {
+            "status": state.get("status"),
+            "active_gates": list(cortex.active_gates(state)) if state else [],
+            "completed_gates": list(state.get("completed_gates", [])),
+            "attempts": [
+                {
+                    "gate": item.get("gate"),
+                    "status": item.get("status"),
+                    "invalidated": bool(item.get("invalidated")),
+                    "report_transport_status": item.get("report_transport_status"),
+                    "gate_decision": item.get("gate_decision"),
+                }
+                for item in state.get("attempts", [])
+                if isinstance(item, dict)
+            ],
+            "gate_failure_counts": dict(
+                state.get("orchestrate_gate_failure_counts")
+                if isinstance(state.get("orchestrate_gate_failure_counts"), dict)
+                else {}
+            ),
+            "rework_pause": {
+                key: safe_rework_pause.get(key)
+                for key in (
+                    "status", "gate", "consecutive_identical_iterations",
+                    "repeat_limit", "failure_class",
+                )
+                if key in safe_rework_pause
+            },
+            "closure_rework": [
+                {
+                    "source_gate": source_gate,
+                    "target_gate": item.get("target_gate"),
+                    "status": item.get("status"),
+                    "finding_count": len(item.get("finding_fingerprints") or []),
+                }
+                for source_gate, item in safe_closure_rework.items()
+                if isinstance(item, dict)
+            ],
+        }
         results.append({
             "scenario": scenario, "status": "PASS" if passed else "FAIL",
             "launch_model": "gpt-5.6-luna", "launch_reasoning_effort": "high",
@@ -1318,6 +1572,7 @@ def live_eval(
             "tool_names": tool_names,
             "native_tool_names": native_tool_names,
             "checks": checks, "failed_public_calls": failed_public_calls,
+            "state_diagnostics": state_diagnostics,
         })
         if not passed:
             if retain_failure_metadata:
@@ -1338,13 +1593,17 @@ def live_eval(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="run the five real gpt-5.6-luna high parent scenarios")
+    parser.add_argument("--live", action="store_true", help="run the real gpt-5.6-luna high parent scenarios")
     parser.add_argument(
-        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown", "automatic_governance", "follow_up_partial"),
+        "--scenario", choices=(
+            "automatic_sequential", "compact_parallel", "blocked_resume",
+            "planner_work_breakdown", "automatic_governance", "follow_up_partial",
+            "finding_rework_documentation",
+        ),
         help="run one live scenario for diagnosis; the default release run still requires all five",
     )
     parser.add_argument(
-        "--live-timeout-seconds", type=int, default=LIVE_TIMEOUT_SECONDS,
+        "--live-timeout-seconds", type=int,
         help="bound each live source-mode scenario and terminate its complete process group on expiry",
     )
     parser.add_argument(
@@ -1352,15 +1611,28 @@ def main() -> int:
         help="opt in to retaining bounded sanitized live-failure metadata under /tmp",
     )
     args = parser.parse_args()
-    if args.live_timeout_seconds < 10 or args.live_timeout_seconds > 7200:
+    timeout_seconds = (
+        FINDING_REWORK_LIVE_TIMEOUT_SECONDS
+        if args.scenario == "finding_rework_documentation" and args.live_timeout_seconds is None
+        else args.live_timeout_seconds if args.live_timeout_seconds is not None else LIVE_TIMEOUT_SECONDS
+    )
+    if timeout_seconds < 10 or timeout_seconds > 7200:
         parser.error("--live-timeout-seconds must be between 10 and 7200")
+    if (
+        args.scenario == "finding_rework_documentation"
+        and timeout_seconds > FINDING_REWORK_LIVE_TIMEOUT_SECONDS
+    ):
+        parser.error(
+            "finding_rework_documentation has a hard 300-second limit; "
+            "--live-timeout-seconds may only reduce it"
+        )
     with tempfile.TemporaryDirectory(prefix="cortex-luna-high-") as directory:
         base = Path(directory)
         fixtures = fixture_eval(base)
         if args.live or os.environ.get("CORTEX_RUN_LIVE_LUNA") == "1":
             live = live_eval(
                 base, (args.scenario,) if args.scenario else None,
-                timeout_seconds=args.live_timeout_seconds,
+                timeout_seconds=timeout_seconds,
                 retain_failure_metadata=args.retain_failure_metadata,
             )
         else:

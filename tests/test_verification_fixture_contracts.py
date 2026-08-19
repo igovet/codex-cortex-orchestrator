@@ -98,6 +98,15 @@ class VerificationFixtureContractTests(unittest.TestCase):
             registry = cortex._operation_registry(ledger)
             task_id = next(iter(registry["tasks"]))
             _task_dir, state, task = cortex._v3_task_state(ledger, task_id)
+            # Exercise the same full-governance completion validator against
+            # the server-projected evidence that the public lifecycle
+            # produced.  This guards the boundary between automatic C3
+            # governance evidence and the v10 ledger hardening contract.
+            cortex.validate_governance_obligation_evidence(
+                state,
+                "governance_close",
+                artifact_root=ledger,
+            )
 
         self.assertEqual(started["requested_mode"], "auto")
         self.assertEqual(started["effective_mode"], "full")

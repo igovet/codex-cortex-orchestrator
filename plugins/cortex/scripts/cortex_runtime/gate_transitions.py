@@ -555,14 +555,23 @@ def _activate_closure_rework(
             "finding_fingerprints": fingerprints,
             # Rework invalidates the review/close receipt that raised the
             # finding.  Keep its immutable report reference in durable state
+            # as historical provenance, rather than as current gate evidence,
             # so the corrective worker receives the exact defect rather than
-            # a generic implementation assignment.
+            # a generic implementation assignment.  The semantic revision
+            # binds this exceptional handoff to the task meaning it reviewed.
             "source_report_refs": report_refs,
+            "task_revision": int(state.get("task_revision") or 1),
             "iteration": iteration,
             "at": now(),
         }
     elif isinstance(prior, dict):
-        prior.update({"status": "rework_required", "target_gate": target_gate, "iteration": iteration, "at": now()})
+        prior.update({
+            "status": "rework_required",
+            "target_gate": target_gate,
+            "task_revision": int(state.get("task_revision") or 1),
+            "iteration": iteration,
+            "at": now(),
+        })
     sync_current_wave(state)
     return target_gate
 

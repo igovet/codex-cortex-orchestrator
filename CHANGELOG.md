@@ -1,5 +1,26 @@
 # Changelog
 
+## [9.2.5] - 2026-08-20
+
+This source-tree hardening candidate is not a publication or installation
+claim. Its source cachebuster is `9.2.5+codex.20260819205849`; tracked-archive,
+remote, and installed-plugin parity remain separate release gates.
+
+- Add governance schema v10 integrity: immutable artifact-authoritative record
+  bodies, exact normalized scope, linear revision chains, strict JSON,
+  immutable-field triggers, and conflict-safe submission receipts.
+- Bind coordinator capabilities to task/initiative scope, principal, thread,
+  generation, expiry, allowed actions, and revocation; rotate a lost bearer
+  only for the same active identity without persisting plaintext.
+- Add a no-progress circuit breaker that pauses materially identical corrective
+  work for an explicit user strategy without creating a false pass.
+- Make semantic steer impact and worker questions revision/generation-aware,
+  superseding stale questions and downstream evidence.
+- Bound manifest capture by entries, hashed bytes, and elapsed time, reuse a
+  bounded digest cache, and require the 50,000-file benchmark in CI.
+- Add CI timeout/concurrency cancellation and explicit CODEOWNERS review
+  coverage while retaining the Python 3.11/3.12 validation matrix.
+
 ## [9.2.4] - 2026-08-19
 
 - Preserve integer relative steps after the server inserts or reorders

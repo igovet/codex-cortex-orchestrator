@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 9
+DATABASE_SCHEMA_VERSION = 10
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
@@ -216,6 +216,35 @@ def _connection(root: Path, *, write: bool = False) -> Iterator[sqlite3.Connecti
             connection.commit()
     finally:
         connection.close()
+
+
+@contextlib.contextmanager
+def connection(root: Path, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+    """Public repository boundary for small domain modules sharing the UoW.
+
+    Callers should prefer dedicated ledger functions where one exists.  The
+    governance module owns a compact set of transactional invariants that
+    span records, artifacts and task links, so it receives this deliberately
+    narrow, re-entrant connection boundary instead of importing private store
+    internals or opening independent SQLite transactions.
+    """
+    with _connection(root, write=write) as active:
+        yield active
+
+
+def in_transaction(root: Path) -> bool:
+    """Return whether ``root`` is already inside the public ledger UoW."""
+    return _root_key(root) in _active_connections()
+
+
+def content_addressed_blob_ref(digest: str, mime_type: str, byte_size: int) -> str:
+    """Expose the stable v7 artifact identity without exposing implementation."""
+    return _blob_ref(digest, mime_type, byte_size)
+
+
+def text_chunk_boundaries(raw: bytes) -> list[bytes]:
+    """Expose canonical UTF-8 chunking for immutable JSON artifacts."""
+    return _text_chunk_boundaries(raw)
 
 
 @dataclass(frozen=True)
@@ -524,6 +553,60 @@ _GOVERNANCE_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS governance_links_target_idx ON governance_links(initiative_ref, task_id, lane_id, finding_fingerprint)",
 )
 
+# v9 intentionally introduced governance without rewriting active task data.
+# v10 is the follow-up integrity migration: a scope is made explicit and
+# non-null, every revision chain is made linear, and database triggers prevent
+# direct SQL from turning an initiative/task record into a broader record.  We
+# retain the v9 table rather than rebuilding it so upgrades remain atomic and
+# preserve record identifiers and artifact references.
+_GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS = (
+    "ALTER TABLE governance_records ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''",
+    "UPDATE governance_records SET scope_key = CASE "
+    "WHEN initiative_ref IS NOT NULL AND task_id IS NOT NULL THEN 'initiative-task:' || length(initiative_ref) || ':' || initiative_ref || ':' || length(task_id) || ':' || task_id "
+    "WHEN initiative_ref IS NOT NULL THEN 'initiative:' || length(initiative_ref) || ':' || initiative_ref "
+    "WHEN task_id IS NOT NULL THEN 'task:' || length(task_id) || ':' || task_id "
+    "ELSE 'project:' END",
+    "CREATE TRIGGER governance_records_scope_integrity_insert BEFORE INSERT ON governance_records FOR EACH ROW "
+    "WHEN NEW.scope_key != CASE "
+    "WHEN NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL THEN 'initiative-task:' || length(NEW.initiative_ref) || ':' || NEW.initiative_ref || ':' || length(NEW.task_id) || ':' || NEW.task_id "
+    "WHEN NEW.initiative_ref IS NOT NULL THEN 'initiative:' || length(NEW.initiative_ref) || ':' || NEW.initiative_ref "
+    "WHEN NEW.task_id IS NOT NULL THEN 'task:' || length(NEW.task_id) || ':' || NEW.task_id "
+    "ELSE 'project:' END "
+    "OR (NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL AND NOT EXISTS "
+    "(SELECT 1 FROM initiative_task_links WHERE initiative_ref=NEW.initiative_ref AND task_id=NEW.task_id)) "
+    "BEGIN SELECT RAISE(ABORT, 'governance scope integrity violation'); END",
+    "CREATE TRIGGER governance_records_scope_integrity_update BEFORE UPDATE OF initiative_ref, task_id, scope_key ON governance_records FOR EACH ROW "
+    "WHEN NEW.scope_key != CASE "
+    "WHEN NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL THEN 'initiative-task:' || length(NEW.initiative_ref) || ':' || NEW.initiative_ref || ':' || length(NEW.task_id) || ':' || NEW.task_id "
+    "WHEN NEW.initiative_ref IS NOT NULL THEN 'initiative:' || length(NEW.initiative_ref) || ':' || NEW.initiative_ref "
+    "WHEN NEW.task_id IS NOT NULL THEN 'task:' || length(NEW.task_id) || ':' || NEW.task_id "
+    "ELSE 'project:' END "
+    "OR (NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL AND NOT EXISTS "
+    "(SELECT 1 FROM initiative_task_links WHERE initiative_ref=NEW.initiative_ref AND task_id=NEW.task_id)) "
+    "BEGIN SELECT RAISE(ABORT, 'governance scope integrity violation'); END",
+    # Re-evaluate legacy v9 rows through the just-installed trigger.  A
+    # legacy record with a cross-initiative task link must fail closed instead
+    # of silently becoming valid in a wider scope after upgrade.
+    "UPDATE governance_records SET scope_key = scope_key",
+    "CREATE UNIQUE INDEX governance_records_scope_revision_unique ON governance_records(scope_key, record_type, revision)",
+    "CREATE UNIQUE INDEX governance_records_supersedes_unique ON governance_records(supersedes) WHERE supersedes IS NOT NULL",
+    "CREATE TABLE governance_submissions(submission_id TEXT PRIMARY KEY, command_digest TEXT NOT NULL, record_ref TEXT NOT NULL REFERENCES governance_records(record_ref) ON DELETE RESTRICT, created_at TEXT NOT NULL)",
+    "CREATE UNIQUE INDEX governance_submissions_record_idx ON governance_submissions(record_ref)",
+    "CREATE TRIGGER governance_records_immutable_update BEFORE UPDATE ON governance_records FOR EACH ROW "
+    "WHEN NEW.initiative_ref IS NOT OLD.initiative_ref OR NEW.task_id IS NOT OLD.task_id OR NEW.scope_key IS NOT OLD.scope_key "
+    "OR NEW.record_type IS NOT OLD.record_type OR NEW.revision IS NOT OLD.revision OR NEW.supersedes IS NOT OLD.supersedes "
+    "OR NEW.content_json IS NOT OLD.content_json OR NEW.content_digest IS NOT OLD.content_digest "
+    "OR NEW.content_artifact_ref IS NOT OLD.content_artifact_ref OR NEW.created_by IS NOT OLD.created_by "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.expires_at IS NOT OLD.expires_at "
+    "BEGIN SELECT RAISE(ABORT, 'governance record immutable fields cannot change'); END",
+    "CREATE TRIGGER governance_records_task_delete_restrict BEFORE DELETE ON tasks FOR EACH ROW "
+    "WHEN EXISTS (SELECT 1 FROM governance_records WHERE task_id=OLD.task_id) "
+    "BEGIN SELECT RAISE(ABORT, 'governance records prevent task deletion'); END",
+    "CREATE TRIGGER governance_records_initiative_delete_restrict BEFORE DELETE ON initiatives FOR EACH ROW "
+    "WHEN EXISTS (SELECT 1 FROM governance_records WHERE initiative_ref=OLD.initiative_ref) "
+    "BEGIN SELECT RAISE(ABORT, 'governance records prevent initiative deletion'); END",
+)
+
 
 def _migration_plan() -> tuple[_Migration, ...]:
     return (
@@ -536,6 +619,7 @@ def _migration_plan() -> tuple[_Migration, ...]:
         _Migration(7, "canonical-content-blobs-and-logical-artifacts", _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS),
         _Migration(8, "revision-aware-orchestration", _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS),
         _Migration(9, "governance-ledger", _GOVERNANCE_SCHEMA_STATEMENTS),
+        _Migration(10, "governance-integrity-hardening", _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS),
     )
 
 
@@ -572,11 +656,18 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "governance_links", "governance_links_record_idx",
             "governance_links_target_idx",
         },
+        10: {
+            "governance_records_scope_revision_unique", "governance_records_supersedes_unique",
+            "governance_submissions", "governance_submissions_record_idx",
+            "governance_records_scope_integrity_insert", "governance_records_scope_integrity_update",
+            "governance_records_immutable_update", "governance_records_task_delete_restrict",
+            "governance_records_initiative_delete_restrict",
+        },
     }
     present = {
         str(row[0])
         for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger')"
         )
     }
     if not required.get(version, set()).issubset(present):
@@ -631,6 +722,10 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "initiative_dependencies": {"dependency_ref", "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "created_at"},
             "governance_records": {"record_ref", "initiative_ref", "task_id", "record_type", "revision", "supersedes", "status", "content_json", "content_digest", "content_artifact_ref", "approval_basis_json", "created_by", "created_at", "expires_at"},
             "governance_links": {"link_ref", "record_ref", "initiative_ref", "task_id", "lane_id", "finding_fingerprint", "evidence_ref", "relationship", "created_at"},
+        },
+        10: {
+            "governance_records": {"scope_key"},
+            "governance_submissions": {"submission_id", "command_digest", "record_ref", "created_at"},
         },
     }
     for table, expected_columns in column_requirements.get(version, {}).items():
@@ -731,6 +826,7 @@ def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, so
     ensure_database(root)
     fingerprint = str(finding["fingerprint"])
     source = source or {}
+    severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
     with _connection(root, write=True) as connection:
         row = connection.execute("SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?", (task_id, fingerprint)).fetchone()
         now = _now()
@@ -740,10 +836,21 @@ def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, so
             except json.JSONDecodeError: evidence = []
         if source and source not in evidence: evidence.append(source)
         if row:
-            # A later closure may resolve/waive a finding; preserve the most
-            # conservative severity/blocking state until explicitly resolved.
             status = str(finding["status"])
-            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (finding["severity"], status, int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
+            if str(row["status"]) == "open" and status == "open":
+                # While a finding remains open, repeated reports may only
+                # retain or increase its severity/blocking state. Explicit
+                # resolved/waived reports are lifecycle transitions and keep
+                # their existing metadata contract below.
+                severity = max(
+                    (str(row["severity"]), str(finding["severity"])),
+                    key=lambda value: severity_rank[value],
+                )
+                blocking = bool(row["blocking"]) or bool(finding["blocking"])
+            else:
+                severity = finding["severity"]
+                blocking = bool(finding["blocking"])
+            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (severity, status, int(blocking), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
         else:
             connection.execute("INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, now))
     return finding | {"task_id": task_id, "source_evidence": evidence}

@@ -68,6 +68,18 @@ review is bound to canonical reviewer attempts and sessions. Full governance
 adds `governance_activation` and `governance_close` review waves owned by
 `code_reviewer`; the resolver never invents a numeric scope trigger.
 
+Governance schema v10 makes the integrity boundary explicit. A record is read
+from and verified against its immutable content artifact; the legacy
+`content_json` column is only a checked cache. Every record has a normalized,
+non-null scope key, task/initiative links are checked exactly, and a partial
+unique index permits at most one successor for a predecessor. Immutable-field
+triggers reject direct SQL mutation, strict JSON rejects non-finite values, and
+`submission_id` plus a command digest makes retries conflict-safe. Promotion
+and its proposal transition must share one SQLite transaction. A coordinator
+capability carries task/initiative scope, principal, thread, generation,
+expiry, allowed actions, and revocation metadata; recovery rotates a lost
+bearer only for the same active identity and never stores plaintext.
+
 ## Chunked immutable artifact transport
 
 Large coordination evidence is stored as immutable SQLite artifacts, not as a
@@ -125,6 +137,13 @@ decision. Choice-based batch forms always expose optional `custom_response`;
 localized custom text follows the same canonical-English translation barrier
 as ordinary free text.
 
+Questions are bound to the task revision, plan revision, and attempt strategy
+generation. A material steer supersedes unresolved questions and invalidates
+downstream evidence; an answer from an older revision is rejected rather than
+applied to the new pipeline. Question quotas are scoped to the active revision
+or generation, so a long-running corrective task can ask a new blocking
+question after a user-approved strategy change without losing the audit trail.
+
 The coordinator is the sole pipeline authority: it builds or consciously
 accepts the initial waves, follows the returned pipeline snapshot by default,
 and changes `future_waves` only when verified evidence materially changes
@@ -144,6 +163,13 @@ active task only when its current wave has no live or pending dispatch.
 Semantically unchanged future-wave reassessment records an unchanged receipt
 and continues, while v5 future waves are internally renumbered so public
 relative steps never move backward or collide.
+
+The open-ended correction policy has a liveness boundary rather than a fixed
+attempt quota. Cortex computes a no-progress signature from the finding
+fingerprint, affected paths, dispatch/manifest digest, verification result,
+and failure class. Repeated materially identical signatures pause autonomous
+work in a user-decision state, preserving the failed gate and evidence instead
+of producing a false pass. A new strategy generation is required to resume.
 
 A final close report may itself reveal bounded work that invalidates terminal
 proof. When the coordinator supplies an explicit rework `future_waves`
@@ -436,7 +462,7 @@ initial baseline before replacement dispatches.
 ### SQLite migration contract
 
 `cortex.db` is the sole mutable source of truth for new tasks. The plugin keeps
-numbered, content-checked migrations through v9 in `ledger_db.py`; the first
+numbered, content-checked migrations through v10 in `ledger_db.py`; the first
 MCP call with a new migration takes the project-ledger lock, applies every
 missing migration in order inside one SQLite transaction, and records each
 version in `schema_migrations`. Repeated calls verify history and schema.
@@ -454,6 +480,13 @@ that they are generated output; a source directory with one of those names is
 not hidden by name alone. This balances complete changed-file accounting with
 the practical need to avoid inventorying virtual environments and package
 caches.
+
+Manifest capture also has explicit `max_entries`, `max_hashed_bytes`, and
+`max_seconds` budgets. A budget breach produces a partial manifest with a
+reason and never masquerades as a complete baseline. A bounded in-process
+digest cache reuses unchanged file hashes only when the full stat identity
+matches. The release workflow runs the 50,000-file benchmark and requires its
+`target_met` result before the CI job can pass.
 
 The ledger stores `principal` and `thread_id` for authorization and a
 delegation attempt for auditability, but it deliberately labels the link as

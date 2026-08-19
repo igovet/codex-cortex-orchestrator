@@ -51,8 +51,10 @@ brief, context files, and at most eight validated domains.
   Final receipts retain manifest digests and change proof. If
   `allow_rework` reopens that task, Cortex first captures a fresh active
   baseline; stale deleted snapshots are never reused.
-- Schema v9 adds the governance ledger beside the v8 task/plan revisions,
-  native worker sessions, attempt messages,
+- Schema v9 historically added the governance ledger beside the v8 task/plan
+  revisions; schema v10 enforces artifact-authoritative bodies, exact scope,
+  linear revisions, and durable idempotent submissions. The task ledger still
+  includes native worker sessions, attempt messages,
   trace/tool observations, and question-batch storage. Schema v7 does not use
   one artifact identity for everything. A content blob
   may be shared by digest, a logical artifact is task-scoped, and an export
@@ -244,7 +246,10 @@ brief, context files, and at most eight validated domains.
   prompts, arguments, results, source paths, and arbitrary host diagnostic
   content are redacted. Heartbeats are emitted every 15 seconds while the parent runs, and
   the per-scenario timeout defaults to 1,800 seconds (`--live-timeout-seconds`
-  accepts 10..7200). Timeout or interruption terminates the complete process
+  accepts 10..7200). The dedicated `finding_rework_documentation` source-mode
+  smoke is an exception: it proves the exact Review finding → corrective
+  Documentation → fresh Review resolution trace and has a hard 300-second
+  maximum (the flag may only reduce it). Timeout or interruption terminates the complete process
   group, escalating from `SIGTERM` to `SIGKILL` after ten seconds. Normal or
   supervised exits clean the private runtime and temporary project; a crash or
   external `SIGKILL` may leave OS-temp residue. A live

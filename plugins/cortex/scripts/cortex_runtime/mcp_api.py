@@ -17,7 +17,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref and the exact task_ref from the successful lifecycle response. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
-    "manage_governance": "Manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
+    "manage_governance": "Manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If the one-response bearer was lost, recover_coordinator_capability rotates it for the same active principal, thread, and task_ref without revealing the old bearer. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
 
@@ -148,8 +148,11 @@ def build_public_schemas(
     GATE_RESULT_SCHEMA = {
         **CLOSURE_SCHEMA,
         "description": (
-            "Canonical result envelope for every gate. The legacy closure sibling remains an alias for "
-            "review/close during the compatibility window."
+            "Canonical optional result envelope. Review, governance activation, governance close, and final close "
+            "require it; other gates may include it. A pass has no open finding or missing required verification. "
+            "Only a fresh rerun of the gate that opened an inherited fingerprint, consuming its immutable origin and "
+            "a server-bound corrective report, may resolve it. The legacy closure "
+            "sibling remains an alias for review/close during the compatibility window."
         ),
         "properties": {
             **CLOSURE_SCHEMA["properties"],
@@ -597,10 +600,13 @@ def build_public_schemas(
         "description": "Dedicated governance surface for initiatives, dependency graph integrity, append-only records, snapshots, exceptions, and approval-only promotion proposals.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "action": {"type": "string", "minLength": 1, "description": "Explicit governance action such as create_initiative, add_dependency, create_record, snapshot, or approve_promotion."},
+            "action": {"type": "string", "minLength": 1, "description": "Explicit governance action such as create_initiative, add_dependency, create_record, snapshot, approve_promotion, or recover_coordinator_capability."},
             "principal": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator principal; when omitted, Cortex derives it from the capability."},
             "thread_id": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator thread/session identity; provide it together with principal or omit both."},
-            "coordinator_capability": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque one-response server-issued capability returned by the original successful start_orchestration call. Only its SHA-256 digest is durable; retries do not reissue it. Never persist it or include it in worker briefings."},
+            "coordinator_capability": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque short-lived task-scoped server-issued capability returned by a successful start_orchestration or explicit recovery response. Only its SHA-256 verifier and non-secret server-owned claims are durable. Never persist it or include it in worker briefings. It is required for every action except recover_coordinator_capability."},
+            "task_ref": {"type": "string", "minLength": 1, "description": "Exact task reference. Required only for recover_coordinator_capability, together with the active server-bound principal and thread_id; recovery rotates instead of revealing a lost bearer."},
+            "capability_generation": {"type": "integer", "minimum": 1, "description": "Optional expected server-owned capability generation for recover_coordinator_capability. A mismatch fails closed rather than reviving a stale bearer."},
+            "submission_id": {"type": "string", "minLength": 1, "description": "Stable caller-generated identifier for durable create_record retry after a lost response. Reuse is accepted only for the exact same immutable command."},
             "entity": {"type": "string"},
             "initiative_ref": {"type": "string"},
             "parent_ref": {"type": "string"},
@@ -645,7 +651,7 @@ def build_public_schemas(
             "trigger": {"type": "string"},
             "reason": {"type": "string"},
         },
-        "required": ["project_root", "action", "coordinator_capability"],
+        "required": ["project_root", "action"],
     }
 
     return {
@@ -751,23 +757,16 @@ def v3_response(
             if start_replayed is not None else ""
         )
         next_action = (
-            f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: FIRST, with close_agent when available, close "
-            "every known completed child whose durable report was read or whose exact failed result Cortex already "
-            "accepted; never close a running or question-paused child. If recovery may have missed a terminal child, "
-            "use list_agents defensively and apply the same eligibility rule. THEN call "
-            "every dispatch.call once with its exact dispatch.arguments in one model turn when the host supports "
-            "parallel tool calls. Exact task_name and dispatch identity bind out-of-order SubagentStart events; "
-            "ordinal correlation is forbidden. "
-            "A worker is dispatched only after that native call returns a child id. Never claim "
-            "it was sent or call wait without the returned child target; if the native call is unavailable or fails, "
-            "stop and report the blocker. Keep the returned child targets, then remain idle and wait only for them. Do not repeat a "
-            "completed lifecycle call while dispatching. Each worker publishes through record_report and returns only "
-            "a report_ref plus a short summary. After the native worker completes, read every ref with "
-            "read_worker_report. Only publication_required=true authorizes one main-chat link, and that same message "
-            "must briefly explain completion_update.summary and what happens next; rereads never republish. After the durable report was read and no "
-            "question or follow-up remains, close that exact completed native child with close_agent when available; "
-            "the Cortex report remains authoritative after native cleanup. Reassess the pipeline, then call "
-            f"continue_orchestration with task_ref={task_ref}, the report_ref values, and this step."
+            f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: FIRST close every known completed child whose "
+            "durable report was read or whose exact failed result Cortex already accepted; never close a running or "
+            "question-paused child. If recovery may have missed one, use list_agents defensively. THEN call every "
+            "dispatch.call exactly once with its exact dispatch.arguments. Until every returned dispatch has been "
+            "invoked, do not call start_orchestration, continue_orchestration, manage_orchestration, inspect, or wait. "
+            "A worker exists only after the native call returns a child target. Never claim it was sent or call wait "
+            "without the returned child target. Wait only for those targets. Each worker must publish through "
+            "record_report. Read every returned report_ref, then close that exact completed native child with close_agent. "
+            "Only after every report is durably read and every eligible child is closed, call "
+            f"continue_orchestration with task_ref={task_ref}, those report_ref values, and this step."
         )
     elif outcome == "awaiting_plan_approval":
         next_action = (

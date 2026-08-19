@@ -97,6 +97,286 @@ _GATE_RESULT_REQUIRED_GATES = {
 }
 
 
+def _semantic_task_revision(state: dict[str, Any]) -> int:
+    """Return the durable user-meaningful task revision, never state CAS rev."""
+    value = state.get("task_revision") or 1
+    try:
+        revision = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("task state has an invalid semantic task revision") from exc
+    if revision < 1:
+        raise ValueError("task state has an invalid semantic task revision")
+    return revision
+
+
+def _finding_transition_source(
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    report_id: str,
+    report_artifact_ref: str,
+    content_digest: str,
+    transition: str,
+    kind: str | None = None,
+    resolution_route: dict[str, Any] | None = None,
+    corrective_origin_report_ref: str | None = None,
+) -> dict[str, Any]:
+    """Build server-owned provenance for one canonical finding transition.
+
+    ``task_findings`` is the materialized current state, while its bounded
+    ``source_evidence`` history is the lightweight traceability graph used by
+    report intake.  None of these values come from the worker report: the
+    server binds them to the immutable report artifact it just stored.
+    """
+    source: dict[str, Any] = {
+        "transition": transition,
+        "report_id": report_id,
+        "receipt_ref": f"report-receipt-{report_id}",
+        "report_artifact_ref": report_artifact_ref,
+        "report_content_digest": content_digest,
+        "attempt_id": str(attempt["attempt_id"]),
+        "gate": str(attempt["gate"]),
+        "task_revision": _semantic_task_revision(state),
+    }
+    if kind:
+        source["kind"] = kind
+    if corrective_origin_report_ref:
+        source["origin_report_ref"] = corrective_origin_report_ref
+    if resolution_route is not None:
+        source["origin_report_ref"] = resolution_route["origin_report_ref"]
+        source["correction_report_refs"] = resolution_route["correction_report_refs"]
+    return source
+
+
+def _open_finding_origin(
+    finding: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the immutable first trusted open event for a finding.
+
+    Subsequent workers may report the same fingerprint as still open, but they
+    must never replace the verifier/gate that owns its resolution authority.
+    """
+    sources = finding.get("source_evidence")
+    if not isinstance(sources, list):
+        return None
+    for source in sources:
+        if not isinstance(source, dict) or source.get("transition") != "opened":
+            continue
+        required = (
+            "report_id", "receipt_ref", "report_artifact_ref", "report_content_digest",
+            "attempt_id", "gate", "task_revision",
+        )
+        if all(str(source.get(field) or "").strip() for field in required):
+            return source
+    return None
+
+
+def _current_correction_report_refs(
+    state: dict[str, Any],
+    *,
+    finding: dict[str, Any],
+    origin_attempt_id: str,
+    origin_report_id: str,
+    rework: dict[str, Any],
+    rerun_context: set[str],
+) -> list[str]:
+    """Return only current corrective reports that the verifier was given.
+
+    The source report is durable historical context after rework invalidates
+    its receipt; it is not the evidence that a correction happened.  A
+    correction ref must be server-bound to this exact fingerprint and origin
+    before a current, passed corrective attempt can supply it to the resolver.
+    This keeps the handoff directional: source finding -> corrective work ->
+    originating verifier.
+    """
+    target_gate = str(rework.get("target_gate") or "")
+    if not target_gate:
+        return []
+    current_revision = _semantic_task_revision(state)
+    corrected_refs = {
+        str(source.get("report_id") or "")
+        for source in finding.get("source_evidence") or []
+        if isinstance(source, dict)
+        and source.get("transition") == "corrective_reported"
+        and source.get("origin_report_ref") == origin_report_id
+        and source.get("gate") == target_gate
+        and int(source.get("task_revision") or 0) == current_revision
+        and str(source.get("report_id") or "")
+    }
+    if not corrected_refs:
+        return []
+    current_evidence = {
+        str(item.get("report_id") or "")
+        for item in state.get("evidence") or []
+        if isinstance(item, dict)
+        and not item.get("invalidated")
+        and str(item.get("report_id") or "")
+    }
+    correction_refs: list[str] = []
+    for candidate in state.get("attempts") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            candidate.get("gate") != target_gate
+            or candidate.get("status") != "passed"
+            or candidate.get("invalidated")
+            or str(candidate.get("attempt_id") or "") == origin_attempt_id
+        ):
+            continue
+        for report_id in candidate.get("report_ids") or []:
+            value = str(report_id or "")
+            if (
+                value in corrected_refs
+                and value in rerun_context
+                and value in current_evidence
+                and value not in correction_refs
+            ):
+                correction_refs.append(value)
+    return correction_refs
+
+
+def _corrective_finding_origins(
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return active rework fingerprints this attempt is allowed to correct.
+
+    This server-only association is written after the immutable report exists.
+    It is intentionally based on the route and scoped context—not on worker
+    prose—so a later verifier can consume an exact correction receipt.
+    """
+    current_revision = _semantic_task_revision(state)
+    context_refs = {str(item) for item in attempt.get("context_report_ids") or []}
+    routes: list[tuple[str, str]] = []
+    for rework in (state.get("closure_rework") or {}).values():
+        if (
+            not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+            or rework.get("target_gate") != attempt.get("gate")
+            or int(rework.get("task_revision") or 0) != current_revision
+        ):
+            continue
+        source_refs = {
+            str(item) for item in rework.get("source_report_refs") or [] if str(item)
+        }
+        if not source_refs or not source_refs.issubset(context_refs):
+            continue
+        for fingerprint in rework.get("finding_fingerprints") or []:
+            value = str(fingerprint or "")
+            if value:
+                routes.extend((value, source_ref) for source_ref in source_refs)
+    return list(dict.fromkeys(routes))
+
+
+def _validate_finding_resolution_transitions(
+    root: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    gate_result: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Fail closed unless the origin verifier reruns against its exact handoff.
+
+    Corrective workers may prove that they changed an artifact, but they do
+    not own the review finding they received.  A finding can become resolved
+    only when the gate that opened it runs again through the server-recorded
+    corrective route and receives the immutable origin report in its scoped
+    predecessor context. ``record_report`` separately enforces the
+    acknowledgement for that full context, so the worker cannot merely name a
+    fingerprint in free text.
+    """
+    if gate_result is None:
+        return {}
+    known = {
+        str(item.get("fingerprint") or ""): item
+        for item in _runtime.db_list_task_findings(root, state["task_id"], include_resolved=True)
+        if isinstance(item, dict)
+    }
+    seen: set[str] = set()
+    resolution_routes: dict[str, dict[str, Any]] = {}
+    current_revision = _semantic_task_revision(state)
+    rerun_context = {str(item) for item in attempt.get("context_report_ids") or []}
+    for proposed in gate_result.get("findings") or []:
+        if not isinstance(proposed, dict):  # Sanitization is authoritative.
+            continue
+        fingerprint = str(proposed.get("fingerprint") or "")
+        if fingerprint in seen:
+            raise ValueError("gate_result must not contain duplicate finding fingerprints")
+        seen.add(fingerprint)
+        if proposed.get("status") != "resolved":
+            continue
+        current = known.get(fingerprint)
+        if current is None or current.get("status") != "open":
+            raise ValueError(
+                "gate_result resolved finding must name one currently open canonical fingerprint"
+            )
+        origin = _open_finding_origin(current)
+        if origin is None:
+            raise ValueError(
+                "gate_result resolved finding has no trusted origin evidence; "
+                "rerun the originating verification gate before closing it"
+            )
+        origin_gate = str(origin["gate"])
+        origin_attempt = str(origin["attempt_id"])
+        origin_report = str(origin["report_id"])
+        try:
+            origin_revision = int(origin["task_revision"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "gate_result resolved finding has invalid trusted origin revision"
+            ) from exc
+        if origin_revision != current_revision:
+            raise ValueError(
+                "gate_result resolved finding comes from a stale semantic task revision; "
+                "re-run the current verification route"
+            )
+        if str(attempt.get("gate") or "") != origin_gate:
+            raise ValueError(
+                "gate_result resolved finding may be published only by a fresh rerun of its origin gate"
+            )
+        if str(attempt.get("attempt_id") or "") == origin_attempt:
+            raise ValueError(
+                "gate_result resolved finding requires a fresh rerun attempt, not its origin attempt"
+            )
+        if origin_report not in rerun_context:
+            raise ValueError(
+                "gate_result resolved finding requires its exact immutable origin report in the rerun handoff"
+            )
+        rework = (state.get("closure_rework") or {}).get(origin_gate)
+        if not isinstance(rework, dict) or rework.get("status") != "rework_required":
+            raise ValueError(
+                "gate_result resolved finding requires an active server-recorded corrective rework route"
+            )
+        if int(rework.get("task_revision") or 0) != current_revision:
+            raise ValueError(
+                "gate_result resolved finding belongs to a superseded corrective route; "
+                "use the current semantic task revision"
+            )
+        expected_fingerprints = {str(item) for item in rework.get("finding_fingerprints") or []}
+        if fingerprint not in expected_fingerprints or origin_report not in {
+            str(item) for item in rework.get("source_report_refs") or []
+        }:
+            raise ValueError(
+                "gate_result resolved finding does not match the active corrective rework route"
+            )
+        correction_refs = _current_correction_report_refs(
+            state,
+            finding=current,
+            origin_attempt_id=origin_attempt,
+            origin_report_id=origin_report,
+            rework=rework,
+            rerun_context=rerun_context,
+        )
+        if not correction_refs:
+            raise ValueError(
+                "gate_result resolved finding requires the current corrective report in the verifier handoff"
+            )
+        resolution_routes[fingerprint] = {
+            "origin_report_ref": origin_report,
+            "correction_report_refs": correction_refs,
+        }
+    return resolution_routes
+
+
 def _report_draft_key(attempt_id: str, draft_ref: str) -> str:
     return f"report_draft:{safe_id(attempt_id)}:{safe_id(draft_ref)}"
 
@@ -636,6 +916,42 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                     "draft_path": str(draft_path),
                 }
             return outcome
+        canonical_gate_result = gate_result or closure
+        verification_finding: dict[str, Any] | None = None
+        resolution_routes: dict[str, dict[str, Any]] = {}
+        if canonical_gate_result is not None:
+            missing_checks = canonical_gate_result["verification"]["required_missing"]
+            existing_verification = {
+                str(item.get("fingerprint") or ""): item
+                for item in _runtime.db_list_task_findings(root, state["task_id"], include_resolved=True)
+                if isinstance(item, dict)
+            }.get("verification-required-missing")
+            result_fingerprints = {
+                str(item.get("fingerprint") or "")
+                for item in canonical_gate_result.get("findings") or []
+                if isinstance(item, dict)
+            }
+            if missing_checks or (
+                isinstance(existing_verification, dict)
+                and existing_verification.get("status") == "open"
+                and "verification-required-missing" not in result_fingerprints
+            ):
+                verification_finding = {
+                    "fingerprint": "verification-required-missing",
+                    "severity": "P1" if missing_checks else "P3",
+                    "status": "open" if missing_checks else "resolved",
+                    "blocking": bool(missing_checks),
+                    "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
+                    "details": missing_checks,
+                }
+            transition_validation_result = dict(canonical_gate_result)
+            if verification_finding is not None:
+                transition_validation_result["findings"] = [
+                    *canonical_gate_result["findings"], verification_finding,
+                ]
+            resolution_routes = _validate_finding_resolution_transitions(
+                root, state, attempt, transition_validation_result
+            )
         attempt_count = sum(1 for item in authoritative if item.get("attempt_id") == attempt_id)
         if attempt_count >= _runtime.MAX_REPORTS_PER_ATTEMPT:
             raise ValueError("per-attempt report count quota exhausted")
@@ -669,20 +985,75 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             export_path=f"reports/records/{report_id}.json",
         )
         record["report_artifact_ref"] = report_artifact["artifact_ref"]
-        canonical_gate_result = gate_result or closure
+        resolved_fingerprints = {
+            str(finding.get("fingerprint") or "")
+            for finding in (canonical_gate_result or {}).get("findings") or []
+            if isinstance(finding, dict) and finding.get("status") == "resolved"
+        }
+        current_findings = {
+            str(finding.get("fingerprint") or ""): finding
+            for finding in _runtime.db_list_task_findings(root, state["task_id"], include_resolved=True)
+            if isinstance(finding, dict) and finding.get("status") == "open"
+        }
+        # A corrective report is a first-class, server-bound bridge in the
+        # trace graph. It applies only to the active route whose immutable
+        # source report is actually in this worker's scoped context. A resolver
+        # cannot self-create this receipt in the same report it uses to close.
+        for fingerprint, origin_report_ref in _corrective_finding_origins(state, attempt):
+            finding = current_findings.get(fingerprint)
+            if finding is None or fingerprint in resolved_fingerprints:
+                continue
+            _runtime.db_upsert_task_finding(
+                root,
+                state["task_id"],
+                finding,
+                source=_finding_transition_source(
+                    state,
+                    attempt,
+                    report_id=report_id,
+                    report_artifact_ref=str(report_artifact["artifact_ref"]),
+                    content_digest=content_digest,
+                    transition="corrective_reported",
+                    corrective_origin_report_ref=origin_report_ref,
+                ),
+            )
         if canonical_gate_result is not None:
             for finding in canonical_gate_result["findings"]:
-                _runtime.db_upsert_task_finding(root, state["task_id"], finding, source={"report_id": report_id, "attempt_id": attempt_id})
-            missing_checks = canonical_gate_result["verification"]["required_missing"]
-            verification_finding = {
-                "fingerprint": "verification-required-missing",
-                "severity": "P1" if missing_checks else "P3",
-                "status": "open" if missing_checks else "resolved",
-                "blocking": bool(missing_checks),
-                "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
-                "details": missing_checks,
-            }
-            _runtime.db_upsert_task_finding(root, state["task_id"], verification_finding, source={"report_id": report_id, "attempt_id": attempt_id, "kind": "verification"})
+                transition = "resolved" if finding.get("status") == "resolved" else (
+                    "waived" if finding.get("status") == "waived" else "opened"
+                )
+                _runtime.db_upsert_task_finding(
+                    root,
+                    state["task_id"],
+                    finding,
+                    source=_finding_transition_source(
+                        state,
+                        attempt,
+                        report_id=report_id,
+                        report_artifact_ref=str(report_artifact["artifact_ref"]),
+                        content_digest=content_digest,
+                        transition=transition,
+                        resolution_route=resolution_routes.get(str(finding.get("fingerprint") or "")),
+                    ),
+                )
+            if verification_finding is not None:
+                verification_transition = (
+                    "opened" if verification_finding["status"] == "open" else "resolved"
+                )
+                _runtime.db_upsert_task_finding(
+                    root,
+                    state["task_id"],
+                    verification_finding,
+                    source=_finding_transition_source(
+                        state,
+                        attempt,
+                        report_id=report_id,
+                        report_artifact_ref=str(report_artifact["artifact_ref"]),
+                        content_digest=content_digest,
+                        transition=verification_transition,
+                        kind="verification",
+                    ),
+                )
         receipt = {
             "schema": REPORT_SCHEMA, "receipt_id": f"report-receipt-{report_id}", "report_id": report_id,
             "task_id": state["task_id"], "gate": attempt["gate"], "attempt_id": attempt_id,

@@ -354,8 +354,8 @@ class LedgerDatabaseTests(unittest.TestCase):
                     "logical_artifacts",
                 )
 
-    def test_v8_to_v9_upgrade_preserves_active_tasks_and_is_idempotent(self) -> None:
-        """The governance migration must extend, not replace, a live v8 ledger."""
+    def test_v8_to_v10_upgrade_preserves_active_tasks_and_is_idempotent(self) -> None:
+        """Governance migrations must extend, not replace, a live v8 ledger."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             migrations = ledger_db._migration_plan()
@@ -367,7 +367,10 @@ class LedgerDatabaseTests(unittest.TestCase):
             ledger_db.ensure_database(root)
             first_history = ledger_db.migration_history(root)
             first_task = ledger_db.load_task(root, "active-v8-task")
-            self.assertEqual([item["version"] for item in first_history], list(range(1, 10)))
+            self.assertEqual(
+                [item["version"] for item in first_history],
+                list(range(1, ledger_db.DATABASE_SCHEMA_VERSION + 1)),
+            )
             self.assertIsNotNone(first_task)
             self.assertEqual(first_task[1]["status"], "active")
 

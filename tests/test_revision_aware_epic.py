@@ -105,10 +105,12 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             migrations = connection.execute(
                 "SELECT version, name FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual(migrations[-2]["version"], 8)
-            self.assertEqual(migrations[-2]["name"], "revision-aware-orchestration")
-            self.assertEqual(migrations[-1]["version"], 9)
-            self.assertEqual(migrations[-1]["name"], "governance-ledger")
+            self.assertEqual(migrations[-3]["version"], 8)
+            self.assertEqual(migrations[-3]["name"], "revision-aware-orchestration")
+            self.assertEqual(migrations[-2]["version"], 9)
+            self.assertEqual(migrations[-2]["name"], "governance-ledger")
+            self.assertEqual(migrations[-1]["version"], 10)
+            self.assertEqual(migrations[-1]["name"], "governance-integrity-hardening")
             tables = {
                 row["name"]
                 for row in connection.execute(
@@ -203,6 +205,293 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(dispatch["attempt_id"], attempt["attempt_id"])
         self.assertNotIn("spawn_agent", dispatch["call"])
         self.assertEqual(steered["task_revision"], 2)
+
+    def test_active_c1_schema_authorization_steer_auto_escalates_full_governance_to_close(self) -> None:
+        """A material active steer owns its governance replan; callers never supply waves."""
+        started = control.start_orchestration(
+            {
+                "project_root": str(self.project),
+                "task": {
+                    "user_request": "Implement a focused C1 result path.",
+                    "complexity": "C1",
+                    "acceptance_criteria": ["The observable behavior is completed."],
+                    "verification": ["Run the focused acceptance check."],
+                },
+            }
+        )
+        self.assertTrue(started["ok"], started)
+        task_dir, state, initial_attempt = self.confirm_running(
+            started, host_agent_id="native.governance-steer:01"
+        )
+        initial_step = started["step"]
+
+        steered = control.manage_orchestration(
+            {
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "steer",
+                "payload": {
+                    "user_message": (
+                        "Add a database schema migration and authorization checks for access control."
+                    ),
+                    "user_language": "en",
+                },
+            }
+        )
+        self.assertTrue(steered["ok"], steered)
+        self.assertEqual(steered["outcome"], "ready_to_resume")
+        self.assertEqual(len(steered["dispatches"]), 1)
+        resume = steered["dispatches"][0]
+        self.assertEqual(resume["call"], "followup_task")
+        self.assertEqual(resume["attempt_id"], initial_attempt["attempt_id"])
+        self.assertEqual(resume["host_agent_id"], "native.governance-steer:01")
+
+        state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(state["governance"]["effective_mode"], "full")
+        pending = state["pending_revision_impact"]
+        self.assertEqual(pending["earliest_affected_gate"], "architecture")
+        self.assertEqual(
+            [
+                delegation["gate"]
+                for wave in pending["replacement_waves"]
+                for delegation in wave["delegations"]
+            ],
+            [
+                "governance_activation", "architecture", "implementation", "security",
+                "review", "documentation", "governance_close", "close",
+            ],
+        )
+
+        expected_gates = [
+            "discover", "governance_activation", "architecture", "implementation", "security",
+            "review", "documentation", "governance_close", "close",
+        ]
+        observed_gates: list[str] = []
+        response: dict = {"step": initial_step}
+        while True:
+            current = control.load_task_state_for_artifact(task_dir)
+            active = [
+                item for item in current["attempts"]
+                if item.get("gate") in control.active_gates(current)
+                and item.get("status") in {control.AWAITING_HOST_SPAWN, "running"}
+                and not item.get("invalidated")
+            ]
+            self.assertEqual(len(active), 1, current)
+            attempt = active[0]
+            observed_gates.append(attempt["gate"])
+            report = self.report_for(attempt, self.project)
+            if attempt["gate"] == "implementation":
+                implementation_path = self.project / "implementation.txt"
+                implementation_path.write_text("schema and authorization implementation fixture\n", encoding="utf-8")
+                report["changed_files"] = ["implementation.txt"]
+            elif attempt["gate"] == "documentation":
+                documentation_path = self.project / "docs" / "governance-steer.md"
+                documentation_path.parent.mkdir(exist_ok=True)
+                documentation_path.write_text("governance steer documentation fixture\n", encoding="utf-8")
+                report["changed_files"] = ["docs/governance-steer.md"]
+            report["evidence"].append("Task revision reviewed: 2")
+            if attempt.get("context_report_ids"):
+                report["evidence"].append(
+                    control._predecessor_review_marker(attempt["context_report_ids"])
+                )
+            publish_params = {
+                "project_root": str(self.project),
+                "task_id": current["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": attempt["profile"],
+                "report": report,
+            }
+            if attempt["gate"] in {"governance_activation", "review", "governance_close", "close"}:
+                publish_params["gate_result"] = {
+                    "decision": "pass",
+                    "failure_class": "product",
+                    "findings": [],
+                    "verification": {
+                        "executed": ["focused acceptance"],
+                        "not_executed": [],
+                        "required_missing": [],
+                        "limitations": [],
+                    },
+                    "workspace": {
+                        "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+                    },
+                }
+            published = control.publish_worker_report(publish_params)
+            self.assertTrue(published["ok"], published)
+            response = control.continue_orchestration(
+                {
+                    "project_root": str(self.project),
+                    "task_ref": started["task_ref"],
+                    "step": response["step"],
+                    "results": [{"report_ref": published["report_ref"]}],
+                }
+            )
+            self.assertTrue(response["ok"], response)
+            if response["outcome"] == "completed":
+                break
+            self.assertEqual(response["outcome"], "ready_to_spawn", response)
+            if observed_gates == ["discover"]:
+                self.assertEqual(
+                    [dispatch["phase"] for dispatch in response["dispatches"]],
+                    ["governance_activation"],
+                )
+            self.assertNotIn("future_waves", response)
+
+        self.assertEqual(observed_gates, expected_gates)
+        final_state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(final_state["status"], "completed")
+        self.assertEqual(final_state["governance"]["effective_mode"], "full")
+        self.assertNotIn("pending_revision_impact", final_state)
+        passed_attempt_ids = {
+            item["attempt_id"] for item in final_state["attempts"]
+            if item.get("status") == "passed" and not item.get("invalidated")
+        }
+        receipt_bound_attempt_ids = {
+            item["attempt_id"] for item in final_state["evidence"]
+            if item.get("report_id") and item.get("report_receipt") and not item.get("invalidated")
+        }
+        self.assertTrue(passed_attempt_ids.issubset(receipt_bound_attempt_ids))
+
+    def test_full_governance_reportless_documentation_worker_retries_once_then_advances(self) -> None:
+        """A documented native stop is one retry, not a self-sustaining docs rework loop."""
+        started = control.start_orchestration(
+            {
+                "project_root": str(self.project),
+                "task": {
+                    "user_request": "Create a governed fixture result after inspecting README.md.",
+                    "complexity": "C3",
+                    "acceptance_criteria": ["The governed fixture result is complete."],
+                    "verification": ["Run the focused governed fixture check."],
+                    "plan_approval": "auto",
+                },
+                "waves": [
+                    {"workers": [{"phase": "implementation"}]},
+                    {"workers": [{"phase": "documentation"}]},
+                    {"workers": [{"phase": "close"}]},
+                ],
+            }
+        )
+        self.assertTrue(started["ok"], started)
+        task_dir, state = self.task_dir_and_state(started)
+        self.assertEqual(state["governance"]["effective_mode"], "full")
+        self.assertTrue(
+            control.bind_host_session_from_hook(
+                str(self.project), started["task_ref"], state["thread_id"]
+            )["bound"]
+        )
+
+        def publish_success(current: dict) -> tuple[dict, dict]:
+            current_state = control.load_task_state_for_artifact(task_dir)
+            attempt = next(
+                item for item in current_state["attempts"]
+                if item.get("gate") in control.active_gates(current_state)
+                and item.get("status") in {control.AWAITING_HOST_SPAWN, "running"}
+                and not item.get("invalidated")
+            )
+            report = self.report_for(attempt, self.project)
+            if attempt.get("context_report_ids"):
+                report["evidence"].append(
+                    control._predecessor_review_marker(attempt["context_report_ids"])
+                )
+            if attempt["gate"] == "implementation":
+                (self.project / "result.txt").write_text("governed fixture\n", encoding="utf-8")
+                report["changed_files"] = ["result.txt"]
+            elif attempt["gate"] == "documentation":
+                docs = self.project / "docs"
+                docs.mkdir(exist_ok=True)
+                (docs / "fixture.md").write_text("governed fixture documentation\n", encoding="utf-8")
+                report["changed_files"] = ["docs/fixture.md"]
+            publication = {
+                "project_root": str(self.project),
+                "task_id": current_state["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": attempt["profile"],
+                "report": report,
+            }
+            if attempt["gate"] in {"governance_activation", "governance_close", "close"}:
+                publication["gate_result"] = {
+                    "decision": "pass",
+                    "failure_class": "product",
+                    "findings": [],
+                    "verification": {
+                        "executed": ["focused governed fixture"],
+                        "not_executed": [],
+                        "required_missing": [],
+                        "limitations": [],
+                    },
+                    "workspace": {
+                        "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+                    },
+                }
+            published = control.publish_worker_report(publication)
+            self.assertTrue(published["ok"], published)
+            advanced = control.continue_orchestration(
+                {
+                    "project_root": str(self.project),
+                    "task_ref": started["task_ref"],
+                    "step": current["step"],
+                    "results": [{"report_ref": published["report_ref"]}],
+                }
+            )
+            self.assertTrue(advanced["ok"], advanced)
+            return advanced, attempt
+
+        current, _activation = publish_success(started)
+        current, _implementation = publish_success(current)
+        current_state = control.load_task_state_for_artifact(task_dir)
+        failed_documentation = next(
+            item for item in current_state["attempts"]
+            if item.get("gate") == "documentation" and not item.get("invalidated")
+        )
+        host_agent_id = "native.documentation-stop:01"
+        confirmed = control.confirm_host_spawn(
+            {
+                "project_root": str(self.project),
+                "task_id": current_state["task_id"],
+                "principal": current_state["principal"],
+                "expected_revision": current_state["revision"],
+                "attempt_id": failed_documentation["attempt_id"],
+                "host_tool": failed_documentation["spawn_request"]["host_tool"],
+                "host_agent_id": host_agent_id,
+                "host_task_name": failed_documentation["spawn_request"]["task_name"],
+                "host_model": failed_documentation["spawn_request"]["expected_model"],
+                "host_reasoning_effort": failed_documentation["spawn_request"]["reasoning_effort"],
+            }
+        )
+        self.assertTrue(confirmed["confirmed"], confirmed)
+        stopped = control.finalize_host_worker_stop_from_hook(
+            str(self.project), current_state["task_id"], current_state["thread_id"], host_agent_id
+        )
+        self.assertEqual(stopped["outcome"], "native_worker_stopped_without_report")
+        retried = control.continue_orchestration(
+            {
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "step": current["step"],
+                "results": [{
+                    "status": "failed",
+                    "reason": "native_worker_stopped_without_report",
+                    "dispatch_ref": failed_documentation["dispatch_ref"],
+                }],
+            }
+        )
+        self.assertTrue(retried["ok"], retried)
+        self.assertEqual(retried["outcome"], "ready_to_spawn")
+        self.assertEqual([item["phase"] for item in retried["dispatches"]], ["documentation"])
+
+        after_documentation, _successful_documentation = publish_success(retried)
+        self.assertEqual([item["phase"] for item in after_documentation["dispatches"]], ["governance_close"])
+        final_docs_state = control.load_task_state_for_artifact(task_dir)
+        documentation_attempts = [
+            item for item in final_docs_state["attempts"] if item.get("gate") == "documentation"
+        ]
+        self.assertEqual(len(documentation_attempts), 2)
+        self.assertEqual(
+            [(item.get("status"), bool(item.get("invalidated"))) for item in documentation_attempts],
+            [("failed", True), ("passed", False)],
+        )
+        self.assertNotIn("documentation", final_docs_state.get("orchestrate_gate_failure_counts", {}))
+        self.assertNotIn("rework_pause", final_docs_state)
 
     def test_material_steer_rejects_report_without_current_revision_marker(self) -> None:
         started = self.start()
@@ -348,7 +637,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(retry["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in retry["dispatches"]], ["qa"])
         held = retry
-        for failure_number in range(1, 6):
+        for failure_number in range(1, 4):
             retried = control.load_task_state_for_artifact(task_dir)
             corrective_qa = next(
                 item for item in retried["attempts"]
@@ -378,18 +667,24 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
                 }
             )
             self.assertTrue(held["ok"], held)
-            self.assertEqual(held["outcome"], "ready_to_spawn")
-            self.assertEqual([item["phase"] for item in held["dispatches"]], ["qa"])
-            arguments = held["dispatches"][0]["arguments"]
-            self.assertEqual(
-                arguments["reasoning_effort"],
-                "high" if failure_number == 1 else "xhigh" if failure_number == 2 else "max",
-            )
-            if failure_number >= 2:
-                self.assertEqual(arguments["model"], "gpt-5.6-terra")
+            if failure_number < 3:
+                self.assertEqual(held["outcome"], "ready_to_spawn")
+                self.assertEqual([item["phase"] for item in held["dispatches"]], ["qa"])
+                arguments = held["dispatches"][0]["arguments"]
+                self.assertEqual(
+                    arguments["reasoning_effort"],
+                    "high" if failure_number == 1 else "xhigh",
+                )
+                if failure_number >= 2:
+                    self.assertEqual(arguments["model"], "gpt-5.6-terra")
+            else:
+                self.assertEqual(held["outcome"], "blocked")
+                self.assertEqual(held["dispatches"], [])
         held_state = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual(held_state["orchestrate_gate_failure_counts"]["qa"], 5)
-        self.assertNotEqual(held_state["status"], "blocked")
+        self.assertEqual(held_state["orchestrate_gate_failure_counts"]["qa"], 3)
+        self.assertEqual(held_state["status"], "blocked")
+        self.assertEqual(held_state["rework_pause"]["status"], "needs_user_decision")
+        self.assertEqual(held_state["rework_pause"]["failure_class"], "product")
         self.assertFalse(
             any(item["gate"] in {"review", "security"} and not item.get("invalidated") for item in held_state["attempts"])
         )
@@ -676,10 +971,10 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(advanced["outcome"], "ready_to_spawn")
         self.assertEqual(advanced["dispatches"][0]["phase"], "discover")
 
-    def test_repeated_reportless_stops_remain_unbounded_and_raise_effort(self) -> None:
-        current = self.start(objective="unbounded reportless stop recovery")
+    def test_repeated_identical_reportless_stops_pause_for_user_recovery(self) -> None:
+        current = self.start(objective="reportless stop recovery pauses when evidence is unchanged")
         parent_session = None
-        for failure_number in range(1, 6):
+        for failure_number in range(1, 4):
             task_dir, state = self.task_dir_and_state(current)
             attempt = next(
                 item for item in state["attempts"]
@@ -718,18 +1013,24 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
                 "results": [result],
             })
             self.assertTrue(current["ok"], current)
-            self.assertEqual(current["outcome"], "ready_to_spawn")
-            self.assertEqual(len(current["dispatches"]), 1)
-            self.assertEqual(
-                current["dispatches"][0]["arguments"]["reasoning_effort"],
-                "high" if failure_number == 1 else "xhigh" if failure_number == 2 else "max",
-            )
+            if failure_number < 3:
+                self.assertEqual(current["outcome"], "ready_to_spawn")
+                self.assertEqual(len(current["dispatches"]), 1)
+                self.assertEqual(
+                    current["dispatches"][0]["arguments"]["reasoning_effort"],
+                    "high" if failure_number == 1 else "xhigh",
+                )
+            else:
+                self.assertEqual(current["outcome"], "blocked")
+                self.assertEqual(current["dispatches"], [])
         _, final_state = self.task_dir_and_state(current)
         self.assertEqual(
             final_state["orchestrate_gate_failure_counts"]["discover"],
-            5,
+            3,
         )
-        self.assertNotEqual(final_state["status"], "blocked")
+        self.assertEqual(final_state["status"], "blocked")
+        self.assertEqual(final_state["rework_pause"]["status"], "needs_user_decision")
+        self.assertEqual(final_state["rework_pause"]["failure_class"], "worker")
 
     def test_localized_question_projection_keeps_canonical_option_ids(self) -> None:
         canonical = control._question_options(

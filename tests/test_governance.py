@@ -1,4 +1,4 @@
-"""Focused acceptance coverage for the v9 governance ledger and resolver."""
+"""Focused acceptance coverage for the v10 governance ledger and resolver."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -165,6 +165,46 @@ class GovernanceAcceptanceTests(unittest.TestCase):
                 task,
             )
 
+    def test_activation_briefing_reviews_governance_boundary_not_future_delivery(self) -> None:
+        project = Path(self.temp.name) / "activation-briefing"
+        project.mkdir()
+        (project / "README.md").write_text("# activation fixture\n", encoding="utf-8")
+        started = cortex.start_orchestration({
+            "project_root": str(project),
+            "task": {
+                "user_request": "Create result.txt as a governed high-impact release fixture.",
+                "complexity": "C3",
+                "acceptance_criteria": ["result.txt contains the governed fixture result."],
+                "verification": ["Read result.txt after implementation."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        activation = started["dispatches"][0]
+        self.assertEqual(activation["phase"], "governance_activation")
+        briefing = Path(activation["briefing_path"]).read_text(encoding="utf-8")
+        assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
+        governance_context = assignment["governance_context"]
+        self.assertEqual(governance_context["requested_mode"], "auto")
+        self.assertEqual(governance_context["effective_mode"], "full")
+        self.assertIn("complexity:C3", governance_context["reasons"])
+        self.assertEqual(governance_context["autonomous_scope_ref"], "governance-scope-autonomous")
+        self.assertEqual(governance_context["policy_snapshot"]["required_floor"], "full")
+        self.assertRegex(governance_context["policy_snapshot_digest"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            governance_context["current_pipeline"],
+            ["governance_activation", "implementation", "documentation", "governance_close", "close"],
+        )
+        self.assertNotIn("task_acceptance_criteria", assignment)
+        self.assertNotIn("task_verification", assignment)
+        self.assertIn("MUST NOT be reported as findings", briefing)
+        self.assertIn("Fail or request rework only for a defect in those activation inputs", briefing)
+
     def test_minimal_and_light_modes_preserve_the_existing_pipeline(self) -> None:
         ordinary = [{"wave_id": "wave-01", "delegations": [{"gate": "implementation", "agent": "general"}]}]
         for mode in ("minimal", "light"):
@@ -194,6 +234,11 @@ class GovernanceAcceptanceTests(unittest.TestCase):
         with (
             mock.patch.object(cortex, "require_activation", return_value=activation),
             mock.patch.object(cortex, "_coordinator_capability_matches", return_value=True),
+            mock.patch.object(
+                cortex,
+                "_coordinator_capability_claims_for_task",
+                return_value={"kind": "project_admin", "generation": 1, "allowed_actions": ["*"]},
+            ),
             mock.patch.object(
                 cortex,
                 "_coordinator_identity_for_capability",
@@ -241,6 +286,13 @@ class GovernanceAcceptanceTests(unittest.TestCase):
     def test_public_start_returns_capability_for_capability_only_governance_call(self) -> None:
         project = Path(self.temp.name) / "capability-project"
         project.mkdir()
+        governance.create_initiative(
+            cortex.ledger_root({"project_root": str(project)}),
+            initiative_ref="initiative-capability-call",
+            title="Capability call",
+            goal="Exercise capability-only coordinator authorization",
+            owner="coordinator",
+        )
         started = cortex.start_orchestration(
             {
                 "project_root": str(project),
@@ -248,6 +300,7 @@ class GovernanceAcceptanceTests(unittest.TestCase):
                     "user_request": "Create a local plain-text note.",
                     "complexity": "C1",
                     "governance_mode": "off",
+                    "initiative_ref": "initiative-capability-call",
                     "risk_triggers": self.no_risk_assessment(),
                     "acceptance_criteria": ["The note contract is preserved."],
                     "verification": ["Verify the local note result."],
@@ -266,12 +319,8 @@ class GovernanceAcceptanceTests(unittest.TestCase):
         managed = cortex.manage_governance(
             {
                 "project_root": str(project),
-                "action": "create",
-                "entity": "initiative",
+                "action": "inspect",
                 "initiative_ref": "initiative-capability-call",
-                "title": "Capability call",
-                "goal": "Exercise capability-only coordinator authorization",
-                "owner": "coordinator",
                 "coordinator_capability": capability,
             }
         )
@@ -287,6 +336,7 @@ class GovernanceAcceptanceTests(unittest.TestCase):
                     "user_request": "Create a local plain-text note.",
                     "complexity": "C1",
                     "governance_mode": "off",
+                    "initiative_ref": "initiative-capability-call",
                     "risk_triggers": self.no_risk_assessment(),
                     "acceptance_criteria": ["The note contract is preserved."],
                     "verification": ["Verify the local note result."],
@@ -536,6 +586,11 @@ class GovernanceAcceptanceTests(unittest.TestCase):
 
         for number in range(402, 405):
             self.add_task(f"task-{number}")
+            ledger_db.upsert_task_finding(
+                self.root,
+                f"task-{number}",
+                {"fingerprint": "concurrent-risk", "severity": "P2", "status": "open", "blocking": False, "summary": "canonical"},
+            )
         findings = [
             {
                 "fingerprint": "concurrent-risk",
@@ -840,6 +895,9 @@ class GovernanceAcceptanceTests(unittest.TestCase):
             task_id="task-203",
             relationship="deliverable",
         )
+        governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="active")
+        governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="completed")
+        current_initiative = governance.inspect_initiative(self.root, initiative["initiative_ref"])
         artifact_by_key = {}
         for key in governance._CLOSE_EVIDENCE_KEYS:
             body = {
@@ -853,6 +911,12 @@ class GovernanceAcceptanceTests(unittest.TestCase):
                     "attempt_id": "governance-close-1",
                     "report_id": "report-review-1",
                     "reviewer_identity": "reviewer-1",
+                    "reviewed_initiative_revision": current_initiative["revision"],
+                    "reviewed_task_revisions": {"task-203": 1},
+                    "reviewed_artifact_digests": {
+                        artifact["artifact_ref"]: artifact["digest_sha256"]
+                        for artifact in artifact_by_key.values()
+                    },
                 })
             artifact_by_key[key] = ledger_db.put_artifact(
                 self.root,
@@ -863,8 +927,6 @@ class GovernanceAcceptanceTests(unittest.TestCase):
                 content=json.dumps(body, sort_keys=True),
                 immutable=True,
             )
-        governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="active")
-        governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="completed")
         with self.assertRaisesRegex(governance.GovernanceError, "close requires"):
             governance.transition_initiative(
                 self.root,
@@ -1018,6 +1080,11 @@ class GovernanceAcceptanceTests(unittest.TestCase):
         for number in range(501, 504):
             task_id = f"task-{number}"
             self.add_task(task_id)
+            ledger_db.upsert_task_finding(
+                self.root,
+                task_id,
+                {"fingerprint": "project-repeat-risk", "severity": "P2", "status": "open", "blocking": False, "summary": "canonical"},
+            )
             findings.append({
                 "fingerprint": "project-repeat-risk",
                 "task_id": task_id,
@@ -1054,6 +1121,11 @@ class GovernanceAcceptanceTests(unittest.TestCase):
         ]
         for item in findings:
             self.add_task(item["task_id"])
+            ledger_db.upsert_task_finding(
+                self.root,
+                item["task_id"],
+                {"fingerprint": "repeat-worker-risk", "severity": "P2", "status": "open", "blocking": False, "summary": "canonical"},
+            )
         proposal_result = governance.evaluate_promotion(
             self.root,
             fingerprint="repeat-worker-risk",

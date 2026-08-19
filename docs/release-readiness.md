@@ -4,6 +4,20 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
+## Unreleased / 9.2.5 draft
+
+This is a source-tree hardening candidate, not a published release. Its source
+cachebuster is `9.2.5+codex.20260819205849`. Full-suite, live-governance,
+tracked archive, and installed-plugin results are recorded separately; no
+plugin installation or user `~/.codex` mutation is implied by this section.
+
+The draft scope is governance schema v10 integrity (artifact-authoritative
+bodies, exact scope, linear revisions, strict JSON, immutable-field triggers,
+and idempotent submissions), scoped capability claims with same-identity
+recovery and revocation, no-progress pause semantics, revision-aware steer and
+questions, bounded/cache-backed manifest capture, the 50,000-file benchmark,
+and CI/CODEOWNERS release evidence.
+
 ## Package contract
 
 - `.agents/plugins/marketplace.json` is the only marketplace manifest.
@@ -11,8 +25,8 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.4` (the current candidate is
-  `9.2.4+codex.20260819182839`; installed builds may carry a cachebuster).
+  `9.2.5` (the current source candidate is
+  `9.2.5+codex.20260819205849`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -36,6 +50,21 @@ MCP approval override, and creates a collision-safe private backup only before
 changing a configured global default-subagent model. It never inspects or
 removes previous orchestration state or unrelated plugin files.
 
+Governance schema v10 makes immutable content artifacts authoritative, enforces
+exact normalized scope and linear revisions, and fails closed on strict-JSON or
+immutable-field violations. Coordinator capabilities are short-lived claims
+bound to task/initiative, principal, thread, generation, expiry, and allowed
+actions; same-identity recovery rotates and revokes generations without
+storing plaintext bearers. Corrective work has no fixed attempt quota, but a
+materially identical no-progress signature pauses autonomous retries for an
+explicit user strategy. Material steer classifies the earliest affected gate;
+questions are bound to task/plan revision and strategy generation.
+
+Manifest capture is bounded by entries, hashed bytes, and elapsed time, with a
+bounded digest cache. CI requires the 50,000-file manifest benchmark to report
+`target_met: true`; the workflow keeps Python 3.11/3.12, a 30-minute timeout,
+per-ref cancellation, and the existing release gates.
+
 Report finalization uses a private draft file: `get_report_template`
 creates a fully structured JSON file with mode `0600` and returns `draft_ref`,
 `draft_path`, and expiry without returning the body. Writers edit that exact
@@ -57,7 +86,10 @@ Worker input/schema validation is retryable on the same attempt and creates no
 failed worker outcome. Failed work remains durable escalation evidence but has
 no pipeline or same-strategy attempt limit: effort rises through `high`,
 `xhigh`, and `max`, with Terra selected for eligible ordinary work after two
-prior failures. A different strategy is optional, not a continuation gate.
+prior failures. A materially identical no-progress signature is the separate
+liveness boundary: it pauses autonomous work and requires an explicit new
+strategy without synthesizing a pass. A different strategy is optional for
+ordinary retries, but required to resume that pause.
 Bounded briefing, report, and coordinator
 artifact reads clamp oversized `max_bytes` to 32768; explicit non-retryable
 integrity, storage, permission, or unavailable-identity failures remain
@@ -68,7 +100,9 @@ terminal.
 Run the commands in `docs/project/verification.md`. A release candidate must
 pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
-tracked-release archive validation.
+tracked-release archive validation. The CI manifest gate must also run
+`python3 -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds
+30` and reject any result without `target_met: true`.
 
 The read-only host gate is separate from source and archive evidence:
 `cortex-host-preflight.py --json` must report `mcp.status=READY` only for the
@@ -110,7 +144,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.4 release commit only with explicit authorization.
+- Create the Cortex 9.2.5 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

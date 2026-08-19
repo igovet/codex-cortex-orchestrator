@@ -19,6 +19,14 @@ class PlanReapprovalRequired(ValueError):
     """A post-plan dispatch cannot use the currently approved evidence basis."""
 
 
+# A repeated failure is not itself proof that the task should fail.  It is,
+# however, enough evidence to stop autonomous retries when every material
+# input to the corrective attempt stayed the same.  The pause below therefore
+# preserves the failed gate and asks for a new user-backed strategy; it never
+# synthesizes a pass/fail result.
+_NO_PROGRESS_REPEAT_LIMIT = 3
+
+
 # The executable facade is the composition root.  It supplies this explicitly
 # declared port set after it has finished initialization; this module never
 # imports the facade and therefore cannot form a reverse import cycle.
@@ -58,6 +66,8 @@ bind_symbols(
         "acquire_lock",
         "activate_orchestration",
         "active_gates",
+        "append_pipeline_change",
+        "apply_pipeline_operations",
         "answer_worker_question",
         "authorize",
         "authorize_principal",
@@ -88,6 +98,7 @@ bind_symbols(
         "get_worker_question_updates",
         "handoff",
         "init_task",
+        "invalidate_reworked_report_receipts",
         "lane_status",
         "ledger_root",
         "list_worker_questions",
@@ -123,6 +134,7 @@ bind_symbols(
         "select_project_root",
         "state_lock",
         "status",
+        "sync_current_wave",
         "task_manifest_baseline",
         "task_paths",
         "update_pipeline",
@@ -805,12 +817,18 @@ def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[s
     durable statement of the defect it must resolve.
     """
     selected: list[str] = []
+    current_task_revision = int(state.get("task_revision") or 1)
     for source_gate, rework in (state.get("closure_rework") or {}).items():
         if not isinstance(rework, dict):
             continue
         if rework.get("status") != "rework_required" or not (
             rework.get("target_gate") in gates or source_gate in gates
         ):
+            continue
+        # A report artifact may remain available as immutable history, but a
+        # handoff from an older semantic task revision must never be supplied
+        # as the current corrective mission after a steer/replan.
+        if int(rework.get("task_revision") or 0) != current_task_revision:
             continue
         for report_ref in rework.get("source_report_refs") or []:
             value = str(report_ref).strip()
@@ -1799,10 +1817,260 @@ def _validate_retry_strategy(
     attempt: dict[str, Any],
     completion: dict[str, Any],
 ) -> None:
-    # Rework is evidence-driven and unbounded. ``next_strategy`` remains an
-    # optional coordinator refinement, never a prerequisite for another QA or
-    # corrective attempt. Dispatch routing raises model/effort automatically.
+    # Strategy remains optional for an ordinary evidence-backed retry. Once
+    # the no-progress circuit breaker pauses the task, resume requires an
+    # explicit replan (validated by ``_orchestrate_resume``), not a caller
+    # assertion on an otherwise identical failed completion.
     return
+
+
+def _normalized_failure_reason(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _failure_class_from_completion(completion: dict[str, Any]) -> str:
+    """Classify a non-success host outcome without trusting worker routing.
+
+    Public v3 completions intentionally expose only a reason, not an
+    authority-bearing failure-class field.  This conservative projection is
+    used exclusively for liveness messaging and evidence grouping; it never
+    changes a gate decision or weakens a canonical gate result.
+    """
+    reason = _normalized_failure_reason(completion.get("reason"))
+    categories = (
+        ("infrastructure", ("infrastructure", "network", "transport", "connection", "timeout", "rate limit", "service unavailable", "host unavailable", "mcp")),
+        ("environment", ("environment", "dependency", "permission", "missing binary", "configuration", "sandbox", "disk full", "toolchain")),
+        ("policy", ("policy", "governance", "authorization", "forbidden")),
+        ("worker", ("worker", "agent stopped", "child stopped", "lease expired")),
+    )
+    for failure_class, markers in categories:
+        if any(marker in reason for marker in markers):
+            return failure_class
+    return "product"
+
+
+def _corrective_evidence(
+    root: Path,
+    state: dict[str, Any],
+    gate: str,
+    gate_attempts: list[dict[str, Any]],
+    completions: list[dict[str, Any]],
+    unresolved_rework: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the bounded, durable evidence projection for retry liveness.
+
+    The circuit breaker compares finding fingerprints, the dispatch manifest
+    baseline, result observations, verification contract and failure class.
+    A changed workspace, verification contract, result, or strategy starts a
+    fresh run; it is not treated as a no-progress loop.
+    """
+    finding_fingerprints = {
+        str(item.get("fingerprint") or "").strip()
+        for item in unresolved_rework
+        if isinstance(item, dict) and str(item.get("fingerprint") or "").strip()
+    }
+    for rework in (state.get("closure_rework") or {}).values():
+        if not isinstance(rework, dict) or rework.get("status") != "rework_required":
+            continue
+        finding_fingerprints.update(
+            str(item).strip() for item in rework.get("finding_fingerprints") or [] if str(item).strip()
+        )
+    try:
+        finding_fingerprints.update(
+            str(item.get("fingerprint") or "").strip()
+            for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
+            if isinstance(item, dict) and str(item.get("fingerprint") or "").strip()
+        )
+    except (OSError, ValueError):
+        # A liveness safeguard must never turn an unavailable diagnostic
+        # projection into a synthetic gate decision.  The remaining immutable
+        # attempt evidence is still sufficient to detect exact repeats.
+        pass
+    relevant_attempts = [item for item in gate_attempts if not item.get("invalidated")]
+    manifest_digests = sorted({
+        str(item.get("result_baseline_digest") or state.get("initial_manifest_digest") or "").strip()
+        for item in relevant_attempts
+        if str(item.get("result_baseline_digest") or state.get("initial_manifest_digest") or "").strip()
+    })
+    verification_contract = [
+        {
+            "acceptance_criteria": list(item.get("acceptance_criteria") or []),
+            "verification": list(item.get("verification") or []),
+        }
+        for item in relevant_attempts
+    ]
+    raw_reasons = [
+        _normalized_failure_reason(item.get("reason"))
+        for item in completions
+        if str(item.get("status") or "").lower() != "passed"
+    ]
+    # A passed worker result with unresolved canonical findings is still a
+    # corrective non-progress observation.  Its canonical fingerprint set is
+    # safer than a mutable worker summary and remains stable across retries.
+    if not raw_reasons and finding_fingerprints:
+        raw_reasons = ["unresolved canonical findings"]
+    failure_classes = sorted({
+        _failure_class_from_completion(item)
+        for item in completions
+        if str(item.get("status") or "").lower() != "passed"
+    })
+    if not failure_classes and finding_fingerprints:
+        failure_classes = ["product"]
+    strategy_values = sorted({
+        str(item.get("next_strategy") or item.get("strategy") or "default").strip()
+        for item in relevant_attempts + completions
+        if str(item.get("next_strategy") or item.get("strategy") or "default").strip()
+    })
+    evidence = {
+        "gate": gate,
+        "finding_fingerprints": sorted(finding_fingerprints),
+        "manifest_digests": manifest_digests,
+        "result_digest": digest_text(json.dumps(raw_reasons, ensure_ascii=False, sort_keys=True)),
+        "verification_digest": digest_text(json.dumps(verification_contract, ensure_ascii=False, sort_keys=True)),
+        "failure_classes": failure_classes or ["product"],
+        "strategy_digest": digest_text(json.dumps(strategy_values, ensure_ascii=False, sort_keys=True)),
+    }
+    evidence["signature"] = digest_text(json.dumps(evidence, ensure_ascii=False, sort_keys=True))
+    return evidence
+
+
+def _record_corrective_progress(
+    root: Path,
+    state: dict[str, Any],
+    gate: str,
+    gate_attempts: list[dict[str, Any]],
+    completions: list[dict[str, Any]],
+    unresolved_rework: list[dict[str, Any]],
+    *,
+    outcome: str,
+) -> dict[str, Any] | None:
+    """Update no-progress evidence and return a pause only for exact repeats."""
+    progress = state.setdefault("rework_progress", {})
+    if not isinstance(progress, dict):
+        progress = {}
+        state["rework_progress"] = progress
+    if outcome in {"passed", "skipped"}:
+        progress.pop(gate, None)
+        return None
+    if outcome != "failed":
+        return None
+    evidence = _corrective_evidence(root, state, gate, gate_attempts, completions, unresolved_rework)
+    prior = progress.get(gate) if isinstance(progress.get(gate), dict) else {}
+    same = prior.get("signature") == evidence["signature"]
+    consecutive = int(prior.get("consecutive_identical_iterations") or 0) + 1 if same else 1
+    event = {
+        **evidence,
+        "consecutive_identical_iterations": consecutive,
+        "last_observed_at": now(),
+    }
+    history = list(prior.get("history") or []) if isinstance(prior, dict) else []
+    history.append({
+        "signature": evidence["signature"],
+        "failure_classes": evidence["failure_classes"],
+        "result_digest": evidence["result_digest"],
+        "manifest_digests": evidence["manifest_digests"],
+        "at": event["last_observed_at"],
+    })
+    event["history"] = history[-16:]
+    progress[gate] = event
+    if consecutive < _NO_PROGRESS_REPEAT_LIMIT:
+        return None
+    failure_class = str(evidence["failure_classes"][0] or "product")
+    recovery = (
+        "remediate the repeated infrastructure/environment condition and submit a Planner-first recovery plan"
+        if failure_class in {"infrastructure", "environment"}
+        else "submit a materially different Planner-first recovery strategy"
+    )
+    return {
+        "status": "needs_user_decision",
+        "gate": gate,
+        "consecutive_identical_iterations": consecutive,
+        "repeat_limit": _NO_PROGRESS_REPEAT_LIMIT,
+        "failure_class": failure_class,
+        "finding_fingerprints": evidence["finding_fingerprints"],
+        "manifest_digests": evidence["manifest_digests"],
+        "result_digest": evidence["result_digest"],
+        "verification_digest": evidence["verification_digest"],
+        "strategy_digest": evidence["strategy_digest"],
+        "required_recovery": recovery,
+        "paused_at": now(),
+    }
+
+
+def _apply_pending_revision_impact(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Apply a durable semantic steer impact only after its worker completes.
+
+    ``cortex._v3_active_steer`` keeps the native worker alive and writes this
+    receipt.  The engine consumes it at the next safe gate boundary, reopening
+    the earliest affected gate and every downstream receipt atomically before
+    it can dispatch a stale successor.
+    """
+    impact = state.get("pending_revision_impact")
+    if not isinstance(impact, dict):
+        return state, False
+    earliest = str(impact.get("earliest_affected_gate") or "").strip()
+    replacement = impact.get("replacement_waves")
+    if isinstance(replacement, list) and replacement:
+        state, plan = _replace_future_orchestrate_waves(
+            {
+                **params,
+                "allow_rework": True,
+                "reason": "Applied the server-classified semantic impact of an active-task steer.",
+            },
+            task_dir,
+            state,
+            plan,
+            replacement,
+        )
+    if not earliest or earliest not in state.get("current_pipeline", []):
+        return state, False
+    change = apply_pipeline_operations(
+        state,
+        operations=[{"op": "rework", "gate": earliest}],
+        allow_rework=True,
+    )
+    append_pipeline_change(
+        state,
+        change,
+        "Applied the durable semantic impact of a completed active-task steer.",
+        [
+            f"task_revision={impact.get('task_revision')}",
+            *[str(item) for item in impact.get("categories") or []],
+        ],
+    )
+    invalidate_reworked_report_receipts(task_dir, state)
+    # Semantic steering invalidates the meaning of every outstanding
+    # corrective route, not merely the attempts it happened to reopen.  Keep
+    # the route for audit history, but remove it from current handoff and
+    # resolution eligibility; a new verifier finding will create a route for
+    # the new task revision.
+    for rework in (state.get("closure_rework") or {}).values():
+        if isinstance(rework, dict) and rework.get("status") == "rework_required":
+            rework.update({
+                "status": "superseded",
+                "superseded_at": now(),
+                "superseded_by_task_revision": impact.get("task_revision"),
+            })
+    sync_current_wave(state)
+    if active_gates(state):
+        state["status"] = "active"
+    applied = {**impact, "applied_at": now(), "reset_gates": list(change.get("reset_gates") or [])}
+    state.setdefault("applied_revision_impacts", []).append(applied)
+    state["applied_revision_impacts"] = state["applied_revision_impacts"][-32:]
+    state.pop("pending_revision_impact", None)
+    save_state(
+        task_dir,
+        task_dir / "state.sqlite",
+        state,
+        "semantic_revision_impact",
+        f"reopened {earliest} and downstream gates after task revision {impact.get('task_revision')}",
+    )
+    return state, True
 
 
 def _preflight_orchestrate_completion(
@@ -2400,6 +2668,12 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             })
             state = reassessed["state"]
         gate_outcomes = params.get("gate_outcomes") if isinstance(params.get("gate_outcomes"), dict) else {}
+        completions_by_attempt = {
+            safe_id(str(item.get("attempt_id") or "")): item
+            for item in completions
+            if isinstance(item, dict)
+        }
+        no_progress_pause: dict[str, Any] | None = None
         for gate in list(current_wave["gates"]):
             if gate in state.get("completed_gates", []) or gate in state.get("skipped_gates", []):
                 continue
@@ -2475,6 +2749,52 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             if recorded.get("recorded") is False:
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
             state = recorded["state"]
+            # A steer is material new evidence, so it must first reopen the
+            # affected pipeline.  Do not let the liveness detector classify
+            # the just-completed pre-steer work as a repeated corrective loop.
+            if not isinstance(state.get("pending_revision_impact"), dict):
+                pause = _record_corrective_progress(
+                    root,
+                    state,
+                    gate,
+                    gate_attempts,
+                    [
+                        completions_by_attempt[item["attempt_id"]]
+                        for item in gate_attempts
+                        if item.get("attempt_id") in completions_by_attempt
+                    ],
+                    unresolved_rework,
+                    outcome=outcome,
+                )
+                save_state(
+                    task_dir,
+                    task_dir / "state.sqlite",
+                    state,
+                    "rework_progress",
+                    f"{gate}: recorded corrective evidence for outcome {outcome}",
+                )
+                if pause is not None and no_progress_pause is None:
+                    no_progress_pause = pause
+        state, semantic_rework = _apply_pending_revision_impact(params, task_dir, state, plan)
+        if no_progress_pause is not None and not semantic_rework:
+            # Retain the failed gate exactly as recorded.  Blocking here only
+            # stops automatic dispatch; it deliberately does not claim that
+            # the product failed or that the findings were resolved.
+            state["status"] = "blocked"
+            state["rework_pause"] = no_progress_pause
+            state["blocked_reason"] = (
+                "automatic corrective dispatch paused after "
+                f"{no_progress_pause['consecutive_identical_iterations']} materially identical "
+                f"{no_progress_pause['failure_class']} failures at gate {no_progress_pause['gate']}; "
+                + str(no_progress_pause["required_recovery"])
+            )
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "no_progress_pause",
+                state["blocked_reason"],
+            )
         current_wave["status"] = "completed" if state.get("status") != "blocked" else "blocked"
         _write_orchestrate_plan(task_dir, plan)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=current_wave["gates"])
@@ -2760,6 +3080,12 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             "active task recovery is allowed only when the current wave has no live or pending worker dispatch"
         )
     closure_rework = state.get("closure_rework") if isinstance(state.get("closure_rework"), dict) else {}
+    no_progress_pause = state.get("rework_pause") if isinstance(state.get("rework_pause"), dict) else None
+    if no_progress_pause and no_progress_pause.get("status") == "needs_user_decision" and params.get("future_waves") is None:
+        raise ValueError(
+            "automatic corrective dispatch is paused after materially identical failures; resume requires an explicit "
+            "Planner-first recovery plan with a different strategy or environment remediation"
+        )
     exhausted_closure_rework = any(
         isinstance(item, dict) and item.get("status") == "rework_required"
         for item in closure_rework.values()
@@ -2780,6 +3106,17 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             "invariant_recovery": True,
             "reason": params.get("reason") or "Restore the complete approved delivery graph before closure.",
         }
+    elif no_progress_pause:
+        # The public surface does not accept a worker-authored retry token.
+        # Requiring an explicit future-wave recovery plan makes the user or
+        # coordinator own the changed strategy, preserves the failed evidence,
+        # and prevents a plain resume from recreating the same loop.
+        params = {
+            **params,
+            "allow_rework": True,
+            "invariant_recovery": True,
+            "reason": params.get("reason") or str(no_progress_pause.get("required_recovery") or "Recover a paused corrective strategy."),
+        }
     if params.get("future_waves") is not None:
         state, plan = _replace_future_orchestrate_waves(
             params, task_dir, state, plan, params["future_waves"]
@@ -2788,6 +3125,11 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict) and item.get("status") == "rework_required":
                 item["target_gate"] = "plan"
         state.pop("blocked_reason", None)
+        if no_progress_pause:
+            resumed_pause = {**no_progress_pause, "resumed_at": now(), "resume_reason": redact(params.get("reason") or "", 1000)}
+            state.setdefault("rework_pause_history", []).append(resumed_pause)
+            state["rework_pause_history"] = state["rework_pause_history"][-32:]
+            state.pop("rework_pause", None)
         save_state(
             task_dir,
             task_dir / "state.sqlite",
