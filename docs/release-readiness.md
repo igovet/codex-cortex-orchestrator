@@ -12,7 +12,7 @@ approval exists.
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
   `9.2.0` (the current candidate is
-  `9.2.0+codex.20260819085921`; installed builds may carry a cachebuster).
+  `9.2.0+codex.20260819093800`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -45,6 +45,10 @@ same file in place and consume no attempt. A new template
 supersedes an old or expired draft. `record_report` rereads/revalidates and
 deletes the file and metadata only after commit. Normal callers send only
 identity and ref; legacy full-payload recording remains compatible.
+The server-owned `resolved_user_decisions` projection is attached outside the
+worker-authored seven-field report, with bounded recent copies in replacement
+briefings; localized choice custom context is retained and translated to
+canonical English before resumption.
 Host-sandboxed read-only gates treat ordinary shared-checkout source deltas as
 concurrency evidence. Recognized cross-language test, build, and cache residue
 is retained in the audit receipt; claimed changes, unknown artifacts, and

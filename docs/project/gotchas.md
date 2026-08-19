@@ -119,6 +119,9 @@ brief, context files, and at most eight validated domains.
   only the exact report-tool error. If persistence succeeds
   but the native acknowledgement is interrupted, inspect with
   `manage_orchestration` and recover the ref from `available_reports`.
+  The server attaches a task-wide `resolved_user_decisions` sibling containing
+  canonical questions, answers, stable option IDs, source refs, and digests.
+  Report Markdown renders the same data under **Resolved User Decisions**.
 - Any profile may call `worker_question(action="ask")` for a material user
   decision that repository evidence cannot resolve. It returns a compact
   question ref plus a complete decision handoff to the parent: why input is
@@ -211,7 +214,9 @@ brief, context files, and at most eight validated domains.
   that configuration.
 - Localized question labels are transient UI projections. Answers retain the
   original value/language and require canonical `answer_en` for localized free
-  text. `ask_batch` accepts 1–32 stable questions but the native UI renders
+  text or a choice's custom response. Every choice step renders optional
+  `custom_response` beside its stable options. `ask_batch` accepts 1–32 stable
+  questions but the native UI renders
   only one step at a time under one durable `batch_ref`; each accepted step is
   checkpointed, and cancellation resumes at the next unanswered question. A
   localized batch is an ordered projection: an exact complete canonical key
@@ -219,6 +224,9 @@ brief, context files, and at most eight validated domains.
   by canonical position and any model-supplied display IDs are ignored.
   `poll_batch` returns canonical English answers; an active task revision
   supersedes an unresolved batch so stale intent cannot resume a worker.
+  Answer resumption remains attempt-scoped, but user authority is task-scoped:
+  successors do not repeat an equivalent resolved question under changed
+  wording or keys unless the current user explicitly reopens it.
 - Fixture Luna-high evaluation covers sequential, compact parallel, and
   blocked/resume flows. The live evaluator is source-mode only: it launches
   `codex exec --ephemeral --ignore-user-config` against this checkout's MCP

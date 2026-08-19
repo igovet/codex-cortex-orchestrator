@@ -102,6 +102,17 @@ attempt. Report intake and continuation fail closed while a blocking question
 is open. This preserves dialogue without treating Planner as a special case or
 forcing a replacement worker after every user response.
 
+Answered intent is task-scoped even though question resumption is
+attempt-scoped. The report service automatically snapshots every canonical
+answered question, answer, selected option ID, source ref, and digest into the
+top-level `resolved_user_decisions` sibling and report Markdown. Replacement
+briefings receive a bounded recent projection, while predecessor reports retain
+the complete list. Successors must not ask a materially equivalent question
+under new wording or keys unless the current user explicitly changes the
+decision. Choice-based batch forms always expose optional `custom_response`;
+localized custom text follows the same canonical-English translation barrier
+as ordinary free text.
+
 The coordinator is the sole pipeline authority: it builds or consciously
 accepts the initial waves, follows the returned pipeline snapshot by default,
 and changes `future_waves` only when verified evidence materially changes

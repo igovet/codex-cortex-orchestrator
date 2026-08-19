@@ -191,6 +191,8 @@ def _batch_question_config(value: object) -> dict[str, Any]:
         raise ValueError("batch questions require stable question_key and question")
     if question_type not in _BATCH_QUESTION_TYPES:
         raise ValueError("batch question type must be single_select, multi_select, or text")
+    if question_type != "text" and question_key == "custom_response":
+        raise ValueError("choice batch question_key custom_response is reserved for free-form input")
     header = redact(str(value.get("header") or question).strip(), 200) or question
     custom_label = redact(str(value.get("custom_label") or "Your answer").strip(), 160) or "Your answer"
     context = redact(str(value.get("context") or "").strip(), 2000)
@@ -1028,7 +1030,7 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
 
 
 def _batch_form_schema(question: dict[str, Any]) -> dict[str, Any]:
-    """Render exactly one batch item in the native question UI."""
+    """Render exactly one batch item, with free-form context beside choices."""
     key = question["question_key"]
     question_type = question["question_type"]
     title = question.get("localized_question") or question["canonical_question"]
@@ -1066,10 +1068,24 @@ def _batch_form_schema(question: dict[str, Any]) -> dict[str, Any]:
                 "description": description,
                 "oneOf": choices,
             }
+    properties = {key: field}
+    if question_type != "text":
+        properties["custom_response"] = {
+            "type": "string",
+            "title": (
+                question.get("localized_custom_label")
+                or question.get("custom_label")
+                or "Your answer / additional context"
+            ),
+            "description": (
+                "" if question.get("localized_for_user") else
+                "Optional free-form response. Explain another choice or add constraints the listed options do not capture."
+            ),
+        }
     return {
         "type": "object",
         "additionalProperties": False,
-        "properties": {key: field},
+        "properties": properties,
         "required": [key],
     }
 
@@ -1082,10 +1098,12 @@ def _batch_answer_from_content(
     if not isinstance(content, dict):
         raise ValueError("MCP elicitation returned an invalid batch response")
     key = str(question["question_key"])
-    if set(content) != {key}:
+    question_type = question["question_type"]
+    allowed_fields = {key} if question_type == "text" else {key, "custom_response"}
+    if key not in content or not set(content).issubset(allowed_fields):
         raise ValueError("MCP elicitation must answer only the current batch question")
     raw = content[key]
-    question_type = question["question_type"]
+    custom_original = ""
     if question_type == "text":
         original = redact(str(raw or "").strip(), 8000)
         if not original:
@@ -1104,9 +1122,14 @@ def _batch_answer_from_content(
         if not option_ids or len(option_ids) != len(set(option_ids)) or any(item not in option_map for item in option_ids):
             raise ValueError("MCP elicitation returned an unknown or empty batch option")
         original = option_ids if question_type == "multi_select" else option_ids[0]
+        raw_custom = content.get("custom_response", "")
+        if isinstance(raw_custom, (dict, list)):
+            raise ValueError("batch custom_response must be text")
+        custom_original = redact(str(raw_custom or "").strip(), 8000)
     return {
         "answer_original": original,
         "answer_option_ids": option_ids,
+        "answer_custom_original": custom_original,
         "answer_original_text": (
             json.dumps(original, ensure_ascii=False, sort_keys=True)
             if isinstance(original, list) else str(original)
@@ -1122,7 +1145,7 @@ def _refresh_batch_answer_state(record: dict[str, Any], params: dict[str, Any]) 
     if supplied is None:
         supplied = {}
     if not isinstance(supplied, dict):
-        raise ValueError("canonical_answers must be an object keyed by text question_key")
+        raise ValueError("canonical_answers must be an object keyed by a free-text or custom-response question_key")
     question_by_key = {str(item["question_key"]): item for item in record.get("questions") or []}
     unknown = sorted(set(supplied) - set(question_by_key))
     if unknown:
@@ -1140,8 +1163,29 @@ def _refresh_batch_answer_state(record: dict[str, Any], params: dict[str, Any]) 
             }
             if not option_ids or any(item not in option_map for item in option_ids):
                 raise ValueError("batch answer record has an invalid canonical option_id")
-            answer["answer_en"] = "\n".join(str(option_map[item]) for item in option_ids)
-            answer["translation_status"] = "not_required"
+            selected = "\n".join(str(option_map[item]) for item in option_ids)
+            custom_original = redact(str(answer.get("answer_custom_original") or "").strip(), 8000)
+            if not custom_original:
+                answer["answer_en"] = selected
+                answer["translation_status"] = "not_required"
+            elif language.lower().startswith("en"):
+                require_internal_english(custom_original, "batch custom response")
+                answer["answer_en"] = selected + "\nAdditional user context: " + custom_original
+                answer["translation_status"] = "not_required"
+            elif key in supplied:
+                translated = redact(str(supplied[key] or "").strip(), 8000)
+                if not translated:
+                    raise ValueError("canonical_answers translations must be non-empty")
+                require_internal_english(translated, "canonical batch custom-response translation")
+                answer["answer_en"] = selected + "\nAdditional user context: " + translated
+                answer["translation_status"] = "translated"
+                answer["translated_by"] = redact(str(params.get("translated_by") or "coordinator"), 160)
+                answer["translated_at"] = now()
+            elif answer.get("translation_status") == "translated" and str(answer.get("answer_en") or "").strip():
+                continue
+            else:
+                answer["translation_status"] = "awaiting_translation"
+                pending_translation.append(key)
             continue
         original = redact(str(answer.get("answer_original") or "").strip(), 8000)
         if not original:
@@ -1171,6 +1215,9 @@ def _refresh_batch_answer_state(record: dict[str, Any], params: dict[str, Any]) 
     record["total_questions"] = len(question_by_key)
     record["next_question_key"] = missing[0] if missing else None
     record["answer_original"] = {key: item["answer_original"] for key, item in stored.items()}
+    record["answer_custom_original"] = {
+        key: str(item.get("answer_custom_original") or "") for key, item in stored.items()
+    }
     record["answer_option_ids"] = {key: list(item.get("answer_option_ids") or []) for key, item in stored.items()}
     record["answer_en"] = {
         key: str(item["answer_en"])
@@ -1342,10 +1389,11 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
                 "question_id": batch_id,
                 "batch_ref": batch_id,
                 "answer_original": record.get("answer_original"),
+                "answer_custom_original": record.get("answer_custom_original"),
                 "answer_original_language": record.get("answer_original_language"),
                 "answer_option_ids": record.get("answer_option_ids"),
                 "translation_required_for": record.get("translation_required_for") or [],
-                "next_action": "Translate only the listed free-text answers, then call the same batch question_ref with canonical_answers.",
+                "next_action": "Translate only the listed free-text answers or custom responses, then call the same batch question_ref with canonical_answers.",
                 "durable": {"batch": record},
             }
         record, idempotent = _persist_batch_answers(params, batch_id, None)
@@ -1453,10 +1501,11 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
             "elicitation_id": last_elicitation_id,
             "progress": _batch_progress(record),
             "answer_original": record.get("answer_original"),
+            "answer_custom_original": record.get("answer_custom_original"),
             "answer_original_language": record.get("answer_original_language"),
             "answer_option_ids": record.get("answer_option_ids"),
             "translation_required_for": record.get("translation_required_for") or [],
-            "next_action": "Translate only the listed free-text answers, then call the same batch question_ref with canonical_answers.",
+            "next_action": "Translate only the listed free-text answers or custom responses, then call the same batch question_ref with canonical_answers.",
             "durable": {"batch": record},
         }
     return {

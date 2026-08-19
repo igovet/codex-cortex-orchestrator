@@ -3301,6 +3301,80 @@ def _open_blocking_questions(
     return blockers
 
 
+def _resolved_user_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every canonical answered user decision for automatic report carry-forward.
+
+    Question storage is attempt-scoped for resumability, but user authority is
+    task-scoped. Reports and replacement dispatches consume this projection so
+    a new worker cannot lose an answer merely because it uses a new attempt or
+    invents a different question key.
+    """
+    decisions: list[dict[str, Any]] = []
+    for record in _question_records(question_bus_paths(task_dir), state):
+        if record.get("status") != "answered":
+            continue
+        question = redact(str(record.get("question") or "").strip(), 2000)
+        answer_en = str(record.get("answer_en_text") or "").strip()
+        if not answer_en and str(record.get("answer_original_language") or "en").lower().startswith("en"):
+            answer_en = str(record.get("answer_text") or "").strip()
+        answer_en = redact(answer_en, 4000)
+        if not question or not answer_en:
+            continue
+        source_ref = safe_id(str(record.get("question_id") or ""))
+        decision = {
+            "source_type": "question",
+            "source_ref": source_ref,
+            "question_key": source_ref,
+            "question_en": question,
+            "answer_en": answer_en,
+            "answer_option_ids": [safe_id(str(item)) for item in record.get("answer_option_ids") or []],
+            "answered_at": record.get("answered_at"),
+        }
+        decision["decision_digest"] = digest_text(json.dumps(
+            {key: decision[key] for key in ("source_type", "source_ref", "question_key", "question_en", "answer_en", "answer_option_ids")},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ))
+        decisions.append(decision)
+
+    document_root = _task_document_root(task_dir, str(state["task_id"]))
+    for document_key, batch in db_list_task_documents(document_root, str(state["task_id"]), "question_batch:"):
+        batch_id = str(batch.get("batch_id") or "")
+        if (
+            batch.get("schema") != "cortex/question-batch/v1"
+            or document_key != "question_batch:" + batch_id
+            or batch.get("task_id") != state["task_id"]
+            or batch.get("status") != "answered"
+        ):
+            continue
+        answers = batch.get("answers") if isinstance(batch.get("answers"), dict) else {}
+        for question in batch.get("questions") or []:
+            if not isinstance(question, dict):
+                continue
+            question_key = safe_id(str(question.get("question_key") or ""))
+            answer = answers.get(question_key)
+            question_en = redact(str(question.get("canonical_question") or "").strip(), 2000)
+            answer_en = redact(str((answer or {}).get("answer_en") or "").strip(), 4000)
+            if not question_key or not isinstance(answer, dict) or not question_en or not answer_en:
+                continue
+            source_ref = safe_id(batch_id)
+            decision = {
+                "source_type": "question_batch",
+                "source_ref": source_ref,
+                "question_key": question_key,
+                "question_en": question_en,
+                "answer_en": answer_en,
+                "answer_option_ids": [safe_id(str(item)) for item in answer.get("answer_option_ids") or []],
+                "answered_at": answer.get("answered_at") or batch.get("answered_at"),
+            }
+            decision["decision_digest"] = digest_text(json.dumps(
+                {key: decision[key] for key in ("source_type", "source_ref", "question_key", "question_en", "answer_en", "answer_option_ids")},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ))
+            decisions.append(decision)
+    decisions.sort(key=lambda item: (str(item.get("answered_at") or ""), item["source_ref"], item["question_key"]))
+    return decisions
+
+
 def _read_private_text(path: Path, label: str, *, max_bytes: int) -> str:
     """Read one bounded private regular UTF-8 file without following links."""
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
@@ -3351,6 +3425,21 @@ def _report_markdown(record: dict[str, Any]) -> str:
 
     report = record["report"]
     lines = [f"# Report {prose(record['report_id'])}", "", f"**Producer:** {prose(record['producer']['profile'])}", "", "## Summary", "", prose(report["summary"])]
+    lines.extend(["", "## Resolved User Decisions", ""])
+    decisions = record.get("resolved_user_decisions")
+    if not isinstance(decisions, list) or not decisions:
+        lines.append("- None")
+    else:
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            lines.extend([
+                f"### {scalar_item(decision.get('question_en') or decision.get('question_key'))}", "",
+                f"- Answer: {scalar_item(decision.get('answer_en'))}",
+                f"- Source: {scalar_item(decision.get('source_ref'))} / {scalar_item(decision.get('question_key'))}",
+                f"- Decision digest: {scalar_item(decision.get('decision_digest'))}",
+                "",
+            ])
     for field in ("findings", "questions", "changed_files", "tests", "evidence", "uncertainty"):
         lines.extend(["", f"## {field.replace('_', ' ').title()}", ""])
         items = report[field]
@@ -3382,6 +3471,8 @@ def _report_markdown(record: dict[str, Any]) -> str:
 
 def _report_metadata(record: dict[str, Any]) -> dict[str, Any]:
     report = record["report"]
+    decisions = record.get("resolved_user_decisions")
+    decisions = decisions if isinstance(decisions, list) else []
     return {
         "report_id": record["report_id"],
         "attempt_id": record["attempt_id"],
@@ -3390,6 +3481,10 @@ def _report_metadata(record: dict[str, Any]) -> dict[str, Any]:
         "summary": report["summary"],
         "changed_files": report["changed_files"],
         "content_digest": record["content_digest"],
+        "resolved_user_decision_count": len(decisions),
+        "resolved_user_decisions_digest": digest_text(json.dumps(
+            decisions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )),
         "result_validation": (
             {
                 "schema": record["result_validation"].get("schema"),
@@ -7852,7 +7947,7 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
             translation_payload: dict[str, Any] = {
                 "question_ref": question_ref,
                 "canonical_answers": {
-                    key: "<canonical English translation of that free-text answer>"
+                    key: "<canonical English translation of that free-text answer or custom response>"
                     for key in required_keys
                 },
                 "translated_by": "coordinator",
@@ -7867,9 +7962,10 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
             "intent": "question",
             "payload": translation_payload,
             "answer_option_ids": result.get("answer_option_ids") or [],
+            "answer_custom_original": result.get("answer_custom_original") or {},
         }
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Translate only result.answer_original free text into canonical English, preserve "
+            f"{COORDINATOR_LOCK} Translate only result.answer_original free text and result.answer_custom_original custom responses into canonical English, preserve "
             "result.answer_option_ids, then call manage_orchestration exactly once with translation_request. "
             "Do not inspect skills, plugin source/cache, or runtime code to infer fields, and do not resume the worker "
             "until Cortex records both representations."
@@ -8556,7 +8652,7 @@ QUESTION_TOOL_SCHEMA = {
         "localized_batch": {"type": "object", "description": "Batch-only alias containing localized_questions under questions."},
         "answer_submission_id": {"type": "string", "description": "Stable id for an answer replay."},
         "canonical_answer": {"type": "string", "description": "Coordinator-supplied English translation of localized free text."},
-        "canonical_answers": {"type": "object", "description": "Batch-only map of localized free-text question_key to its canonical English translation. Option-only answers derive English from stable option_id and must not be translated."},
+        "canonical_answers": {"type": "object", "description": "Batch-only map of localized free-text or choice custom-response question_key to its canonical English translation. Choice labels derive English from stable option_id and must not be translated."},
         "translated_by": {"type": "string", "description": "Audit label for the coordinator that supplied batch free-text translations."},
         "attempt_id": {"type": "string", "description": "Worker attempt. Supplying it routes the question to the coordinator instead of opening a worker UI."},
         "submission_id": {"type": "string", "description": "Stable worker-question submission id."},

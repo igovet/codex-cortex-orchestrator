@@ -89,7 +89,7 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.2.0+codex.20260819085921`. These results are
+The source manifest declares `9.2.0+codex.20260819093800`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
@@ -158,6 +158,12 @@ verification remain separate, explicitly requested actions.
   claimed `changed_files`, arbitrary ignored output, and unrecognized artifacts
   still fail, while recognized conventional test/build/cache residue is
   retained in the audit receipt.
+- The server-owned `resolved_user_decisions` snapshot is carried with each
+  immutable report outside the worker-authored seven-field envelope. Report
+  metadata and Markdown expose its count/digest and decision sources, while
+  replacement briefings receive a bounded recent projection. Choice batch
+  answers preserve stable option IDs and optional custom context; localized
+  custom context requires canonical English before worker resumption.
 - Worker caller/input/schema validation results are structured corrections:
   fix the named field and retry the same tool on the same attempt without
   consuming the failed phase-attempt budget. `get_report_template` and

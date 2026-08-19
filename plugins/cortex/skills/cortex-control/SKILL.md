@@ -432,7 +432,9 @@ directly: a single question uses the original `answer` plus its translated
 `answer_en`; a batch supplies only the listed `canonical_answers`. Do not
 inspect plugin sources or infer alternative fields. Answers preserve the
 user's original value and language and require `answer_en` for localized free
-text before the worker receives the canonical English answer. Workers may use
+text or a choice's free-form custom response before the worker receives the
+canonical English answer. Every choice question renders that optional custom
+field beside its stable options. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
 same `batch_ref` with `action="poll_batch"`; the host renders one question per
 native step and durably checkpoints each accepted answer before showing the
@@ -448,6 +450,11 @@ question must state the concrete decision, and every option must name its
 outcome or trade-off; generic numbered or recommended/alternative placeholders
 are rejected. A task
 revision supersedes an unresolved batch rather than resuming stale user intent.
+Every worker report automatically includes the task-wide canonical
+`resolved_user_decisions` snapshot. A successor must review it as durable user
+authority and must never ask a materially equivalent question merely because
+the wording, key, phase, or attempt changed; only an explicit current user
+change reopens that decision.
 Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or
 material user decisions. Only the last class pauses through `worker_question`;

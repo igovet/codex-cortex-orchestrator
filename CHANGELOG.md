@@ -8,6 +8,12 @@
   verified transitive DAG frontier: every omitted report is covered by a
   passed report that durably acknowledged it, while full history and the
   Planner evidence digest remain intact.
+- Attach a task-wide `resolved_user_decisions` snapshot to every immutable
+  report, and forbid successors from asking an equivalent resolved question
+  under new wording, keys, phases, or attempts unless the user reopens it.
+- Render optional free-form input beside every batch choice. Preserve and,
+  when needed, translate it into the canonical answer without changing the
+  selected stable option IDs.
 
 ## [9.1.1] - 2026-08-19
 

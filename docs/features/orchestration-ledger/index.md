@@ -56,6 +56,14 @@ lazy, materialized human-facing projections—exact briefings, report
 Markdown/JSON, planning revisions, handoffs, and journals—rather than another
 source of truth.
 
+Question answers are stored with their attempt for exact pause/resume, but
+their authority is projected task-wide. Every new report artifact receives an
+automatic `resolved_user_decisions` sibling and Markdown section with the
+canonical questions and answers, selected option IDs, source refs, and
+digests. Successor briefings require review of that ledger before another
+question is published. Choice-based batch steps always render optional
+free-form input and preserve its original and canonical-English forms.
+
 Large bodies are never embedded in a lifecycle response. `manage_orchestration`
 with `intent="artifacts"` lists bounded metadata pages and reads one selected
 artifact in a server-limited UTF-8/BLOB part. `read_dispatch_briefing` and

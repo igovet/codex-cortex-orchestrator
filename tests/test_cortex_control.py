@@ -4109,6 +4109,17 @@ class ControlPlaneTests(unittest.TestCase):
             "planning": self.v3_planning(),
         })
         self.assertTrue(accepted["ok"])
+        persisted = control.read_worker_report({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "report_ref": accepted["report_ref"],
+        })
+        self.assertEqual(len(persisted["resolved_user_decisions"]), 1)
+        self.assertEqual(
+            persisted["resolved_user_decisions"][0]["question_en"],
+            "What outcome and audience should this landing page prioritize?",
+        )
+        self.assertIn("Lead generation for B2B sales teams", persisted["resolved_user_decisions"][0]["answer_en"])
 
     def test_v3_desktop_skill_link_is_canonicalized_before_task_persistence_and_labeling(self):
         request = (

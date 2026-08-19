@@ -628,7 +628,9 @@ flowchart LR
    seven-field `cortex/report/v1` contract. Planner Scope may additionally
    publish the top-level `scoping` sibling (`overview`, `context_files`, and
    up to eight validated discovery domains); Planner Plan may publish
-   `planning`. These siblings do not alter the seven report fields.
+   `planning`. The server also attaches the task-wide
+   `resolved_user_decisions` snapshot. These siblings do not alter the seven
+   worker-authored report fields.
 7. **Fresh approvals and adaptive replanning.** Required approval is available
    only after the final plan. The review records the plan revision, planner
    report reference, verified-predecessor digest, and semantic future-pipeline
@@ -659,7 +661,9 @@ flowchart LR
 - **Explicit file ownership.** Each worker knows its allowed scope. Independent
   writers can use separate worktrees when isolation is required.
 - **Material decisions are not invented.** A worker can persist a question,
-  pause, and resume the same attempt after the user answers.
+  pause, and resume the same attempt after the user answers. Every later
+  report carries that canonical question and answer so a successor cannot
+  treat changed wording or a new key as a new decision.
 - **Verification is contractual.** Executed checks record the command, working
   directory, exit code, and decisive result.
 - **Documentation does not override source.** `docs/project/` and
@@ -708,7 +712,9 @@ items use `localized_question`, `localized_header`, `localized_options`, and
 `localized_custom_label`; `question`, `header`, `options`, and `custom_label`
 remain compatibility aliases. Generic numbered, A/B, or
 recommended/alternative placeholders are rejected, and option descriptions
-may be rendered with the native choices.
+may be rendered with the native choices. Every choice form also renders an
+optional free-form field. Its text is preserved beside the stable option IDs
+and translated to canonical English before a worker resumes when necessary.
 
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
