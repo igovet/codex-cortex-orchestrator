@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.0.4-7c3aed" alt="Cortex 9.0.4" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.0-7c3aed" alt="Cortex 9.2.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -691,13 +691,34 @@ reads predecessor reports with `read_worker_report`. Workers use
 `read_dispatch_briefing`, `worker_question`, `get_report_template`,
 and `record_report`.
 
+Worker briefings carry the verified transitive predecessor frontier, not inline
+report bodies or the entire task history. A passed report covers only the exact
+refs its attempt read and acknowledged, so long-running tasks may retain
+thousands of immutable reports without growing every successor prompt or
+discarding evidence. Compact inspect and recovery responses independently
+retain the newest eight summaries; full history remains in SQLite.
+
+Material worker questions are handed off with more than a bare reference:
+`QUESTION_RECORDED` is followed by why input is needed, full self-contained
+questions, concrete outcome-based options, descriptions, trade-offs, and a
+recommendation. Before calling native MCP elicitation, the root publishes a
+detailed commentary preamble in the user's language. That message explains the
+decision but must not collect or replace the native answer. Localized batch
+items use `localized_question`, `localized_header`, `localized_options`, and
+`localized_custom_label`; `question`, `header`, `options`, and `custom_label`
+remain compatibility aliases. Generic numbered, A/B, or
+recommended/alternative placeholders are rejected, and option descriptions
+may be rendered with the native choices.
+
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
 exact `dispatch_ref`, briefing path, and digest; the worker reads and verifies
-that briefing before project work. The briefing carries the phase/profile,
-selection rationale, objective, ownership, paths, dependencies, context files,
-acceptance criteria, verification, and predecessor handoffs, so scheduler data
-cannot silently disappear from the worker prompt. A worker never browses
+that briefing before project work. Worker Briefing v2 JSON-serializes every
+task-controlled assignment value inside one explicitly untrusted data block;
+the surrounding authority, role playbook, phase overlay, evidence rules, and
+worker protocol remain fixed instructions. Ordinary profiles do not carry
+harvest specialization; exact harvest routes add a conditional mode overlay.
+A worker never browses
 unrelated `.codex/cortex` coordination data. Canonical state is stored in the
 local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
 tasks without that field resume their persisted pipeline unchanged.
@@ -715,6 +736,10 @@ or storage blockers are terminal. Successful finalization revalidates the
 current draft and state, commits the durable report atomically, and deletes the
 draft post-commit. Bounded briefing, report, and coordinator artifact reads
 clamp oversized `max_bytes` requests to 32768 and continue with cursors.
+Failed work has two independent limits: at most two failures may reuse one
+strategy, while a phase may fail at most three times total. Before a third phase
+attempt, the coordinator supplies a materially different `next_strategy` or
+replans the future pipeline.
 Drafts expire after one hour and a new template supersedes
 the prior attempt draft. Read-only
 workers do not claim source changes observed in the shared checkout as their

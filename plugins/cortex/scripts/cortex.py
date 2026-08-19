@@ -249,8 +249,11 @@ def load_profile_contract() -> tuple[dict[str, Any], dict[str, dict[str, Any]], 
 PROFILE_CONTRACT, PROFILES, PROFILE_INSTRUCTIONS = load_profile_contract()
 AGENTS = set(PROFILES)
 PROFILE_EXECUTION_CONTRACTS = PROFILE_CONTRACT["profile_execution_contracts"]
+MODE_OVERLAYS = PROFILE_CONTRACT.get("mode_overlays", {})
 SHARED_WORKER_CONTRACT = PROFILE_CONTRACT.get("shared_worker_contract", {})
 CODEBASE_MEMORY_REFRESH_PROFILES = set(SHARED_WORKER_CONTRACT.get("codebase_memory_refresh_profiles", []))
+RETRY_POLICY = SHARED_WORKER_CONTRACT.get("retry_policy", {})
+PROMPT_BUDGETS = SHARED_WORKER_CONTRACT.get("prompt_budgets", {})
 if (
     SHARED_WORKER_CONTRACT.get("repository_intelligence")
     != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
@@ -270,6 +273,19 @@ if (
     != "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
     or not CODEBASE_MEMORY_REFRESH_PROFILES.issubset(AGENTS)
+    or RETRY_POLICY != {"phase_attempt_limit": 3, "same_strategy_limit": 2}
+    or set(MODE_OVERLAYS) != {"harvest"}
+    or set(MODE_OVERLAYS["harvest"]) != {
+        "planner", "explorer", "architect", "technical_writer", "code_reviewer", "build_verification"
+    }
+    or not all(isinstance(value, str) and value.strip() for value in MODE_OVERLAYS["harvest"].values())
+    or PROMPT_BUDGETS != {
+        "bootstrap_hard_bytes": 1500,
+        "ordinary_briefing_soft_bytes": 10000,
+        "ordinary_briefing_hard_bytes": 14000,
+        "harvest_briefing_soft_bytes": 11000,
+        "harvest_briefing_hard_bytes": 15000,
+    }
 ):
     raise RuntimeError("bundled Cortex shared worker contract is invalid")
 AVAILABLE_GATES = {
@@ -533,8 +549,6 @@ MAX_TEXT = 4000
 MAX_REPORT_BYTES = 65536
 MAX_REPORT_ITEMS = 100
 MAX_REPORTS_PER_ATTEMPT = 32
-MAX_REPORTS_PER_TASK = 256
-MAX_REPORT_AGGREGATE_BYTES = 1024 * 1024
 MAX_PLANNING_BYTES = 128 * 1024
 MAX_SCOPING_BYTES = 128 * 1024
 MAX_DISCOVERY_DOMAINS = 8
@@ -552,10 +566,13 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 # entry.  Keep the read cap finite while allowing ordinary repositories to
 # complete handoff and reconciliation.
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+# Compact inspect/recovery handoffs retain only the newest summaries.  Worker
+# dispatches use scoped report refs instead of embedding these summaries, so
+# predecessor grants are bounded by the task's report inventory instead.
 MAX_CONTEXT_REPORTS = 8
-MAX_CONTEXT_REPORT_CHARS = 32000
-MAX_GATE_RECOVERY_FAILURES = 3
-MAX_ORCHESTRATE_GATE_FAILURES = 3
+MAX_GATE_RECOVERY_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
+MAX_ORCHESTRATE_GATE_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
+MAX_SAME_STRATEGY_FAILURES = int(RETRY_POLICY["same_strategy_limit"])
 MAX_GATE_RECOVERY_EVENTS = 64
 MAX_TOOL_ERROR_LOG_INPUT_BYTES = 16384
 MAX_TOOL_ERROR_LOG_BYTES = 10 * 1024 * 1024
@@ -3566,8 +3583,6 @@ def _report_index(paths: dict[str, Path], task_id: str) -> dict[str, Any]:
         return {"schema": REPORT_SCHEMA, "task_id": task_id, "reports": [], "submissions": {}, "updated_at": now()}
     if value.get("schema") != REPORT_SCHEMA or value.get("task_id") != task_id:
         raise ValueError("report index does not belong to this task")
-    if len(value.get("reports", [])) > MAX_REPORTS_PER_TASK or len(value.get("submissions", {})) > MAX_REPORTS_PER_TASK:
-        raise ValueError("report index exceeds its bounded capacity")
     return value
 
 
@@ -3576,31 +3591,6 @@ def _write_report_index(paths: dict[str, Path], task_id: str, value: dict[str, A
         raise ValueError("report index does not belong to this task")
     _task_document_root(paths["root"].parent, task_id)
     db_put_task_document(_ledger_root_for_artifact(paths["root"].parent), task_id, "report_index", value)
-
-
-def _compact_report_context(record: dict[str, Any]) -> dict[str, Any]:
-    """Return a bounded, receipt-free predecessor handoff for a worker prompt."""
-    report = record.get("report") if isinstance(record.get("report"), dict) else {}
-
-    def compact_list(field: str, *, items: int = 16, chars: int = 1200) -> list[str]:
-        values = report.get(field)
-        if not isinstance(values, list):
-            return []
-        return [redact(item, chars) for item in values[:items]]
-
-    producer = record.get("producer") if isinstance(record.get("producer"), dict) else {}
-    return {
-        "report_id": redact(record.get("report_id", ""), 128),
-        "phase": redact(record.get("gate", ""), 128),
-        "profile": redact(producer.get("profile", ""), 128),
-        "summary": redact(report.get("summary", ""), 2400),
-        "findings": compact_list("findings"),
-        "questions": compact_list("questions", items=8),
-        "changed_files": compact_list("changed_files", chars=500),
-        "tests": compact_list("tests"),
-        "evidence": compact_list("evidence"),
-        "uncertainty": compact_list("uncertainty", items=8),
-    }
 
 
 def _predecessor_review_marker(report_ids: list[str]) -> str:
@@ -3665,12 +3655,7 @@ def _validate_knowledge_review(report: dict[str, Any], knowledge_indexes: list[s
 
 def _is_knowledge_harvest_task(task: dict[str, Any]) -> bool:
     routing_text = "\n".join(_task_routing_items(task)).lower()
-    return (
-        "harvest" in routing_text
-        or "feature census" in routing_text
-        or "repository knowledge" in routing_text
-        or "knowledge documentation" in routing_text
-    )
+    return re.search(r"(?<![a-z0-9])harvest(?:-refresh)?(?![a-z0-9])", routing_text) is not None
 
 
 def _required_task_result_contract(task: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -4039,47 +4024,6 @@ def _validate_predecessor_review(report: dict[str, Any], report_ids: list[str]) 
         )
 
 
-def _context_report_payloads(
-    task_dir: Path,
-    state: dict[str, Any],
-    report_ids: list[str],
-) -> list[dict[str, Any]]:
-    """Load bounded predecessor reports that a facade worker cannot fetch itself."""
-    if len(report_ids) > MAX_CONTEXT_REPORTS:
-        raise ValueError(
-            f"worker context requires {len(report_ids)} predecessor reports but the safe limit is "
-            f"{MAX_CONTEXT_REPORTS}; set depends_on to the exact prerequisite phases"
-        )
-    payloads: list[dict[str, Any]] = []
-    used_chars = 0
-    for report_id in report_ids:
-        normalized_report_id = safe_id(report_id)
-        record, _ = read_immutable_json_artifact(
-            task_dir,
-            state["task_id"],
-            f"reports/records/{normalized_report_id}.json",
-            kinds={"worker_report", "report_record"},
-        )
-        if record.get("task_id") != state.get("task_id") or record.get("report_id") != normalized_report_id:
-            raise ValueError("context report crosses task scope")
-        payload = _compact_report_context(record)
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        if len(encoded) > MAX_CONTEXT_REPORT_CHARS:
-            payload["findings"] = payload["findings"][:4]
-            payload["tests"] = payload["tests"][:4]
-            payload["evidence"] = payload["evidence"][:4]
-            payload["uncertainty"] = payload["uncertainty"][:4]
-            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        if used_chars + len(encoded) > MAX_CONTEXT_REPORT_CHARS:
-            raise ValueError(
-                "predecessor handoffs exceed the safe worker-context budget; "
-                "set depends_on to the exact prerequisite phases instead of dropping reports implicitly"
-            )
-        payloads.append(payload)
-        used_chars += len(encoded)
-    return payloads
-
-
 def _delegation_report_index(paths: dict[str, Path], task_id: str, attempt_id: str) -> tuple[str, dict[str, Any]]:
     attempt = safe_id(attempt_id)
     task_dir = paths["root"].parent
@@ -4090,7 +4034,7 @@ def _delegation_report_index(paths: dict[str, Path], task_id: str, attempt_id: s
         value = {"schema": REPORT_SCHEMA, "task_id": task_id, "attempt_id": attempt, "owned_report_ids": [], "context_report_ids": [], "updated_at": now()}
     if value.get("task_id") != task_id or value.get("attempt_id") != attempt:
         raise ValueError("delegation report index scope mismatch")
-    if len(value.get("owned_report_ids", [])) > MAX_REPORTS_PER_ATTEMPT or len(value.get("context_report_ids", [])) > MAX_REPORTS_PER_TASK:
+    if len(value.get("owned_report_ids", [])) > MAX_REPORTS_PER_ATTEMPT:
         raise ValueError("delegation report index exceeds its bounded capacity")
     return document_key, value
 
@@ -5076,7 +5020,6 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
         submissions: dict[str, str] = {}
         by_attempt: dict[str, list[str]] = {}
         repaired: list[str] = []
-        aggregate_bytes = 0
         source_index = _report_index(paths, state["task_id"])
         for metadata in source_index.get("reports", []):
             if not isinstance(metadata, dict):
@@ -5136,11 +5079,8 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
             records.append(_report_metadata(record))
             submissions[f"{record['attempt_id']}:{safe_id(str(record['submission_id']))}"] = report_id
             by_attempt.setdefault(record["attempt_id"], []).append(report_id)
-            if len(records) > MAX_REPORTS_PER_TASK or len(by_attempt[record["attempt_id"]]) > MAX_REPORTS_PER_ATTEMPT:
-                raise ValueError("authoritative reports exceed count quota")
-            aggregate_bytes += len(json.dumps(record.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8"))
-            if aggregate_bytes > MAX_REPORT_AGGREGATE_BYTES:
-                raise ValueError("authoritative reports exceed aggregate byte quota")
+            if len(by_attempt[record["attempt_id"]]) > MAX_REPORTS_PER_ATTEMPT:
+                raise ValueError("authoritative reports exceed per-attempt count quota")
             markdown_path = paths["markdown"] / f"{report_id}.md"
             generated = _report_markdown(record)
             if markdown_path.is_symlink():
@@ -7116,6 +7056,7 @@ def _v3_compact_waves(
     allowed_worker_keys = {
         "phase", "profile", "objective", "paths", "acceptance", "verification",
         "model", "user_requested_model", "effort", "visible", "isolated_checkout", "depends_on", "context_files",
+        "strategy",
     }
     phase_waves: dict[str, tuple[int, str]] = {}
     available_context_gates = set(completed_gates or set())
@@ -7211,7 +7152,7 @@ def _v3_compact_waves(
             for source, target in (
                 ("objective", "objective"), ("paths", "allowed_paths"),
                 ("acceptance", "acceptance_criteria"), ("verification", "verification"),
-                ("context_files", "context_files"),
+                ("context_files", "context_files"), ("strategy", "strategy"),
             ):
                 if source in worker:
                     if source == "context_files" and project_root is not None:
@@ -7724,7 +7665,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         for index, result in enumerate(results, 1):
             if not isinstance(result, dict):
                 raise ValueError("every result must be an object")
-            allowed_result = {"worker", "report_ref", "dispatch_ref", "status", "reason"}
+            allowed_result = {"worker", "report_ref", "dispatch_ref", "status", "reason", "next_strategy"}
             unknown_result = sorted(set(result) - allowed_result)
             if unknown_result:
                 raise ValueError("unsupported result fields: " + ", ".join(unknown_result))
@@ -7749,6 +7690,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 _pre_recorded_report(task_dir, state, attempt_ids[slot - 1], report_ref)
                 if str(result.get("reason") or "").strip():
                     raise ValueError("successful results must not include reason")
+                if str(result.get("next_strategy") or "").strip():
+                    raise ValueError("successful results must not include next_strategy")
             else:
                 if report_ref:
                     raise ValueError("non-success results must omit report_ref")
@@ -7791,6 +7734,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 completion["report_ref"] = report_ref
             else:
                 completion["reason"] = str(result["reason"])
+                if str(result.get("next_strategy") or "").strip():
+                    completion["next_strategy"] = redact(result["next_strategy"], 1000)
             completions.append(completion)
         old_params["completions"] = completions
         if future_waves is not None:
@@ -7896,8 +7841,8 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
         response["outcome"] = "host_question_unavailable"
         response["code"] = "host_question_unavailable"
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the durable question open and stop. Do not ask it through commentary, a final "
-            "message, or a worker-local UI; retry only in a main-chat host that supports MCP elicitation."
+            f"{COORDINATOR_LOCK} Keep the durable question open and stop. Commentary may explain context but must "
+            "not collect or fabricate the answer; retry only in a main-chat host that supports MCP elicitation."
         )
     elif status_value == "awaiting_translation":
         response["outcome"] = "awaiting_translation"
@@ -8590,7 +8535,7 @@ PIPELINE_OPERATION_SCHEMA = {"type": "object", "properties": {"op": {"type": "st
 QUESTION_OPTION_SCHEMA = {
     "anyOf": [
         {"type": "string", "minLength": 1},
-        {"type": "object", "additionalProperties": False, "properties": {"option_id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}, "label_en": {"type": "string", "minLength": 1}, "label_localized": {"type": "string", "minLength": 1}, "description": {"type": "string"}}, "anyOf": [{"required": ["label"]}, {"required": ["label_en"]}]},
+        {"type": "object", "additionalProperties": False, "properties": {"option_id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}, "label_en": {"type": "string", "minLength": 1}, "label_localized": {"type": "string", "minLength": 1}, "description": {"type": "string"}, "description_localized": {"type": "string"}}, "anyOf": [{"required": ["label"]}, {"required": ["label_en"]}]},
     ]
 }
 QUESTION_TOOL_SCHEMA = {
@@ -8607,7 +8552,7 @@ QUESTION_TOOL_SCHEMA = {
         "localized_header": {"type": "string"},
         "localized_options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA},
         "localized_custom_label": {"type": "string"},
-        "localized_questions": {"type": "array", "maxItems": 32, "items": {"type": "object"}, "description": "Batch-only localized form projection. Each item identifies its stable question_key and may change titles/options display labels only."},
+        "localized_questions": {"type": "array", "maxItems": 32, "items": {"type": "object"}, "description": "Batch-only ordered localized form projection. Use localized_question, localized_header, localized_options, and optional localized_custom_label; question/header/options/custom_label are compatibility aliases. Copy every canonical choice position, but use concrete outcome-based labels rather than placeholders."},
         "localized_batch": {"type": "object", "description": "Batch-only alias containing localized_questions under questions."},
         "answer_submission_id": {"type": "string", "description": "Stable id for an answer replay."},
         "canonical_answer": {"type": "string", "description": "Coordinator-supplied English translation of localized free text."},

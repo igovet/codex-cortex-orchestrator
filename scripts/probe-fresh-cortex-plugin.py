@@ -18,7 +18,7 @@ SOURCE = ROOT / "plugins/cortex"
 PROFILE_CONTRACT = json.loads((SOURCE / "profiles.json").read_text(encoding="utf-8"))
 VERSION = json.loads((SOURCE / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
 EXPECTED_AGENT_FILES = {item["filename"] for item in PROFILE_CONTRACT["profiles"]}
-EXPECTED_SKILLS = {"adaptive-pipeline", "content-safety", "context-compaction", "orchestrator", "cortex-control", "documentation-sync", "find-skills", "knowledge-harvest", "output-validation", "token-monitoring"}
+EXPECTED_SKILLS = {"adaptive-pipeline", "content-safety", "context-compaction", "orchestrator", "cortex-control", "documentation-sync", "find-skills", "knowledge-harvest", "output-validation", "progress-accounting"}
 
 
 def command(argv: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -190,7 +190,14 @@ def main() -> int:
             raise SystemExit("fresh plugin probe: human worker display name still contains an identity suffix")
         if not re.fullmatch(r"explorer_[a-z0-9_]+_01_[0-9a-f]{8}", str(dispatch["arguments"].get("task_name") or "")):
             raise SystemExit("fresh plugin probe: native worker task name is not unique and host-safe")
-        confirmed = mcp_tool(launcher, entrypoint, environment, workspace, "manage_orchestration", {"intent": "inspect"})
+        confirmed = mcp_tool(
+            launcher,
+            entrypoint,
+            environment,
+            workspace,
+            "manage_orchestration",
+            {"task_ref": created["task_ref"], "intent": "inspect"},
+        )
         task = cortex.load_task_definition(expected_task)
         state = cortex.load_task_state_for_artifact(expected_task)
         loaded = cortex.db_load_task(workspace / ".codex/cortex", str(state["task_id"]))

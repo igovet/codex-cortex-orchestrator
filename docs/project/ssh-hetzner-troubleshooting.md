@@ -158,11 +158,13 @@ stopped native worker. Recovery is bounded and identity-scoped:
    action.
 
 Cortex permits at most three automatic failed attempts for one active phase
-(`MAX_ORCHESTRATE_GATE_FAILURES = 3`). The first two exact failed
-continuations can return a fresh authorized dispatch; the third leaves the
-task `blocked` with a durable handoff instead of looping. Repair the recorded
-cause before resuming a blocked task. Report-backed stops and durable-question
-stops remain separate paths: neither is a reason to follow up a dead child.
+(`phase_attempt_limit=3`) and at most two failures with one strategy
+(`same_strategy_limit=2`). Before a third phase attempt, the second failed
+continuation must supply a materially different `next_strategy` or accompany a
+future-wave replan. The third failure leaves the task `blocked` with a durable
+handoff instead of looping. Repair the recorded cause before resuming a blocked
+task. Report-backed stops and durable-question stops remain separate paths:
+neither is a reason to follow up a dead child.
 
 The runtime contract is implemented by the stop finalizer in
 [`cortex.py`](../../plugins/cortex/scripts/cortex.py), the recovery handoff in

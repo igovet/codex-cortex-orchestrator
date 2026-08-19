@@ -1,6 +1,6 @@
 ---
 name: adaptive-pipeline
-description: Reassess an active coding plan when new repository evidence changes complexity, scope, dependencies, security risk, or validation needs. Use after material discovery, failed verification, or a changed implementation plan.
+description: Internal Cortex replanning overlay. Load only for an explicitly activated Cortex task when new evidence requires a future-pipeline decision; never select for ordinary work.
 ---
 
 # Adaptive Pipeline
@@ -34,4 +34,7 @@ replacement must be a singleton Planner wave after scope, discovery, and all
 pre-implementation design gates. No-op and transport-only replacements retain
 the existing approval.
 
-After two failed attempts at the same approach, pause and ask for direction instead of endlessly escalating agents or effort.
+The retry policy has two separate limits: `same_strategy_limit=2` and
+`phase_attempt_limit=3`. After two failures of the same approach, pause and
+require a materially different strategy or replanning before the third phase
+attempt. The third failed phase attempt blocks the task with a durable handoff.

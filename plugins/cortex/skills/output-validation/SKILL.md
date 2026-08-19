@@ -1,6 +1,6 @@
 ---
 name: output-validation
-description: Validate code changes, plans, or delegated results against explicit acceptance criteria and evidence. Use before integration, after implementation, or when a worker reports completion without sufficient proof.
+description: Internal Cortex validation overlay. Load only for an explicitly activated Cortex task when a gate result must be checked against its acceptance and evidence contract.
 ---
 
 # Output Validation

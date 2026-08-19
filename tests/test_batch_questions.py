@@ -153,6 +153,7 @@ class BatchQuestionTests(unittest.TestCase):
         started, _, state, attempt = self._start()
         asked = self._ask(state, attempt)
         self.assertEqual(asked["outcome"], "batch_recorded")
+        self.assertIn("complete decision handoff", asked["next_action"])
         batch_ref = asked["batch_ref"]
         localized = [
             {
@@ -248,6 +249,142 @@ class BatchQuestionTests(unittest.TestCase):
         })
         self.assertEqual(polled["answers"]["extra_context"]["answer_en"], "Preserve backwards compatibility.")
         self.assertNotIn("Нужно", json.dumps(polled, ensure_ascii=False))
+
+    def test_localized_batch_accepts_documented_fields_and_renders_option_tradeoffs(self):
+        started, _, state, attempt = self._start()
+        asked = self._ask(state, attempt, key="localized-documented-fields")
+        localized = [
+            {
+                "localized_header": "Стратегия хранения",
+                "localized_question": "Какую стратегию базы данных следует закрепить для реализации?",
+                "localized_options": [
+                    {
+                        "label": "Сохранить существующую схему",
+                        "description": "Минимальный риск совместимости, но меньше свободы для новой модели данных.",
+                    },
+                    {
+                        "label": "Создать отдельную новую схему",
+                        "description": "Даёт чистую модель данных, но требует миграции и совместимости.",
+                    },
+                ],
+            },
+            {
+                "localized_header": "Область миграции",
+                "localized_question": "Какие части системы должны входить в обязательную миграцию?",
+                "localized_options": [
+                    {"label": "Перенести существующие данные"},
+                    {"label": "Обновить код приложения"},
+                ],
+            },
+            {
+                "localized_header": "Дополнительные ограничения",
+                "localized_question": "Какие дополнительные ограничения должен учитывать план реализации?",
+                "localized_custom_label": "Опишите обязательные ограничения",
+            },
+        ]
+        with mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            side_effect=[
+                ("accept", {"database_strategy": "use_existing_schema"}, "documented-fields-1"),
+                ("accept", {"migration_scope": ["data"]}, "documented-fields-2"),
+                ("accept", {"extra_context": "Сохранить совместимость."}, "documented-fields-3"),
+            ],
+        ) as elicitation:
+            pending = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "question",
+                "payload": {
+                    "question_ref": asked["batch_ref"],
+                    "localized_questions": localized,
+                },
+            })
+        self.assertTrue(pending["ok"], pending)
+        first_choice = elicitation.call_args_list[0].args[1]["properties"]["database_strategy"]["oneOf"][0]
+        self.assertEqual(first_choice, {
+            "const": "use_existing_schema",
+            "title": "Сохранить существующую схему",
+            "description": "Минимальный риск совместимости, но меньше свободы для новой модели данных.",
+        })
+
+    def test_worker_and_localized_batches_reject_placeholder_decisions(self):
+        started, _, state, attempt = self._start()
+        invalid = self._batch("placeholder-worker-options")
+        invalid["questions"][0]["options"] = ["A", "B"]
+        rejected_worker = control.worker_question({
+            **self._identity(state, attempt, self.project),
+            "action": "ask_batch",
+            "batch": invalid,
+        })
+        self.assertFalse(rejected_worker["ok"])
+        self.assertEqual(rejected_worker["outcome"], "needs_correction")
+        self.assertIn("concrete outcome", rejected_worker["diagnostics"][0]["message"])
+
+        asked = self._ask(state, attempt, key="placeholder-localized-options")
+        rejected_ui = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "question",
+            "payload": {
+                "question_ref": asked["batch_ref"],
+                "localized_questions": [
+                    {
+                        "localized_header": "Решение 1",
+                        "localized_question": "Какой вариант выбрать для первого решения?",
+                        "localized_options": ["Вариант 1", "Вариант 2"],
+                    },
+                    {
+                        "localized_header": "Решение 2",
+                        "localized_question": "Какой вариант выбрать для второго решения?",
+                        "localized_options": ["Вариант 1", "Вариант 2"],
+                    },
+                    {
+                        "localized_header": "Решение 3",
+                        "localized_question": "Какой вариант выбрать для третьего решения?",
+                    },
+                ],
+            },
+        })
+        self.assertFalse(rejected_ui["ok"])
+        self.assertIn("placeholders", rejected_ui["diagnostics"][0]["message"])
+
+    def test_english_batch_projection_falls_back_to_canonical_question_copy(self):
+        record = {
+            "questions": [
+                {
+                    "question_key": "database_strategy",
+                    "question_type": "single_select",
+                    "canonical_question": "Which database strategy should the implementation preserve?",
+                    "header": "Database strategy",
+                    "options": [
+                        {"option_id": "existing", "label_en": "Preserve the existing schema"},
+                        {"option_id": "new", "label_en": "Introduce a separate new schema"},
+                    ],
+                }
+            ]
+        }
+        projected = runtime_questions._localized_batch_view(
+            record,
+            {
+                "user_language": "en",
+                "localized_questions": [
+                    {
+                        "options": [
+                            "Preserve the existing schema",
+                            "Introduce a separate new schema",
+                        ]
+                    }
+                ],
+            },
+        )
+        schema = runtime_questions._batch_form_schema(projected["questions"][0])
+        field = schema["properties"]["database_strategy"]
+        self.assertEqual(
+            field["title"],
+            "Which database strategy should the implementation preserve?",
+        )
+        self.assertEqual(field["description"], "Database strategy")
 
     def test_localized_batch_uses_canonical_positions_when_display_ids_change(self):
         started, _, state, attempt = self._start()

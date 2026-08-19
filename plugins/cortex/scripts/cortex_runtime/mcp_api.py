@@ -11,8 +11,8 @@ from typing import Any
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response; never inspect, list, infer, or select a task after a start response without task_ref. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. For intent=question pass payload.question_ref and optional localized UI labels. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: persist one material question or an atomic batch, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question through native MCP elicitation, or review a completed plan. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response; never inspect, list, infer, or select a task after a start response without task_ref. In an initialized stdio session, plan approval opens native MCP elicitation with exactly Approve and Cancel controls; direct non-stdio callers receive the cortex/plan-approval/v1 fallback interaction and must submit only its embedded arguments. Never infer approval when the host cannot render either path. Before intent=question, publish a detailed user-language commentary preamble from the worker's decision handoff; then pass payload.question_ref and self-contained localized UI labels. Generic placeholders are rejected. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
+    "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
@@ -283,6 +283,12 @@ def build_public_schemas(
                 "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
             },
             "objective": {"type": "string"},
+            "strategy": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+                "description": "Optional concise name for the initial worker approach; Cortex uses it only for bounded retry-strategy accounting.",
+            },
             "paths": {"type": "array", "items": {"type": "string"}},
             "acceptance": {"type": "array", "items": {"type": "string"}},
             "verification": {"type": "array", "items": {"type": "string"}},
@@ -364,7 +370,7 @@ def build_public_schemas(
                     {
                         "properties": {
                             "user_request": {
-                                "pattern": "(?:[Hh][Aa][Rr][Vv][Ee][Ss][Tt](?:-[Rr][Ee][Ff][Rr][Ee][Ss][Hh])?|[Ff][Ee][Aa][Tt][Uu][Rr][Ee] [Cc][Ee][Nn][Ss][Uu][Ss]|[Rr][Ee][Pp][Oo][Ss][Ii][Tt][Oo][Rr][Yy] [Kk][Nn][Oo][Ww][Ll][Ee][Dd][Gg][Ee]|[Kk][Nn][Oo][Ww][Ll][Ee][Dd][Gg][Ee] [Dd][Oo][Cc][Uu][Mm][Ee][Nn][Tt][Aa][Tt][Ii][Oo][Nn])",
+                                "pattern": "(?:[Hh][Aa][Rr][Vv][Ee][Ss][Tt](?:-[Rr][Ee][Ff][Rr][Ee][Ss][Hh])?)",
                             }
                         },
                         "description": "Knowledge-harvest routes may omit either list because Cortex supplies the exhaustive census contract.",
@@ -394,6 +400,12 @@ def build_public_schemas(
                         "dispatch_ref": {"type": "string", "minLength": 1, "description": "Exact dispatch ref returned by Cortex; required only for a non-success result so stale failures cannot target a replacement attempt."},
                         "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
                         "reason": {"type": "string", "description": "Required for a non-success result."},
+                        "next_strategy": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1000,
+                            "description": "Materially different approach required after two failures of the current strategy and before the third phase attempt.",
+                        },
                     },
                 },
             },
@@ -479,6 +491,8 @@ def build_public_schemas(
                                 "header": {"type": "string"},
                                 "options": {"type": "array", "maxItems": 32, "items": question_option_schema},
                                 "custom_label": {"type": "string"},
+                                "context": {"type": "string", "description": "Evidence or conflict that makes this user decision necessary."},
+                                "recommendation": {"type": "string", "description": "Worker recommendation and its main consequence; empty only when the choice is genuinely neutral."},
                             },
                             "required": ["question_key", "question", "type"],
                         },
@@ -537,7 +551,12 @@ def build_public_schemas(
                     "embedded response arguments (including request_id) for approve/cancel, while revise remains "
                     "the explicit feedback path. For intent=follow_up, use the completed source task_ref and an exact "
                     "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
-                    "{question_ref: '<worker ref>'} plus optional localized UI labels. If Cortex returns "
+                    "{question_ref: '<worker ref>'} plus optional localized UI labels, after a normal user-language commentary "
+                    "message has explained the decision context, consequences, and recommendation. For batch localization, "
+                    "each ordered item uses localized_question, localized_header, localized_options, and optional "
+                    "localized_custom_label; question/header/options/custom_label remain compatibility aliases. Every question "
+                    "and option must be self-contained and outcome-specific; generic numbered or recommended/alternative "
+                    "placeholders are rejected. If Cortex returns "
                     "awaiting_translation, submit its translation_request unchanged except for the English translation: "
                     "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
                     "Cortex resolves task/principal/thread and opens native MCP elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
@@ -741,7 +760,9 @@ def v3_response(
                 ]
                 next_action = (
                     f"{coordinator_lock} The worker is paused on a durable question, not running. Never wait on or "
-                    "respawn it. Surface the question through manage_orchestration(intent=question): "
+                    "respawn it. First publish the worker's complete decision handoff as a detailed user-language "
+                    "commentary preamble, then surface the self-contained question through "
+                    "manage_orchestration(intent=question): "
                     + ", ".join(waiting_questions) + "."
                 )
             elif stopped_workers and all(item.get("report_refs") for item in stopped_workers):
@@ -789,8 +810,10 @@ def v3_response(
             ]
             if waiting_questions:
                 next_action = (
-                    f"{coordinator_lock} Never wait on or respawn the paused worker. Surface and answer the durable "
-                    "question through manage_orchestration(intent=question): " + ", ".join(waiting_questions)
+                    f"{coordinator_lock} Never wait on or respawn the paused worker. First publish the worker's "
+                    "complete decision handoff as a detailed user-language commentary preamble, then surface and "
+                    "answer the durable question through manage_orchestration(intent=question): "
+                    + ", ".join(waiting_questions)
                     + ". Then resume the same persisted host_agent_id with followup_task."
                 )
             elif all(item.get("report_refs") for item in stopped_workers):

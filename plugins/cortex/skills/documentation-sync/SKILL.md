@@ -1,6 +1,6 @@
 ---
 name: documentation-sync
-description: Synchronize durable project, feature, verification, gotcha, and ADR documentation with completed code changes. Use after C2/C3 work or whenever behavior, interfaces, architecture, project commands, or feature ownership changed.
+description: Internal Cortex documentation overlay. Load only after verified changes in an explicitly activated Cortex task require durable project or feature documentation updates.
 ---
 
 # Documentation Sync

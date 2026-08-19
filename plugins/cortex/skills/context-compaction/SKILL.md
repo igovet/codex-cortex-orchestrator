@@ -1,6 +1,6 @@
 ---
 name: context-compaction
-description: Produce concise, evidence-based handoffs between Codex agents or work phases. Use when a task crosses agents, resumes after long investigation, or has noisy logs and reports that would otherwise pollute the parent context.
+description: Internal Cortex recovery overlay. Load only for an explicitly activated Cortex task after compaction, reset, or a required bounded handoff; never select for ordinary work.
 ---
 
 # Context Handoff

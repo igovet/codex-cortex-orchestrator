@@ -694,15 +694,18 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             after_stop = control.load_task_state_for_artifact(task_dir)
             stopped_attempt = control._attempt(after_stop, attempt["attempt_id"])
             self.assertEqual(stopped_attempt["status"], "failed")
+            result = {
+                "status": "failed",
+                "reason": "native_worker_stopped_without_report",
+                "dispatch_ref": attempt["dispatch_ref"],
+            }
+            if failure_number == control.MAX_SAME_STRATEGY_FAILURES:
+                result["next_strategy"] = "use an alternate repository evidence path"
             current = control.continue_orchestration({
                 "project_root": str(self.project),
                 "task_ref": current["task_ref"],
                 "step": current["step"],
-                "results": [{
-                    "status": "failed",
-                    "reason": "native_worker_stopped_without_report",
-                    "dispatch_ref": attempt["dispatch_ref"],
-                }],
+                "results": [result],
             })
             self.assertTrue(current["ok"], current)
             if failure_number < control.MAX_ORCHESTRATE_GATE_FAILURES:

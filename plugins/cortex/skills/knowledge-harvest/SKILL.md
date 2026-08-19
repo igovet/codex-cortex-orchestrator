@@ -1,6 +1,6 @@
 ---
 name: knowledge-harvest
-description: Build or refresh exhaustive repository knowledge documentation from verified source, tests, configuration, process definitions, and integrations. Use for Cortex harvest, harvest-refresh, repository onboarding, incomplete feature registries, large restructuring, or stale docs/project and docs/features trees.
+description: Internal Cortex knowledge-route overlay. Load only after the user explicitly activates cortex:orchestrator with harvest or harvest-refresh; never infer this route from repository state.
 ---
 
 # Knowledge Harvest
@@ -71,40 +71,6 @@ evidence, while plan resolves the implementation/documentation decision. The
 strict seven-field `cortex/report/v1` remains unchanged; Scope may add only the
 top-level `scoping` sibling and Plan may add only `planning`.
 
-<!-- The canonical order above is authoritative. -->
-<!-- Historical detailed wording below is intentionally omitted. -->
-<!--
-1. **Plan:** Dispatch `planner` to enumerate top-level applications, services,
-   packages, runtime processes, deployment surfaces, integrations, and likely
-   functional domains. The plan must define domain partitions, ownership,
-   serialization boundaries, a coverage matrix, and explicit completeness
-   criteria. A vague “inspect relevant files” plan fails this gate.
-2. **Domain census:** Replace the discovery wave when necessary with one
-   read-only `explorer` per bounded domain, normally 2–8 in parallel for a
-   large repository. Each explorer exhaustively inventories its assigned
-   domain and traces feature-bearing surfaces through entry points, workflows,
-   state, persistence, configuration, integrations, failure paths, and tests.
-   Give each explorer the planner report through `depends_on: ["plan"]`.
-3. **Architecture synthesis:** Dispatch `architect` with the planning and all
-   discovery handoffs. It deduplicates features, defines stable feature
-   boundaries, maps cross-domain flows and shared infrastructure, identifies
-   ADR-worthy decisions, and emits the canonical documentation taxonomy.
-4. **Documentation:** Dispatch one or more `technical_writer` workers. Use one
-   writer for a small repository. For a large repository, parallelize only
-   across non-overlapping `docs/features/<domain-or-feature>/` paths and assign
-   exactly one writer to `docs/project/` plus `docs/features/index.md`. Every
-   writer depends on the architecture phase and verifies consequential facts
-   in current source or tests instead of copying reports blindly.
-5. **Completeness review:** Dispatch `code_reviewer` after documentation to
-   independently compare the fresh source inventory with the coverage matrix
-   and written pages. Any unmapped surface, placeholder, thin page, broken
-   source link, undocumented failure path, or unsupported coverage claim
-   fails review and triggers a bounded documentation rework.
-6. **Close:** Dispatch `build_verification` to check links, paths, generated
-   blocks, formatting, repository-native documentation checks, and the final
-   coverage statement without editing files.
-
--->
 The coordinator owns domain partitioning and may change the future pipeline
 when verified evidence exposes additional domains, shared ownership, or an
 unsafe overlap. Same-wave workers do not depend on one another; put dependent

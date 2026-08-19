@@ -108,8 +108,8 @@ brief, context files, and at most eight validated domains.
 - Successful results carry a compact `report_ref`. Workers persist exactly
   these ordered seven `cortex/report/v1` fields through the scoped public
   `record_report` tool: `summary`, `findings`, `questions`, `changed_files`,
-  `tests`, `evidence`, and `uncertainty`.
-  then return only `REPORT_RECORDED report_ref=<value>` plus at most a
+  `tests`, `evidence`, and `uncertainty`, then return only
+  `REPORT_RECORDED report_ref=<value>` plus at most a
   two-sentence summary. The coordinator reads the full report through
   `read_worker_report`; successor workers may use that tool only for explicitly
   supplied predecessor refs with exact scope identifiers. Non-success results omit report refs and require a
@@ -120,18 +120,26 @@ brief, context files, and at most eight validated domains.
   but the native acknowledgement is interrupted, inspect with
   `manage_orchestration` and recover the ref from `available_reports`.
 - Any profile may call `worker_question(action="ask")` for a material user
-  decision that repository evidence cannot resolve. It returns only a compact
-  question ref to the parent and stays alive; the coordinator surfaces the ref
-  through management, obtains the user answer, then resumes that same worker,
-  which polls the ref. Open blocking questions reject both `record_report` and
-  `continue_orchestration`. Do not encode missing product intent as assumptions.
+  decision that repository evidence cannot resolve. It returns a compact
+  question ref plus a complete decision handoff to the parent: why input is
+  needed, every full self-contained question, concrete outcome-based options,
+  descriptions, trade-offs, and a recommendation. The coordinator must first
+  publish a detailed user-language commentary preamble, then call native MCP
+  elicitation exactly once; the preamble supplies context but must not collect
+  or replace the native answer. Open blocking questions reject both
+  `record_report` and `continue_orchestration`. Do not encode missing product
+  intent as assumptions.
 - Embedded predecessor handoffs are mandatory input. Read and reconcile every
   supplied report before project work, then include the generated
   `Predecessor review:` entry naming every supplied report ref in report
   evidence; public `record_report` rejects an incomplete acknowledgement.
-  Omit `depends_on` to receive all verified predecessors, provide exact earlier
+  Omit `depends_on` to select all verified predecessors, provide exact earlier
   phases to narrow the set, or use `[]` only for intentional independence.
-  Context count/size overflow fails closed instead of dropping older reports.
+  Dispatch receives the selected set's transitive frontier: a passed report
+  covers only refs that its attempt durably acknowledged. Full history remains
+  in SQLite and in the Planner evidence digest, so a 1000-report task does not
+  produce a 1000-ref prompt or hit an artificial count limit. Compact
+  inspect/recovery views independently retain eight recent summaries.
 - Available `docs/project/index.md` and `docs/features/index.md` files are
   injected into every worker briefing. The planner names task-relevant linked
   pages for the coordinator to attach through `context_files`; downstream
@@ -151,7 +159,7 @@ brief, context files, and at most eight validated domains.
 - The same correction contract applies to every allowed worker tool, including
   `worker_question`, `get_report_template`, `read_dispatch_briefing`, and
   `read_worker_report`: fix the named diagnostic and retry on the same attempt;
-  rejected calls do not consume the three-attempt recovery budget. Briefing,
+  rejected calls do not consume the failed phase-attempt budget. Briefing,
   report, and coordinator artifact reads normalize `max_bytes` above 32768 to
   the server bound. Stop only for `retryable: false` or an explicit integrity,
   storage, permission, or unavailable-identity blocker.
@@ -260,7 +268,7 @@ brief, context files, and at most eight validated domains.
   host child id, never by ordinal or display label. While the wave is active,
   `waiting_workers` carries `output_policy="silent"`; repeated wait timeouts
   must not generate heartbeat commentary.
-- Keep `profile` as the exact canonical role name, and use the human-readable
+- Keep `profile` as the exact canonical role name. The human-readable
   `display_name` is derived from the task domain in the user's request (for
   example, `Planner Authentication`), without an ordinal or digest. Gate
   mission verbs are not used as the display module. The unique native
@@ -268,11 +276,14 @@ brief, context files, and at most eight validated domains.
   underscore profile/module, ordinal, and digest (for example,
   `explorer_auth_02_<digest>`); `followup_task` resumes that same native
   worker after a durable question or active steer, never a dead replacement.
-  Host spawn prompts de-duplicate the exact user request; `start_orchestration.next_action`
-  is serialized before dispatch payloads. The nested realistic harvest Planner
-  prompt is regression-tested below 11,500 bytes, the compact native bootstrap
-  is below 1,500 bytes, and the complete public start response below 8,000
-  UTF-8 bytes. A worker is not sent until native
+  Host spawn prompts use one JSON-serialized, explicitly untrusted assignment
+  envelope; do not interpolate task-controlled values as Markdown or protocol
+  headings. `start_orchestration.next_action` is serialized before dispatch
+  payloads. Representative prompt budgets are 1,500 bytes for the compact
+  native bootstrap, 10,000/14,000 bytes for ordinary briefings, and
+  11,000/15,000 bytes for harvest briefings (soft/hard). The validator also
+  rejects long duplicate prompt paragraphs and tests adversarial assignment
+  data. A worker is not sent until native
   `spawn_agent` returns a child id; empty dispatch announcements or waits are
   forbidden, and a synchronous `PreToolUse` hook denies a targetless wait
   before it can block. Native failure is a blocker. The native
@@ -296,8 +307,10 @@ brief, context files, and at most eight validated domains.
   `dispatch_ref`, `status="failed"`, and
   `reason="native_worker_stopped_without_report"`; wait, respawn, and
   `followup_task` are invalid for that child. Only the fresh top-level
-  dispatch returned by Cortex may retry, and the third failure blocks with a
-  durable handoff. PostToolUse recovery scans all non-invalidated reportless
+  dispatch returned by Cortex may retry, but the third phase attempt requires
+  a materially different `next_strategy` or an explicit replan; the third
+  failure blocks with a durable handoff. PostToolUse recovery scans all
+  non-invalidated reportless
   attempts in the current gate, not only the last attempt, so a later
   completed retry does not hide an earlier failure receipt that is still
   required.
@@ -402,7 +415,9 @@ and v8 ledger. They are not caller-facing request envelopes.
   replacement through `record_report`. Correct all named fields and retry
   `record_report` with the same `draft_ref`. A new template supersedes an old
   or expired draft. Rejected records explicitly consume no worker attempt; only
-  failed worker attempts count toward the three-attempt recovery budget.
+  failed worker attempts count toward the phase budget: at most three per
+  phase, with no more than two using the same strategy. Before a third phase
+  attempt, provide a materially different `next_strategy` or replan.
   `record_report` validates the exact current draft and state, then atomically
   persists it and deletes the file and metadata only after commit. Legacy
   full-payload recording remains compatible. Stop only for a non-retryable

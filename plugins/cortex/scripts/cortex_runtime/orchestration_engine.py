@@ -31,6 +31,7 @@ bind_symbols(
         "AWAITING_HOST_SPAWN",
         "MAX_CONTEXT_REPORTS",
         "MAX_ORCHESTRATE_GATE_FAILURES",
+        "MAX_SAME_STRATEGY_FAILURES",
         "MAX_WORK_PACKAGES",
         "NORMAL_COMMAND",
         "ORCHESTRATE_MUTATING_OPERATIONS",
@@ -606,6 +607,32 @@ def _predecessor_context_report_ids(
     return selected
 
 
+def _transitive_context_frontier(state: dict[str, Any], report_ids: list[str]) -> list[str]:
+    """Collapse acknowledged predecessor chains without losing durable history.
+
+    A passed report can cover only the exact predecessor refs granted to its
+    attempt. Report intake already proves that it read and acknowledged every
+    one of those refs. Keeping the reports that are not covered by another
+    selected report therefore bounds a successor handoff by the current DAG
+    frontier while the immutable ledger and plan-basis digest retain the full
+    history.
+    """
+    selected = list(dict.fromkeys(str(report_id) for report_id in report_ids))
+    selected_set = set(selected)
+    covered: set[str] = set()
+    for attempt in state.get("attempts", []):
+        if attempt.get("status") != "passed" or attempt.get("invalidated"):
+            continue
+        produced = set(str(report_id) for report_id in attempt.get("report_ids", []))
+        if not produced.intersection(selected_set):
+            continue
+        covered.update(
+            str(report_id) for report_id in attempt.get("context_report_ids", [])
+            if str(report_id) in selected_set
+        )
+    return [report_id for report_id in selected if report_id not in covered]
+
+
 def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[str]:
     """Keep the report that opened an active corrective wave in its context.
 
@@ -740,14 +767,13 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             context_report_ids = list(dict.fromkeys(
                 context_report_ids + [item["report_ref"] for item in required_basis]
             ))
-        # The report that triggered corrective work stays readable even though
-        # its original gate receipt was invalidated.  Put it first so bounded
-        # context cannot silently discard the reason for the rework.
-        context_report_ids = list(dict.fromkeys(rework_report_ids + context_report_ids))
-        if len(context_report_ids) > MAX_CONTEXT_REPORTS:
-            raise ValueError(
-                f"verified predecessor context contains {len(context_report_ids)} reports, exceeding the {MAX_CONTEXT_REPORTS}-report limit; narrow the discovery wave before dispatch"
-            )
+        # A verified successor report transitively covers only refs that its
+        # own passed attempt acknowledged. Preserve active rework sources even
+        # when a later ordinary handoff covered them: they are the current
+        # corrective mission, not merely historical context.
+        context_report_ids = list(dict.fromkeys(
+            rework_report_ids + _transitive_context_frontier(state, context_report_ids)
+        ))
         delegated = record_delegation({
             **params,
             **spec,
@@ -1020,6 +1046,7 @@ def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 "phase": spec.get("gate"),
                 "profile": spec.get("agent"),
                 "objective": str(spec.get("objective") or ""),
+                "strategy": str(spec.get("strategy") or "default"),
                 "paths": list(spec.get("allowed_paths") or []),
                 "dependencies": dependencies,
                 "context_files": list(spec.get("context_files") or []),
@@ -1281,6 +1308,41 @@ def _pre_recorded_report(
     return record, receipt
 
 
+def _validate_retry_strategy(
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    completion: dict[str, Any],
+) -> None:
+    if str(completion.get("status", "passed")).strip().lower() != "failed":
+        return
+    attempt_id = str(attempt.get("attempt_id") or "")
+    current_strategy = str(attempt.get("strategy") or "default").strip()
+    same_strategy_failures = 1 + sum(
+        1
+        for prior in state.get("attempts", [])
+        if prior.get("attempt_id") != attempt_id
+        and prior.get("gate") == attempt.get("gate")
+        and prior.get("status") == "failed"
+        and str(prior.get("strategy") or "default").strip().casefold() == current_strategy.casefold()
+    )
+    phase_failure_number = int(
+        state.get("orchestrate_gate_failure_counts", {}).get(attempt.get("gate"), 0)
+    ) + 1
+    if (
+        same_strategy_failures >= MAX_SAME_STRATEGY_FAILURES
+        and phase_failure_number < MAX_ORCHESTRATE_GATE_FAILURES
+        and not completion.get("pipeline_replanned")
+    ):
+        next_strategy = str(completion.get("next_strategy") or "").strip()
+        if not next_strategy:
+            raise ValueError(
+                "same_strategy_limit reached after two failed attempts; provide a materially different "
+                "next_strategy or replan future waves before the third phase attempt"
+            )
+        if next_strategy.casefold() == current_strategy.casefold():
+            raise ValueError("next_strategy must materially differ from the failed strategy")
+
+
 def _preflight_orchestrate_completion(
     task_dir: Path,
     state: dict[str, Any],
@@ -1292,6 +1354,7 @@ def _preflight_orchestrate_completion(
     requested_status = str(completion.get("status", "passed")).strip().lower()
     if requested_status not in TERMINAL_ATTEMPT_STATUSES:
         raise ValueError("completion status must be passed, failed, blocked, cancelled, or superseded")
+    _validate_retry_strategy(state, attempt, completion)
     if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
         if attempt.get("status") != requested_status:
             raise ValueError("completion status does not match the terminal ledger attempt")
@@ -1333,6 +1396,29 @@ def _preflight_orchestrate_completion(
         _validate_report_decision_closure(task_dir, state, attempt, record["report"])
     elif not str(completion.get("reason", "")).strip():
         raise ValueError("non-success completion requires an explicit reason")
+
+
+def _apply_next_retry_strategies(
+    wave: dict[str, Any],
+    state: dict[str, Any],
+    completions: list[dict[str, Any]],
+) -> None:
+    """Carry an explicitly revised strategy into only the matching retry slot."""
+    by_key = {
+        str(spec.get("orchestration_delegation_key") or ""): spec
+        for spec in wave.get("delegations", [])
+        if isinstance(spec, dict)
+    }
+    for completion in completions:
+        next_strategy = str(completion.get("next_strategy") or "").strip()
+        if not next_strategy:
+            continue
+        attempt = _attempt(state, safe_id(str(completion.get("attempt_id", ""))))
+        key = str(attempt.get("orchestration_delegation_key") or "")
+        spec = by_key.get(key)
+        if spec is None:
+            raise ValueError("next_strategy cannot identify the matching retry slot")
+        spec["strategy"] = next_strategy
 
 
 def _auto_handoff(params: dict[str, Any], task_dir: Path, state: dict[str, Any], next_action: str) -> dict[str, Any]:
@@ -1716,6 +1802,8 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         for completion in completions:
             if not isinstance(completion, dict):
                 raise ValueError("completion entries must be objects")
+            if params.get("future_waves") is not None:
+                completion["pipeline_replanned"] = True
             _preflight_orchestrate_completion(task_dir, state, completion)
         if params.get("future_waves") is not None:
             task = load_task_definition(task_dir, state)
@@ -1732,6 +1820,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 raise ValueError("completion entries must be objects")
             state, receipt = _complete_orchestrate_attempt(params, task_dir, state, completion)
             receipts[safe_id(str(completion["attempt_id"]))] = receipt
+        _apply_next_retry_strategies(current_wave, state, completions)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "attempts_completed", attempt_ids=sorted(provided_attempt_ids))
         if state.get("require_delegation") and not state.get("reassessment_receipts") and "close" in current_wave["gates"]:
             reassessed = reassess_pipeline({
