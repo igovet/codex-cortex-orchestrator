@@ -416,7 +416,19 @@ include a concise `reason`. Planner and explorer ownership recommendations are
 advisory routing evidence, not an automatic rewrite command. Prefer the
 narrowest supported profile and replace a stale route only after that explicit
 decision. `general` is a conservative fallback, not the preferred universal
-writer. Repeating a completed phase requires `rework: true`. Use
+writer. The public facade infers rework when `future_waves` reintroduces a
+current or completed phase; the optional `rework` field is only a compatibility
+hint. A pending implementation phase cannot be silently omitted from a
+replacement: retain it and narrow its report dependencies instead. After an
+exhausted closure-rework budget, ordinary `resume` must not replay the same
+corrective wave. Resume with atomic recovery `payload.future_waves` beginning
+with one Planner wave; Cortex records the replan before returning a dispatch
+and restores every original delivery obligation—implementation, applicable QA,
+security/performance, review, documentation, and close—before requiring fresh
+plan approval. Before documentation or close dispatch, the runtime compares
+the accepted planning catalog with non-invalidated delivery attempts and
+repairs any missing graph instead of accepting documentation as implementation
+evidence. Use
 `manage_orchestration` for `inspect`, `resume`, `deactivate`, `lane`,
 `resource`, or `question`; these intents do not belong in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.

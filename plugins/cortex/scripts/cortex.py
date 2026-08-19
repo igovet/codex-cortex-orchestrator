@@ -5032,7 +5032,7 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": redact(params.get("user_request") or params.get("objective", ""), 4000), "objective": redact(params.get("objective", "")), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
         if thread_id and (
@@ -6096,6 +6096,7 @@ def resume_task(params: dict[str, Any]) -> dict[str, Any]:
         if state["status"] != "blocked":
             raise ValueError("only blocked tasks can be resumed")
         state["status"] = "active"
+        state.pop("blocked_reason", None)
         state.setdefault("resume_events", []).append({"reason": redact(params.get("reason", ""), 2000), "at": now()})
         save_state(task_dir, task_dir / "state.sqlite", state, "resume", redact(params.get("reason", "task resumed")))
         return {"state": state}
@@ -6145,7 +6146,10 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         intent = str(params.get("intent", "add_specialist"))
         if intent not in {"add_specialist", "resequence", "rework_gate", "stop"}:
             raise ValueError("intent must be add_specialist, resequence, rework_gate, or stop")
-        if int(state.get("replan_count", 0)) >= int(state.get("replan_limit", 2)):
+        if (
+            int(state.get("replan_count", 0)) >= int(state.get("replan_limit", 2))
+            and not params.get("invariant_recovery", False)
+        ):
             raise ValueError("replan limit exhausted")
         explicit_pipeline = params.get("pipeline")
         proposal_params = {"complexity": task["complexity"], "requirements": task.get("requirements", []) + signals}
@@ -7342,7 +7346,7 @@ def _v3_response(
     start_replayed: bool | None = None,
 ) -> dict[str, Any]:
     """Public delegating entrypoint for the orchestration response adapter."""
-    return render_v3_response(
+    response = render_v3_response(
         old,
         task_ref,
         native_arguments=_v3_native_arguments,
@@ -7351,6 +7355,9 @@ def _v3_response(
         include_result=include_result,
         start_replayed=start_replayed,
     )
+    if not response.get("ok", False):
+        response["attempt_budget_consumed"] = False
+    return response
 
 
 
@@ -7753,6 +7760,20 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
             if params.get("future_waves") is not None else None
         )
+        rework_scope = (
+            set(state.get("completed_gates", []))
+            | set(state.get("skipped_gates", []))
+            | set(active_gates(state))
+        )
+        inferred_rework = bool(
+            future_waves
+            and rework_scope.intersection(
+                str(delegation.get("gate") or "")
+                for wave in future_waves
+                for delegation in wave.get("delegations", [])
+            )
+        )
+        effective_rework = bool(params.get("rework", False)) or inferred_rework
         if len(results) != len(attempt_ids):
             raise ValueError(f"active wave requires exactly {len(attempt_ids)} result(s)")
         slots: dict[int, dict[str, Any]] = {}
@@ -7835,7 +7856,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         old_params["completions"] = completions
         if future_waves is not None:
             old_params["future_waves"] = future_waves
-            old_params["allow_rework"] = bool(params.get("rework", False))
+            old_params["allow_rework"] = effective_rework
         if params.get("reason") is not None:
             old_params["reason"] = params["reason"]
         old = orchestrate(old_params)
@@ -8538,11 +8559,35 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 }
         submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload"), **operation_context}, sort_keys=True, default=str))[:16])
         if intent in {"resume", "deactivate"}:
+            recovery: dict[str, Any] = {}
+            if intent == "resume" and params.get("payload") is not None:
+                raw_recovery = params.get("payload")
+                if not isinstance(raw_recovery, dict):
+                    raise ValueError("resume payload must be an object")
+                unknown_recovery = sorted(set(raw_recovery) - {"future_waves", "rework"})
+                if unknown_recovery:
+                    raise ValueError("unsupported resume recovery fields: " + ", ".join(unknown_recovery))
+                if raw_recovery.get("future_waves") is None:
+                    raise ValueError("resume recovery payload requires future_waves")
+                if not str(params.get("reason") or "").strip():
+                    raise ValueError("resume recovery future_waves requires a concise reason")
+                recovery["future_waves"] = _v3_compact_waves(
+                    raw_recovery["future_waves"],
+                    task_definition,
+                    completed_gates=(
+                        set(state.get("completed_gates", []))
+                        | set(state.get("skipped_gates", []))
+                        | set(active_gates(state))
+                    ),
+                    project_root=select_project_root(params),
+                )
+                recovery["allow_rework"] = True
             old = orchestrate({
                 **common,
                 "operation": intent,
                 "submission_id": submission_id,
                 "reason": params.get("reason"),
+                **recovery,
             })
         else:
             payload = normalized_payload if normalized_payload is not None else params.get("payload")

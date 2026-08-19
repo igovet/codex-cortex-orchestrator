@@ -1,5 +1,18 @@
 # Changelog
 
+## [9.2.1] - 2026-08-19
+
+- Preserve immutable pipeline obligations across context compaction and future-wave
+  reassessment, and reject any replacement that silently drops pending
+  implementation work without consuming a recovery attempt.
+- Infer rework at the public facade and atomically recover exhausted closure
+  routes through a freshly approved Planner-first delivery graph. Missing
+  implementation now restores its QA, audit, review, documentation, and close
+  successors instead of dispatching another writer.
+- Check accepted planning catalogs against verified delivery attempts before
+  documentation or close, and extend the black-box JSON-RPC smoke with a
+  dynamic-replan proof that implementation cannot disappear.
+
 ## [9.2.0] - 2026-08-19
 
 - Remove task-wide report-count and aggregate-byte quotas; reports remain

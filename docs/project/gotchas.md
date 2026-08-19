@@ -385,8 +385,9 @@ and v8 ledger. They are not caller-facing request envelopes.
 - Use `advance` to submit a reviewed future-wave replacement. A no-op remains
   unchanged; never claim a C2/C3 documentation or reassessment decision was
   applied without the corresponding durable operation. Replacing completed
-  work requires `allow_rework=true`. If final-close evidence supplies an
-  explicit replacement, Cortex reopens the internally completed pipeline and
+  work is recognized as rework from the repeated current or completed gates;
+  callers do not need to supply `allow_rework=true`. If final-close evidence
+  supplies an explicit replacement, Cortex reopens the internally completed pipeline and
   invalidates downstream attempts, evidence records, and report receipts before
   dispatching the replacement waves; returning terminal success while
   those waves remain would be a false completion.
@@ -638,7 +639,8 @@ and v8 ledger. They are not caller-facing request envelopes.
 - The main orchestrator owns the full optional pipeline: `start` receives the
   complete plan and Cortex appends the mandatory `documentation` and `close`
   audit gates. During work, `advance` may replace future waves under a revision
-  guard; changing completed work requires explicit `allow_rework=true`.
+  guard; changing completed work is detected as rework automatically, while
+  the internal `allow_rework` guard remains fail-closed for runtime callers.
 - Pipeline gate IDs are canonical lowercase identifiers (`plan`, `discover`,
   `architecture`, `database_architecture`, `implementation`, `qa`, `security`,
   `performance`, `accessibility`, `ux`, `review`, `documentation`, `close`).

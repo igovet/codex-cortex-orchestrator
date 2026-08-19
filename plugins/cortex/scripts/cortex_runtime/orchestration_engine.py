@@ -695,6 +695,7 @@ def _unresolved_rework_findings(
 
 
 def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    state, plan = _repair_delivery_graph_before_closure(params, task_dir, state, plan)
     current_gates = active_gates(state)
     if not current_gates:
         return {"wave_id": None, "spawn_requests": [], "attempt_ids": [], "state": state}
@@ -1065,6 +1066,273 @@ def _semantic_future_pipeline_digest(plan: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
     ))
+
+
+def _semantic_pipeline_gates(pipeline: list[dict[str, Any]]) -> set[str]:
+    """Return canonical gates represented by an approval-semantic pipeline."""
+    return {
+        str(worker.get("phase") or "")
+        for wave in pipeline
+        for worker in (wave.get("workers") or [])
+        if isinstance(worker, dict) and str(worker.get("phase") or "")
+    }
+
+
+def _validate_pending_implementation_retained(
+    state: dict[str, Any],
+    old_semantic_pipeline: list[dict[str, Any]],
+    requested_future_gates: set[str],
+    completed_gates: set[str],
+    obligation_gates: set[str] | None = None,
+) -> None:
+    """Prevent context-only replans from deleting the delivery phase."""
+    implementation_obligated = "implementation" in (
+        obligation_gates
+        or {
+            str(gate)
+            for gate in (
+                state.get("pipeline_obligations")
+                or state.get("current_pipeline")
+                or []
+            )
+        }
+    ) or "implementation" in _semantic_pipeline_gates(old_semantic_pipeline)
+    if (
+        implementation_obligated
+        and "implementation" not in requested_future_gates
+        and "implementation" not in completed_gates
+    ):
+        raise ValueError(
+            "future_waves cannot silently drop a pending implementation phase; retain implementation "
+            "and narrow its report dependencies instead"
+        )
+
+
+_DELIVERY_RECOVERY_ORDER = (
+    "implementation", "qa", "security", "performance", "review", "documentation", "close",
+)
+_IMPLEMENTATION_PROFILES = {
+    "backend_dev", "data_engineer", "debugger", "devops_engineer", "frontend_dev",
+    "fullstack_dev", "general", "mobile_dev", "refactorer",
+}
+
+
+def _pipeline_obligation_gates(
+    state: dict[str, Any],
+    plan: dict[str, Any],
+    task: dict[str, Any] | None = None,
+) -> set[str]:
+    """Recover immutable delivery obligations, including pre-v9 task history."""
+    obligations = {
+        str(gate) for gate in state.get("pipeline_obligations", []) if str(gate)
+    }
+    if isinstance(task, dict):
+        obligations.update(
+            str(gate)
+            for gate in (task.get("initial_pipeline") or task.get("base_pipeline") or [])
+            if str(gate)
+        )
+    for change in state.get("pipeline_changes", []):
+        if isinstance(change, dict):
+            obligations.update(str(gate) for gate in change.get("from", []) if str(gate))
+    for entry in plan.get("history", []):
+        if isinstance(entry, dict):
+            obligations.update(
+                _semantic_pipeline_gates(entry.get("semantic_future_pipeline") or [])
+            )
+    obligations.update(str(gate) for gate in state.get("current_pipeline", []) if str(gate))
+    return obligations
+
+
+def _approved_plan_delivery_gap(
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return required and missing delivery gates for an accepted implementation plan."""
+    if "plan" not in state.get("completed_gates", []):
+        return [], []
+    approval_status = str(_plan_approval(state).get("status") or "")
+    if approval_status not in {"approved", "not_required"}:
+        return [], []
+    manifest = current_planning_manifest(task_dir)
+    if not isinstance(manifest, dict) or not manifest.get("work_packages"):
+        return [], []
+    task = load_task_definition(task_dir, state)
+    obligations = _pipeline_obligation_gates(state, plan, task)
+    planning_requires_implementation = False
+    for package_summary in manifest.get("work_packages", []):
+        if not isinstance(package_summary, dict):
+            continue
+        artifact_path = str(package_summary.get("artifact_path") or "")
+        if not artifact_path:
+            continue
+        try:
+            package_record, _ = read_immutable_json_artifact(
+                task_dir,
+                state["task_id"],
+                artifact_path,
+                kinds={"planning_revision"},
+            )
+        except ValueError:
+            planning_requires_implementation = True
+            break
+        package = package_record.get("package") if isinstance(package_record, dict) else None
+        if not isinstance(package, dict):
+            planning_requires_implementation = True
+            break
+        if any(
+            str(microtask.get("profile") or "") in _IMPLEMENTATION_PROFILES
+            for microtask in package.get("microtasks", [])
+            if isinstance(microtask, dict)
+        ):
+            planning_requires_implementation = True
+            break
+        if any(
+            str(path).strip() in {".", "*"}
+            or not (
+                str(path).replace("\\", "/").startswith("docs/")
+                or str(path).lower().endswith((".md", ".mdx"))
+            )
+            for path in package.get("allowed_paths", [])
+        ):
+            planning_requires_implementation = True
+            break
+    if "implementation" not in obligations and not planning_requires_implementation:
+        return [], []
+    if planning_requires_implementation:
+        obligations.update({"implementation", "qa", "review", "documentation", "close"})
+    required = [gate for gate in _DELIVERY_RECOVERY_ORDER if gate in obligations]
+    passed = {
+        str(attempt.get("gate") or "")
+        for attempt in state.get("attempts", [])
+        if attempt.get("status") == "passed"
+        and not attempt.get("invalidated")
+        and attempt.get("report_ids")
+    }
+    return required, [gate for gate in required if gate not in passed]
+
+
+def _historical_recovery_specs(plan: dict[str, Any], gate: str) -> list[dict[str, Any]]:
+    """Reuse the most recent semantic worker contract for one restored gate."""
+    semantic_versions = [
+        entry.get("semantic_future_pipeline") or []
+        for entry in reversed(plan.get("history", []))
+        if isinstance(entry, dict)
+    ]
+    semantic_versions.append(_semantic_future_pipeline(plan))
+    for semantic in semantic_versions:
+        workers = [
+            worker
+            for wave in semantic
+            for worker in (wave.get("workers") or [])
+            if isinstance(worker, dict) and worker.get("phase") == gate
+        ]
+        if workers:
+            return [
+                {
+                    "gate": gate,
+                    "agent": str(worker.get("profile") or _default_profile_for_gate(gate)),
+                    **({"objective": worker["objective"]} if worker.get("objective") else {}),
+                    **({"strategy": worker["strategy"]} if worker.get("strategy") else {}),
+                    **({"allowed_paths": list(worker["paths"])} if worker.get("paths") else {}),
+                    **({"context_gates": list(worker["dependencies"])} if isinstance(worker.get("dependencies"), list) else {}),
+                    **({"context_files": list(worker["context_files"])} if worker.get("context_files") else {}),
+                    **({"acceptance_criteria": list(worker["acceptance_criteria"])} if worker.get("acceptance_criteria") else {}),
+                    **({"verification": list(worker["verification"])} if worker.get("verification") else {}),
+                }
+                for worker in workers
+            ]
+    return [{"gate": gate, "agent": _default_profile_for_gate(gate)}]
+
+
+def _delivery_recovery_waves(
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+    required_gates: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build Planner-first recovery for every historically required delivery gate."""
+    task = load_task_definition(task_dir, state)
+    obligations = _pipeline_obligation_gates(state, plan, task)
+    required = required_gates or [gate for gate in _DELIVERY_RECOVERY_ORDER if gate in obligations]
+    return [
+        {"wave_id": "recovery-plan", "delegations": [{"gate": "plan", "agent": "planner"}]},
+        *[
+            {
+                "wave_id": f"recovery-{gate}",
+                "delegations": _historical_recovery_specs(plan, gate),
+            }
+            for gate in required
+        ],
+    ]
+
+
+def _repair_delivery_graph_before_closure(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Atomically restore a truncated approved delivery graph before dispatch."""
+    required, missing = _approved_plan_delivery_gap(task_dir, state, plan)
+    if not missing:
+        return state, plan
+    current = set(active_gates(state))
+    closure_plan_rework = "plan" in current and any(
+        isinstance(item, dict)
+        and item.get("status") == "rework_required"
+        and item.get("target_gate") == "plan"
+        for item in (state.get("closure_rework") or {}).values()
+    )
+    if not (current.intersection({"documentation", "close"}) or closure_plan_rework):
+        return state, plan
+    blocking_missing = list(missing)
+    if not closure_plan_rework:
+        current_positions = [
+            _DELIVERY_RECOVERY_ORDER.index(gate)
+            for gate in current
+            if gate in _DELIVERY_RECOVERY_ORDER
+        ]
+        if not current_positions:
+            return state, plan
+        first_current_position = min(current_positions)
+        blocking_missing = [
+            gate for gate in missing
+            if _DELIVERY_RECOVERY_ORDER.index(gate) < first_current_position
+        ]
+        if not blocking_missing:
+            return state, plan
+    recovery_params = {
+        **params,
+        "allow_rework": True,
+        "invariant_recovery": True,
+        "reason": (
+            "Pipeline completeness invariant restored missing approved delivery phases before documentation/close: "
+            + ", ".join(blocking_missing)
+        ),
+    }
+    state, plan = _replace_future_orchestrate_waves(
+        recovery_params,
+        task_dir,
+        state,
+        plan,
+        _delivery_recovery_waves(task_dir, state, plan, required),
+    )
+    state["delivery_recovery"] = {
+        "status": "plan_reapproval_required",
+        "required_gates": required,
+        "missing_gates": blocking_missing,
+        "at": now(),
+    }
+    save_state(
+        task_dir,
+        task_dir / "state.sqlite",
+        state,
+        "delivery_graph_recovery",
+        "restored missing approved delivery phases before closure dispatch",
+    )
+    return state, plan
 
 
 def _verified_plan_predecessor_basis(
@@ -1622,6 +1890,15 @@ def _replace_future_orchestrate_waves(
     ]}
     new_semantic_digest = _semantic_future_pipeline_digest(candidate_plan)
     semantic_changed = old_semantic_digest != new_semantic_digest
+    completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+    new_semantic_gates = _semantic_pipeline_gates(_semantic_future_pipeline(candidate_plan))
+    _validate_pending_implementation_retained(
+        state,
+        old_semantic_pipeline,
+        new_semantic_gates,
+        completed_set,
+        _pipeline_obligation_gates(state, plan, task),
+    )
     approval_before = _plan_approval(state)
     invalidate_approval = (
         _pipeline_contract_version(state) >= 2
@@ -1639,7 +1916,6 @@ def _replace_future_orchestrate_waves(
             raise PlanReapprovalRequired(
                 "a material approved-future change requires rework=true and a singleton Planner plan wave before affected work"
             )
-    completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
     requested_future_gates = {gate for wave in future for gate in wave["gates"]}
     rework_gates = sorted(completed_set & requested_future_gates)
     if rework_gates and not params.get("allow_rework", False):
@@ -1811,7 +2087,15 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 params["future_waves"], task, plan.get("host_capabilities") or {}, str(params["project_root"])
             )
             prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(current_wave["gates"])
-            reintroduced = sorted(prospective_completed & {gate for wave in future_preview for gate in wave["gates"]})
+            requested_future_gates = {gate for wave in future_preview for gate in wave["gates"]}
+            _validate_pending_implementation_retained(
+                state,
+                _semantic_future_pipeline(plan),
+                requested_future_gates,
+                prospective_completed,
+                _pipeline_obligation_gates(state, plan, task),
+            )
+            reintroduced = sorted(prospective_completed & requested_future_gates)
             if reintroduced and not params.get("allow_rework", False):
                 raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
         receipts: dict[str, dict[str, Any] | None] = {}
@@ -2127,6 +2411,42 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
     task_id = safe_id(str(params.get("task_id", "")))
     _, task_dir, state = load_state(task_id, params)
     authorize(state, params)
+    plan = _load_orchestrate_plan(task_dir, state)
+    closure_rework = state.get("closure_rework") if isinstance(state.get("closure_rework"), dict) else {}
+    exhausted_closure_rework = any(
+        isinstance(item, dict) and item.get("status") == "rework_required"
+        for item in closure_rework.values()
+    ) and str(state.get("blocked_reason") or "").startswith("automatic close rework budget exhausted")
+    if exhausted_closure_rework and params.get("future_waves") is None:
+        raise ValueError(
+            "closure rework budget is exhausted and the recorded corrective pipeline is still unresolved; "
+            "resume requires an atomic Planner-first recovery replan"
+        )
+    if exhausted_closure_rework:
+        recovery_required, _ = _approved_plan_delivery_gap(task_dir, state, plan)
+        params = {
+            **params,
+            "future_waves": _delivery_recovery_waves(
+                task_dir, state, plan, recovery_required or None
+            ),
+            "allow_rework": True,
+            "invariant_recovery": True,
+            "reason": params.get("reason") or "Restore the complete approved delivery graph before closure.",
+        }
+    if params.get("future_waves") is not None:
+        state, plan = _replace_future_orchestrate_waves(
+            params, task_dir, state, plan, params["future_waves"]
+        )
+        for item in (state.get("closure_rework") or {}).values():
+            if isinstance(item, dict) and item.get("status") == "rework_required":
+                item["target_gate"] = "plan"
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "resume_replan",
+            "recorded an atomic recovery plan before resuming the blocked task",
+        )
     resumed = resume_task({
         **params,
         "task_id": task_id,
@@ -2135,8 +2455,17 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
     })
     resumed_state = resumed["state"]
     failure_counts = resumed_state.setdefault("orchestrate_gate_failure_counts", {})
-    for gate in active_gates(resumed_state):
-        failure_counts.pop(gate, None)
+    resume_state_changed = False
+    if params.get("future_waves") is not None:
+        recovered_failure_gates = (
+            {str(gate) for gate in closure_rework}
+            if exhausted_closure_rework else set(active_gates(resumed_state))
+        )
+        for gate in recovered_failure_gates:
+            resume_state_changed = failure_counts.pop(gate, None) is not None or resume_state_changed
+    else:
+        for gate in active_gates(resumed_state):
+            resume_state_changed = failure_counts.pop(gate, None) is not None or resume_state_changed
     invalidated = False
     for attempt in resumed_state.get("attempts", []):
         if attempt.get("gate") in active_gates(resumed_state) and attempt.get("status") == "blocked" and not attempt.get("invalidated"):
@@ -2144,9 +2473,14 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             attempt["invalidated_at"] = now()
             attempt["invalidation_reason"] = "retry_after_resume"
             invalidated = True
-    if invalidated:
-        save_state(task_dir, task_dir / "state.sqlite", resumed_state, "resume_invalidation", "retired blocked attempts before retry")
-    plan = _load_orchestrate_plan(task_dir, resumed_state)
+    if invalidated or resume_state_changed:
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            resumed_state,
+            "resume_invalidation",
+            "retired blocked attempts and reset the recovered gate budget before retry",
+        )
     prepared = _prepare_orchestrate_wave(params, task_dir, resumed_state, plan)
     return _orchestrate_response("resume", prepared["state"], wave_id=prepared["wave_id"], spawn_requests=prepared["spawn_requests"], plan=plan)
 

@@ -118,7 +118,10 @@ accepts the initial waves, follows the returned pipeline snapshot by default,
 and changes `future_waves` only when verified evidence materially changes
 ownership, dependencies, risk, sequencing, or validation. Planner and explorer
 recommendations are advisory, and every replacement carries the coordinator's
-concise reason. Changing a completed gate requires explicit rework.
+concise reason. The public facade derives rework intent when a supplied future
+pipeline repeats a current or completed gate, so a missing boolean cannot turn
+an otherwise valid recovery into a caller-correction loop. The internal engine
+still records an explicit audited rework transition.
 Semantically unchanged future-wave reassessment records an unchanged receipt
 and continues, while v5 future waves are internally renumbered so public
 relative steps never move backward or collide.

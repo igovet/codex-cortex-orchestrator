@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.0-7c3aed" alt="Cortex 9.2.0" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.1-7c3aed" alt="Cortex 9.2.1" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -224,6 +224,17 @@ The two settings above are required in every configuration:
   hidden Luna workers without copying the expected model into a native model
   override. Cortex still selects Terra and Sol explicitly when policy requires
   them.
+
+For clearer coordinator explanations, self-contained questions, and more
+detailed answer choices, the recommended top-level Codex setting is:
+
+```toml
+model_verbosity = "high"
+```
+
+This setting is recommended rather than required by the Cortex runtime. Apply
+it before starting a new task so the new task inherits the configured response
+style.
 
 Marketplace installation does not replace these global Codex settings. Verify
 both values yourself before starting the first Cortex task and after changing

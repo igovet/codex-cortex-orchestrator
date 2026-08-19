@@ -198,7 +198,13 @@ Routing is evidence-driven:
    coordinator concludes that verified evidence materially changes ownership,
    dependencies, risk gates, sequencing, or validation. Include a concise
    reason. Never restate or relabel an unchanged pipeline merely because a
-   report completed.
+   report completed. Context narrowing changes dependencies, not phase
+   membership: Cortex rejects removal of a pending implementation obligation
+   and automatically infers rework when a replacement repeats a current or
+   completed phase. If an accepted implementation plan reaches documentation
+   or close without implementation and its required QA/audit/review evidence,
+   Cortex restores a Planner-first full delivery graph before dispatch; never
+   substitute another documentation worker.
 4. A profile may own only its declared automatic gate, or—when it is a manual
    workspace writer—the implementation gate. Do not assign a writer to plan,
    discovery, review, audit, or close work. Do not assign a read-only analyst

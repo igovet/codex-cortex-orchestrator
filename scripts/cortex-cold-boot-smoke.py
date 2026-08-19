@@ -235,6 +235,8 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         parallel_wave_seen = False
         plan_approval_seen = False
         implementation_applied = False
+        dynamic_replan_applied = False
+        pending_implementation_drop_rejected = False
         last_payload = None
         while current["outcome"] != "completed":
             if current.get("outcome") == "awaiting_plan_approval":
@@ -333,7 +335,40 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 "step": current["step"],
                 "results": results,
             }
-            current = rpc.tool("continue_orchestration", last_payload)
+            active_phases = {str(item.get("phase")) for item in dispatches}
+            if active_phases == {"discover"} and not dynamic_replan_applied:
+                rejected = rpc.tool("continue_orchestration", {
+                    **last_payload,
+                    "future_waves": [
+                        {"workers": [{"phase": "documentation"}]},
+                    ],
+                    "reason": "exercise the pending implementation retention invariant",
+                })
+                if rejected.get("ok"):
+                    raise AssertionError("dynamic pipeline accepted removal of pending implementation")
+                diagnostics = rejected.get("diagnostics") or []
+                if (
+                    rejected.get("attempt_budget_consumed") is not False
+                    or not diagnostics
+                    or "pending implementation" not in str(diagnostics[0].get("message", ""))
+                ):
+                    raise AssertionError(f"pending implementation rejection lost its safe diagnostic: {rejected}")
+                pending_implementation_drop_rejected = True
+                current = rpc.tool("continue_orchestration", {
+                    **last_payload,
+                    "future_waves": [
+                        {"workers": [{"phase": "architecture"}, {"phase": "database_architecture"}]},
+                        {"workers": [{"phase": "plan"}]},
+                        {"workers": [{"phase": "implementation"}]},
+                        {"workers": [{"phase": "qa"}]},
+                        {"workers": [{"phase": "security"}, {"phase": "performance"}]},
+                        {"workers": [{"phase": "review"}]},
+                    ],
+                    "reason": "add required audit phases while retaining the pending delivery phase",
+                })
+                dynamic_replan_applied = True
+            else:
+                current = rpc.tool("continue_orchestration", last_payload)
             if not current.get("ok"):
                 raise AssertionError(f"continue failed: {current}")
         replay = rpc.tool("continue_orchestration", last_payload)
@@ -347,6 +382,10 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         raise AssertionError("the smoke plan did not return a parallel dispatch wave")
     if not plan_approval_seen:
         raise AssertionError("the C2 smoke plan did not pause for post-plan approval")
+    if not dynamic_replan_applied or not pending_implementation_drop_rejected:
+        raise AssertionError("the smoke did not exercise dynamic replanning and implementation retention")
+    if not implementation_applied:
+        raise AssertionError("the dynamically replanned pipeline never executed implementation")
 
     task_path = ledger / "tasks" / task_directory
     state = cortex.load_task_state_for_artifact(task_path)
@@ -371,11 +410,30 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
     planning_artifacts = canonical_artifacts(ledger, state["task_id"], kind="planning_revision")
     if not planning_artifacts:
         raise AssertionError("Planner work-breakdown artifacts are missing from the canonical SQLite catalog")
+    passed_gates = {
+        str(item.get("gate"))
+        for item in state.get("attempts", [])
+        if item.get("status") == "passed" and not item.get("invalidated")
+    }
+    expected_gates = {
+        "discover", "architecture", "database_architecture", "plan",
+        "implementation", "qa", "security", "performance", "review",
+        "documentation", "close",
+    }
+    if not expected_gates.issubset(passed_gates):
+        raise AssertionError(
+            "dynamic pipeline skipped required gates: "
+            + ", ".join(sorted(expected_gates - passed_gates))
+        )
     return {
         "status": "PASS", "fixture": str(base), "task_directory": str(task_path),
         "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
         "report_count": len(receipts), "parallel_wave_seen": parallel_wave_seen,
         "plan_approval_seen": plan_approval_seen,
+        "dynamic_replan_applied": dynamic_replan_applied,
+        "pending_implementation_drop_rejected": pending_implementation_drop_rejected,
+        "implementation_phase_seen": "implementation" in passed_gates,
+        "passed_gates": sorted(passed_gates),
     }
 
 

@@ -410,7 +410,11 @@ def build_public_schemas(
                 },
             },
             "future_waves": {"type": "array", "minItems": 1, "items": V3_WAVE_SCHEMA},
-            "rework": {"type": "boolean", "default": False},
+            "rework": {
+                "type": "boolean",
+                "default": False,
+                "description": "Optional compatibility hint. Cortex automatically infers rework when future_waves reintroduces a current or completed phase.",
+            },
             "reason": {"type": "string"},
         },
         "required": ["project_root", "step", "results"],
@@ -559,7 +563,7 @@ def build_public_schemas(
                     "placeholders are rejected. If Cortex returns "
                     "awaiting_translation, submit its translation_request unchanged except for the English translation: "
                     "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
-                    "Cortex resolves task/principal/thread and opens native MCP elicitation. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
+                    "Cortex resolves task/principal/thread and opens native MCP elicitation. For intent=resume after an exhausted closure-rework cycle, payload.future_waves must begin with a Planner recovery wave; Cortex infers rework and records the replacement before dispatch. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
                     "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
                     "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup targets use only safe backup_name values. Normal wave progression never uses this field."

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.0` source line. The public
+Security fixes are prepared for the current `9.2.1` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -108,6 +108,6 @@ working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This repository is a source candidate only. The 9.2.0+codex.20260819093800
+This repository is a source candidate only. The 9.2.1+codex.20260819110617
 build has not been installed into a user's plugin and is not published or
 tagged.
