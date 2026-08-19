@@ -215,7 +215,9 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "plus at most a two-sentence summary. If report publication fails, return only the exact error and a "
             "short blocker description."
         )
-    if package.get("gate") in {"review", "close"}:
+    if package.get("gate") in {
+        "review", "governance_activation", "governance_close", "close",
+    }:
         closure_contract = (
             f"This {package.get('gate')} report needs exactly one top-level `gate_result` outside the "
             f"{len(REPORT_FIELDS)}-key report. It has decision/failure_class/findings/verification/workspace. "
@@ -578,7 +580,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             " REQUIRED top-level planning sibling={overview,work_packages}. Every microtask requires a unique id, narrow objective, explicit profile, "
             "non-broad allowed_paths, dependencies, acceptance criteria, and exact verification."
         )
-    elif gate in {"review", "close"}:
+    elif gate in {"review", "governance_activation", "governance_close", "close"}:
         report_extra = (
             " Add exactly one top-level `gate_result` outside the 7-key report with decision/failure_class/findings/verification/workspace. "
             "Do not add closure; it is a legacy input alias only. Pass requires findings=[]. Every non-empty finding "

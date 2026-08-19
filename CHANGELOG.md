@@ -1,5 +1,23 @@
 # Changelog
 
+## [9.2.4] - 2026-08-19
+
+- Preserve integer relative steps after the server inserts or reorders
+  `governance_activation` and `governance_close`, allowing the public
+  `continue_orchestration` contract to advance automatically governed tasks.
+- Project governance reviewer reports into server-owned, scoped, immutable
+  evidence that binds the consumed report receipt, verified execution,
+  independent reviewer identity, and every required governance obligation.
+- Require canonical `gate_result` envelopes for governance activation and
+  close reviews, and route their canonical blockers through the same bounded
+  corrective-review machinery as ordinary review and close gates.
+- Add deterministic and live C3 fixtures that omit `governance_mode`, prove
+  automatic `full` resolution from complexity, execute both governance review
+  waves, validate typed immutable evidence, and require final handoff.
+- Align immutable governance briefings and the live validator on the canonical
+  `gate_result` envelope, and use a neutral text result in the governance live
+  fixture so documentation policy does not create unrelated rework.
+
 ## [9.2.3] - 2026-08-19
 
 - Store only a digest of the coordinator governance capability, issue the raw

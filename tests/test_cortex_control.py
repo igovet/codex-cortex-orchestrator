@@ -949,7 +949,7 @@ class ControlPlaneTests(unittest.TestCase):
             clear=False,
         ):
             started = self.v3_start(
-                "publish one understandable completion update",
+                "show one understandable completion update",
                 waves=[{"workers": [{"phase": "architecture"}]}],
             )
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -9276,7 +9276,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.3")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.4")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

@@ -453,7 +453,7 @@ def _closure_rework_target(
     )
     approval_status = str((state.get("plan_approval") or {}).get("status") or "")
     if (
-        gate in {"review", "close"}
+        gate in {"review", "governance_activation", "governance_close", "close"}
         and approval_status in {"approved", "not_required"}
         and "implementation" in obligations
         and not implementation_passed
@@ -616,7 +616,8 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             current_attempt_evidence=current_attempt_evidence,
         )
         if outcome in {"passed", "failed"} and (
-            gate in {"review", "close"} or bool(params.get("enforce_canonical_findings"))
+            gate in {"review", "governance_activation", "governance_close", "close"}
+            or bool(params.get("enforce_canonical_findings"))
         ):
             blockers = db_task_findings_blockers(root, state["task_id"])
             if blockers:
@@ -644,7 +645,9 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
                     "state": state,
                     "revision_correction": revision_correction,
                     "gate_rework": True,
-                    "closure_rework": gate in {"review", "close"},
+                    "closure_rework": gate in {
+                        "review", "governance_activation", "governance_close", "close",
+                    },
                     "reason": "gate_blockers",
                     "gate": gate,
                     "target_gate": target_gate,

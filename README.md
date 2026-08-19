@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.3-7c3aed" alt="Cortex 9.2.3" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.4-7c3aed" alt="Cortex 9.2.4" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -88,6 +88,7 @@ choice is required, explain exactly what is needed and ask me before proceeding.
 - [How orchestration works](#how-orchestration-works)
 - [Profiles and model routing](#profiles-and-model-routing)
 - [Developing Cortex](#developing-cortex)
+- [Support Cortex 💜](#support-cortex-)
 - [Verification and diagnostics](#verification-and-diagnostics)
 
 ---
@@ -620,7 +621,9 @@ flowchart LR
    discover → architecture → plan → documentation → review → close`.
    Architecture, database architecture, and UX gates precede plan; security,
    performance, and accessibility remain post-implementation audits before
-   review.
+   review. When automatic governance resolves to `full`, the server wraps the
+   resolved task pipeline with `governance_activation` first and
+   `governance_close` immediately before final close.
 4. **Precise dispatch.** Every worker receives a profile, model, reasoning
    effort, allowed paths, ownership, acceptance criteria, and verification
    responsibilities.
@@ -937,6 +940,16 @@ compatibility.
 
 ---
 
+## Support Cortex 💜
+
+Cortex remains open source, and if it is useful to your work, you can support its continued
+development and maintenance through [GitHub Sponsors](https://github.com/sponsors/igovet).
+Sponsorship helps fund testing and experimentation with multi-agent orchestration, plus the
+infrastructure, tooling, documentation, skills, and MCP integrations that make it better.
+Sponsorship is entirely optional—a simple way to help sustain the project.
+
+---
+
 ## Verification and diagnostics
 
 Run the relevant checks before publishing a change:
@@ -956,6 +969,8 @@ does **not** install or update the user's plugin:
 
 ```bash
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
+# Prove C3 automatically activates and completes full governance.
+python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
 ```
 
 Run the read-only preflight on a local or SSH host with:

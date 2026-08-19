@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.3 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.4 `cortex/v8` task ledger plus
 the additive v9 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through exactly nine public tools: coordinator
@@ -158,7 +158,10 @@ server derives or bounds expiry, enforces optional field/redaction lists, and
 keeps expired rows only in audit history. Full-governance close review must
 resolve from its immutable artifact to a linked task, passed `code_reviewer`
 `governance_close` attempt, matching report reference, and completed native
-session.
+session. In automatic mode, C3 raises the effective governance mode to `full`;
+the server inserts `governance_activation` first and `governance_close`
+immediately before final close, then renumbers the complete resolved wave list
+so every public lifecycle response retains an integer relative step.
 
 The coordinator governance capability appears only in the original successful
 start response. Its SHA-256 digest is the sole durable verifier; idempotent
@@ -535,11 +538,14 @@ unrelated files. If the worker is interrupted after persistence but before its
 acknowledgement, `manage_orchestration` inspect returns the compact entry in
 `available_reports`, including the same path, for recovery.
 
-Every gate report carries a separate top-level `gate_result` envelope with
-`decision`, `failure_class`, `findings`, `verification`, and `workspace` for
-every gate. The older top-level `closure` sibling is retained only as a
-review/close compatibility alias; neither envelope is nested in the strict
-seven-field report.
+Review, governance activation, governance close, and final close reports
+require a separate canonical top-level `gate_result` envelope with `decision`,
+`failure_class`, `findings`, `verification`, and `workspace`. The older
+top-level `closure` input is accepted only as a compatibility alias for those
+gates; canonical artifacts retain `gate_result` only. Neither input is nested
+in the strict seven-field report. Governance review evidence is server-owned,
+bound to the consumed report receipt and independent reviewer identity, and
+covers the gate's typed obligations in one immutable verified artifact.
 
 For C2/C3 close attempts, Cortex additionally requires at least one executed
 test or verification result and a non-empty concrete summary of the observed

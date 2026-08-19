@@ -54,6 +54,7 @@ bind_symbols(
         "_validate_report_decision_closure",
         "_write_delegation_package",
         "_governance_boundary_recheck",
+        "_governance_obligations_for_gate",
         "acquire_lock",
         "activate_orchestration",
         "active_gates",
@@ -2030,6 +2031,30 @@ def _ensure_attempt_evidence(
         "summary": f"Unified facade accepted the {attempt['gate']} report from {attempt['agent']}",
         "paths": [],
     }
+    attempt_gate = str(attempt.get("gate") or "")
+    governance_obligations = (
+        list(_governance_obligations_for_gate(state, attempt_gate))
+        if attempt_gate in {"governance_activation", "governance_close"}
+        else []
+    )
+    if governance_obligations:
+        # Public workers publish only through ``record_report``.  The server
+        # therefore owns the typed governance-evidence projection that binds
+        # the consumed report receipt, immutable evidence artifact, verified
+        # execution, scope, and independent reviewer identity.  Never accept
+        # these authority-bearing fields from the parent result payload.
+        reviewer_identity = str(
+            attempt.get("host_agent_id")
+            or attempt.get("dispatch_ref")
+            or attempt.get("attempt_id")
+            or ""
+        ).strip()
+        evidence_params.update({
+            "governance_obligations": governance_obligations,
+            "reviewer_identity": reviewer_identity,
+            "reviewer_role": str(attempt.get("agent") or ""),
+            "independent_reviewer": True,
+        })
     if attempt["gate"] == "documentation":
         report_record, _ = (
             read_immutable_json_artifact(
@@ -2048,6 +2073,11 @@ def _ensure_attempt_evidence(
             "paths": changed_files,
         })
         result = record_evidence(evidence_params)
+    elif governance_obligations:
+        result = execute_verification({
+            **evidence_params,
+            "verification_id": "benign_success",
+        })
     elif command:
         result = execute_verification({**evidence_params, "verification_id": "benign_success"})
     else:

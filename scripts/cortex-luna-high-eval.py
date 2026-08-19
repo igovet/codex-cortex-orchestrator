@@ -785,7 +785,9 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                 "profile": dispatch["profile"],
                 "report": worker_report,
             }
-            if attempt.get("gate") in {"review", "close"}:
+            if attempt.get("gate") in {
+                "review", "governance_activation", "governance_close", "close",
+            }:
                 publication["closure"] = passing_closure(project, str(attempt["gate"]))
             if attempt.get("gate") == "plan":
                 publication["planning"] = planning(label)
@@ -932,7 +934,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
         f"never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist {report_contract} with record_report and return only report_ref plus a short summary. "
-        f"For every review or close dispatch, record_report must include both a top-level gate_result and a separate compatible top-level closure sibling: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Their decision, findings, verification, and workspace values must match. Never place gate_result or closure inside the strict {len(cortex.REPORT_FIELDS)}-key report. "
+        f"For every review, governance review, or close dispatch, record_report must include exactly one canonical top-level gate_result: decision=pass only when there are no open blockers, findings=[], verification with executed/not_executed/required_missing/limitations arrays (required_missing=[] only after required checks ran), and workspace with modified/untracked/staged arrays plus committed true, false, or not_required. Do not add the legacy closure alias, and never place gate_result inside the strict {len(cortex.REPORT_FIELDS)}-key report. "
         "Read every ref with read_worker_report and advance with report_ref. After a durable report was read and no "
         "question or follow-up remains for that child, close the completed native child with close_agent when that "
         "host tool is available, before dispatching a later wave; never close a running or question-paused child. "
@@ -948,6 +950,39 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "corrections. "
         f"The exact project_root is {project}. "
     )
+    if scenario == "automatic_governance":
+        return common + (
+            "<cortex_task_contract>"
+            "{\"user_request\":\"Inspect README.md and create result.txt containing exactly one line: Automatic governance fixture completed. Treat this as a high-impact cross-system release change requiring independent oversight.\","
+            "\"complexity\":\"C3\","
+            "\"acceptance_criteria\":[\"README.md is inspected before implementation.\","
+            "\"result.txt contains exactly one line: Automatic governance fixture completed.\","
+            "\"Cortex automatically activates full governance and completes independent governance review before final close.\"],"
+            "\"verification\":[\"Read README.md and result.txt and verify the exact result.txt content.\","
+            "\"Verify the server-added governance activation and governance close evidence before final handoff.\"],"
+            "\"plan_approval\":\"auto\"}"
+            "</cortex_task_contract> "
+            "Do not pass governance_mode, governance_triggers, risk_triggers, or initiative_ref: the server default "
+            "auto mode must resolve solely from C3 complexity. Call start_orchestration exactly once with that exact "
+            "task and these exact caller waves: [{\"workers\":[{\"phase\":\"implementation\"}]},"
+            "{\"workers\":[{\"phase\":\"documentation\"}]},{\"workers\":[{\"phase\":\"close\"}]}]. "
+            "Before spawning, confirm requested_mode=auto, effective_mode=full, governance_activation is first, and "
+            "governance_close is immediately before close. Execute every returned wave in order. Do not call "
+            "manage_governance to force or simulate activation, and do not call manage_orchestration in this "
+            "straight-through scenario. Use this strict state machine for all five sequential server waves: "
+            "dispatch.call -> wait(target returned by that dispatch) -> read_worker_report -> close_agent(completed child) "
+            "-> continue_orchestration(exact current step and report_ref) -> next dispatch.call. "
+            "After each successful continue_orchestration response with outcome=ready_to_spawn, the only legal next "
+            "tool call is every returned dispatch.call with its exact arguments. Invoke it immediately, even when an "
+            "attempt summary says passed or a previous child was just closed; do not reason, inspect, list agents, "
+            "wait, or call any Cortex tool between that response and the native dispatch. A native wait is legal only "
+            "immediately after a successful native dispatch and must use the new child target returned by that exact "
+            "dispatch. Never reuse a closed child target, never call continue_orchestration twice for one step, and "
+            "never call wait without the child target returned by the immediately preceding native dispatch. "
+            "Governance reviewers must follow their immutable "
+            "briefings and publish the canonical gate_result plus all evidence they observed. Stop only after Cortex "
+            "reports completion with a final handoff."
+        )
     if scenario == "automatic_sequential":
         return common + (
             "<cortex_task_contract>"
@@ -1048,7 +1083,10 @@ def live_eval(
     if not codex:
         return [{"status": "SKIP", "reason": "codex runtime unavailable; no live evidence"}]
     results: list[dict[str, object]] = []
-    for scenario in scenarios or ("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown"):
+    for scenario in scenarios or (
+        "automatic_sequential", "compact_parallel", "blocked_resume",
+        "planner_work_breakdown", "automatic_governance",
+    ):
         project = base / f"live-{scenario}"
         project.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=project, check=True)
@@ -1125,13 +1163,16 @@ def live_eval(
             set(record.get("report", {})) == report_keys
             for record in report_records
         )
-        closures_valid = all(
-            isinstance(record.get("closure"), dict)
-            and record["closure"].get("decision") == "pass"
-            and record["closure"].get("findings") == []
-            and record["closure"].get("verification", {}).get("required_missing") == []
-            and set(record["closure"].get("workspace", {})) == {"modified", "untracked", "staged", "committed"}
-            for record in report_records if record.get("gate") in {"review", "close"}
+        gate_results_valid = all(
+            isinstance(record.get("gate_result"), dict)
+            and record["gate_result"].get("decision") == "pass"
+            and record["gate_result"].get("findings") == []
+            and record["gate_result"].get("verification", {}).get("required_missing") == []
+            and set(record["gate_result"].get("workspace", {})) == {"modified", "untracked", "staged", "committed"}
+            for record in report_records
+            if record.get("gate") in {
+                "review", "governance_activation", "governance_close", "close",
+            }
         )
         attempts_by_wave: dict[str, set[str]] = {}
         for attempt in state.get("attempts", []):
@@ -1173,7 +1214,7 @@ def live_eval(
                 )
             ),
             "strict_worker_reports": strict_reports,
-            "review_close_closures": closures_valid,
+            "review_close_gate_results": gate_results_valid,
             "no_failed_public_calls": not failed_public_calls,
             "one_start": completed_tool_names.count("start_orchestration") == 1,
             "native_dispatch_exercised": "spawn_agent" in completed_native_tool_names,
@@ -1198,6 +1239,57 @@ def live_eval(
                     for package in package_artifacts
                 )
             )
+        if scenario == "automatic_governance":
+            task_definition = cortex.load_task_definition(task_dir, state) if task_dir else {}
+            governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+            governance_attempts = [
+                item for item in state.get("attempts", [])
+                if isinstance(item, dict)
+                and not item.get("invalidated")
+                and item.get("gate") in {"governance_activation", "governance_close"}
+            ]
+            governance_evidence = [
+                item for item in state.get("evidence", [])
+                if isinstance(item, dict)
+                and not item.get("invalidated")
+                and item.get("gate") in {"governance_activation", "governance_close"}
+            ]
+            observed_obligations = {
+                str(obligation)
+                for item in governance_evidence
+                for obligation in item.get("governance_obligations", [])
+            }
+            required_obligations = set(
+                cortex._governance_obligations_for_gate(state, "governance_close")
+            )
+            checks.update({
+                "governance_not_forced": "manage_governance" not in tool_names,
+                "governance_requested_auto": governance.get("requested_mode") == "auto",
+                "governance_resolved_full": governance.get("effective_mode") == "full",
+                "governance_reason_is_c3": (
+                    task_definition.get("complexity") == "C3"
+                    and "complexity:C3" in governance.get("reasons", [])
+                ),
+                "server_governance_pipeline": state.get("current_pipeline") == [
+                    "governance_activation", "implementation", "documentation",
+                    "governance_close", "close",
+                ],
+                "governance_gates_completed": {
+                    "governance_activation", "governance_close",
+                }.issubset(set(state.get("completed_gates", []))),
+                "independent_governance_reviewers": (
+                    len(governance_attempts) == 2
+                    and all(item.get("agent") == "code_reviewer" for item in governance_attempts)
+                    and all(item.get("status") == "passed" for item in governance_attempts)
+                ),
+                "typed_immutable_governance_evidence": (
+                    len(governance_evidence) == 2
+                    and required_obligations.issubset(observed_obligations)
+                    and all(item.get("artifact_immutable") is True for item in governance_evidence)
+                    and all(item.get("artifact_verified") is True for item in governance_evidence)
+                    and all(item.get("verified_execution") is True for item in governance_evidence)
+                ),
+            })
         if scenario == "follow_up_partial":
             source_dir = next((path for path in task_dirs if path != task_dir), None)
             corrective_task = cortex.load_task_definition(task_dir) if task_dir else {}
@@ -1246,10 +1338,10 @@ def live_eval(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="run the four real gpt-5.6-luna high parent scenarios")
+    parser.add_argument("--live", action="store_true", help="run the five real gpt-5.6-luna high parent scenarios")
     parser.add_argument(
-        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown", "follow_up_partial"),
-        help="run one live scenario for diagnosis; the default release run still requires all four",
+        "--scenario", choices=("automatic_sequential", "compact_parallel", "blocked_resume", "planner_work_breakdown", "automatic_governance", "follow_up_partial"),
+        help="run one live scenario for diagnosis; the default release run still requires all five",
     )
     parser.add_argument(
         "--live-timeout-seconds", type=int, default=LIVE_TIMEOUT_SECONDS,

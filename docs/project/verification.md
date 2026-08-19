@@ -11,6 +11,8 @@ python3 scripts/cortex-luna-high-eval.py
 python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
 # Full lifecycle live scenario for a release gate.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
+# Automatic C3 governance lifecycle: no governance mode is supplied by the caller.
+python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
 # Optional per-scenario timeout override (10..7200 seconds; default 1800).
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --live-timeout-seconds 900
 # Optional, explicit retention of sanitized failure metadata under /tmp.
@@ -32,7 +34,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete source suite passed **547 tests** with 16 intentional native-UI
+- The complete source suite passed **550 tests** with 16 intentional native-UI
   skips. Focused governance/migration coverage includes digest-only
   coordinator capability storage and legacy scrubbing, exhaustive `off`
   assessment, canonical independent-review attestation, sensitive-record
@@ -46,15 +48,23 @@ it validates `git archive HEAD`, not the mutable worktree.
   live `follow_up_partial` task also passed through a real Codex parent in 24
   seconds: it created one linked corrective task, prepared its first dispatch,
   used only the public follow-up management route, made no failed public calls,
-  and left source unchanged. The full `automatic_sequential` live release
-  scenario was not run and is not claimed.
+  and left source unchanged. The targeted `automatic_governance` live scenario
+  then passed through a real `gpt-5.6-luna` high parent in 1,375 seconds. The
+  caller supplied C3 complexity and implementation/documentation/close waves
+  but no governance mode or trigger fields. Cortex resolved `auto` to `full`,
+  inserted and completed `governance_activation` and `governance_close` around
+  implementation and documentation, accepted two independent code-reviewer
+  results with typed immutable verified obligation evidence, completed close,
+  cleaned manifest snapshots, and created the final handoff. All live checks
+  passed with no failed public calls and no `manage_governance` forcing.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
   syntax checks, `git diff --check`, the no-write installer dry run, and the
   8-worker/5-wave call-count benchmark passed. Host preflight and
   `sync-cortex.sh --check` correctly remain blocked because this source is
-  9.2.3 while the user-installed plugin is 9.2.1; the installation was not
-  changed. The full source-mode live lifecycle, matching installed-plugin
-  check, and tracked release archive gate remain unrun external/release gates.
+  9.2.4 while the user-installed plugin is 9.2.3; the installation was not
+  changed. Matching installed-plugin verification therefore remains blocked.
+  Per the targeted test scope, the default five-scenario live release matrix
+  was not rerun; the tracked release archive gate also remains unrun.
 
 The live evaluator emits newline-delimited JSON progress records while the
 parent runs. Each record has `type: "cortex_live_progress"`, the scenario, and
@@ -105,11 +115,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.2.3+codex.20260819173812`. These results are
+The source manifest declares `9.2.4+codex.20260819182839`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 9.2.3 source contract
+## Current 9.2.4 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -157,8 +167,10 @@ verification remain separate, explicitly requested actions.
   digest verification, then acknowledged in a separate transaction. Required
   briefings are capability files; reports and planning outputs are optional,
   rebuildable projections. Task directories and projection parents are lazy.
-- Every gate report carries a top-level structured `gate_result` sibling. The older
-  `closure` sibling remains a review/close compatibility alias. Open P0/P1/P2
+- Review, governance activation, governance close, and close reports require a
+  canonical top-level structured `gate_result` sibling. The older `closure`
+  input remains a compatibility alias for those gates but is not retained in
+  canonical report artifacts. Open P0/P1/P2
   or blocking findings, and missing required verification, reopen the recorded
   target gate for rework; resolved or auditable non-self waivers are retained
   in SQLite rather than inferred from prose.
@@ -285,7 +297,7 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for a streamed, sanitized source-mode parent run against the workspace source tree. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
+- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle or `--live --scenario automatic_governance` for the C3 auto-governance lifecycle in a streamed, sanitized source-mode parent run against the workspace source tree. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host

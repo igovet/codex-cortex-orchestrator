@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `9.2.3`. This
+The current source manifest and server are intended for plugin version `9.2.4`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -52,8 +52,10 @@ final report `questions: []` and routes material ambiguity through durable
 `worker_question`; deterministic preflight holds short underspecified
 product-surface creation requests until the user answers a blocking question.
 
-Every gate report includes canonical top-level `gate_result`; the
-older `closure` sibling remains a review/close compatibility alias. The report
+Review, governance activation, governance close, and final close reports
+require canonical top-level `gate_result`; the older `closure` input remains a
+compatibility alias for those gates and is normalized away before canonical
+persistence. The report
 Markdown renderer escapes HTML and only list-item markers, preserving ordinary
 Markdown punctuation rather than introducing backslashes before dots,
 parentheses, or hyphens.
@@ -83,5 +85,5 @@ orchestrator and knowledge-harvest skills.
 
 ## Verification
 
-Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 9.2.3 results are recorded there, and remaining gates are not implied by this page. The 9.2.3 source candidate passed resolver/launcher regressions, marketplace and shell validation, cold boot, deterministic fixtures, the composite benchmark, and the isolated fresh-plugin probe. Full lifecycle live, installed-plugin, and tracked-release checks remain. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v9 governance and v8 revision-aware orchestration catalogs. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
+Use the host preflight, marketplace validator, plugin probe, and installer check listed in [verification.md](../../project/verification.md) according to the question being diagnosed: host preflight is read-only and can run without installation, while the plugin probe and `sync-cortex.sh --check` are installation/package checks. `sync-cortex.sh --dry-run` reports that it changed no plugin or configuration. The source-mode live commands in that document run against this checkout without installation, reinstallation, or plugin update; their current 9.2.4 results are recorded there, and remaining gates are not implied by this page. The 9.2.4 source candidate passed the 550-test regression suite, resolver/launcher regressions, marketplace and shell validation, cold boot, deterministic fixtures, the composite benchmark, the isolated fresh-plugin probe, and the targeted automatic C3 governance source-mode live lifecycle. The default five-scenario live matrix was not rerun; matching installed-plugin and tracked-release checks remain. Its first MCP access applies checksummed project-local SQLite migrations automatically, including the v9 governance and v8 revision-aware orchestration catalogs. Pre-SQLite task Markdown/JSON is ignored by the active ledger. Run tracked-release verification against the committed candidate before push.
 <!-- GENERATED:END -->

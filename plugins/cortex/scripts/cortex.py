@@ -7930,7 +7930,18 @@ def _append_governance_waves(waves: list[dict[str, Any]], task: dict[str, Any]) 
             result.insert(close_index, governance_close_wave)
     if len(result) > len(waves) + 2:
         raise ValueError("full governance may add at most two lifecycle waves")
-    return result
+    # The public v5 facade uses the trailing ordinal in ``wave_id`` as the
+    # relative ``step`` accepted by ``continue_orchestration``.  Server-owned
+    # governance waves used to carry symbolic ids (``governance-activation``
+    # and ``governance-close``), which rendered as ``step=None`` and made the
+    # first governance result impossible to submit because the public adapter
+    # accepts integer steps only.  Re-number the complete server-resolved
+    # sequence after insertion/reordering so response rendering and continue
+    # validation share one unambiguous relative-step contract.
+    return [
+        {**wave, "wave_id": f"wave-{index:02d}"}
+        for index, wave in enumerate(result, 1)
+    ]
 
 
 def _v3_host_capabilities() -> dict[str, Any]:

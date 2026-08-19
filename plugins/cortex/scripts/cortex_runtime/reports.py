@@ -92,6 +92,9 @@ _REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v2"
 _LEGACY_REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v1"
 _REPORT_DRAFT_TTL = timedelta(hours=1)
 _REPORT_DRAFT_PAYLOAD_FIELDS = {"report", "scoping", "planning", "gate_result", "closure"}
+_GATE_RESULT_REQUIRED_GATES = {
+    "review", "governance_activation", "governance_close", "close",
+}
 
 
 def _report_draft_key(attempt_id: str, draft_ref: str) -> str:
@@ -458,15 +461,17 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 "resume this same worker after the coordinator records the user answer"
             )
         report = sanitize_report_payload(params.get("report"))
-        is_closure_gate = attempt.get("gate") in {"review", "close"}
+        is_closure_gate = attempt.get("gate") in _GATE_RESULT_REQUIRED_GATES
         actor_ids = {str(params.get("principal") or "").strip(), str(params.get("profile") or "").strip()}
         actor_ids.update(str(alias).strip() for alias in _attempt_identity_aliases(attempt))
         closure = sanitize_closure_payload(params["closure"], actor_ids={item for item in actor_ids if item}) if params.get("closure") is not None else None
         gate_result = _runtime.sanitize_gate_result_payload(
             params["gate_result"], actor_ids={item for item in actor_ids if item}
         ) if params.get("gate_result") is not None else None
-        if closure is not None and attempt.get("gate") not in {"review", "close"}:
-            raise ValueError("closure is only valid for review and close attempts")
+        if closure is not None and attempt.get("gate") not in _GATE_RESULT_REQUIRED_GATES:
+            raise ValueError(
+                "closure is only valid for review, governance review, and close attempts"
+            )
         if gate_result is not None and closure is not None:
             compatible = {key: gate_result[key] for key in ("decision", "findings", "verification", "workspace")}
             if compatible != closure:
@@ -477,7 +482,13 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if params.get("_require_close_validation"):
             _validate_close_report(task_dir, state, attempt, report)
         if is_closure_gate and gate_result is None and closure is None:
-            raise ValueError("review and close reports require the canonical top-level gate_result")
+            if attempt.get("gate") in {"review", "close"}:
+                raise ValueError(
+                    "review and close reports require the canonical top-level gate_result"
+                )
+            raise ValueError(
+                "governance review reports require the canonical top-level gate_result"
+            )
         if gate_result is None and closure is not None:
             gate_result = {**closure, "failure_class": "product"}
         # ``closure`` remains accepted only as an input compatibility alias.
@@ -922,6 +933,7 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
             "project files changed during read-only",
             "review and close reports require the canonical top-level gate_result",
+            "governance review reports require the canonical top-level gate_result",
             "closure ", "gate_result ", "non-pass gate_result ",
         )):
             code = "report_validation_failed"
@@ -1343,7 +1355,7 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                 }],
             }
             required_top_level.append("planning")
-        if gate in {"review", "close"}:
+        if gate in _GATE_RESULT_REQUIRED_GATES:
             template["gate_result"] = {
                 "decision": "pass",
                 "failure_class": "product",

@@ -348,6 +348,45 @@ class GovernanceAcceptanceTests(unittest.TestCase):
         self.assertTrue(required["ok"], required)
         self.assertEqual(required["effective_mode"], "full")
 
+    def test_public_auto_governance_waves_keep_integer_relative_steps(self) -> None:
+        project = Path(self.temp.name) / "auto-governance-relative-steps"
+        project.mkdir()
+        started = cortex.start_orchestration(
+            {
+                "project_root": str(project),
+                "task": {
+                    "user_request": "Validate a high-impact cross-system release fixture.",
+                    "complexity": "C3",
+                    "acceptance_criteria": ["The governed fixture completes."],
+                    "verification": ["Verify the governed lifecycle."],
+                    "plan_approval": "auto",
+                },
+                "waves": [
+                    {"workers": [{"phase": "implementation"}]},
+                    {"workers": [{"phase": "documentation"}]},
+                    {"workers": [{"phase": "close"}]},
+                ],
+            }
+        )
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["requested_mode"], "auto")
+        self.assertEqual(started["effective_mode"], "full")
+        self.assertEqual(started["step"], 1)
+        self.assertEqual(
+            [wave["wave"] for wave in started["pipeline"]["waves"]],
+            [1, 2, 3, 4, 5],
+        )
+        self.assertEqual(
+            [wave["workers"][0]["phase"] for wave in started["pipeline"]["waves"]],
+            [
+                "governance_activation",
+                "implementation",
+                "documentation",
+                "governance_close",
+                "close",
+            ],
+        )
+
     def test_initiative_hierarchy_dependencies_and_replay_are_safe(self) -> None:
         root = governance.create_initiative(
             self.root,
