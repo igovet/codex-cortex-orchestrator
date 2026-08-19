@@ -1327,6 +1327,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("materially different `next_strategy`", skill)
         self.assertIn("ordinary tasks have non-empty `task.acceptance_criteria`", skill)
         self.assertIn("ask the user before calling Cortex", skill)
+        self.assertIn("complete decision handoff", skill)
+        self.assertIn("normal main-chat commentary message", skill)
+        self.assertIn("Only after that preamble", skill)
+        self.assertIn("generic numbered or recommended/alternative placeholders", skill)
         self.assertIn("`profile` is forbidden at package level", skill)
         self.assertRegex(skill, r"non-empty\s+`verification`, with optional `profile`")
         self.assertRegex(skill, r"Dispatch\s+briefing reviewed: <sha256>")
@@ -1795,7 +1799,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.1.0")
+        self.assertEqual(base_version, "9.1.1")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

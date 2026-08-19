@@ -30,7 +30,7 @@ opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
 | --- | --- | --- | --- |
 | inactive | explicit orchestrator activation | call `start_orchestration` once | concise activation summary |
 | waiting_workers | wait timeout | wait again | silent |
-| waiting_workers | worker question | use the durable question flow | native UI only |
+| waiting_workers | worker question | publish the decision preamble, then use the durable question flow | commentary preamble, then native UI |
 | active or blocked | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise acknowledgement |
 | awaiting_plan_approval | approve | invoke only the returned next wave | approval acknowledgement |
 | awaiting_plan_approval | cancel | make no lifecycle call | silent |
@@ -158,16 +158,25 @@ paths forbidden above.
    resolve a material user decision. Before pausing, it collects every
    currently known material decision: use `action="ask_batch"` when there is
    more than one, and `action="ask"` only when exactly one is known. It returns
-   a compact `question_ref`; the worker sends only that ref and a concise
-   question summary through the native parent
-   channel, publishes no report, and finishes its native turn into an
-   idle/resumable state rather than busy-waiting. The coordinator calls
+   a compact `question_ref`; the worker sends that ref plus a complete decision handoff
+   through the native parent. The handoff states why input is needed,
+   every full self-contained question, every concrete outcome-based option and
+   its material trade-offs, and the worker's recommendation. Placeholder copy
+   such as `Option 1`, `A/B`, `Decision 1`, `Recommended option`, or translated
+   equivalents is forbidden. The worker publishes no report and finishes its
+   native turn into an idle/resumable state rather than busy-waiting. The
+   coordinator first publishes one normal main-chat commentary message in the user's
+   language that explains the decision context, consequences, and recommendation.
+   This message supplies context only and must not collect the answer. When the
+   handoff is long, put the detail in that commentary while keeping every native
+   form question and option independently understandable. Only after that preamble,
+   the coordinator calls
    `manage_orchestration(task_ref="<current task ref>", intent="question",
    payload={"question_ref": "<exact ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
    the host-native question UI. A batch is rendered sequentially, one native
    question at a time, and every accepted answer is checkpointed before the
-   next appears. Never ask the question in commentary/final prose or guess an
-   internal identity. After the answer is durably recorded,
+   next appears. Never substitute commentary/final prose for the native answer
+   control or guess an internal identity. After the answer is durably recorded,
    resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
    continuing. Never replace the worker or advance the wave for a question.
@@ -431,7 +440,13 @@ next. For a non-English batch, `localized_questions` is an ordered UI
 projection only: preserve the canonical order when possible, but never invent
 or reconstruct canonical `question_key` or `option_id` values. Cortex maps
 each projection by its exact canonical key only when the complete batch
-preserves all keys; otherwise it maps positions and ignores display IDs. A task
+preserves all keys; otherwise it maps positions and ignores display IDs. Each
+projection uses `localized_question`, `localized_header`, `localized_options`,
+and optional `localized_custom_label`; the compatibility aliases `question`,
+`header`, `options`, and `custom_label` mean the same thing. Every localized
+question must state the concrete decision, and every option must name its
+outcome or trade-off; generic numbered or recommended/alternative placeholders
+are rejected. A task
 revision supersedes an unresolved batch rather than resuming stale user intent.
 Every
 worker classifies unknowns as repository-resolvable, low-impact reversible, or

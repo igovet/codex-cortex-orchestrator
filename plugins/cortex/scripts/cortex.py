@@ -7913,8 +7913,8 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
         response["outcome"] = "host_question_unavailable"
         response["code"] = "host_question_unavailable"
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the durable question open and stop. Do not ask it through commentary, a final "
-            "message, or a worker-local UI; retry only in a main-chat host that supports MCP elicitation."
+            f"{COORDINATOR_LOCK} Keep the durable question open and stop. Commentary may explain context but must "
+            "not collect or fabricate the answer; retry only in a main-chat host that supports MCP elicitation."
         )
     elif status_value == "awaiting_translation":
         response["outcome"] = "awaiting_translation"
@@ -8607,7 +8607,7 @@ PIPELINE_OPERATION_SCHEMA = {"type": "object", "properties": {"op": {"type": "st
 QUESTION_OPTION_SCHEMA = {
     "anyOf": [
         {"type": "string", "minLength": 1},
-        {"type": "object", "additionalProperties": False, "properties": {"option_id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}, "label_en": {"type": "string", "minLength": 1}, "label_localized": {"type": "string", "minLength": 1}, "description": {"type": "string"}}, "anyOf": [{"required": ["label"]}, {"required": ["label_en"]}]},
+        {"type": "object", "additionalProperties": False, "properties": {"option_id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}, "label_en": {"type": "string", "minLength": 1}, "label_localized": {"type": "string", "minLength": 1}, "description": {"type": "string"}, "description_localized": {"type": "string"}}, "anyOf": [{"required": ["label"]}, {"required": ["label_en"]}]},
     ]
 }
 QUESTION_TOOL_SCHEMA = {
@@ -8624,7 +8624,7 @@ QUESTION_TOOL_SCHEMA = {
         "localized_header": {"type": "string"},
         "localized_options": {"type": "array", "maxItems": 32, "items": QUESTION_OPTION_SCHEMA},
         "localized_custom_label": {"type": "string"},
-        "localized_questions": {"type": "array", "maxItems": 32, "items": {"type": "object"}, "description": "Batch-only localized form projection. Each item identifies its stable question_key and may change titles/options display labels only."},
+        "localized_questions": {"type": "array", "maxItems": 32, "items": {"type": "object"}, "description": "Batch-only ordered localized form projection. Use localized_question, localized_header, localized_options, and optional localized_custom_label; question/header/options/custom_label are compatibility aliases. Copy every canonical choice position, but use concrete outcome-based labels rather than placeholders."},
         "localized_batch": {"type": "object", "description": "Batch-only alias containing localized_questions under questions."},
         "answer_submission_id": {"type": "string", "description": "Stable id for an answer replay."},
         "canonical_answer": {"type": "string", "description": "Coordinator-supplied English translation of localized free text."},

@@ -832,7 +832,8 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             outcome = "needs_input"
             next_action = (
                 "Call worker_question(action=ask) now with the smallest material product-intent question and useful "
-                "options. Return only its question_ref and concise summary; do not record a report until the user "
+                "options. Return its question_ref plus a complete decision handoff with context, concrete options, "
+                "trade-offs, and a recommendation; do not record a report until the user "
                 "answers and this same attempt resumes."
             )
         elif (

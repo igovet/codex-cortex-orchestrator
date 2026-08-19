@@ -120,11 +120,15 @@ brief, context files, and at most eight validated domains.
   but the native acknowledgement is interrupted, inspect with
   `manage_orchestration` and recover the ref from `available_reports`.
 - Any profile may call `worker_question(action="ask")` for a material user
-  decision that repository evidence cannot resolve. It returns only a compact
-  question ref to the parent and stays alive; the coordinator surfaces the ref
-  through management, obtains the user answer, then resumes that same worker,
-  which polls the ref. Open blocking questions reject both `record_report` and
-  `continue_orchestration`. Do not encode missing product intent as assumptions.
+  decision that repository evidence cannot resolve. It returns a compact
+  question ref plus a complete decision handoff to the parent: why input is
+  needed, every full self-contained question, concrete outcome-based options,
+  descriptions, trade-offs, and a recommendation. The coordinator must first
+  publish a detailed user-language commentary preamble, then call native MCP
+  elicitation exactly once; the preamble supplies context but must not collect
+  or replace the native answer. Open blocking questions reject both
+  `record_report` and `continue_orchestration`. Do not encode missing product
+  intent as assumptions.
 - Embedded predecessor handoffs are mandatory input. Read and reconcile every
   supplied report before project work, then include the generated
   `Predecessor review:` entry naming every supplied report ref in report

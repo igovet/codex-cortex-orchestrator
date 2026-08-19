@@ -1,5 +1,15 @@
 # Changelog
 
+## [9.1.1] - 2026-08-19
+
+- Require every material worker question to reach the coordinator with its
+  decision context, self-contained outcome-based choices, trade-offs, and a
+  recommendation. The coordinator now explains that context in the user's
+  language before opening the native answer control.
+- Accept the documented localized batch field names alongside their
+  compatibility aliases, render localized option descriptions, and reject
+  generic numbered, A/B, or recommended/alternative placeholder choices.
+
 ## [9.1.0] - 2026-08-19
 
 - Make orchestration and every supporting overlay explicitly opt-in. The

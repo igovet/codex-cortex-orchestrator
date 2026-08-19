@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.1.0-7c3aed" alt="Cortex 9.1.0" />
+        <img src="https://img.shields.io/badge/Cortex-9.1.1-7c3aed" alt="Cortex 9.1.1" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -690,6 +690,18 @@ The public MCP surface is deliberately small. The coordinator uses
 reads predecessor reports with `read_worker_report`. Workers use
 `read_dispatch_briefing`, `worker_question`, `get_report_template`,
 and `record_report`.
+
+Material worker questions are handed off with more than a bare reference:
+`QUESTION_RECORDED` is followed by why input is needed, full self-contained
+questions, concrete outcome-based options, descriptions, trade-offs, and a
+recommendation. Before calling native MCP elicitation, the root publishes a
+detailed commentary preamble in the user's language. That message explains the
+decision but must not collect or replace the native answer. Localized batch
+items use `localized_question`, `localized_header`, `localized_options`, and
+`localized_custom_label`; `question`, `header`, `options`, and `custom_label`
+remain compatibility aliases. Generic numbered, A/B, or
+recommended/alternative placeholders are rejected, and option descriptions
+may be rendered with the native choices.
 
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sys
 from typing import Any
@@ -53,6 +54,51 @@ BATCH_QUESTION_SCHEMA = "cortex/question-batch/v1"
 _BATCH_DOCUMENT_PREFIX = "question_batch:"
 _BATCH_OPEN_STATUSES = {"open", "awaiting_translation"}
 _BATCH_QUESTION_TYPES = {"single_select", "multi_select", "text"}
+_GENERIC_DECISION_LABELS = {
+    "a", "b", "c", "d",
+    "option", "recommended option", "alternative option", "other option",
+    "variant", "recommended variant", "alternative variant",
+    "choice", "answer", "decision",
+    "вариант", "рекомендуемый вариант", "альтернативный вариант", "другой вариант",
+    "выбор", "ответ", "решение",
+}
+_GENERIC_NUMBERED_LABEL = re.compile(
+    r"^(?:option|variant|choice|answer|decision|вариант|выбор|ответ|решение)\s*(?:#?\d+|[a-zа-я])$",
+    re.IGNORECASE,
+)
+_GENERIC_NUMBERED_QUESTION = re.compile(
+    r"(?:\b(?:decision|question)\s*(?:#?\d+|one|two|three)\b|"
+    r"\bрешени[ея]\s*#?\d+\b|\b(?:перв\w*|втор\w*|трет\w*)\s+решени\w*\b)",
+    re.IGNORECASE,
+)
+
+
+def _normalized_display_text(value: object) -> str:
+    return " ".join(str(value or "").strip().casefold().split()).strip(" .,:;!?()[]{}<>-—_")
+
+
+def _require_meaningful_decision_label(value: object, label: str) -> None:
+    """Reject placeholders that make a material decision impossible to understand."""
+    normalized = _normalized_display_text(value)
+    if (
+        not normalized
+        or normalized in _GENERIC_DECISION_LABELS
+        or _GENERIC_NUMBERED_LABEL.fullmatch(normalized)
+    ):
+        raise ValueError(
+            f"{label} must name the concrete outcome or trade-off; generic placeholders such as "
+            "'Option 1', 'A/B', or 'Recommended option' are not allowed"
+        )
+
+
+def _require_self_contained_question(value: object, label: str) -> None:
+    """Reject ordinal-only question copy that depends on unseen worker context."""
+    normalized = " ".join(str(value or "").strip().split())
+    if not normalized or _GENERIC_NUMBERED_QUESTION.search(normalized):
+        raise ValueError(
+            f"{label} must state the concrete decision and relevant constraint; numbered decision placeholders "
+            "are not allowed"
+        )
 
 
 def _batch_document_key(batch_id: str) -> str:
@@ -147,6 +193,8 @@ def _batch_question_config(value: object) -> dict[str, Any]:
         raise ValueError("batch question type must be single_select, multi_select, or text")
     header = redact(str(value.get("header") or question).strip(), 200) or question
     custom_label = redact(str(value.get("custom_label") or "Your answer").strip(), 160) or "Your answer"
+    context = redact(str(value.get("context") or "").strip(), 2000)
+    recommendation = redact(str(value.get("recommendation") or "").strip(), 1000)
     options = _question_options(value.get("options"))
     if question_type == "text" and options:
         raise ValueError("text batch questions must not define options")
@@ -155,7 +203,13 @@ def _batch_question_config(value: object) -> dict[str, Any]:
     require_internal_english(question, "batch worker question")
     require_internal_english(header, "batch worker question header")
     require_internal_english(custom_label, "batch worker question custom_label")
+    require_internal_english(context, "batch worker question context")
+    require_internal_english(recommendation, "batch worker question recommendation")
     require_internal_english(options, "batch worker question options")
+    _require_self_contained_question(question, "batch worker question")
+    _require_meaningful_decision_label(header, "batch worker question header")
+    for option in options:
+        _require_meaningful_decision_label(option.get("label_en"), "batch worker question option")
     return {
         "question_key": question_key,
         "question_type": question_type,
@@ -166,6 +220,8 @@ def _batch_question_config(value: object) -> dict[str, Any]:
         "options": options,
         "custom_label": custom_label,
         "localized_custom_label": custom_label,
+        "context": context,
+        "recommendation": recommendation,
     }
 
 
@@ -459,8 +515,10 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "status": record["status"],
                 "idempotent": bool(result.get("idempotent")),
                 "next_action": (
-                    "Return only QUESTION_RECORDED question_ref=<value> plus a concise batch summary to the parent "
-                    "coordinator; remain available and do not record a report until this batch is answered."
+                    "Return QUESTION_RECORDED question_ref=<value>, then a complete decision handoff to the parent: "
+                    "why input is needed, every full question, every concrete option label and description, material "
+                    "trade-offs, and your recommendation. Do not use placeholders such as Option 1 or Recommended "
+                    "option. Remain available and do not record a report until this batch is answered."
                 ),
             }
         if action == "ask":
@@ -469,6 +527,10 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             question = str(params.get("question") or "").strip()
             if not question:
                 raise ValueError("ask requires question")
+            _require_self_contained_question(question, "worker question")
+            _require_meaningful_decision_label(params.get("header") or question, "worker question header")
+            for option in _question_options(params.get("options")):
+                _require_meaningful_decision_label(option.get("label_en"), "worker question option")
             submission_id = safe_id(
                 f"public-{attempt_id}-question-"
                 + digest_text(json.dumps({
@@ -495,8 +557,10 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 "status": record["status"],
                 "idempotent": bool(result.get("idempotent")),
                 "next_action": (
-                    "Return only QUESTION_RECORDED question_ref=<value> plus a concise question summary to the "
-                    "parent coordinator; remain available and do not record a report until this question is answered."
+                    "Return QUESTION_RECORDED question_ref=<value>, then a complete decision handoff to the parent: "
+                    "why input is needed, the full question, every concrete option label and description, material "
+                    "trade-offs, and your recommendation. Do not use placeholders such as Option 1 or Recommended "
+                    "option. Remain available and do not record a report until this question is answered."
                 ),
             }
         question_ref = safe_id(str(params.get("question_ref") or ""))
@@ -722,10 +786,16 @@ def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     options = list(config.get("options") or [])
     if options:
-        titled_options = [
-            {"const": item["option_id"], "title": item.get("label_localized") or item.get("label") or item["option_id"]}
-            for item in options
-        ]
+        titled_options = []
+        for item in options:
+            option_title = item.get("label_localized") or item.get("label") or item["option_id"]
+            option_description = item.get("description_localized") or (
+                "" if config.get("localized_for_user") else item.get("description") or ""
+            )
+            choice = {"const": item["option_id"], "title": option_title}
+            if option_description and option_description != option_title:
+                choice["description"] = option_description
+            titled_options.append(choice)
         if config.get("multiple"):
             properties["selections"] = {
                 "type": "array",
@@ -903,26 +973,32 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
         else list(raw_localized)
     )
     for question, localized in zip(questions, localized_items):
+        question["localized_for_user"] = requires_localization
         localized_question = localized.get("localized_question", localized.get("question"))
         if requires_localization and not str(localized_question or "").strip():
             raise ValueError("every localized batch item requires localized_question")
         if localized_question is not None:
             question["localized_question"] = redact(str(localized_question).strip(), 4000) or question["canonical_question"]
-        localized_header = localized.get("header")
+        localized_header = localized.get("localized_header", localized.get("header"))
         if requires_localization and not str(localized_header or "").strip():
             localized_header = localized_question
         if localized_header is not None:
             question["localized_header"] = redact(str(localized_header).strip(), 200) or question["localized_question"]
-        localized_custom_label = localized.get("custom_label")
+        localized_custom_label = localized.get("localized_custom_label", localized.get("custom_label"))
         if requires_localization and not str(localized_custom_label or "").strip():
             localized_custom_label = localized_question
         if localized_custom_label is not None:
             question["localized_custom_label"] = redact(str(localized_custom_label).strip(), 160) or question["localized_question"]
-        if "options" not in localized and requires_localization and question.get("question_type") != "text":
+        effective_question = question.get("localized_question") or question["canonical_question"]
+        effective_header = question.get("localized_header") or question.get("header") or effective_question
+        _require_self_contained_question(effective_question, "localized batch question")
+        _require_meaningful_decision_label(effective_header, "localized batch question header")
+        has_localized_options = "localized_options" in localized or "options" in localized
+        if not has_localized_options and requires_localization and question.get("question_type") != "text":
             raise ValueError("localized choice questions require localized options")
-        if "options" not in localized:
+        if not has_localized_options:
             continue
-        raw_options = localized["options"]
+        raw_options = localized.get("localized_options", localized.get("options"))
         canonical_options = list(question.get("options") or [])
         if not isinstance(raw_options, list) or len(raw_options) != len(canonical_options):
             raise ValueError("localized batch options must match the canonical option count")
@@ -930,15 +1006,23 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
         for canonical, display in zip(canonical_options, raw_options):
             if isinstance(display, dict):
                 title = display.get("label_localized", display.get("label", display.get("label_en", "")))
+                description = display.get("description_localized", display.get("description", ""))
             else:
                 title = display
+                description = ""
             localized_title = redact(str(title or "").strip(), 120)
             if not localized_title:
                 raise ValueError("localized batch options require non-empty labels")
+            _require_meaningful_decision_label(localized_title, "localized batch option")
+            localized_description = redact(str(description or "").strip(), 400)
             # Localization changes only a display title.  The form position
             # selects the server-owned option, so any model-supplied
             # ``option_id`` is display metadata and cannot alter the answer.
-            merged.append({**canonical, "label_localized": localized_title})
+            merged.append({
+                **canonical,
+                "label_localized": localized_title,
+                **({"description_localized": localized_description} if localized_description else {}),
+            })
         question["options"] = merged
     return {**record, "questions": questions}
 
@@ -957,13 +1041,16 @@ def _batch_form_schema(question: dict[str, Any]) -> dict[str, Any]:
             "description": description or question.get("localized_custom_label") or question.get("custom_label"),
         }
     else:
-        choices = [
-            {
-                "const": option["option_id"],
-                "title": option.get("label_localized") or option.get("label_en") or option["option_id"],
-            }
-            for option in question.get("options") or []
-        ]
+        choices = []
+        for option in question.get("options") or []:
+            option_title = option.get("label_localized") or option.get("label_en") or option["option_id"]
+            option_description = option.get("description_localized") or (
+                "" if question.get("localized_for_user") else option.get("description") or ""
+            )
+            choice = {"const": option["option_id"], "title": option_title}
+            if option_description and option_description != option_title:
+                choice["description"] = option_description
+            choices.append(choice)
         if question_type == "multi_select":
             field = {
                 "type": "array",
@@ -1406,6 +1493,8 @@ def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> 
         localized_header = question
     if localized_header:
         config["header"] = redact(localized_header, 200)
+    _require_self_contained_question(question, "localized question")
+    _require_meaningful_decision_label(config["header"], "localized question header")
     if requires_localization and config.get("options") and not isinstance(params.get("localized_options"), list):
         raise ValueError("non-English choice questions require localized_options")
     if isinstance(params.get("localized_options"), list):
@@ -1419,7 +1508,19 @@ def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> 
             supplied_id = str(raw_display.get("option_id") or "") if isinstance(raw_display, dict) else ""
             if supplied_id and safe_id(supplied_id.lower()) != canonical["option_id"]:
                 raise ValueError("localized option_id must match the canonical option_id")
-            merged.append({**canonical, "label_localized": display["label"]})
+            localized_label = display["label"]
+            _require_meaningful_decision_label(localized_label, "localized question option")
+            description = ""
+            if isinstance(raw_display, dict):
+                description = redact(
+                    str(raw_display.get("description_localized", raw_display.get("description", ""))).strip(),
+                    400,
+                )
+            merged.append({
+                **canonical,
+                "label_localized": localized_label,
+                **({"description_localized": description} if description else {}),
+            })
         config["options"] = merged
     localized_custom_label = params.get("localized_custom_label")
     if requires_localization and not str(localized_custom_label or "").strip():

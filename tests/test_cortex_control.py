@@ -4002,7 +4002,7 @@ class ControlPlaneTests(unittest.TestCase):
             })
         self.assertFalse(unavailable["ok"])
         self.assertEqual(unavailable["code"], "host_question_unavailable")
-        self.assertIn("Do not ask it through commentary", unavailable["next_action"])
+        self.assertIn("must not collect or fabricate the answer", unavailable["next_action"])
         question = self.task_document(task_dir, f"question:{asked['question_ref']}")
         self.assertEqual(question["status"], "open")
 
@@ -8609,7 +8609,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.1.0")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.1.1")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

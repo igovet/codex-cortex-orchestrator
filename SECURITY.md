@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.1.0` source line. The public
+Security fixes are prepared for the current `9.1.1` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -73,15 +73,26 @@ approval; no-op or transport-only changes do not invalidate it. A mismatch
 blocks dispatch with recoverable reapproval guidance.
 
 Questions shown to users by the root coordinator must be localized to the
-user's original language. Worker protocol messages and durable worker reports
-remain English, and localized UI text must not alter the canonical question or
-answer values.
+user's original language. Before native MCP elicitation, the root must publish
+a detailed user-language commentary preamble explaining why the decision is
+needed, its consequences, and the recommendation. That commentary provides
+context only: it must not collect an answer or replace the native elicitation
+control. Worker protocol messages and durable worker reports remain English.
+Workers return `QUESTION_RECORDED` with a complete handoff containing the
+decision context, full self-contained questions, concrete outcome-based options,
+descriptions, trade-offs, and recommendation. Generic numbered, A/B, or
+recommended/alternative placeholders are rejected; descriptions may be shown
+with rendered options. Localized UI text must not alter canonical question or
+answer values. Batch projections accept the documented `localized_question`,
+`localized_header`, `localized_options`, and `localized_custom_label` fields,
+plus the compatibility aliases `question`, `header`, `options`, and
+`custom_label`.
 
 The archive boundary is validated from `git archive HEAD`, not the mutable
 working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This working tree is a source candidate only. The 9.1.0+codex.20260818230853
+This working tree is a source candidate only. The 9.1.1+codex.20260819034734
 changes are not installed into a user's plugin, published, committed, or
 tagged by this task.

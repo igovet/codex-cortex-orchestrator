@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.1.0 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 9.1.1 `cortex/v8` task ledger and
 public `cortex/orchestration/v5` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly eight public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -387,14 +387,19 @@ call `read_worker_report` only for predecessor refs explicitly supplied in its
 dispatch, with exact `project_root`, `task_ref`, `attempt_id`, and `profile`.
 Cortex rejects ungranted refs and emits no coordinator Markdown-link
 instruction in worker context. A material
-question is persisted with action `ask`; the worker returns only
-`QUESTION_RECORDED question_ref=<value>` plus a concise summary, ends the
-current native turn, and becomes idle/resumable. The coordinator passes only
-that `question_ref` to `manage_orchestration(intent="question")`; Cortex
-internally resolves task, attempt, profile, and native-thread identity and
-opens native MCP elicitation. Guessed identity fields and prose fallback fail
-closed. After the answer, the coordinator resumes the exact worker through
-`followup_task`; the worker polls the same ref and continues the same attempt.
+question is persisted with action `ask`; the worker returns
+`QUESTION_RECORDED question_ref=<value>` plus a complete decision handoff that
+states why input is needed, every full self-contained question, every concrete
+outcome-based option with descriptions and trade-offs, and the recommendation.
+Generic numbered, A/B, or recommended/alternative placeholders are rejected.
+The coordinator first publishes a detailed user-language commentary preamble
+with that context, then passes only the `question_ref` to
+`manage_orchestration(intent="question")`; the preamble must not collect or
+replace the native answer. Cortex internally resolves task, attempt, profile,
+and native-thread identity and opens native MCP elicitation. Guessed identity
+fields and prose fallback fail closed. After the answer, the coordinator
+resumes the exact worker through `followup_task`; the worker polls the same ref
+and continues the same attempt.
 Caller/input/schema validation from allowed worker tools is returned as a
 structured correction and retried on that same attempt without consuming the
 failed-worker budget. `get_report_template` and `worker_question` preserve this
@@ -411,10 +416,16 @@ value/language and require canonical `answer_en` for localized free text.
 Workers may submit 1–32 stable questions through `ask_batch` and poll the
 same `batch_ref` with `poll_batch`; the coordinator retains one durable ref but
 renders one question per native UI step. Each accepted answer is checkpointed
-before the next step. Cancellation leaves the batch open and a later resume
-starts at the next unanswered question. Localized UI is a transient
-projection, and localized free text requires canonical English translation
-before resumption. A task revision supersedes an unresolved batch.
+before the next step. Batch projections use `localized_question`,
+`localized_header`, `localized_options`, and optional
+`localized_custom_label`; `question`, `header`, `options`, and `custom_label`
+remain compatibility aliases. Every localized question and option must be
+self-contained and outcome-specific; generic numbered, A/B, or
+recommended/alternative placeholders are rejected, and option descriptions
+may be rendered. Cancellation leaves the batch open and a later resume starts
+at the next unanswered question. Localized UI is a transient projection, and
+localized free text requires canonical English translation before resumption.
+A task revision supersedes an unresolved batch.
 
 After questions are resolved, every worker calls `get_report_template`, replaces
 its gate-specific placeholders in the exact private draft file, and calls
@@ -700,7 +711,7 @@ The focused plan-approval regression set passes with 14 tests, covering native
 and direct-fallback controls, approval continuation, silent cancellation,
 request-ID freshness, stale-basis rejection, revision, localization, and
 transport compatibility. The full control suite (292 tests), invariant suite
-(83 tests), complete discovery suite (514 tests), and cold-boot smoke also
+(83 tests), complete discovery suite (517 tests), and cold-boot smoke also
 pass. These checks exercise the source
 MCP server and mocked/native JSON-RPC exchanges; this checkout does not include
 a live Codex Desktop renderer, so installed-plugin and live-host button

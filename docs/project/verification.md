@@ -32,7 +32,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete Python 3.12.3 discovery suite passed: 514 tests. The current
+- The complete Python 3.12.3 discovery suite passed: 517 tests. The current
   cold-boot smoke and deterministic sequential, compact-parallel, and
   blocked/resume fixtures also passed.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
@@ -89,11 +89,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.1.0+codex.20260818230853`. These results are
+The source manifest declares `9.1.1+codex.20260819034734`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 9.1.0 source contract
+## Current 9.1.1 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
