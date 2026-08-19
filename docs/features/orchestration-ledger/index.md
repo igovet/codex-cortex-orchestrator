@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.1.1 `cortex/v8` task ledger and
+The local MCP server implements the Cortex 9.2.0 `cortex/v8` task ledger and
 public `cortex/orchestration/v5` lifecycle, staged waves,
 worker questions/reports, maintenance, and optional execution lanes through exactly eight public
 tools: coordinator lifecycle operations `start_orchestration`,
@@ -565,14 +565,17 @@ active tasks, and removes only project-scoped `.codex/cortex` state; project
 source and documentation remain untouched.
 
 Predecessor handoffs are an enforced worker contract. Omitted `depends_on`
-supplies every verified predecessor report ref, an explicit phase list selects
-only those completed or earlier-wave dependencies, and `[]` declares
-intentional independence. Report bodies are not embedded in successor prompts:
-the worker reads every granted ref through `read_worker_report`, reconciles the
+selects all verified predecessors, an explicit phase list selects only those
+completed or earlier-wave dependencies, and `[]` declares intentional
+independence. Cortex dispatches the selected set's verified transitive DAG
+frontier. A passed report covers only the exact refs that its attempt read and
+acknowledged; covered reports remain immutable and continue to influence the
+Planner evidence digest. Report bodies are not embedded in successor prompts:
+the worker reads every frontier ref through `read_worker_report`, reconciles the
 handoffs, and emits an exact generated `Predecessor review:` evidence marker
 containing all refs. Public `record_report` rejects incomplete acknowledgement.
-Ref-based handoffs remain bounded and fail closed rather than silently dropping
-older reports.
+There is no separate predecessor-count limit. Compact inspect/recovery views
+independently retain eight recent summaries.
 
 Codebase Memory is conditional worker tooling rather than a ledger dependency.
 Cortex precomputes the current upstream path-derived project key from canonical
@@ -640,8 +643,9 @@ Reports are sanitized, task- and attempt-bound, and use one-use receipts.
 Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
 so reconciliation can repair derived receipts, indexes, and Markdown but
 cannot replay consumed evidence. A report is capped at 64 KiB and 100 list
-items per field; an attempt at 32 reports; a task at 256 reports and 1 MiB
-total; and an attempt at 256 context grants. Task and operation ledger files
+items per field, and an attempt at 32 reports. Tasks have no report-count or
+aggregate-report-byte quota; immutable history grows in SQLite until storage
+is unavailable or project-scoped state is explicitly pruned. Task and operation ledger files
 have an 8 MiB upper bound. Ordinary JSON writes use `MAX_JSON_BYTES=8 MiB` and
 fail before replacement with actionable diagnostics. Manifest snapshot reads
 use `MAX_MANIFEST_BYTES=64 MiB`; initial capture preflight runs before task-directory creation,
@@ -710,8 +714,8 @@ during retirement.
 The focused plan-approval regression set passes with 14 tests, covering native
 and direct-fallback controls, approval continuation, silent cancellation,
 request-ID freshness, stale-basis rejection, revision, localization, and
-transport compatibility. The full control suite (292 tests), invariant suite
-(83 tests), complete discovery suite (517 tests), and cold-boot smoke also
+transport compatibility. The full control suite (295 tests), invariant suite
+(83 tests), complete discovery suite (520 tests), and cold-boot smoke also
 pass. These checks exercise the source
 MCP server and mocked/native JSON-RPC exchanges; this checkout does not include
 a live Codex Desktop renderer, so installed-plugin and live-host button

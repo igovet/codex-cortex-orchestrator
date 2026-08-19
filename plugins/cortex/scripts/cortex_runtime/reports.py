@@ -21,8 +21,6 @@ from cortex import (
     AWAITING_HOST_SPAWN,
     MAX_BRIEFING_BYTES,
     MAX_REPORTS_PER_ATTEMPT,
-    MAX_REPORTS_PER_TASK,
-    MAX_REPORT_AGGREGATE_BYTES,
     PUBLIC_ORCHESTRATION_SCHEMA,
     REPORT_FIELDS,
     REPORT_SCHEMA,
@@ -618,12 +616,8 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 }
             return outcome
         attempt_count = sum(1 for item in authoritative if item.get("attempt_id") == attempt_id)
-        aggregate_bytes = sum(len(json.dumps(item.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8")) for item in authoritative)
-        report_bytes = len(json.dumps(report, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-        if attempt_count >= _runtime.MAX_REPORTS_PER_ATTEMPT or len(authoritative) >= _runtime.MAX_REPORTS_PER_TASK:
-            raise ValueError("report count quota exhausted")
-        if aggregate_bytes + report_bytes > _runtime.MAX_REPORT_AGGREGATE_BYTES:
-            raise ValueError("report aggregate byte quota exhausted")
+        if attempt_count >= _runtime.MAX_REPORTS_PER_ATTEMPT:
+            raise ValueError("per-attempt report count quota exhausted")
         report_id = f"report-{max(occupied_numbers, default=0) + 1:04d}"
         record = {
             "schema": REPORT_SCHEMA, "report_id": report_id, "task_id": state["task_id"],
@@ -909,8 +903,8 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
         elif any(fragment in message for fragment in (
             "unsupported record_report fields", "report must contain exactly", "report summary and next_action",
             "report findings must", "report questions must", "report tests must", "report evidence must",
-            "report uncertainty must", "report exceeds the", "report count quota exhausted",
-            "report aggregate byte quota exhausted", "idempotent report submission_id",
+            "report uncertainty must", "report exceeds the", "per-attempt report count quota exhausted",
+            "idempotent report submission_id",
             "draft_ref is invalid", "report draft", "record_report with draft_ref",
             "project_root is required", "project_root must be an absolute path", "CORTEX_ROOT is not supported",
             "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",

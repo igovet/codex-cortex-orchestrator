@@ -549,8 +549,6 @@ MAX_TEXT = 4000
 MAX_REPORT_BYTES = 65536
 MAX_REPORT_ITEMS = 100
 MAX_REPORTS_PER_ATTEMPT = 32
-MAX_REPORTS_PER_TASK = 256
-MAX_REPORT_AGGREGATE_BYTES = 1024 * 1024
 MAX_PLANNING_BYTES = 128 * 1024
 MAX_SCOPING_BYTES = 128 * 1024
 MAX_DISCOVERY_DOMAINS = 8
@@ -568,8 +566,10 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 # entry.  Keep the read cap finite while allowing ordinary repositories to
 # complete handoff and reconciliation.
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
+# Compact inspect/recovery handoffs retain only the newest summaries.  Worker
+# dispatches use scoped report refs instead of embedding these summaries, so
+# predecessor grants are bounded by the task's report inventory instead.
 MAX_CONTEXT_REPORTS = 8
-MAX_CONTEXT_REPORT_CHARS = 32000
 MAX_GATE_RECOVERY_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
 MAX_ORCHESTRATE_GATE_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
 MAX_SAME_STRATEGY_FAILURES = int(RETRY_POLICY["same_strategy_limit"])
@@ -3583,8 +3583,6 @@ def _report_index(paths: dict[str, Path], task_id: str) -> dict[str, Any]:
         return {"schema": REPORT_SCHEMA, "task_id": task_id, "reports": [], "submissions": {}, "updated_at": now()}
     if value.get("schema") != REPORT_SCHEMA or value.get("task_id") != task_id:
         raise ValueError("report index does not belong to this task")
-    if len(value.get("reports", [])) > MAX_REPORTS_PER_TASK or len(value.get("submissions", {})) > MAX_REPORTS_PER_TASK:
-        raise ValueError("report index exceeds its bounded capacity")
     return value
 
 
@@ -3593,31 +3591,6 @@ def _write_report_index(paths: dict[str, Path], task_id: str, value: dict[str, A
         raise ValueError("report index does not belong to this task")
     _task_document_root(paths["root"].parent, task_id)
     db_put_task_document(_ledger_root_for_artifact(paths["root"].parent), task_id, "report_index", value)
-
-
-def _compact_report_context(record: dict[str, Any]) -> dict[str, Any]:
-    """Return a bounded, receipt-free predecessor handoff for a worker prompt."""
-    report = record.get("report") if isinstance(record.get("report"), dict) else {}
-
-    def compact_list(field: str, *, items: int = 16, chars: int = 1200) -> list[str]:
-        values = report.get(field)
-        if not isinstance(values, list):
-            return []
-        return [redact(item, chars) for item in values[:items]]
-
-    producer = record.get("producer") if isinstance(record.get("producer"), dict) else {}
-    return {
-        "report_id": redact(record.get("report_id", ""), 128),
-        "phase": redact(record.get("gate", ""), 128),
-        "profile": redact(producer.get("profile", ""), 128),
-        "summary": redact(report.get("summary", ""), 2400),
-        "findings": compact_list("findings"),
-        "questions": compact_list("questions", items=8),
-        "changed_files": compact_list("changed_files", chars=500),
-        "tests": compact_list("tests"),
-        "evidence": compact_list("evidence"),
-        "uncertainty": compact_list("uncertainty", items=8),
-    }
 
 
 def _predecessor_review_marker(report_ids: list[str]) -> str:
@@ -4051,47 +4024,6 @@ def _validate_predecessor_review(report: dict[str, Any], report_ids: list[str]) 
         )
 
 
-def _context_report_payloads(
-    task_dir: Path,
-    state: dict[str, Any],
-    report_ids: list[str],
-) -> list[dict[str, Any]]:
-    """Load bounded predecessor reports that a facade worker cannot fetch itself."""
-    if len(report_ids) > MAX_CONTEXT_REPORTS:
-        raise ValueError(
-            f"worker context requires {len(report_ids)} predecessor reports but the safe limit is "
-            f"{MAX_CONTEXT_REPORTS}; set depends_on to the exact prerequisite phases"
-        )
-    payloads: list[dict[str, Any]] = []
-    used_chars = 0
-    for report_id in report_ids:
-        normalized_report_id = safe_id(report_id)
-        record, _ = read_immutable_json_artifact(
-            task_dir,
-            state["task_id"],
-            f"reports/records/{normalized_report_id}.json",
-            kinds={"worker_report", "report_record"},
-        )
-        if record.get("task_id") != state.get("task_id") or record.get("report_id") != normalized_report_id:
-            raise ValueError("context report crosses task scope")
-        payload = _compact_report_context(record)
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        if len(encoded) > MAX_CONTEXT_REPORT_CHARS:
-            payload["findings"] = payload["findings"][:4]
-            payload["tests"] = payload["tests"][:4]
-            payload["evidence"] = payload["evidence"][:4]
-            payload["uncertainty"] = payload["uncertainty"][:4]
-            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        if used_chars + len(encoded) > MAX_CONTEXT_REPORT_CHARS:
-            raise ValueError(
-                "predecessor handoffs exceed the safe worker-context budget; "
-                "set depends_on to the exact prerequisite phases instead of dropping reports implicitly"
-            )
-        payloads.append(payload)
-        used_chars += len(encoded)
-    return payloads
-
-
 def _delegation_report_index(paths: dict[str, Path], task_id: str, attempt_id: str) -> tuple[str, dict[str, Any]]:
     attempt = safe_id(attempt_id)
     task_dir = paths["root"].parent
@@ -4102,7 +4034,7 @@ def _delegation_report_index(paths: dict[str, Path], task_id: str, attempt_id: s
         value = {"schema": REPORT_SCHEMA, "task_id": task_id, "attempt_id": attempt, "owned_report_ids": [], "context_report_ids": [], "updated_at": now()}
     if value.get("task_id") != task_id or value.get("attempt_id") != attempt:
         raise ValueError("delegation report index scope mismatch")
-    if len(value.get("owned_report_ids", [])) > MAX_REPORTS_PER_ATTEMPT or len(value.get("context_report_ids", [])) > MAX_REPORTS_PER_TASK:
+    if len(value.get("owned_report_ids", [])) > MAX_REPORTS_PER_ATTEMPT:
         raise ValueError("delegation report index exceeds its bounded capacity")
     return document_key, value
 
@@ -5088,7 +5020,6 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
         submissions: dict[str, str] = {}
         by_attempt: dict[str, list[str]] = {}
         repaired: list[str] = []
-        aggregate_bytes = 0
         source_index = _report_index(paths, state["task_id"])
         for metadata in source_index.get("reports", []):
             if not isinstance(metadata, dict):
@@ -5148,11 +5079,8 @@ def reconcile_report_bus(params: dict[str, Any]) -> dict[str, Any]:
             records.append(_report_metadata(record))
             submissions[f"{record['attempt_id']}:{safe_id(str(record['submission_id']))}"] = report_id
             by_attempt.setdefault(record["attempt_id"], []).append(report_id)
-            if len(records) > MAX_REPORTS_PER_TASK or len(by_attempt[record["attempt_id"]]) > MAX_REPORTS_PER_ATTEMPT:
-                raise ValueError("authoritative reports exceed count quota")
-            aggregate_bytes += len(json.dumps(record.get("report", {}), ensure_ascii=False, sort_keys=True).encode("utf-8"))
-            if aggregate_bytes > MAX_REPORT_AGGREGATE_BYTES:
-                raise ValueError("authoritative reports exceed aggregate byte quota")
+            if len(by_attempt[record["attempt_id"]]) > MAX_REPORTS_PER_ATTEMPT:
+                raise ValueError("authoritative reports exceed per-attempt count quota")
             markdown_path = paths["markdown"] / f"{report_id}.md"
             generated = _report_markdown(record)
             if markdown_path.is_symlink():

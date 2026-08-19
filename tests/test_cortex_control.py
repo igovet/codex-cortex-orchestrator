@@ -6745,34 +6745,107 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertIn("Verified predecessor handoff refs: report-0001", prompt)
                 self.assertNotIn("report-0002", prompt)
             if current["dispatches"][0]["phase"] == "plan":
-                self.assertIn("Verified predecessor handoff refs: report-0001, report-0002", prompt)
+                self.assertIn("Verified predecessor handoff refs: report-0002", prompt)
+                self.assertNotIn("report-0001", prompt)
             if current["dispatches"][0]["phase"] == "implementation":
                 self.assertIn("Verified predecessor handoff refs: report-0003", prompt)
                 self.assertNotIn("report-0001", prompt)
                 self.assertNotIn("report-0002", prompt)
 
-    def test_v3_reference_handoffs_fail_closed_instead_of_dropping_old_reports(self):
-        with mock.patch.object(control, "MAX_CONTEXT_REPORTS", 1), mock.patch.object(orchestration_engine, "MAX_CONTEXT_REPORTS", 1):
-            started = self.v3_start("bounded handoff overflow", plan_approval="auto", waves=[
-                {"workers": [{"phase": "discover"}]},
-                {"workers": [{"phase": "architecture"}]},
-                {"workers": [{"phase": "plan"}]},
-            ])
-            second = control.continue_orchestration({
+    def test_v3_final_planner_accepts_full_twelve_report_predecessor_basis(self):
+        self.assertEqual(control.MAX_CONTEXT_REPORTS, 8)
+        started = self.v3_start("full bounded planner evidence", plan_approval="auto", waves=[
+            {"workers": [{"phase": "scope"}]},
+            {"workers": [
+                {"phase": "discover", "objective": f"Inspect discovery domain {index}."}
+                for index in range(1, control.MAX_DISCOVERY_DOMAINS + 1)
+            ]},
+            {"workers": [
+                {"phase": "architecture"},
+                {"phase": "database_architecture"},
+                {"phase": "ux"},
+            ]},
+            {"workers": [{"phase": "plan"}]},
+        ])
+        current = started
+        for summary in ("scope", "discovery", "design"):
+            current = control.continue_orchestration({
                 "project_root": str(self.project),
                 "task_ref": started["task_ref"],
-                "step": started["step"],
-                "results": self.v3_results(started, self.v3_report("discover report")),
+                "step": current["step"],
+                "results": self.v3_results(current, self.v3_report(f"{summary} evidence")),
             })
-            self.assertTrue(second["ok"])
-            blocked = control.continue_orchestration({
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "step": second["step"],
-                "results": self.v3_results(second, self.v3_report("architecture report")),
+            self.assertTrue(current["ok"], current)
+
+        self.assertEqual(current["dispatches"][0]["phase"], "plan")
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        plan_attempt = next(
+            attempt for attempt in state["attempts"]
+            if attempt["gate"] == "plan" and attempt["status"] == control.AWAITING_HOST_SPAWN
+        )
+        package = self.task_document(task_dir, f"dispatch:{plan_attempt['attempt_id']}")
+        self.assertEqual(package["context_report_ids"], ["report-0010", "report-0011", "report-0012"])
+        basis, _ = orchestration_engine._verified_plan_predecessor_basis(task_dir, state)
+        self.assertEqual([item["report_ref"] for item in basis], [f"report-{index:04d}" for index in range(1, 13)])
+        prompt = self.briefing_from_response(current)
+        self.assertNotIn("report-0001", prompt)
+        self.assertIn("Verified predecessor handoff refs: report-0010", prompt)
+        self.assertIn("report-0012", prompt)
+
+    def test_v3_predecessor_dispatch_has_no_separate_report_count_limit(self):
+        started = self.v3_start("all bounded task evidence reaches planner", plan_approval="auto", waves=[
+            {"workers": [{"phase": "scope"}]},
+            {"workers": [
+                {"phase": "discover", "objective": f"Inspect source partition {index}."}
+                for index in range(1, 33)
+            ]},
+            {"workers": [{"phase": "plan"}]},
+        ])
+        discovery = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("scope evidence")),
+        })
+        self.assertTrue(discovery["ok"], discovery)
+        planner = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": discovery["step"],
+            "results": self.v3_results(discovery, self.v3_report("partition evidence")),
+        })
+        self.assertTrue(planner["ok"], planner)
+        self.assertEqual(planner["dispatches"][0]["phase"], "plan")
+
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        plan_attempt = next(
+            attempt for attempt in state["attempts"]
+            if attempt["gate"] == "plan" and attempt["status"] == control.AWAITING_HOST_SPAWN
+        )
+        package = self.task_document(task_dir, f"dispatch:{plan_attempt['attempt_id']}")
+        self.assertEqual(len(package["context_report_ids"]), 32)
+        self.assertEqual(package["context_report_ids"][0], "report-0002")
+        self.assertEqual(package["context_report_ids"][-1], "report-0033")
+
+    def test_transitive_predecessor_frontier_scales_past_one_thousand_reports(self):
+        attempts = []
+        report_ids = []
+        for index in range(1, 1002):
+            report_id = f"report-{index:04d}"
+            report_ids.append(report_id)
+            attempts.append({
+                "attempt_id": f"discover-{index:04d}",
+                "gate": "discover",
+                "status": "passed",
+                "report_ids": [report_id],
+                "context_report_ids": ([report_ids[-2]] if index > 1 else []),
             })
-            self.assertFalse(blocked["ok"])
-            self.assertIn("exceeding the 1-report limit", blocked["diagnostics"][0]["message"])
+        frontier = orchestration_engine._transitive_context_frontier(
+            {"attempts": attempts}, report_ids,
+        )
+        self.assertEqual(frontier, ["report-1001"])
 
     def test_v3_inspect_recovers_report_when_native_worker_ack_is_interrupted(self):
         started = self.v3_start("recover persisted report", waves=[
@@ -8127,30 +8200,50 @@ class ControlPlaneTests(unittest.TestCase):
         recorded = self.report("orphan-markdown", delegation["attempt_id"])
         self.assertEqual(recorded["report"]["report_id"], "report-0001")
 
-    def test_report_quotas_and_terminal_attempt_are_rejected(self):
+    def test_per_attempt_report_quota_and_terminal_attempt_are_rejected(self):
         state = self.init(task_id="quotas", complexity="C2")["state"]
         delegation = self.delegate(state, "quotas", "plan", "planner")
-        original_attempt, original_task, original_bytes = control.MAX_REPORTS_PER_ATTEMPT, control.MAX_REPORTS_PER_TASK, control.MAX_REPORT_AGGREGATE_BYTES
+        original_attempt = control.MAX_REPORTS_PER_ATTEMPT
         try:
             control.MAX_REPORTS_PER_ATTEMPT = 1
             self.report("quotas", delegation["attempt_id"], submission_id="one")
             with self.assertRaisesRegex(ValueError, "quota"):
                 self.report("quotas", delegation["attempt_id"], submission_id="two")
-            control.MAX_REPORTS_PER_ATTEMPT = 10
-            control.MAX_REPORTS_PER_TASK = 1
-            with self.assertRaisesRegex(ValueError, "quota"):
-                self.report("quotas", delegation["attempt_id"], submission_id="task-limit")
-            control.MAX_REPORTS_PER_TASK = original_task
-            control.MAX_REPORT_AGGREGATE_BYTES = 1
-            with self.assertRaisesRegex(ValueError, "byte quota"):
-                self.report("quotas", delegation["attempt_id"], submission_id="byte-limit")
         finally:
-            control.MAX_REPORTS_PER_ATTEMPT, control.MAX_REPORTS_PER_TASK, control.MAX_REPORT_AGGREGATE_BYTES = original_attempt, original_task, original_bytes
+            control.MAX_REPORTS_PER_ATTEMPT = original_attempt
         report = control.record_report({"task_id": "quotas", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "one", "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": []}})
         evidence = control.record_evidence({"task_id": "quotas", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "done"})
         control.record_gate({"task_id": "quotas", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
         with self.assertRaisesRegex(ValueError, "terminal"):
             self.report("quotas", delegation["attempt_id"], submission_id="late")
+
+    def test_report_indexes_do_not_impose_a_task_wide_count_quota(self):
+        state = self.init(task_id="long-history", complexity="C2")["state"]
+        task_dir = self.ledger / "tasks/0001-long-history"
+        report_ids = [f"report-{index:04d}" for index in range(1, 1002)]
+        control.db_put_task_document(self.ledger, state["task_id"], "report_index", {
+            "schema": control.REPORT_SCHEMA,
+            "task_id": state["task_id"],
+            "reports": [{"report_id": report_id} for report_id in report_ids],
+            "submissions": {f"attempt-{index}:submission": report_id for index, report_id in enumerate(report_ids, 1)},
+            "updated_at": control.now(),
+        })
+        loaded = control._report_index(control.report_bus_paths(task_dir), state["task_id"])
+        self.assertEqual(len(loaded["reports"]), 1001)
+
+        attempt_id = "synthetic-attempt"
+        control.db_put_task_document(self.ledger, state["task_id"], f"report_delegation:{attempt_id}", {
+            "schema": control.REPORT_SCHEMA,
+            "task_id": state["task_id"],
+            "attempt_id": attempt_id,
+            "owned_report_ids": [],
+            "context_report_ids": report_ids,
+            "updated_at": control.now(),
+        })
+        _, delegation_index = control._delegation_report_index(
+            control.report_bus_paths(task_dir), state["task_id"], attempt_id,
+        )
+        self.assertEqual(len(delegation_index["context_report_ids"]), 1001)
 
     def test_journal_symlinks_cannot_modify_task_or_lane_state(self):
         state = self.init(task_id="journal", complexity="C1")["state"]
@@ -8609,7 +8702,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.1.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.0")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

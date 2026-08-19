@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.1.1` source line. The public
+Security fixes are prepared for the current `9.2.0` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -58,6 +58,13 @@ Reports retain the strict seven-field
 first. Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
+Each immutable report remains bounded to 64 KiB and each attempt to 32 reports,
+but a task has no artificial report-count or aggregate-report-byte quota.
+Long-running histories grow in project-scoped SQLite subject to real storage
+availability and explicit pruning. Successor prompts receive only the verified
+transitive handoff frontier; covered history remains immutable and included in
+Planner evidence digests.
+
 Worker-facing caller, input, and schema validation failures are structured as
 same-attempt corrections and do not consume recovery budget. Failed work may
 reuse one strategy at most twice and may fail one phase at most three times;
@@ -93,6 +100,6 @@ working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This working tree is a source candidate only. The 9.1.1+codex.20260819034734
+This working tree is a source candidate only. The 9.2.0+codex.20260819085921
 changes are not installed into a user's plugin, published, committed, or
 tagged by this task.

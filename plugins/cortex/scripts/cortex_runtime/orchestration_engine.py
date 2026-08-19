@@ -607,6 +607,32 @@ def _predecessor_context_report_ids(
     return selected
 
 
+def _transitive_context_frontier(state: dict[str, Any], report_ids: list[str]) -> list[str]:
+    """Collapse acknowledged predecessor chains without losing durable history.
+
+    A passed report can cover only the exact predecessor refs granted to its
+    attempt. Report intake already proves that it read and acknowledged every
+    one of those refs. Keeping the reports that are not covered by another
+    selected report therefore bounds a successor handoff by the current DAG
+    frontier while the immutable ledger and plan-basis digest retain the full
+    history.
+    """
+    selected = list(dict.fromkeys(str(report_id) for report_id in report_ids))
+    selected_set = set(selected)
+    covered: set[str] = set()
+    for attempt in state.get("attempts", []):
+        if attempt.get("status") != "passed" or attempt.get("invalidated"):
+            continue
+        produced = set(str(report_id) for report_id in attempt.get("report_ids", []))
+        if not produced.intersection(selected_set):
+            continue
+        covered.update(
+            str(report_id) for report_id in attempt.get("context_report_ids", [])
+            if str(report_id) in selected_set
+        )
+    return [report_id for report_id in selected if report_id not in covered]
+
+
 def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[str]:
     """Keep the report that opened an active corrective wave in its context.
 
@@ -741,14 +767,13 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             context_report_ids = list(dict.fromkeys(
                 context_report_ids + [item["report_ref"] for item in required_basis]
             ))
-        # The report that triggered corrective work stays readable even though
-        # its original gate receipt was invalidated.  Put it first so bounded
-        # context cannot silently discard the reason for the rework.
-        context_report_ids = list(dict.fromkeys(rework_report_ids + context_report_ids))
-        if len(context_report_ids) > MAX_CONTEXT_REPORTS:
-            raise ValueError(
-                f"verified predecessor context contains {len(context_report_ids)} reports, exceeding the {MAX_CONTEXT_REPORTS}-report limit; narrow the discovery wave before dispatch"
-            )
+        # A verified successor report transitively covers only refs that its
+        # own passed attempt acknowledged. Preserve active rework sources even
+        # when a later ordinary handoff covered them: they are the current
+        # corrective mission, not merely historical context.
+        context_report_ids = list(dict.fromkeys(
+            rework_report_ids + _transitive_context_frontier(state, context_report_ids)
+        ))
         delegated = record_delegation({
             **params,
             **spec,

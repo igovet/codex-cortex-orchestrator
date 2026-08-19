@@ -133,9 +133,13 @@ brief, context files, and at most eight validated domains.
   supplied report before project work, then include the generated
   `Predecessor review:` entry naming every supplied report ref in report
   evidence; public `record_report` rejects an incomplete acknowledgement.
-  Omit `depends_on` to receive all verified predecessors, provide exact earlier
+  Omit `depends_on` to select all verified predecessors, provide exact earlier
   phases to narrow the set, or use `[]` only for intentional independence.
-  Context count/size overflow fails closed instead of dropping older reports.
+  Dispatch receives the selected set's transitive frontier: a passed report
+  covers only refs that its attempt durably acknowledged. Full history remains
+  in SQLite and in the Planner evidence digest, so a 1000-report task does not
+  produce a 1000-ref prompt or hit an artificial count limit. Compact
+  inspect/recovery views independently retain eight recent summaries.
 - Available `docs/project/index.md` and `docs/features/index.md` files are
   injected into every worker briefing. The planner names task-relevant linked
   pages for the coordinator to attach through `context_files`; downstream

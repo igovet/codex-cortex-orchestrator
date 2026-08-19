@@ -1,5 +1,14 @@
 # Changelog
 
+## [9.2.0] - 2026-08-19
+
+- Remove task-wide report-count and aggregate-byte quotas; reports remain
+  individually bounded and SQLite-backed, so long-running tasks may retain
+  thousands of immutable handoffs. Successor dispatches now receive the
+  verified transitive DAG frontier: every omitted report is covered by a
+  passed report that durably acknowledged it, while full history and the
+  Planner evidence digest remain intact.
+
 ## [9.1.1] - 2026-08-19
 
 - Require every material worker question to reach the coordinator with its

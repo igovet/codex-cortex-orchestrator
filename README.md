@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.1.1-7c3aed" alt="Cortex 9.1.1" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.0-7c3aed" alt="Cortex 9.2.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
@@ -690,6 +690,13 @@ The public MCP surface is deliberately small. The coordinator uses
 reads predecessor reports with `read_worker_report`. Workers use
 `read_dispatch_briefing`, `worker_question`, `get_report_template`,
 and `record_report`.
+
+Worker briefings carry the verified transitive predecessor frontier, not inline
+report bodies or the entire task history. A passed report covers only the exact
+refs its attempt read and acknowledged, so long-running tasks may retain
+thousands of immutable reports without growing every successor prompt or
+discarding evidence. Compact inspect and recovery responses independently
+retain the newest eight summaries; full history remains in SQLite.
 
 Material worker questions are handed off with more than a bare reference:
 `QUESTION_RECORDED` is followed by why input is needed, full self-contained

@@ -242,14 +242,19 @@ source authority or the coordination-only root lock.
 ## Explicit predecessor handoffs
 
 Verified worker handoffs are executable context, not optional prose. Omitted
-`depends_on` supplies every verified predecessor report; an explicit phase list
-selects only those prerequisites, and an empty list declares intentional
-independence. The generated prompt requires the worker to reconcile every
-supplied handoff against current evidence and add the exact generated
+`depends_on` selects all verified predecessors, an explicit phase list selects
+only those prerequisites, and an empty list declares intentional independence.
+Before dispatch, Cortex reduces that selection to its transitive DAG frontier:
+a passed report covers only the exact refs that its attempt read and
+acknowledged. The generated prompt requires the worker to reconcile every
+frontier handoff against current evidence and add the exact generated
 `Predecessor review:` marker to report evidence. Public `record_report` rejects
-missing report acknowledgements. Context count or size overflow fails closed
-with guidance to narrow `depends_on`; Cortex never silently discards an older
-handoff to make a prompt fit.
+missing acknowledgements. Covered reports remain immutable in SQLite and in
+the final Planner evidence digest; they are not discarded or silently omitted.
+There is no task-wide report-count, report-aggregate-byte, or separate
+predecessor-count quota. Individual reports, attempts, briefings, and storage
+integrity remain bounded. Compact inspect/recovery views independently retain
+eight recent summaries.
 
 ## Repository knowledge is routed context, not authority
 
