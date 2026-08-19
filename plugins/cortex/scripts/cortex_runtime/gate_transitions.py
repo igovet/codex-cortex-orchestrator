@@ -43,6 +43,7 @@ bind_symbols(
         "sync_current_wave",
         "task_manifest_baseline",
         "validate_completion_invariants",
+        "validate_governance_obligation_evidence",
     ),
 )
 
@@ -96,7 +97,10 @@ def _validate_skip(
 ) -> dict[str, Any] | None:
     if outcome != "skipped":
         return None
-    if gate == "close" or (gate == "documentation" and state.get("require_delegation")):
+    governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    if gate == "close" or (gate == "documentation" and state.get("require_delegation")) or (
+        governance.get("effective_mode") == "full" and gate in {"governance_activation", "governance_close"}
+    ):
         return _recoverable(
             state,
             revision_correction,
@@ -317,6 +321,7 @@ def _validate_handoff_and_close(
 
 
 def _apply_transition(
+    root: Path,
     task_dir: Path,
     state: dict[str, Any],
     params: dict[str, Any],
@@ -374,7 +379,7 @@ def _apply_transition(
     if outcome in {"passed", "skipped"}:
         candidate_wave = sync_current_wave(state)
         if not candidate_wave:
-            validate_completion_invariants(state)
+            validate_completion_invariants(state, artifact_root=root)
             state["status"] = "completed"
     else:
         sync_current_wave(state)
@@ -537,6 +542,7 @@ def _activate_closure_rework(
     ))
     rework = state.setdefault("closure_rework", {})
     prior = rework.get(gate)
+    iteration = int(prior.get("iteration") or 0) + 1 if isinstance(prior, dict) else 1
     if (
         not isinstance(prior, dict)
         or prior.get("finding_fingerprints") != fingerprints
@@ -552,8 +558,11 @@ def _activate_closure_rework(
             # so the corrective worker receives the exact defect rather than
             # a generic implementation assignment.
             "source_report_refs": report_refs,
+            "iteration": iteration,
             "at": now(),
         }
+    elif isinstance(prior, dict):
+        prior.update({"status": "rework_required", "target_gate": target_gate, "iteration": iteration, "at": now()})
     sync_current_wave(state)
     return target_gate
 
@@ -588,6 +597,17 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
         )
         if recovery is not None:
             return recovery
+        if outcome == "passed":
+            validate_governance_obligation_evidence(
+                state,
+                gate,
+                # Light-mode close obligations are intentionally accumulated
+                # across documentation/review/verification gates.  Full
+                # governance-close evidence is also safe to resolve from the
+                # complete immutable receipt set at this boundary.
+                None if gate == "close" else current_attempt_evidence,
+                artifact_root=root,
+            )
         _validate_handoff_and_close(
             task_dir,
             state,
@@ -632,6 +652,7 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
                     "blockers": actionable,
                 }
         completed, operations = _apply_transition(
+            root,
             task_dir,
             state,
             params,

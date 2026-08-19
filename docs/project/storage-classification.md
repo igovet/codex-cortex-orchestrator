@@ -1,6 +1,6 @@
 # Storage classification ADR
 
-Status: implemented source-tree policy (schema v8).
+Status: implemented source-tree policy (schema v9; task schema remains cortex/v8).
 
 ## Decision
 
@@ -86,7 +86,7 @@ capabilities when a dispatch needs one.
 
 ## Implemented storage workflow
 
-Migrations are append-only through v8 and run in one SQLite transaction with a
+Migrations are append-only through v9 and run in one SQLite transaction with a
 content checksum. Canonical writes first commit content blobs, logical-artifact
 metadata, export authorization, and an outbox job. Projection materialization
 then claims a lease, writes a private regular file by atomic replacement and

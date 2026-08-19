@@ -47,6 +47,8 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
             "profile": attempt["profile"],
             "action": "ask",
             "question": "Which externally visible behavior is authoritative?",
+            "recommendation": "Preserve the currently documented public behavior unless repository evidence proves it is incorrect.",
+            "recommended_answer": "Preserve the currently documented public behavior.",
         })
         self.assertTrue(asked["ok"], asked)
         self.assertFalse((task_dir / "questions").exists())

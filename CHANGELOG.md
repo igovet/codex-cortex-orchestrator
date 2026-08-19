@@ -1,5 +1,53 @@
 # Changelog
 
+## [9.2.3] - 2026-08-19
+
+- Store only a digest of the coordinator governance capability, issue the raw
+  bearer once, refuse replay reissuance, and scrub/invalidate legacy plaintext
+  capability fields on first registry access.
+- Make `governance_mode=off` fail closed unless C1 supplies an exhaustive
+  boolean assessment of every hard and topology trigger; persist that
+  assessment in the policy snapshot and keep text detection promotion-only.
+- Bind independent initiative-close review to a passed `code_reviewer`
+  `governance_close` attempt, its report reference, and a completed native
+  worker session instead of caller-authored reviewer fields.
+- Enforce sensitive-record retention and access policy at write time, including
+  derived/bounded expiry and optional allowed/redacted field rules, while
+  retaining expired rows in append-only audit history.
+- Preserve an approved policy while a worker replacement is pending, reject
+  conflicting initiative replays across every immutable creation field, and
+  support reviewed project-scope promotion into project policy.
+- Count a closure rework iteration as the next attempt ordinal rather than an
+  extra prior failure, so first/second/later corrective dispatches reliably use
+  `high`/`xhigh`/`max` effort without premature escalation.
+- Remove the pipeline, QA, review, and same-strategy attempt caps. Corrective
+  work now remains unbounded while acceptance or findings require it, raises
+  effort through `high`/`xhigh`/`max`, and selects Terra for eligible ordinary
+  work after two prior failures.
+
+## [9.2.2] - 2026-08-19
+
+- Treat `replan_count` as audit history and retain `replan_limit` only as
+  compatibility metadata, so each new evidence-backed review finding can open
+  another corrective pipeline regardless of task length.
+- Preflight material future-wave approval, rework, and obligation rules before
+  recording attempts or gates, preventing rejected replans from leaving an
+  active Planner gate with approved stale state and no dispatch.
+- Recover legacy stranded active tasks through one safe Planner-first resume
+  payload when no worker is live or pending, and extend the black-box JSON-RPC
+  smoke to prove three replans pass despite a persisted legacy limit of two.
+- Make ignored side effects framework-independent at read-only gates: all are
+  non-blocking and digest-audited, while recognized caches such as `.expo`
+  receive an additional ephemeral classification and unknown future-framework
+  outputs remain visible as unclassified receipts.
+- Add an optional localized free-form field beside every native and fallback
+  plan-approval choice; non-empty text durably requests Planner revision and
+  becomes the replacement plan's feedback instead of silently approving.
+- Make report-link publication an at-most-once completion event: only the first
+  full coordinator read after the matching native worker stop returns a link,
+  and the same user-facing message must summarize what completed and what
+  happens next. Early reads and rereads remain link-free.
+
 ## [9.2.1] - 2026-08-19
 
 - Preserve immutable pipeline obligations across context compaction and future-wave

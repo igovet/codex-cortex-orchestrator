@@ -77,7 +77,7 @@ class LazyFilesystemTests(unittest.TestCase):
         control.planning_paths(task_dir)
         self.assertFalse(task_dir.exists())
 
-    def test_briefing_is_the_only_eager_projection_and_reports_are_on_demand(self) -> None:
+    def test_briefing_and_exact_intent_are_the_only_eager_projections_and_reports_are_on_demand(self) -> None:
         started = self._start()
         self.assertTrue(started["ok"], started)
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -85,7 +85,7 @@ class LazyFilesystemTests(unittest.TestCase):
         attempt = state["attempts"][0]
 
         files = [path.relative_to(task_dir).as_posix() for path in task_dir.rglob("*") if path.is_file()]
-        self.assertEqual(files, [attempt["briefing_file"]])
+        self.assertEqual(sorted(files), sorted([attempt["briefing_file"], "intent/user-request.txt"]))
         self.assertFalse((task_dir / "reports").exists())
         self.assertFalse((task_dir / "questions").exists())
         self.assertFalse((task_dir / "planning").exists())
@@ -104,7 +104,8 @@ class LazyFilesystemTests(unittest.TestCase):
             "report_ref": published["report_ref"],
         })
         self.assertTrue(read["ok"], read)
-        markdown = Path(read["report_markdown_path"])
+        self.assertFalse(read["publication_required"])
+        markdown = task_dir / "reports/markdown" / f"{published['report_ref']}.md"
         self.assertTrue(markdown.is_file())
         self.assertFalse((task_dir / "reports/records").exists())
         self.assertFalse((task_dir / "reports/receipts").exists())

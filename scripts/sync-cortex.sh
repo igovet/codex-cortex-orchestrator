@@ -180,8 +180,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "9.2.1":
-    raise SystemExit("plugin/server version must match the 9.2.1 release manifest")
+if module.SERVER_VERSION != version or base_version != "9.2.3":
+    raise SystemExit("plugin/server version must match the 9.2.3 release manifest")
 PY
 }
 
@@ -541,49 +541,6 @@ check_cortex_mcp_approval_mode() {
   echo "ok      Cortex default_tools_approval_mode=approve"
 }
 
-check_granular_mcp_elicitations() {
-  local config_path="${codex_home}/config.toml" status
-  validate_global_config_path || return 1
-  [[ -e "${config_path}" || -L "${config_path}" ]] || return 0
-  status="$("${cortex_python}" - "${config_path}" <<'PY'
-import sys
-import tomllib
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    payload = tomllib.loads(path.read_text(encoding="utf-8"))
-except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-    raise SystemExit(f"error: cannot parse Codex config for granular MCP elicitation: {exc}")
-
-approval_policy = payload.get("approval_policy")
-if not isinstance(approval_policy, dict) or "granular" not in approval_policy:
-    print("not_granular")
-elif not isinstance(approval_policy["granular"], dict):
-    print("invalid")
-elif approval_policy["granular"].get("mcp_elicitations") is True:
-    print("enabled")
-else:
-    print("disabled")
-PY
-)" || return 1
-  case "${status}" in
-    enabled)
-      echo "ok      Codex granular mcp_elicitations=true"
-      ;;
-    not_granular)
-      ;;
-    disabled)
-      echo "outdated Codex global config: granular approval_policy requires mcp_elicitations=true for Cortex worker questions" >&2
-      return 1
-      ;;
-    *)
-      echo "error: Codex granular approval policy is invalid" >&2
-      return 1
-      ;;
-  esac
-}
-
 ensure_cortex_mcp_approval_mode() {
   local config_path="${codex_home}/config.toml" captured="${cortex_mcp_approval_override}"
   if [[ "${mode}" == "dry-run" ]]; then
@@ -616,13 +573,11 @@ install_or_check() {
     [[ "${version}" == "${expected_version}" ]] || { echo "outdated ${plugin_name}@${marketplace_name}: expected ${expected_version}, found ${version:-missing}" >&2; return 1; }
     content_matches || { echo "outdated ${plugin_name}@${marketplace_name}: same-version content drift"; return 1; }
     check_cortex_mcp_approval_mode || return 1
-    check_granular_mcp_elicitations || return 1
     check_global_subagent_model || return 1
     sync_cortex_hook_trust || return 1
     echo "ok      ${plugin_name}@${marketplace_name} (${expected_version}, content verified)"; return 0
   fi
   capture_cortex_mcp_approval_override || return 1
-  check_granular_mcp_elicitations || return 1
   capture_global_subagent_model || return 1
   original_global_subagent_model_state="${global_subagent_model_state}"
   original_global_config_mode="${global_config_mode}"

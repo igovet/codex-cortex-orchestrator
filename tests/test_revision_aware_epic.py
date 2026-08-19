@@ -105,8 +105,10 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             migrations = connection.execute(
                 "SELECT version, name FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual(migrations[-1]["version"], 8)
-            self.assertEqual(migrations[-1]["name"], "revision-aware-orchestration")
+            self.assertEqual(migrations[-2]["version"], 8)
+            self.assertEqual(migrations[-2]["name"], "revision-aware-orchestration")
+            self.assertEqual(migrations[-1]["version"], 9)
+            self.assertEqual(migrations[-1]["name"], "governance-ledger")
             tables = {
                 row["name"]
                 for row in connection.execute(
@@ -146,7 +148,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "report_validation_failed")
         self.assertIn("report must contain exactly", rejected["diagnostics"][0]["message"])
 
-        with self.assertRaisesRegex(ValueError, "closure finding contains unknown fields"):
+        with self.assertRaisesRegex(ValueError, "gate_result finding contains unknown fields"):
             control.sanitize_gate_result_payload(
                 {
                     "decision": "rework",
@@ -345,39 +347,49 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertTrue(retry["ok"], retry)
         self.assertEqual(retry["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in retry["dispatches"]], ["qa"])
-        retried = control.load_task_state_for_artifact(task_dir)
-        corrective_qa = next(
-            item for item in retried["attempts"]
-            if item["gate"] == "qa" and not item.get("invalidated")
-        )
-        self.assertIn(qa_report["report_ref"], corrective_qa["context_report_ids"])
-
-        generic_qa_report = self.report_for(corrective_qa, self.project)
-        generic_qa_report["evidence"].append(
-            control._predecessor_review_marker(corrective_qa["context_report_ids"])
-        )
-        generic_qa = control.publish_worker_report(
-            {
-                "project_root": str(self.project),
-                "task_id": state["task_id"],
-                "attempt_id": corrective_qa["attempt_id"],
-                "profile": corrective_qa["profile"],
-                "report": generic_qa_report,
-            }
-        )
-        self.assertTrue(generic_qa["ok"], generic_qa)
-        held = control.continue_orchestration(
-            {
-                "project_root": str(self.project),
-                "task_ref": started["task_ref"],
-                "step": retry["step"],
-                "results": [{"report_ref": generic_qa["report_ref"]}],
-            }
-        )
-        self.assertTrue(held["ok"], held)
-        self.assertEqual([item["phase"] for item in held["dispatches"]], ["qa"])
+        held = retry
+        for failure_number in range(1, 6):
+            retried = control.load_task_state_for_artifact(task_dir)
+            corrective_qa = next(
+                item for item in retried["attempts"]
+                if item["gate"] == "qa" and not item.get("invalidated")
+            )
+            self.assertIn(qa_report["report_ref"], corrective_qa["context_report_ids"])
+            generic_qa_report = self.report_for(corrective_qa, self.project)
+            generic_qa_report["evidence"].append(
+                control._predecessor_review_marker(corrective_qa["context_report_ids"])
+            )
+            generic_qa = control.publish_worker_report(
+                {
+                    "project_root": str(self.project),
+                    "task_id": state["task_id"],
+                    "attempt_id": corrective_qa["attempt_id"],
+                    "profile": corrective_qa["profile"],
+                    "report": generic_qa_report,
+                }
+            )
+            self.assertTrue(generic_qa["ok"], generic_qa)
+            held = control.continue_orchestration(
+                {
+                    "project_root": str(self.project),
+                    "task_ref": started["task_ref"],
+                    "step": held["step"],
+                    "results": [{"report_ref": generic_qa["report_ref"]}],
+                }
+            )
+            self.assertTrue(held["ok"], held)
+            self.assertEqual(held["outcome"], "ready_to_spawn")
+            self.assertEqual([item["phase"] for item in held["dispatches"]], ["qa"])
+            arguments = held["dispatches"][0]["arguments"]
+            self.assertEqual(
+                arguments["reasoning_effort"],
+                "high" if failure_number == 1 else "xhigh" if failure_number == 2 else "max",
+            )
+            if failure_number >= 2:
+                self.assertEqual(arguments["model"], "gpt-5.6-terra")
         held_state = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual(held_state["orchestrate_gate_failure_counts"]["qa"], 1)
+        self.assertEqual(held_state["orchestrate_gate_failure_counts"]["qa"], 5)
+        self.assertNotEqual(held_state["status"], "blocked")
         self.assertFalse(
             any(item["gate"] in {"review", "security"} and not item.get("invalidated") for item in held_state["attempts"])
         )
@@ -664,10 +676,10 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(advanced["outcome"], "ready_to_spawn")
         self.assertEqual(advanced["dispatches"][0]["phase"], "discover")
 
-    def test_repeated_reportless_stops_use_three_failure_budget(self) -> None:
-        current = self.start(objective="bounded reportless stop recovery")
+    def test_repeated_reportless_stops_remain_unbounded_and_raise_effort(self) -> None:
+        current = self.start(objective="unbounded reportless stop recovery")
         parent_session = None
-        for failure_number in range(1, control.MAX_ORCHESTRATE_GATE_FAILURES + 1):
+        for failure_number in range(1, 6):
             task_dir, state = self.task_dir_and_state(current)
             attempt = next(
                 item for item in state["attempts"]
@@ -699,8 +711,6 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
                 "reason": "native_worker_stopped_without_report",
                 "dispatch_ref": attempt["dispatch_ref"],
             }
-            if failure_number == control.MAX_SAME_STRATEGY_FAILURES:
-                result["next_strategy"] = "use an alternate repository evidence path"
             current = control.continue_orchestration({
                 "project_root": str(self.project),
                 "task_ref": current["task_ref"],
@@ -708,17 +718,18 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
                 "results": [result],
             })
             self.assertTrue(current["ok"], current)
-            if failure_number < control.MAX_ORCHESTRATE_GATE_FAILURES:
-                self.assertEqual(current["outcome"], "ready_to_spawn")
-                self.assertEqual(len(current["dispatches"]), 1)
-        self.assertEqual(current["outcome"], "blocked")
-        self.assertEqual(current["dispatches"], [])
+            self.assertEqual(current["outcome"], "ready_to_spawn")
+            self.assertEqual(len(current["dispatches"]), 1)
+            self.assertEqual(
+                current["dispatches"][0]["arguments"]["reasoning_effort"],
+                "high" if failure_number == 1 else "xhigh" if failure_number == 2 else "max",
+            )
         _, final_state = self.task_dir_and_state(current)
         self.assertEqual(
             final_state["orchestrate_gate_failure_counts"]["discover"],
-            control.MAX_ORCHESTRATE_GATE_FAILURES,
+            5,
         )
-        self.assertIn("rework budget exhausted", final_state["blocked_reason"])
+        self.assertNotEqual(final_state["status"], "blocked")
 
     def test_localized_question_projection_keeps_canonical_option_ids(self) -> None:
         canonical = control._question_options(
@@ -728,7 +739,12 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             ]
         )
         question, localized = control._localized_question_view(
-            {"question": "Which schema should be used?", "options": canonical},
+            {
+                "question": "Which schema should be used?",
+                "options": canonical,
+                "recommendation": "Use the existing schema to preserve compatibility and minimize migration risk.",
+                "recommended_option_ids": ["use_existing_schema"],
+            },
             {
                 "localized_question": "Какую схему использовать?",
                 "localized_options": [
@@ -748,7 +764,12 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(answer["option_ids"], ["use_existing_schema"])
         with self.assertRaisesRegex(ValueError, "localized option_id"):
             control._localized_question_view(
-                {"question": "Which schema?", "options": canonical},
+                {
+                    "question": "Which schema?",
+                    "options": canonical,
+                    "recommendation": "Use the existing schema to preserve compatibility.",
+                    "recommended_option_ids": ["use_existing_schema"],
+                },
                 {"localized_options": [{"option_id": "wrong", "label": "Неверно"}, {"label": "Второе"}]},
             )
 
@@ -845,7 +866,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             self.assertIn("No plugin or Codex configuration was changed", completed.stdout)
             self.assertFalse((Path(home) / "codex" / "config.toml").exists())
 
-    def test_installer_rejects_disabled_granular_mcp_elicitations(self) -> None:
+    def test_installer_accepts_disabled_granular_mcp_elicitations_for_chat_flow(self) -> None:
         script = Path(__file__).parents[1] / "scripts" / "sync-cortex.sh"
         with tempfile.TemporaryDirectory() as home:
             codex_home = Path(home) / "codex"
@@ -867,8 +888,8 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(completed.returncode, 1)
-            self.assertIn("granular approval_policy requires mcp_elicitations=true", completed.stderr)
+            self.assertEqual(completed.returncode, 0)
+            self.assertNotIn("mcp_elicitations", completed.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

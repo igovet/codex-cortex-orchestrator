@@ -34,7 +34,10 @@ replacement must be a singleton Planner wave after scope, discovery, and all
 pre-implementation design gates. No-op and transport-only replacements retain
 the existing approval.
 
-The retry policy has two separate limits: `same_strategy_limit=2` and
-`phase_attempt_limit=3`. After two failures of the same approach, pause and
-require a materially different strategy or replanning before the third phase
-attempt. The third failed phase attempt blocks the task with a durable handoff.
+Pipeline rework is unbounded while acceptance criteria, required verification,
+or canonical findings remain unresolved. Failure counts are durable audit and
+routing evidence, not a retry budget. Cortex raises reasoning effort after
+each unresolved cycle (`high`, then `xhigh`, then `max`) and routes eligible
+ordinary work to Terra after two failures unless the user explicitly selected
+a model. Use a materially different `next_strategy` or replan when evidence
+supports it, but never require either merely to authorize another correction.

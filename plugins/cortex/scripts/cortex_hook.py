@@ -540,12 +540,23 @@ def report_publication_context(event: dict) -> str | None:
     if str(event.get("hook_event_name")) != "PostToolUse" or str(event.get("tool_name")) != CORTEX_REPORT_TOOL:
         return None
     result = structured_tool_result(event)
+    if not isinstance(result, dict) or result.get("publication_required") is not True:
+        return None
     link = str(result.get("report_markdown_link") or "") if isinstance(result, dict) else ""
     if not link or len(link) > 4096 or "\n" in link or not link.startswith("["):
         return None
+    completion = result.get("completion_update")
+    if not isinstance(completion, dict):
+        return None
+    summary = str(completion.get("summary") or "").strip()
+    next_step = str(completion.get("next") or "").strip()
+    if not summary or not next_step or len(summary) > 1000 or len(next_step) > 1000:
+        return None
     return (
-        "REPORT PUBLICATION REQUIRED: publish this exact report_markdown_link verbatim in the main chat now, before "
-        f"any other Cortex report read or lifecycle call: {link}"
+        "REPORT COMPLETION PUBLICATION REQUIRED: the native subagent durably completed and this is the one allowed "
+        "publication. In one main-chat message, briefly explain in the user's language what completed using only "
+        f"this bounded summary ({summary}), what happens next using this bounded next-step basis ({next_step}), and "
+        f"include this exact report_markdown_link once: {link}. Never publish the link alone or on a later reread."
     )
 
 
@@ -756,7 +767,7 @@ def stopped_worker_after_wait_context(
         f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_report'). Do not wait on, respawn, "
         f"or follow up the stopped native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). "
         f"{inspect}; then submit exactly one result with status='failed', this dispatch_ref, and this reason so Cortex can apply its "
-        "bounded retry policy."
+        "unbounded corrective policy and raise effort after repeated failures."
     )
 
 
@@ -1027,7 +1038,8 @@ def main() -> None:
                         f"Call manage_orchestration(intent='inspect', task_ref={public_ref!r}) exactly once before any other lifecycle, dispatch, or report-read call. "
                         "Treat the returned context_handoff, current pipeline, report refs, and relative step as authoritative. "
                         "Do not call start_orchestration again, replay completed dispatches, or reconstruct state from the transcript. "
-                        "Publish every returned report_markdown_link verbatim in the main chat before the next lifecycle call."
+                        "Publish a report link only when read_worker_report returns publication_required=true; include "
+                        "its completion summary and next-step explanation in the same message, and never republish on reread."
                     )
                 else:
                     context += (

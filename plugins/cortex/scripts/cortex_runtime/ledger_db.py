@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 8
+DATABASE_SCHEMA_VERSION = 9
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
@@ -501,6 +501,29 @@ _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS tool_observations_attempt_idx ON tool_observations(task_id, attempt_id, context_epoch, last_seen_at)",
 )
 
+# Governance is deliberately appended to the existing ledger rather than
+# creating a second database or rewriting any v1-v8 tables.  Bodies are kept
+# as canonical JSON plus a digest in the append-only record table; callers
+# may additionally associate an immutable artifact from the normal artifact
+# catalog when the record is task-scoped.  This keeps migration v9 safe for
+# existing active tasks and preserves the v8 transaction/lock boundary.
+_GOVERNANCE_SCHEMA_STATEMENTS = (
+    "CREATE TABLE IF NOT EXISTS initiatives(initiative_ref TEXT PRIMARY KEY, parent_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE RESTRICT, title TEXT NOT NULL, goal TEXT NOT NULL, owner TEXT NOT NULL, risk TEXT NOT NULL CHECK(risk IN ('low','moderate','high','critical')), acceptance_oracle_artifact_ref TEXT, status TEXT NOT NULL CHECK(status IN ('proposed','active','blocked','completed','closed','cancelled')), revision INTEGER NOT NULL CHECK(revision >= 1), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(parent_ref, title))",
+    "CREATE INDEX IF NOT EXISTS initiatives_parent_idx ON initiatives(parent_ref, status, updated_at)",
+    "CREATE INDEX IF NOT EXISTS initiatives_status_idx ON initiatives(status, updated_at)",
+    "CREATE TABLE IF NOT EXISTS initiative_task_links(initiative_ref TEXT NOT NULL REFERENCES initiatives(initiative_ref) ON DELETE CASCADE, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, relationship TEXT NOT NULL CHECK(relationship IN ('milestone','deliverable','corrective')), milestone TEXT, deliverable TEXT, corrective INTEGER NOT NULL DEFAULT 0 CHECK(corrective IN (0,1)), expected_revision INTEGER NOT NULL DEFAULT 1 CHECK(expected_revision >= 1), created_at TEXT NOT NULL, PRIMARY KEY(initiative_ref, task_id, relationship))",
+    "CREATE INDEX IF NOT EXISTS initiative_task_links_task_idx ON initiative_task_links(task_id, relationship)",
+    "CREATE TABLE IF NOT EXISTS initiative_dependencies(dependency_ref TEXT PRIMARY KEY, source_type TEXT NOT NULL CHECK(source_type IN ('initiative','task')), source_ref TEXT NOT NULL, target_type TEXT NOT NULL CHECK(target_type IN ('initiative','task')), target_ref TEXT NOT NULL, dependency_type TEXT NOT NULL CHECK(dependency_type IN ('blocks','requires','relates_to','follows')), created_at TEXT NOT NULL, UNIQUE(source_type, source_ref, target_type, target_ref, dependency_type), CHECK(NOT(source_type = target_type AND source_ref = target_ref)))",
+    "CREATE INDEX IF NOT EXISTS initiative_dependencies_source_idx ON initiative_dependencies(source_type, source_ref)",
+    "CREATE INDEX IF NOT EXISTS initiative_dependencies_target_idx ON initiative_dependencies(target_type, target_ref)",
+    "CREATE TABLE IF NOT EXISTS governance_records(record_ref TEXT PRIMARY KEY, initiative_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE SET NULL, task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL, record_type TEXT NOT NULL CHECK(record_type IN ('policy','decision','ruling','preference','assumption','risk','learning','reflection','exception','promotion')), revision INTEGER NOT NULL CHECK(revision >= 1), supersedes TEXT REFERENCES governance_records(record_ref) ON DELETE RESTRICT, status TEXT NOT NULL CHECK(status IN ('pending','active','approved','rejected','superseded','expired')), content_json TEXT NOT NULL, content_digest TEXT NOT NULL, content_artifact_ref TEXT, approval_basis_json TEXT, created_by TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT, UNIQUE(initiative_ref, task_id, record_type, revision))",
+    "CREATE INDEX IF NOT EXISTS governance_records_scope_idx ON governance_records(initiative_ref, task_id, record_type, revision DESC)",
+    "CREATE INDEX IF NOT EXISTS governance_records_active_idx ON governance_records(status, record_type, expires_at)",
+    "CREATE TABLE IF NOT EXISTS governance_links(link_ref TEXT PRIMARY KEY, record_ref TEXT NOT NULL REFERENCES governance_records(record_ref) ON DELETE CASCADE, initiative_ref TEXT REFERENCES initiatives(initiative_ref) ON DELETE CASCADE, task_id TEXT REFERENCES tasks(task_id) ON DELETE CASCADE, lane_id TEXT REFERENCES lanes(lane_id) ON DELETE CASCADE, finding_fingerprint TEXT, evidence_ref TEXT, relationship TEXT NOT NULL CHECK(relationship IN ('initiative','task','lane','finding','evidence')), created_at TEXT NOT NULL, CHECK(initiative_ref IS NOT NULL OR task_id IS NOT NULL OR lane_id IS NOT NULL OR finding_fingerprint IS NOT NULL OR evidence_ref IS NOT NULL))",
+    "CREATE INDEX IF NOT EXISTS governance_links_record_idx ON governance_links(record_ref, relationship)",
+    "CREATE INDEX IF NOT EXISTS governance_links_target_idx ON governance_links(initiative_ref, task_id, lane_id, finding_fingerprint)",
+)
+
 
 def _migration_plan() -> tuple[_Migration, ...]:
     return (
@@ -512,6 +535,7 @@ def _migration_plan() -> tuple[_Migration, ...]:
         _Migration(6, "crash-safe-prune-tombstones", _PRUNE_SCHEMA_STATEMENTS),
         _Migration(7, "canonical-content-blobs-and-logical-artifacts", _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS),
         _Migration(8, "revision-aware-orchestration", _REVISION_AWARE_ORCHESTRATION_SCHEMA_STATEMENTS),
+        _Migration(9, "governance-ledger", _GOVERNANCE_SCHEMA_STATEMENTS),
     )
 
 
@@ -538,6 +562,15 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "tool_observations", "task_revisions_created_idx", "plan_revisions_created_idx",
             "worker_sessions_status_idx", "attempt_messages_delivery_idx", "question_batches_status_idx",
             "orchestration_trace_task_idx", "tool_observations_attempt_idx",
+        },
+        9: {
+            "initiatives", "initiatives_parent_idx", "initiatives_status_idx",
+            "initiative_task_links", "initiative_task_links_task_idx",
+            "initiative_dependencies", "initiative_dependencies_source_idx",
+            "initiative_dependencies_target_idx", "governance_records",
+            "governance_records_scope_idx", "governance_records_active_idx",
+            "governance_links", "governance_links_record_idx",
+            "governance_links_target_idx",
         },
     }
     present = {
@@ -591,6 +624,13 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "question_answers": {"batch_id", "question_key", "answer_original", "answer_original_language", "answer_option_ids_json", "answer_en", "translation_status", "translated_by", "translated_at"},
             "orchestration_trace": {"trace_id", "task_id", "attempt_id", "event", "occurred_at", "metadata_json"},
             "tool_observations": {"observation_id", "task_id", "attempt_id", "context_epoch", "fingerprint", "tool_name", "normalized_arguments", "workspace_generation", "result_digest", "coverage", "status", "first_seen_at", "last_seen_at", "repeat_count"},
+        },
+        9: {
+            "initiatives": {"initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "status", "revision", "created_at", "updated_at"},
+            "initiative_task_links": {"initiative_ref", "task_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "created_at"},
+            "initiative_dependencies": {"dependency_ref", "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "created_at"},
+            "governance_records": {"record_ref", "initiative_ref", "task_id", "record_type", "revision", "supersedes", "status", "content_json", "content_digest", "content_artifact_ref", "approval_basis_json", "created_by", "created_at", "expires_at"},
+            "governance_links": {"link_ref", "record_ref", "initiative_ref", "task_id", "lane_id", "finding_fingerprint", "evidence_ref", "relationship", "created_at"},
         },
     }
     for table, expected_columns in column_requirements.get(version, {}).items():

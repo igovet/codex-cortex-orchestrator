@@ -697,7 +697,7 @@ def planning(label: str) -> dict[str, object]:
                 "title": "Verify fixture lifecycle",
                 "objective": "Record a complete, reproducible fixture result.",
                 "profile": "backend_dev",
-                "allowed_paths": ["."],
+                "allowed_paths": ["result.md"],
                 "acceptance_criteria": ["The fixture result is recorded."],
                 "verification": ["Run the deterministic fixture command."],
             }],
@@ -881,10 +881,14 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
                 "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
             } for item in report_records)
             or any(
-                not isinstance(item.get("closure"), dict)
-                or item["closure"].get("decision") != "pass"
-                or item["closure"].get("findings") != []
-                or item["closure"].get("verification", {}).get("required_missing") != []
+                (
+                    lambda envelope: (
+                        not isinstance(envelope, dict)
+                        or envelope.get("decision") != "pass"
+                        or envelope.get("findings") != []
+                        or envelope.get("verification", {}).get("required_missing") != []
+                    )
+                )(item.get("gate_result") if isinstance(item.get("gate_result"), dict) else item.get("closure"))
                 for item in closure_records
             )
             or any(
@@ -938,9 +942,9 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "Treat a native child as successful only "
         "when its final response starts with REPORT_RECORDED and the referenced report was read successfully. If a "
         "stopped child returns anything else and no durable report exists, call continue_orchestration once for that "
-        "current wave with status=failed, the exact dispatch_ref from the dispatch, and the child's exact bounded "
+        "current wave with status=failed, the exact dispatch_ref from the dispatch, and the child's exact "
         "failure text as reason; never submit an empty result or a reportless success, and let Cortex issue any "
-        "bounded retry dispatch. Finish only after close evidence and handoff. Do not ask for manual argument "
+        "corrective dispatch with escalated effort. Finish only after close evidence and handoff. Do not ask for manual argument "
         "corrections. "
         f"The exact project_root is {project}. "
     )

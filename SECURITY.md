@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.1` source line. The public
+Security fixes are prepared for the current `9.2.3` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
@@ -55,8 +55,29 @@ Reports retain the strict seven-field
 `cortex/report/v1` contract. The sensitive diagnostic log at
 `~/.codex/logs/cortex-tool-errors.jsonl` is permission-protected and capped at
 10 MiB by retaining complete newest records and dropping the oldest records
-first. Secrets, credentials, personal data, and private report contents must
+first. New records retain only value-free input shape metadata (source, byte
+size, bounded top-level field names, and sensitive-field count), never tool
+argument values, report bodies, question text, or user-authored content.
+Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
+
+The governance bearer is returned only with the original successful start
+response. Cortex persists its SHA-256 digest, never the reusable plaintext,
+and does not reissue it on an idempotent retry. Any legacy plaintext bearer is
+deleted and invalidated on first registry access; the affected task fails
+closed instead of preserving a possibly compromised credential. Workers must
+never receive or persist this coordinator-only bearer.
+
+`governance_mode=off` is fail-closed: C1 callers must submit an exhaustive
+boolean assessment of all documented hard and topology triggers. Keyword
+classification and positive structured evidence may only raise the governance
+floor. Sensitive governance records require an approved exact-scope/type
+policy with bounded `retention_days` and allowed actor roles; record expiry is
+derived or constrained by that policy, optional allowed/redacted field rules
+are enforced before persistence, and expired rows remain only as audit
+history. Independent close evidence is bound to the canonical passed
+`governance_close` code-reviewer attempt, its report reference, and a completed
+native worker session rather than caller-authored reviewer labels.
 
 Each worker-authored report envelope remains bounded to 64 KiB and each
 attempt to 32 reports. The server-owned decision snapshot may enlarge the
@@ -70,9 +91,11 @@ task-wide canonical `resolved_user_decisions` snapshot; replacement briefings
 carry a bounded recent projection so answered intent survives attempt changes.
 
 Worker-facing caller, input, and schema validation failures are structured as
-same-attempt corrections and do not consume recovery budget. Failed work may
-reuse one strategy at most twice and may fail one phase at most three times;
-the third attempt requires a materially different strategy or pipeline replan.
+same-attempt corrections and do not consume recovery budget. Evidence-backed
+pipeline rework has no attempt or same-strategy limit: unresolved acceptance,
+verification, or canonical findings continue to produce corrective dispatches.
+Repeated failures automatically raise reasoning effort and, for eligible
+workers, escalate routing to Terra instead of blocking the task.
 Only explicit non-retryable integrity, storage, permission, or unavailable
 identity failures terminate that worker attempt. Bounded briefing, report, and
 coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
@@ -84,21 +107,24 @@ approval; no-op or transport-only changes do not invalidate it. A mismatch
 blocks dispatch with recoverable reapproval guidance.
 
 Questions shown to users by the root coordinator must be localized to the
-user's original language. Before native MCP elicitation, the root must publish
-a detailed user-language commentary preamble explaining why the decision is
-needed, its consequences, and the recommendation. That commentary provides
-context only: it must not collect an answer or replace the native elicitation
-control. Worker protocol messages and durable worker reports remain English.
+user's original language. Cortex returns a bounded `cortex/chat-interaction/v1`
+projection; the root renders it as one detailed ordinary final assistant
+message and ends the turn. It must not call a UI, input, approval, or
+elicitation tool. The user's next ordinary message is recorded against the same
+durable interaction before the exact worker resumes. Worker protocol messages
+and durable worker reports remain English.
 Workers return `QUESTION_RECORDED` with a complete handoff containing the
 decision context, full self-contained questions, concrete outcome-based options,
-descriptions, trade-offs, and recommendation. Generic numbered, A/B, or
+descriptions, trade-offs, and recommendation. Every question must name the
+LLM's recommended option IDs or recommended free-text answer and explain the
+rationale. Generic numbered, A/B, or
 recommended/alternative placeholders are rejected; descriptions may be shown
-with rendered options. Localized UI text must not alter canonical question or
+with rendered options. Localized chat projection text must not alter canonical question or
 answer values. Batch projections accept the documented `localized_question`,
 `localized_header`, `localized_options`, and `localized_custom_label` fields,
 plus the compatibility aliases `question`, `header`, `options`, and
-`custom_label`. Choice forms always include optional free-form input in
-addition to server-owned options. Localized custom text is preserved in its
+`custom_label`. Choice questions always permit optional free-form constraints
+in addition to server-owned options. Localized custom text is preserved in its
 original form and withheld from workers until a canonical English translation
 is recorded. Successors may reopen a resolved decision only after an explicit
 current user change.
@@ -108,6 +134,6 @@ working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This repository is a source candidate only. The 9.2.1+codex.20260819110617
+This repository is a source candidate only. The 9.2.3+codex.20260819173812
 build has not been installed into a user's plugin and is not published or
 tagged.

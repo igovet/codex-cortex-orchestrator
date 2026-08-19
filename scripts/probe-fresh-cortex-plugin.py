@@ -146,7 +146,7 @@ def main() -> int:
         rows = [json.loads(line) for line in rpc.stdout.splitlines() if line.strip()]
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
         expected_tools = {
-            "start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question",
+            "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question",
             "get_report_template", "record_report",
             "read_dispatch_briefing", "read_worker_report",
         }

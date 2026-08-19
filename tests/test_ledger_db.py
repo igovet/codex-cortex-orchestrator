@@ -354,6 +354,28 @@ class LedgerDatabaseTests(unittest.TestCase):
                     "logical_artifacts",
                 )
 
+    def test_v8_to_v9_upgrade_preserves_active_tasks_and_is_idempotent(self) -> None:
+        """The governance migration must extend, not replace, a live v8 ledger."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            migrations = ledger_db._migration_plan()
+            v8_plan = migrations[:8]
+            with mock.patch.object(ledger_db, "_migration_plan", return_value=v8_plan):
+                ledger_db.ensure_database(root)
+                self.create_task(root, "active-v8-task")
+
+            ledger_db.ensure_database(root)
+            first_history = ledger_db.migration_history(root)
+            first_task = ledger_db.load_task(root, "active-v8-task")
+            self.assertEqual([item["version"] for item in first_history], list(range(1, 10)))
+            self.assertIsNotNone(first_task)
+            self.assertEqual(first_task[1]["status"], "active")
+
+            ledger_db.ensure_database(root)
+            self.assertEqual(ledger_db.migration_history(root), first_history)
+            second_task = ledger_db.load_task(root, "active-v8-task")
+            self.assertEqual(second_task, first_task)
+
     def test_projection_ack_requires_the_current_nonexpired_lease_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"

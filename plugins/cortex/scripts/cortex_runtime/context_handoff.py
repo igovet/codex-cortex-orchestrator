@@ -175,6 +175,10 @@ def _context_handoff(
             "dispatch_ref": redact(attempt.get("dispatch_ref", ""), 128),
             "task_name": redact(spawn_request.get("task_name", ""), 128),
             "worker": worker_slots.get(str(attempt.get("attempt_id") or "")),
+            "lifecycle_status": redact(attempt.get("lifecycle_status", ""), 64) or None,
+            "spawn_lease_expires_at": attempt.get("spawn_lease_expires_at"),
+            "worker_lease_expires_at": attempt.get("worker_lease_expires_at"),
+            "last_heartbeat_at": attempt.get("last_heartbeat_at"),
         }
         if attempt.get("status") == AWAITING_HOST_SPAWN:
             briefing_file = str(attempt.get("briefing_file") or "")
@@ -309,8 +313,9 @@ def _context_handoff(
         f"Call manage_orchestration(intent=inspect, task_ref={task_ref}) once after context compaction; "
         "treat the returned context_handoff and current ledger as authoritative. Do not call "
         "start_orchestration again, do not replay completed dispatches, and do not use a raw transcript. "
-        "After rehydration, follow the returned relative step and publish every exact report_markdown_link "
-        "before the next lifecycle or report-read call. "
+        "After rehydration, follow the returned relative step. Publish a report link only when "
+        "read_worker_report returns publication_required=true, with its completion summary and next step in the "
+        "same message; never republish on reread. "
         + " ".join(recovery_actions)
     )
     return {
@@ -318,7 +323,17 @@ def _context_handoff(
         "task_ref": task_ref,
         "task_id": redact(state.get("task_id", ""), 128),
         "generated_at": now(),
-        "goal": redact(task.get("user_request") or task.get("objective", ""), 4000),
+        "goal": redact(
+            task.get("user_request_projection") or task.get("user_request") or task.get("objective", ""),
+            4000,
+        ),
+        "user_intent": {
+            "artifact_ref": task.get("user_intent_artifact_ref"),
+            "artifact_path": task.get("user_intent_artifact_path"),
+            "digest_sha256": task.get("user_request_digest"),
+            "byte_size": task.get("user_intent_byte_size"),
+            "exact": True,
+        },
         "acceptance_criteria": [redact(item, 1000) for item in (task.get("acceptance_criteria") or [])[:32]],
         "verified_facts": verified_facts[-MAX_CONTEXT_REPORTS:],
         "decisions": decisions[-16:],
@@ -338,7 +353,7 @@ def _context_handoff(
             "hidden_dispatch": "Hidden spawn_agent requests retain fork_turns=none so the coordinator transcript is not inherited.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",
             "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn. Active workers are waitable exact child ids. A stopped worker without a report is terminal and requires one exact failed continuation; it is never waitable, followup-resumable, or respawned. A worker paused on a durable question may be resumed only through followup_task to its persisted host_agent_id when the returned action authorizes that resume.",
-            "report_publication": "Read each report_ref, then publish the returned report_markdown_link verbatim in the main chat before any other lifecycle call or report read.",
+            "report_publication": "After a native worker completes, read each report_ref. Publish a link only when read_worker_report returns publication_required=true, in the same message as a concise completion summary and next step. Rereads never republish.",
             "instruction_source": "cortex:orchestrator and cortex-control skills; this handoff restores state and invariants, not a replacement skill source.",
         },
         "next_action": next_action,

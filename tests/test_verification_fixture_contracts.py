@@ -38,13 +38,19 @@ class VerificationFixtureContractTests(unittest.TestCase):
             subprocess.run(["git", "init", "-q"], cwd=project, check=True)
             (project / "changed.txt").write_text("fixture\n", encoding="utf-8")
 
-            for factory in (COLD_BOOT.passing_closure, LUNA_EVAL.passing_closure):
+            for factory in (COLD_BOOT.passing_gate_result, LUNA_EVAL.passing_closure):
                 closure = factory(project, "close")
                 self.assertEqual(closure["decision"], "pass")
                 self.assertEqual(closure["findings"], [])
                 self.assertEqual(closure["verification"]["required_missing"], [])
                 self.assertEqual(closure["workspace"]["untracked"], ["changed.txt"])
-                self.assertEqual(cortex.sanitize_closure_payload(closure), closure)
+                closure_compatible = {
+                    key: value for key, value in closure.items() if key != "failure_class"
+                }
+                self.assertEqual(
+                    cortex.sanitize_closure_payload(closure_compatible),
+                    closure_compatible,
+                )
 
     def test_deterministic_fixtures_complete_from_canonical_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -58,6 +64,8 @@ class VerificationFixtureContractTests(unittest.TestCase):
 
         self.assertEqual(cold_boot["status"], "PASS")
         self.assertTrue(cold_boot["dynamic_replan_applied"])
+        self.assertGreaterEqual(cold_boot["dynamic_replan_count"], 3)
+        self.assertGreater(cold_boot["replan_count"], cold_boot["legacy_replan_limit"])
         self.assertTrue(cold_boot["pending_implementation_drop_rejected"])
         self.assertTrue(cold_boot["implementation_phase_seen"])
         self.assertTrue(luna)

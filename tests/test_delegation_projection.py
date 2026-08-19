@@ -80,7 +80,10 @@ class RequiredBriefingProjectionTests(unittest.TestCase):
             delegated = control.record_delegation(self._params())
 
         self.assertEqual(delegated["spawn_request"]["briefing_digest"], delegated["briefing_digest"])
-        job = ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)[0]
+        job = next(
+            item for item in ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)
+            if item["projection_type"] == "dispatch_briefing"
+        )
         self.assertEqual(job["status"], "ready")
         self.assertEqual(job["materialized_digest"], delegated["briefing_digest"])
 
@@ -90,9 +93,10 @@ class RequiredBriefingProjectionTests(unittest.TestCase):
                 control.record_delegation(self._params())
 
         jobs = ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["status"], "failed")
-        self.assertIn("disk unavailable", str(jobs[0]["last_error"]))
+        self.assertEqual(len(jobs), 2)
+        failed = next(item for item in jobs if item["status"] == "failed")
+        self.assertEqual(failed["projection_type"], "user_intent")
+        self.assertIn("disk unavailable", str(failed["last_error"]))
         _, state, _, _ = ledger_db.load_task(self.root, "projection-boundary")
         self.assertEqual(state["attempts"][-1]["status"], "failed")
         self.assertEqual(
@@ -142,10 +146,10 @@ class RequiredBriefingProjectionTests(unittest.TestCase):
 
         self.assertTrue(prepared["recorded"])
         self.assertEqual(len(prepared["spawn_requests"]), 2)
-        self.assertEqual(len(observed_calls), 2)
+        self.assertEqual(len(observed_calls), 3)
         self.assertEqual(
             [job["status"] for job in ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)],
-            ["ready", "ready"],
+            ["ready", "ready", "ready"],
         )
 
     def test_batch_precommit_validation_failure_leaves_no_attempt_or_projection(self) -> None:
@@ -166,7 +170,9 @@ class RequiredBriefingProjectionTests(unittest.TestCase):
         materialize.assert_not_called()
         _, state, _, _ = ledger_db.load_task(self.root, "projection-boundary")
         self.assertEqual(state["attempts"], [])
-        self.assertEqual(ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10), [])
+        jobs = ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["projection_type"], "user_intent")
 
 
 if __name__ == "__main__":

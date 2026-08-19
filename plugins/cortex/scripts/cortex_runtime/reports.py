@@ -477,9 +477,13 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if params.get("_require_close_validation"):
             _validate_close_report(task_dir, state, attempt, report)
         if is_closure_gate and gate_result is None and closure is None:
-            raise ValueError("review and close reports require a top-level closure sibling or canonical gate_result")
+            raise ValueError("review and close reports require the canonical top-level gate_result")
         if gate_result is None and closure is not None:
             gate_result = {**closure, "failure_class": "product"}
+        # ``closure`` remains accepted only as an input compatibility alias.
+        # Canonical digests, artifacts, reports, and successor prompts contain
+        # exactly one result envelope: gate_result.
+        closure = None
         raw_planning = params.get("planning")
         planning = None
         if raw_planning is not None:
@@ -917,14 +921,15 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
             "project files changed during read-only",
-            "review and close reports require a top-level closure sibling",
+            "review and close reports require the canonical top-level gate_result",
+            "closure ", "gate_result ", "non-pass gate_result ",
         )):
             code = "report_validation_failed"
             outcome = "needs_correction"
             next_action = (
                 "Correct only the report fields named by the diagnostic and retry record_report on this same task "
                 "and attempt. Repeat for every later caller-correctable validation diagnostic until the report is "
-                "accepted; rejected validation calls do not consume the failed phase-attempt budget. Do not guess "
+                "accepted; rejected validation calls do not create a worker failure, and pipeline rework has no attempt budget. Do not guess "
                 "identity, remove required evidence, end the worker, or paste the report into the parent channel."
             )
         else:
@@ -960,6 +965,11 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
         "report_ref": record["report_id"],
         "receipt_ref": receipt["receipt_id"],
         "summary": redact(record.get("report", {}).get("summary", ""), 500),
+        "report_transport_status": "recorded",
+        "gate_decision": (
+            (record.get("gate_result") or {}).get("decision")
+            if isinstance(record.get("gate_result"), dict) else "reported"
+        ),
         "idempotent": bool(result.get("idempotent")),
         "next_action": "Return only REPORT_RECORDED, report_ref, and at most a two-sentence summary to the parent coordinator.",
     }
@@ -1318,11 +1328,14 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                     "id": "<replace with stable_package_id>",
                     "title": "<replace with package title>",
                     "objective": "<replace with package objective>",
+                    "allowed_paths": ["<replace with narrow project-relative path>"],
                     "depends_on": [],
                     "microtasks": [{
                         "id": "<replace with globally_unique_microtask_id>",
                         "title": "<replace with microtask title>",
                         "objective": "<replace with microtask objective>",
+                        "profile": "<replace with canonical implementation profile>",
+                        "allowed_paths": ["<replace with narrow project-relative path>"],
                         "depends_on": [],
                         "acceptance_criteria": ["<replace with observable acceptance criterion>"],
                         "verification": ["<replace with exact verification>"],
@@ -1615,6 +1628,92 @@ def _worker_report_error_path(message: str) -> str:
     return "$"
 
 
+def _claim_coordinator_report_publication(
+    root: Path,
+    state: dict[str, Any],
+    record: dict[str, Any],
+    report_ref: str,
+    *,
+    complete: bool,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Issue one completion publication only after the native worker stopped.
+
+    Report reads are intentionally repeatable. Human-visible completion
+    publication is not: it is an at-most-once event bound to the durable
+    SubagentStop receipt, and worker-scoped predecessor reads never claim it.
+    """
+    if not complete:
+        return False, "report_read_incomplete", None
+    attempt_id = safe_id(str(record.get("attempt_id") or ""))
+    attempt = next(
+        (
+            item for item in state.get("attempts", [])
+            if isinstance(item, dict) and str(item.get("attempt_id") or "") == attempt_id
+        ),
+        None,
+    )
+    if not isinstance(attempt, dict):
+        return False, "producer_attempt_unavailable", None
+    if attempt.get("invalidated"):
+        return False, "producer_attempt_invalidated", None
+    stopped_reports = {safe_id(str(item)) for item in attempt.get("host_report_refs") or []}
+    if (
+        attempt.get("host_stop_outcome") != "report_recorded"
+        or not attempt.get("host_stopped_at")
+        or report_ref not in stopped_reports
+    ):
+        return False, "native_worker_not_completed", None
+
+    document_key = "report_publication:" + report_ref
+    with state_lock(root):
+        existing = db_get_task_document(root, str(state["task_id"]), document_key)
+        if isinstance(existing, dict):
+            return False, "already_issued", existing
+        publication = {
+            "schema": "cortex/report-publication/v1",
+            "status": "issued",
+            "task_id": str(state["task_id"]),
+            "report_ref": report_ref,
+            "attempt_id": attempt_id,
+            "phase": str(record.get("gate") or "report"),
+            "host_stopped_at": attempt.get("host_stopped_at"),
+            "issued_at": now(),
+        }
+        db_put_task_document(root, str(state["task_id"]), document_key, publication)
+    return True, "native_worker_completed", publication
+
+
+def _report_completion_update(
+    state: dict[str, Any],
+    record: dict[str, Any],
+    report_ref: str,
+) -> dict[str, Any]:
+    report = record.get("report") if isinstance(record.get("report"), dict) else {}
+    phase = str(record.get("gate") or "report")
+    completed_or_skipped = {
+        str(item) for item in [*state.get("completed_gates", []), *state.get("skipped_gates", [])]
+    }
+    remaining = [
+        str(item) for item in state.get("current_pipeline", [])
+        if str(item) != phase and str(item) not in completed_or_skipped
+    ]
+    next_step = (
+        f"Evaluate this completed result, then continue the Cortex pipeline. "
+        f"Next pending pipeline phase: {remaining[0]}."
+        if remaining else
+        "Evaluate this completed result, then ask Cortex to finalize the pipeline; no later phase remains pending."
+    )
+    return {
+        "schema": "cortex/report-completion-update/v1",
+        "report_ref": report_ref,
+        "phase": phase,
+        "worker": redact(str((record.get("producer") or {}).get("profile") or "worker"), 100),
+        "summary": redact(str(report.get("summary") or "Worker completed the delegated phase."), 500),
+        "remaining_phases": remaining,
+        "next": next_step,
+    }
+
+
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Read one active-task report by compact ref for a coordinator or successor worker."""
     try:
@@ -1739,15 +1838,38 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "project, and include the exact generated Predecessor review acknowledgement in report.evidence."
             )
         else:
-            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
-            result.update({
-                "report_markdown_path": str(markdown_path),
-                "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
-                "next_action": (
-                    "Publish report_markdown_link verbatim in the main chat before any other Cortex lifecycle call; "
-                    "the link is mandatory coordinator output, not optional metadata."
-                ),
-            })
+            publication_required = False
+            publication_reason = "report_read_incomplete"
+            publication = None
+            if result.get("complete"):
+                # Materialize before claiming the at-most-once event so an
+                # export failure cannot permanently consume publication.
+                markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+                publication_required, publication_reason, publication = _claim_coordinator_report_publication(
+                    root, state, record, report_ref, complete=True,
+                )
+            result["publication_required"] = publication_required
+            result["publication_reason"] = publication_reason
+            if publication_required:
+                completion_update = _report_completion_update(state, record, report_ref)
+                result.update({
+                    "report_markdown_path": str(markdown_path),
+                    "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
+                    "completion_update": completion_update,
+                    "publication": publication,
+                    "next_action": (
+                        "Publish report_markdown_link exactly once in the same main-chat message as a concise "
+                        "user-language summary of completion_update.summary and what happens next from "
+                        "completion_update.next. Never publish a bare link. Then evaluate the report before the "
+                        "next Cortex lifecycle call."
+                    ),
+                })
+            else:
+                result["next_action"] = (
+                    "Use the report content for evaluation only. Do not publish a report link or repeat a prior "
+                    "completion update; publication is allowed only on the first complete coordinator read after "
+                    "the native worker's durable completion."
+                )
         return result
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         message = redact(str(exc), 1000)

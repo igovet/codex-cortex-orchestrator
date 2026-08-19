@@ -39,6 +39,7 @@ for the same question-paused worker after the durable answer is recorded. Each p
 `briefing_path`, and `briefing_digest`, but the coordinator must not read or
 inline the briefing. Do not call
 `start_orchestration` again, replay completed dispatches, or reconstruct state
-from a raw transcript. After rehydration, continue the existing task and
-publish every exact `report_markdown_link` before the next lifecycle or report
-read call.
+from a raw transcript. After rehydration, continue the existing task. Publish a
+report link only when `read_worker_report.publication_required=true`, together
+with its completion summary and next-step explanation; never republish a link
+on recovery rereads.

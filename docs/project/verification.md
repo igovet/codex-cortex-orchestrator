@@ -32,16 +32,29 @@ it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete Python 3.12.3 discovery suite passed: 524 tests. The current
-  black-box cold-boot JSON-RPC smoke dynamically adds audit phases, rejects a
-  replacement that drops pending implementation without consuming a recovery
-  attempt, and then verifies passed attempts for all 11 gates through close.
-  Deterministic sequential, compact-parallel, and blocked/resume fixtures also
-  passed.
+- The complete source suite passed **547 tests** with 16 intentional native-UI
+  skips. Focused governance/migration coverage includes digest-only
+  coordinator capability storage and legacy scrubbing, exhaustive `off`
+  assessment, canonical independent-review attestation, sensitive-record
+  retention/access enforcement, project-scope promotion, approval-ordered
+  policy revision, conflicting replay rejection, and corrective-effort
+  escalation. Three repeated focused rework runs also passed.
+- The black-box cold-boot JSON-RPC smoke passed all 13 dynamically selected
+  gates through close, retained implementation across replans, and completed
+  three evidence-backed replans despite a persisted legacy limit of two. The
+  deterministic evaluator passed all three fixtures. The isolated source-mode
+  live `follow_up_partial` task also passed through a real Codex parent in 24
+  seconds: it created one linked corrective task, prepared its first dispatch,
+  used only the public follow-up management route, made no failed public calls,
+  and left source unchanged. The full `automatic_sequential` live release
+  scenario was not run and is not claimed.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
-  syntax checks, `git diff --check`, and the 8-worker/5-wave call-count
-  benchmark passed. The source-mode live lifecycle, installed-plugin check,
-  and tracked archive gate were not run for this candidate.
+  syntax checks, `git diff --check`, the no-write installer dry run, and the
+  8-worker/5-wave call-count benchmark passed. Host preflight and
+  `sync-cortex.sh --check` correctly remain blocked because this source is
+  9.2.3 while the user-installed plugin is 9.2.1; the installation was not
+  changed. The full source-mode live lifecycle, matching installed-plugin
+  check, and tracked release archive gate remain unrun external/release gates.
 
 The live evaluator emits newline-delimited JSON progress records while the
 parent runs. Each record has `type: "cortex_live_progress"`, the scenario, and
@@ -92,11 +105,11 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.2.1+codex.20260819110617`. These results are
+The source manifest declares `9.2.3+codex.20260819173812`. These results are
 evidence for the checked-out source only; release publication and installed-plugin
 verification remain separate, explicitly requested actions.
 
-## Current 9.2.1 source contract
+## Current 9.2.3 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -126,14 +139,15 @@ verification remain separate, explicitly requested actions.
   audit/Desktop projections; altering, deleting, or adding a projection cannot
   restore or modify coordination state. Existing pre-SQLite files are neither
   inspected, imported, resumed, altered, nor deleted.
-- Database schema changes are numbered and checksummed through **schema v8**.
+- Database schema changes are numbered and checksummed through **schema v9**.
   First MCP access takes
   the project-ledger lock and applies only missing SQLite-to-SQLite migrations
   atomically; a failed or mismatched migration fails closed. Checksums cover
   migration version, name, and ordered normalized SQL content. Legacy
   name-only checksums are upgraded only after schema validation. The schema
   uses unbounded SQLite `TEXT`/`BLOB` values for content and indexed 32 KiB
-  immutable artifact chunks for transport. Schema v8 adds task/plan revisions,
+  immutable artifact chunks for transport. Schema v9 adds the governance
+  ledger; schema v8 added task/plan revisions,
   native worker sessions, attempt messages, trace/tool observations, and
   question-batch storage; schema v7 separates deduplicated
   content blobs, task-scoped logical artifacts, and authorized filesystem
@@ -158,18 +172,23 @@ verification remain separate, explicitly requested actions.
   persists, then deletes the file and metadata only after commit. Legacy
   full-payload `record_report` remains compatible. Host-sandboxed read-only
   gates record ordinary shared-checkout source deltas as concurrency evidence;
-  claimed `changed_files`, arbitrary ignored output, and unrecognized artifacts
-  still fail, while recognized conventional test/build/cache residue is
-  retained in the audit receipt.
+  claimed `changed_files` still fail. Every ignored side effect is retained as
+  non-blocking digest evidence, with recognized conventional test/build/cache
+  residue and unknown framework output classified separately.
 - The server-owned `resolved_user_decisions` snapshot is carried with each
   immutable report outside the worker-authored seven-field envelope. Report
   metadata and Markdown expose its count/digest and decision sources, while
   replacement briefings receive a bounded recent projection. Choice batch
   answers preserve stable option IDs and optional custom context; localized
   custom context requires canonical English before worker resumption.
+- Report-publication regression coverage binds the only user-facing Markdown
+  link to the matching durable native-worker stop. It proves that an early
+  read is link-free, the first eligible complete coordinator read returns
+  `publication_required=true` with a completion summary and next step, and a
+  reread cannot publish the link again.
 - Worker caller/input/schema validation results are structured corrections:
   fix the named field and retry the same tool on the same attempt without
-  consuming the failed phase-attempt budget. `get_report_template` and
+  creating a failed worker outcome or changing escalation counters. `get_report_template` and
   `worker_question` return correction envelopes. Briefing, predecessor-report,
   and coordinator artifact reads clamp oversized `max_bytes` to 32768. Only
   explicit `retryable: false` integrity, storage, permission, or unavailable
@@ -178,20 +197,15 @@ verification remain separate, explicitly requested actions.
   worker sessions in place; completed-task corrections remain linked
   `follow_up` tasks. Schema v8 stores the revision, session, and atomic
   question-batch identity; `ask_batch`/`poll_batch` cover 1–32 questions with
-  canonical answers. The main-chat UI keeps one durable batch ref while
-  presenting one native question per step, checkpoints accepted answers, and
-  resumes after cancellation at the next unanswered question.
-- Required post-plan review is surfaced through native **Approve/Cancel** UI.
-  Initialized stdio transport emits `elicitation/create` with the
-  `cortex/plan-approval/v1` schema and exactly two choices; direct callers
-  receive the same schema as `plan_approval_interaction` with embedded
-  `manage_orchestration` arguments. Approve requires the current opaque request
-  ID, emits a localized plan-approved notice, and dispatches the next wave;
-  stale or replayed requests do not dispatch. Cancel is silent and leaves the
-  plan pending for the next user message, while an unsupported host leaves the
-  approval pending without inferred consent. Focused coverage includes native
-  and fallback prompting, approve continuation, cancel-pending behavior,
-  invalid/replayed button requests, stale-basis rejection, and revision.
+  canonical answers. Main chat keeps one durable batch ref, renders every
+  question with its required LLM recommendation, checkpoints accepted answers,
+  and resumes only after the next user message is recorded.
+- Required post-plan review is surfaced through one ordinary final assistant
+  message using `cortex/chat-interaction/v1`. It includes the complete bounded
+  plan, approve/revise/cancel meanings, opaque request ID, and LLM recommendation.
+  Tests assert that no nested UI request is emitted, the turn pauses, approve
+  dispatches the next wave, revision feedback is preserved, cancel remains
+  pending, and stale or replayed responses do not dispatch.
 - Prune first commits a tombstone, removes the projection tree outside the
   state lock, and only then deletes canonical task rows in one final SQLite
   transaction. Failed filesystem removal leaves the task recoverable for a
@@ -227,9 +241,9 @@ close evidence. They also cover human-readable `Profile Module` labels and
 attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
-Public API tests require exactly eight MCP tools: coordinator lifecycle
+Public API tests require exactly nine MCP tools: coordinator lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; worker `worker_question`, `get_report_template`,
+`manage_orchestration`; coordinator-only `manage_governance`; worker `worker_question`, `get_report_template`,
 `record_report`, and
 identity/digest-scoped `read_dispatch_briefing`; plus scoped predecessor
 `read_worker_report`. Native worker prompts carry a compact bootstrap with the
@@ -243,13 +257,14 @@ while harvest is automatic after its source-backed plan.
 
 Prompt-architecture regressions validate explicit Cortex opt-in, the
 `cortex-control` runtime-core handoff, conditional harvest overlays, and the
-Worker Briefing v2 assignment envelope. Adversarial task values are serialized
+Worker Briefing v3 budget-enforced assignment envelope. Adversarial task values are serialized
 and round-tripped as JSON, rather than interpreted as prompt structure; tests
 also reject long duplicate prompt paragraphs and enforce representative
 bootstrap/briefing budgets (1,500 bytes; ordinary 10,000/14,000 soft/hard;
 harvest 11,000/15,000 soft/hard). Retry regressions enforce
-`phase_attempt_limit=3`, `same_strategy_limit=2`, and the required
-`next_strategy` or pipeline replan before a third phase attempt.
+unbounded pipeline rework, the `high`/`xhigh`/`max` effort escalation, Terra
+routing after two unresolved attempts, and optional evidence-backed
+`next_strategy` or pipeline replanning.
 
 Predecessor regressions retain the complete Planner evidence basis while
 dispatching only the verified transitive frontier, exercise a 33-report
@@ -275,8 +290,8 @@ bounded identifiers.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host
   diagnostic for Codex CLI, Python 3.11+/`tomllib`, plugin launcher, same-user
-  cache, exact `cortex@cortex` registration, MCP approval and elicitation
-  configuration, and lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
+  cache, exact `cortex@cortex` registration, MCP approval configuration, and
+  lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
   `BLOCKED`) and `mcp.blocking_checks`; `READY` requires every emitted check to
   pass. A nonzero result identifies the failed prerequisite; it never installs
   software or changes Codex configuration. See the [SSH host troubleshooting

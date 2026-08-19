@@ -9,11 +9,11 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative eight-tool public facade
+## Relative nine-tool public facade
 
-The public API exposes exactly eight tools. Coordinators use the three lifecycle
+The public API exposes exactly nine tools. Coordinators use the three lifecycle
 operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; workers use `worker_question`, `get_report_template`,
+`manage_orchestration` plus coordinator-only `manage_governance`; workers use `worker_question`, `get_report_template`,
 and `record_report`, may
 recover only their exact immutable briefing through `read_dispatch_briefing`, and may
 read only explicitly supplied predecessor refs with scoped `read_worker_report`.
@@ -39,22 +39,34 @@ refs before state writes, records evidence and gates, and returns the next
 step. Interrupted native acknowledgement is recoverable because inspect lists
 persisted `available_reports`.
 
-## Interactive post-plan approval
+## Ordinary-chat post-plan approval
 
 Required approval is a state-machine hold after the singleton final Planner
 wave, not a prose convention. The pending review is bound to the plan revision,
 planner report, verified predecessor digest, semantic future-pipeline digest,
-and an opaque request ID. An initialized stdio host receives MCP
-`elicitation/create` with the versioned `cortex/plan-approval/v1` schema and
-exactly Approve and Cancel choices. Direct callers receive a declarative
-`plan_approval_interaction` with the same schema and embedded
-`manage_orchestration` arguments, allowing a host to render buttons without
-inventing a second tool or changing the eight-tool surface. Approve and Cancel
-button submissions must carry the current request ID; stale, replayed, or
-mismatched submissions fail closed. Approve advances the next wave, whereas
-Cancel records no dispatch and keeps `awaiting_user` silent so a later user
-message can revise the plan. Hosts that support neither interaction cannot
-advance the task by inference.
+and an opaque request ID. Cortex returns a declarative
+`cortex/chat-interaction/v1` containing the understandable plan summary,
+approve/revise/cancel meanings, and the LLM-recommended response with its
+rationale. The coordinator renders it as one ordinary final assistant message,
+calls no UI/input/approval/elicitation tool, and ends the turn. The next user
+message must carry the current interaction ID when recorded; stale, replayed,
+or mismatched submissions fail closed. Approve advances the next wave, Revise
+preserves feedback verbatim and reruns Planner, whereas Cancel records no
+dispatch and keeps `awaiting_user` pending. Silence cannot advance the task.
+
+## Server-owned governance records
+
+`manage_governance` persists bounded initiatives and typed dependency edges,
+append-only scoped records with content digests and superseding revisions,
+active snapshots, constrained exceptions, and coordinator-approved promotion
+with project-scoped proposals and policy. Workers and reviewers may publish
+proposals, but cannot activate or approve policy. Coordinator governance
+authorization is one-response capability material with only a durable digest;
+`off` requires an exhaustive structured assessment, sensitive records enforce
+policy retention and access controls at write time, and independent close
+review is bound to canonical reviewer attempts and sessions. Full governance
+adds `governance_activation` and `governance_close` review waves owned by
+`code_reviewer`; the resolver never invents a numeric scope trigger.
 
 ## Chunked immutable artifact transport
 
@@ -122,6 +134,13 @@ concise reason. The public facade derives rework intent when a supplied future
 pipeline repeats a current or completed gate, so a missing boolean cannot turn
 an otherwise valid recovery into a caller-correction loop. The internal engine
 still records an explicit audited rework transition.
+The lifetime `replan_count` is audit history only. The legacy `replan_limit`
+field remains readable for old tasks but never blocks a new evidence-backed
+corrective cycle. Per-gate failure counts and strategy names are escalation and
+audit evidence only: corrective cycles remain unbounded while acceptance or
+findings require work. Future-wave approval and rework requirements are
+preflighted before gate recording, and Planner-first resume may repair an
+active task only when its current wave has no live or pending dispatch.
 Semantically unchanged future-wave reassessment records an unchanged receipt
 and continues, while v5 future waves are internally renumbered so public
 relative steps never move backward or collide.
@@ -193,7 +212,7 @@ MCP schema/transport adapter. The record-report vertical slice is separated
 into domain policy, ports, a SQLite unit-of-work adapter, projection port, and
 use case; `core/runtime_bindings.py` is the explicit composition binding, not a
 bidirectional facade import. The public adapter owns the declarative
-eight-tool contract and JSON-RPC stdio loop; the facade passes the current
+nine-tool contract and JSON-RPC stdio loop; the facade passes the current
 business handlers into it. Gate transitions are further separated into active-
 gate resolution, evidence/C2-C3 validation, durable state mutation, and
 terminal manifest cleanup, so routing changes cannot accidentally weaken
@@ -215,7 +234,7 @@ runtime-core overlay for coordinator state, dispatch, recovery, and private
 diagnostics; the orchestrator skill supplies route and role guidance without
 duplicating the runtime protocol.
 
-Worker Briefing v2 has one assignment envelope. Task-controlled values are
+Worker Briefing v3 has one budget-enforced assignment envelope. Task-controlled values are
 JSON-serialized as untrusted `Assignment data`, so headings, fences, markup,
 and instruction-like text remain data rather than prompt structure. The
 briefing no longer repeats model/effort routing metadata, prompt-baseline
@@ -230,11 +249,13 @@ and 11,000/15,000 bytes for harvest briefings (soft/hard). The marketplace
 validator and regression tests also lint long duplicate prompt paragraphs and
 parse adversarial assignment data as JSON.
 
-Retry policy is explicit and strategy-aware. A phase permits at most three
-failed attempts (`phase_attempt_limit=3`), but no more than two failures using
-the same strategy (`same_strategy_limit=2`). Before a third phase attempt, the
-coordinator must provide a materially different `next_strategy` or replan the
-pipeline; retries do not silently replay the same approach.
+Rework policy is explicit, evidence-driven, and unbounded. QA, review,
+implementation, and corrective phases repeat while acceptance, verification,
+or canonical findings remain unresolved. Counts are durable audit/routing
+inputs rather than budgets. The first unresolved cycle floors effort at
+`high`, the second at `xhigh` and eligible work at Terra, and the third and
+later cycles at `max`. `next_strategy` and replanning are optional when new
+evidence supports them; neither is a prerequisite for continuing correction.
 
 ## Conditional indexed repository intelligence
 
@@ -315,7 +336,7 @@ exports, backups, evidence, or independent prune targets. Lifecycle telemetry
 and model metrics are not canonical task artifacts and must not be used as
 completion proof.
 
-## Bounded gate recovery
+## Bounded private commit-adapter recovery
 
 Composite gate commits must not turn adapter mistakes into an active task that
 can be retried forever. A unique context grant may be normalized to its
@@ -323,7 +344,9 @@ attempt-bound report receipt because the server can verify task, gate, attempt,
 and one-use ownership. Any other repeated `commit_gate` validation failure for
 the same gate/mode is persisted as a recovery event; after three failures the task is
 blocked with a handoff/resume action. This preserves the exact failure for
-repair while guaranteeing a terminal control-plane outcome.
+repair while guaranteeing a terminal control-plane outcome. This safety cap is
+strictly local to the private atomic adapter; it does not limit pipeline, QA,
+review, worker, finding-remediation, or closure rework cycles.
 
 ## Same-user host readiness and hook trust
 
@@ -335,8 +358,7 @@ diagnostic emits seven prerequisite checks: `codex_cli`, `cortex_python`,
 registration check requires exactly one enabled, installed `cortex@cortex`
 entry at the checked version for the same Codex user; the MCP check requires a
 regular, non-symlink `config.toml` with Cortex enabled and
-`default_tools_approval_mode = "approve"`, plus
-`mcp_elicitations = true` when a granular approval policy is selected; hook
+`default_tools_approval_mode = "approve"`; hook
 trust requires all five enabled, trusted, cache-backed hooks and matching
 persisted hashes. The script
 does not install or mutate anything, so remote provisioning remains an
@@ -355,11 +377,12 @@ failed continuation with that ref and reason. Cortex alone may return a fresh
 top-level dispatch; the dead child is never waited on, respawned, or resumed
 with `followup_task`. A stopped worker with a report is consumed normally, and
 a worker paused on a durable question remains resumable through its exact host
-identity. `MAX_ORCHESTRATE_GATE_FAILURES = 3` bounds repeated failed
-continuations for one gate; the third failure records a durable blocked
-handoff instead of looping. This separates evidence-bearing and user-paused
-stops from the no-report deadlock while preserving idempotent, identity-scoped
-recovery.
+identity. Repeated failed continuations remain eligible for fresh top-level
+dispatches while Cortex raises the effort floor (`high`, then `xhigh`, then
+`max`) and uses Terra for eligible ordinary work after two prior failures.
+Only an explicit non-retryable blocker or user cancellation stops correction.
+This separates evidence-bearing and user-paused stops from the no-report
+deadlock while preserving idempotent, identity-scoped recovery.
 
 The corresponding PostToolUse recovery is deliberately ordering-independent:
 it searches all matching reportless attempts in the current gate, so a later
@@ -413,7 +436,7 @@ initial baseline before replacement dispatches.
 ### SQLite migration contract
 
 `cortex.db` is the sole mutable source of truth for new tasks. The plugin keeps
-numbered, content-checked migrations through v8 in `ledger_db.py`; the first
+numbered, content-checked migrations through v9 in `ledger_db.py`; the first
 MCP call with a new migration takes the project-ledger lock, applies every
 missing migration in order inside one SQLite transaction, and records each
 version in `schema_migrations`. Repeated calls verify history and schema.
@@ -556,8 +579,8 @@ failure cost, also use Terra; other low/moderate-risk adaptive work stays on
 Luna. Efficient Luna uses
 C1/C2/C3 `high`/`high`/`xhigh`; bounded adaptive Luna uses
 `high`/`xhigh`/`max`; Terra uses `high`/`high`/`xhigh`, all subject to the risk
-floor. The accepted effort vocabulary ends at `max`; automatic `max` is
-limited to bounded C3 Luna work. Coordinator Luna/Terra overrides remain
+floor. The accepted effort vocabulary ends at `max`; automatic `max` covers
+C3 adaptive Luna work and repeated unresolved corrective failures. Coordinator Luna/Terra overrides remain
 available but cannot lower the computed effort floor.
 Non-security Sol is valid only for an explicit user model request represented
 by matching `user_requested_model` and `requested_model`; old

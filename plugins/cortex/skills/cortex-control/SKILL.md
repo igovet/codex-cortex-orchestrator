@@ -5,7 +5,7 @@ description: Internal Cortex runtime protocol. Load only after cortex:orchestrat
 
 # Cortex Control
 
-The public Cortex API exposes exactly eight tools: three coordinator lifecycle
+The public Cortex API exposes exactly nine tools: four coordinator lifecycle
 operations plus scoped worker question/report transport. Coordinators use `start_orchestration` and
 `continue_orchestration` for normal work, `read_worker_report` to evaluate a
 persisted report, and `manage_orchestration` only for recovery or rare
@@ -30,10 +30,11 @@ opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
 | --- | --- | --- | --- |
 | inactive | explicit orchestrator activation | call `start_orchestration` once | concise activation summary |
 | waiting_workers | wait timeout | wait again | silent |
-| waiting_workers | worker question | publish the decision preamble, then use the durable question flow | commentary preamble, then native UI |
+| waiting_workers | worker question | render the durable chat interaction and end the turn | one detailed final chat message with LLM recommendation |
 | active or blocked | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise acknowledgement |
 | awaiting_plan_approval | approve | invoke only the returned next wave | approval acknowledgement |
 | awaiting_plan_approval | cancel | make no lifecycle call | silent |
+| awaiting_plan_approval | non-empty custom response | invoke only the returned replacement Planner wave | revision acknowledgement |
 | completed | user asks to correct the result | `manage_orchestration(intent="follow_up")` | linked-task summary |
 | context uncertain | compaction or reset | `manage_orchestration(intent="inspect")` once | recovered-state summary only when action is needed |
 
@@ -165,18 +166,19 @@ paths forbidden above.
    such as `Option 1`, `A/B`, `Decision 1`, `Recommended option`, or translated
    equivalents is forbidden. The worker publishes no report and finishes its
    native turn into an idle/resumable state rather than busy-waiting. The
-   coordinator first publishes one normal main-chat commentary message in the user's
-   language that explains the decision context, consequences, and recommendation.
-   This message supplies context only and must not collect the answer. When the
-   handoff is long, put the detail in that commentary while keeping every native
-   form question and option independently understandable. Only after that preamble,
-   the coordinator calls
+   coordinator calls
    `manage_orchestration(task_ref="<current task ref>", intent="question",
-   payload={"question_ref": "<exact ref>"})` exactly once; Cortex owns task/principal/thread resolution and opens
-   the host-native question UI. A batch is rendered sequentially, one native
-   question at a time, and every accepted answer is checkpointed before the
-   next appears. Never substitute commentary/final prose for the native answer
-   control or guess an internal identity. After the answer is durably recorded,
+   payload={"question_ref": "<exact ref>"})` exactly once; Cortex owns
+   task/principal/thread resolution and returns a complete
+   `cortex/chat-interaction/v1`. Render that interaction as the final ordinary
+   assistant message in the user's language, including context, consequences,
+   every option and trade-off, and the visibly labelled LLM recommendation with
+   rationale. End the turn without calling any UI/input/approval/elicitation
+   tool. A batch is rendered sequentially as ordinary chat interactions; every
+   user answer is checkpointed before the next question is shown. The next
+   ordinary user message supplies the answer for the same interaction ref; do
+   not guess an internal identity or infer an answer from silence. After the
+   answer is durably recorded,
    resume the exact same native worker through `followup_task`; that worker
    calls `worker_question(action="poll")` with the same attempt and ref before
    continuing. Never replace the worker or advance the wave for a question.
@@ -186,8 +188,8 @@ paths forbidden above.
    placeholder, and calls `record_report` with the same ref; a host-sandboxed
    read-only worker instead sends a small JSON Merge Patch or complete report
    replacement through `record_report`. Invalid records keep the file and
-   consume no worker attempt. Only failed worker attempts count toward the
-   phase-attempt budget. `record_report` rereads and revalidates the
+   consume no worker attempt. Failed worker attempts remain durable escalation
+   evidence but never consume a finite pipeline budget. `record_report` rereads and revalidates the
    current state, then atomically persists and deletes that same file only
    after successful persistence. The
    worker never resends, reconstructs, or reconsiders the strict report payload. It returns only
@@ -240,21 +242,26 @@ paths forbidden above.
    report, route the durable question, or submit the exact failed result that
    inspect returns. Only a newly returned top-level dispatch authorizes rework
    after a worker is no longer resumable.
-   Cortex uses `same_strategy_limit=2` and `phase_attempt_limit=3`. After two
-   failures of the same strategy, the next non-success result must supply a
-   materially different `next_strategy` or replan future waves before Cortex
-   issues the third phase attempt. The third failed phase attempt blocks with a
-   durable handoff. Resume only after repairing the recorded cause, which
-   resets that phase's bounded recovery counter.
-5. After all workers finish, read every ref with `read_worker_report`. Each
-   result includes Cortex's derived absolute `report_markdown_path` for the
-   persisted `reports/markdown/<report-ref>.md` artifact. After reading each
-   completed report, immediately publish the returned `report_markdown_link`
-   verbatim as a compact clickable Markdown link in the main chat, before any
-   other lifecycle call or additional report read. This is mandatory coordinator
-   output, not optional metadata. The link supplements the concise summary and
-   report review. Never guess, substitute, or use the path to browse unrelated
-   files. Then evaluate
+   QA, review, implementation, and corrective pipeline rework are unbounded while acceptance criteria,
+   required verification, or canonical findings
+   remain unresolved. Failure counts remain durable audit/routing evidence and
+   never block a new corrective dispatch. Cortex raises reasoning effort to
+   `high` after one unresolved attempt, `xhigh` after two, and `max` after three
+   or more; after two it also routes eligible ordinary work to Terra unless the
+   user explicitly selected a model. `next_strategy` and replanning remain
+   optional evidence-backed improvements, not retry permits. Continue until
+   the defect is fixed or an explicit non-retryable integrity, permission,
+   storage, unavailable-identity, or external-authority blocker is proven.
+5. After all workers finish, read every ref with `read_worker_report`. A report
+   is always rereadable, but only the first complete coordinator read after the
+   matching durable native-worker stop may return
+   `publication_required=true`, the derived `report_markdown_path`, and
+   `report_markdown_link`. Publish that exact link once in the same main-chat
+   message as a concise user-language explanation of
+   `completion_update.summary` and `completion_update.next`; never publish a
+   bare link. A reread returns `publication_required=false` and must not repeat
+   the link or completion update. Never guess, substitute, or use the path to
+   browse unrelated files. Then evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
    prior response, and all `report_ref` results. A single-worker result may omit
@@ -300,8 +307,9 @@ exact returned dispatch identity before project work (`agent_type` is
 If a running attempt has no child id, fail closed instead of spawning or
 waiting without a target. Do not call `start_orchestration`
 again, replay completed dispatches, or reconstruct state from a raw
-transcript. After rehydration, continue the existing task and publish every
-exact `report_markdown_link` before the next lifecycle or report-read call.
+transcript. After rehydration, continue the existing task. Publish only a newly
+authorized `report_markdown_link` with `publication_required=true`, and include
+its completion summary and next-step explanation in the same message.
 
 ### Required post-plan approval
 
@@ -309,16 +317,19 @@ exact `report_markdown_link` before the next lifecycle or report-read call.
 `required` for C2/C3 and `auto` for C1. The C1 auto policy does not require
 user confirmation. A required plan must be its own wave. Once that plan
 completes, the lifecycle result is `awaiting_plan_approval` with no successor
-dispatch and a bounded `plan_review` containing `report_ref`, `summary`,
-`findings`, `uncertainty`, and `remaining_phases`. The
+dispatch and a bounded `plan_review` containing the objective, complete work
+packages and microtasks, paths, dependencies, verification, material risks,
+`report_ref`, and `remaining_phases`. The
 coordinator reads the report, summarizes the plan in the main chat, then calls
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
-Cortex opens the native `Approve` / `Cancel` UI. On `Approve`, announce in the
-user's language that the plan was approved and dispatch the returned wave. On
-`Cancel`, stop silently, keep the plan pending, and wait for the user's next
-message. For requested changes after that message, use
-`manage_orchestration(intent="plan_approval", payload={"decision":"revise", "feedback":"..."})`;
-feedback is required and the Planner runs again before approval. This gate is
+Cortex returns `cortex/chat-interaction/v1`. Render it as one detailed ordinary
+final assistant message, including every work package, verification and risk,
+all approve/revise/cancel meanings, and the visibly labelled LLM recommendation
+with rationale. Do not call a UI, input, approval, or elicitation tool. End the
+turn and wait. Submit the user's next message with the exact `interaction_ref`
+as `request_id`: unambiguous approval uses `approve`, explicit cancellation uses
+`cancel`, and any requested change uses `revise` with the exact feedback text.
+Planner then reruns before another approval hold. Silence never approves. This gate is
 separate from `worker_question`: material questions are resolved through that
 lifecycle during planning rather than through a duplicate approval question.
 
@@ -327,9 +338,9 @@ The Planner may attach a separate `planning` object to its public
 strict seven-field `cortex/report/v1` contract remains unchanged. Each package
 has `id`, `title`, `objective`, optional `allowed_paths`/`depends_on`, and
 non-empty microtasks; `profile` is forbidden at package level. Each microtask
-requires `id`, `title`, `objective`, non-empty `acceptance_criteria`, and
-non-empty `verification`, with optional `profile`, `allowed_paths`, and
-`depends_on`.
+requires `id`, `title`, `objective`, an explicit `profile`, narrow non-broad
+`allowed_paths`, non-empty `acceptance_criteria`, and non-empty `verification`,
+with optional `depends_on`.
 Cortex requires microtask IDs to be globally unique across the plan, allows
 `depends_on` to reference microtasks in another work package, rejects unknown
 references, and validates the combined microtask dependency graph as acyclic.
@@ -341,8 +352,10 @@ and `packages/<id>.json` artifacts. The SQLite task document
 `planning/manifest.json` or `planning/overview.md` latest aliases.
 `plan_review` exposes compact
 `planning_artifacts` for approval. Treat this as a durable catalog for
-ownership/dependency-aware scheduling within the canonical phase/wave safety
-model, not as an unconstrained auto-executor.
+ownership/dependency-aware scheduling. After approval, Cortex topologically
+compiles all microtasks into an immutable `compiled_plan_unit` artifact and
+dispatches that exact executable contract. It never substitutes a generic
+implementation objective or broad `.` path.
 
 ### Active steer and correcting a completed task
 
@@ -372,11 +385,12 @@ bounded to at most 32 source refs; when omitted, Cortex selects a bounded
 recent set. If the source task is active, use evidence-based `rework` instead;
 `follow_up` rejects active sources.
 
-`read_worker_report` returns the derived absolute `report_markdown_path` for
-the persisted `reports/markdown/<report-ref>.md` artifact. After reading each
-completed report, publish a compact clickable Markdown link in the main chat
-using that exact returned path, in addition to the concise summary and report
-review. Never guess, substitute, or use the path to browse unrelated files.
+`read_worker_report` returns the derived absolute `report_markdown_path` and
+link only for the one publication authorized after durable native completion.
+Publish it only when `publication_required=true`, once, together with the
+concise completion summary and next-step explanation. Repeated reads remain
+available for evaluation but never authorize another user-facing link. Never
+guess, substitute, or use a path to browse unrelated files.
 Inspect `available_reports` and required-plan `plan_review` expose the same
 derived path for recovery and approval review.
 
@@ -428,14 +442,25 @@ security/performance, review, documentation, and close—before requiring fresh
 plan approval. Before documentation or close dispatch, the runtime compares
 the accepted planning catalog with non-invalidated delivery attempts and
 repairs any missing graph instead of accepting documentation as implementation
-evidence. Use
+evidence. `replan_count` is audit history, not a task-wide quota; the retained
+`replan_limit` field is compatibility metadata and never blocks a new
+evidence-backed review/remediation cycle. The facade preflights approval,
+rework, and obligation retention before recording the current gate. A legacy
+partial failure that left an active current gate without a live or pending
+dispatch may use the same Planner-first resume payload; active recovery is
+rejected while any worker is still addressable. Use
 `manage_orchestration` for `inspect`, `resume`, `deactivate`, `lane`,
 `resource`, or `question`; these intents do not belong in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
 The question intent accepts only the worker's exact `question_ref` on the
-normal path, resolves all durable identity internally, and requests main-chat
-MCP UI elicitation through `elicitation/create`. The coordinator may pass
+normal path and resolves all durable identity internally. It returns a
+`cortex/chat-interaction/v1` projection. Render that projection completely in
+the user's language as one ordinary **final assistant message**, then end the
+turn without calling any UI, input, approval, or elicitation tool. The user's
+next ordinary message resumes the same durable task: preserve its exact text,
+record it against the same `interaction_ref`, and only then resume the exact
+same worker. The coordinator may pass
 `localized_question`, `localized_header`, `localized_options`, and
 `localized_custom_label` as transient user-language labels; the stored
 question remains canonical English. For a response with
@@ -448,9 +473,10 @@ text or a choice's free-form custom response before the worker receives the
 canonical English answer. Every choice question renders that optional custom
 field beside its stable options. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
-same `batch_ref` with `action="poll_batch"`; the host renders one question per
-native step and durably checkpoints each accepted answer before showing the
-next. For a non-English batch, `localized_questions` is an ordered UI
+same `batch_ref` with `action="poll_batch"`; the coordinator renders all
+currently unanswered items in one understandable chat message and Cortex
+durably checkpoints the next user answer before resuming. For a non-English
+batch, `localized_questions` is an ordered display
 projection only: preserve the canonical order when possible, but never invent
 or reconstruct canonical `question_key` or `option_id` values. Cortex maps
 each projection by its exact canonical key only when the complete batch
@@ -460,7 +486,10 @@ and optional `localized_custom_label`; the compatibility aliases `question`,
 `header`, `options`, and `custom_label` mean the same thing. Every localized
 question must state the concrete decision, and every option must name its
 outcome or trade-off; generic numbered or recommended/alternative placeholders
-are rejected. A task
+are rejected. Every question also requires `recommendation` plus exact
+`recommended_option_ids`, or `recommended_answer` for free text. The user-facing
+message must visibly label which answer the LLM recommends and explain why; a
+neutral choice still needs an explicit recommendation rationale. A task
 revision supersedes an unresolved batch rather than resuming stale user intent.
 Every worker report automatically includes the task-wide canonical
 `resolved_user_decisions` snapshot. A successor must review it as durable user
@@ -475,9 +504,9 @@ intent. Cortex rejects `record_report` and `continue_orchestration` while a
 blocking question remains open, rejects any non-empty final report question
 list, and requires an answered blocking question before decision-bearing
 phases can complete when deterministic intent preflight marks a short product
-surface request as underspecified. Lack of advertised host elicitation support
-is a fail-closed host limitation, not permission to invent an answer or ask the
-question as an ordinary message.
+surface request as underspecified. Ordinary chat is the only user decision
+surface: after the detailed question message the task must stop until the user
+answers. Silence never authorizes a default answer.
 
 Project maintenance uses `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` only after the user
@@ -509,8 +538,8 @@ work, and high/critical failure cost use Terra. Efficient Luna uses C1/C2/C3
 `high`/`high`/`xhigh`; bounded adaptive Luna uses `high`/`xhigh`/`max`; Terra
 uses `high`/`high`/`xhigh`. Risk floors remain low/moderate `medium`, high
 `high`, critical `xhigh`. The complete vocabulary is `low`, `medium`, `high`,
-`xhigh`, and `max`; never request another value. Automatic `max` is limited to
-bounded C3 Luna work. A coordinator may explicitly override an
+`xhigh`, and `max`; never request another value. Automatic `max` covers C3
+adaptive Luna work and repeated unresolved corrective failures. A coordinator may explicitly override an
 ordinary route between Luna and Terra, but cannot lower its effort floor.
 Non-security Sol is accepted only when the user explicitly selected it.
 Set compact `user_requested_model: sol`; omit `model` or also set it to `sol`.
@@ -529,7 +558,7 @@ user language is held by the main coordinator only. Workers emit English in
 every message, tool argument, report, durable question, handoff, and native
 final response. Durable worker questions remain English; the coordinator may
 pass `localized_question`, `localized_header`, `localized_options`, and
-`localized_custom_label` as user-language UI projections without altering the
+`localized_custom_label` as user-language chat projections without altering the
 durable record. A corrective `follow_up` inherits the completed source task's
 user language, but workers retain the same English-only protocol.
 
@@ -623,8 +652,9 @@ append. Expected public validation and recovery responses with `ok: false` are
 not exceptions and are not written to this log.
 
 Records contain bounded correlation metadata such as timestamp, method, tool,
-error type, `chat_session_id`/`thread_id`, request id, and supplied durable ids.
-Common credential shapes are redacted, nested values are bounded, the parent
+error type, `chat_session_id`/`thread_id`, request id, supplied durable ids,
+and a value-free input shape summary. They never retain tool argument values,
+report bodies, question text, or user-authored content. The parent
 directory is mode `0700`, the file is mode `0600`, and symlink paths are
 rejected. These controls do not guarantee arbitrary input is non-sensitive:
 never put secrets in tool inputs, relax permissions, commit the log, or copy

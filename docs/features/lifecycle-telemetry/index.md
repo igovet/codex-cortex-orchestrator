@@ -61,9 +61,10 @@ not allow `SubagentStop` to emit model context, the supported `PostToolUse`
 hook on the completing wait re-reads this durable state. When the latest
 attempt stopped without a report it instructs the coordinator to inspect and
 submit the exact failed result, and explicitly forbids a corrective
-`followup_task` to the dead child. The failed continuation is bounded by
-`MAX_ORCHESTRATE_GATE_FAILURES = 3`: only a newly returned top-level dispatch
-may retry, and the third failure blocks the task with a durable handoff.
+`followup_task` to the dead child. Only a newly returned top-level dispatch may
+retry. Corrective dispatch remains unbounded while acceptance or findings
+require work; Cortex raises effort through `high`, `xhigh`, and `max`, and
+selects Terra for eligible ordinary work after two prior failures.
 If more than one active task shares a host session, Cortex removes the session's
 lookup entry until only one active task remains; the hook never guesses which
 task should receive recovery context. Completing one of the ambiguous tasks
@@ -91,14 +92,14 @@ hook paths.
 
 ## Verification
 
-Lifecycle-hook regressions are in [test_cortex_invariants.py](../../../tests/test_cortex_invariants.py) and run through the standard unittest command in [verification.md](../../project/verification.md). The session-start/pre-planning recovery path is covered by the focused command below, which exercises terminal reportless stops, exact failed continuation, bounded retry, and empty-wait rejection:
+Lifecycle-hook regressions are in [test_cortex_invariants.py](../../../tests/test_cortex_invariants.py) and run through the standard unittest command in [verification.md](../../project/verification.md). The session-start/pre-planning recovery path is covered by the focused command below, which exercises terminal reportless stops, exact failed continuation, unbounded corrective escalation, and empty-wait rejection:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_subagent_stop_is_terminal_and_non_resumable \
   tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry \
   tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_mixed_wave_reportless_stop_keeps_failed_slot_addressable \
-  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_repeated_reportless_stops_use_three_failure_budget \
+  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_repeated_reportless_stops_remain_unbounded_and_raise_effort \
   tests.test_cortex_control.ControlPlaneTests.test_post_wait_stop_context_directs_terminal_failure \
   tests.test_cortex_invariants.OrchestrationInvariantTests.test_agent_hook_rejects_empty_wait_as_unspawned_dispatch
 ```

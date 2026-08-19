@@ -6,6 +6,7 @@ import difflib
 import fnmatch
 import html
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -37,7 +38,7 @@ if __name__ != "cortex" and __name__ in sys.modules:
 
 
 def respond(payload: dict[str, Any]) -> None:
-    """Write a JSON-RPC response, including a nested elicitation request."""
+    """Write one JSON-RPC response."""
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
@@ -127,6 +128,11 @@ from cortex_runtime.routing import (
     profiles_for_gate as routing_profiles_for_gate,
     resolve_dispatch_route as routing_resolve_dispatch_route,
 )
+from cortex_runtime.governance import (
+    GovernanceError,
+    manage_governance as manage_governance_service,
+    resolve_governance,
+)
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback; atomic replace still applies.
@@ -168,15 +174,11 @@ SYSTEM_PROJECT_ROOTS = frozenset(
         "/usr", "/var",
     )
 )
-MCP_OPENAI_FORM = False
-MCP_INTERACTIVE = False
 _STATE_LOCK_LOCAL = threading.local()
 MCP_SERVER_INSTRUCTIONS = (
-    "Cortex opt-in. Root preserves task_ref, follows exact responses, and publishes every read_worker_report "
-    "report_markdown_link. Internal workers emit English only. For all public tools use bundled skills, schemas and "
-    "responses; never inspect plugin source/cache/.codex. Lifecycle requires task_ref; no unscoped recovery. Read "
-    "once/turn unless changed/partial. Bind starts by task_name/dispatch. After resume, clear, or compaction inspect once "
-    "with task_ref: spawn, wait ids, use context_handoff, never restart."
+    "Cortex opt-in. Publish read_worker_report links only when publication_required=true, with the summary and next step. "
+    "Internal workers emit English only. Lifecycle requires task_ref; no unscoped recovery. "
+    "After resume, clear, or compaction inspect once with task_ref; use context_handoff and never restart."
 )
 
 try:
@@ -270,10 +272,14 @@ if (
     or SHARED_WORKER_CONTRACT.get("caller_correctable_tool_errors")
     != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
     or SHARED_WORKER_CONTRACT.get("read_only_workspace_delta")
-    != "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail"
+    != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
     or CODEBASE_MEMORY_REFRESH_PROFILES != {"planner", "explorer", "architect", "database_architect"}
     or not CODEBASE_MEMORY_REFRESH_PROFILES.issubset(AGENTS)
-    or RETRY_POLICY != {"phase_attempt_limit": 3, "same_strategy_limit": 2}
+    or RETRY_POLICY != {
+        "pipeline_rework": "unbounded_while_acceptance_or_findings_require_correction",
+        "terra_after_failed_attempts": 2,
+        "effort_by_prior_failures": {"1": "high", "2": "xhigh", "3+": "max"},
+    }
     or set(MODE_OVERLAYS) != {"harvest"}
     or set(MODE_OVERLAYS["harvest"]) != {
         "planner", "explorer", "architect", "technical_writer", "code_reviewer", "build_verification"
@@ -291,15 +297,15 @@ if (
 AVAILABLE_GATES = {
     "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
     "qa", "security", "performance", "accessibility", "ux", "review",
-    "documentation", "close",
+    "documentation", "close", "governance_activation", "governance_close",
 }
 READ_ONLY_RESULT_GATES = {
     "scope", "plan", "discover", "architecture", "database_architecture", "security",
-    "performance", "accessibility", "ux", "review", "close",
+    "performance", "accessibility", "ux", "review", "close", "governance_activation", "governance_close",
 }
 EXECUTED_CHECK_RESULT_GATES = {
     "implementation", "qa", "security", "performance", "accessibility", "ux",
-    "review", "documentation", "close",
+    "review", "documentation", "close", "governance_activation", "governance_close",
 }
 WRITE_REQUIRED_RESULT_GATES = {"implementation"}
 
@@ -449,7 +455,52 @@ def select_implementation_profile(task: dict[str, Any]) -> dict[str, Any]:
     planner or explorer may recommend a narrower replacement for future waves.
     """
     corpus = _implementation_routing_text(task)
+    mobile_signals = (
+        "react native", "expo", "android", "ios", "swiftui", "uikit", "jetpack compose", "flutter",
+        "mobile app", "мобильн", "андроид",
+    )
+    matched_mobile = [signal for signal in mobile_signals if _routing_signal_matches(corpus, signal)]
+    if matched_mobile:
+        return {
+            "profile": "mobile_dev",
+            "reason": "Mobile platform/framework evidence takes precedence over generic React/frontend or API signals.",
+            "matched_signals": matched_mobile,
+            "source": "bounded_task_signals",
+        }
+    path_values = [str(item).lower().replace("\\", "/") for item in task.get("allowed_paths", [])]
+    python_path_evidence = any(
+        path.endswith(".py")
+        or path.startswith(("plugins/cortex/scripts", "scripts/", "src/")) and "python" in corpus
+        for path in path_values
+    )
+    python_runtime = python_path_evidence and any(
+        signal in corpus for signal in ("runtime", "plugin", "service", "server", "cortex", "python")
+    )
+    if python_runtime:
+        return {
+            "profile": "backend_dev",
+            "reason": "Python runtime/service paths indicate backend implementation rather than a generic full-stack owner.",
+            "matched_signals": [path for path in path_values if path.endswith(".py")][:8],
+            "source": "bounded_task_signals",
+        }
+    application_paths = [
+        path for path in path_values
+        if not path.startswith((".github/", "infra/", "deploy/", "ops/"))
+        and not path.endswith((".yml", ".yaml", ".tf"))
+    ]
+    application_change_signal = any(
+        _routing_signal_matches(corpus, signal)
+        for signal in (
+            "fix", "bug", "feature", "implement", "application change", "app change",
+            "исправ", "ошибк", "функц", "реализ",
+        )
+    )
     for rule in IMPLEMENTATION_ROUTING["rules"]:
+        if rule.get("profile") == "devops_engineer" and (application_paths or application_change_signal):
+            # Deployment is a later operational concern when the same task also
+            # changes application code. Planner microtasks decide the primary
+            # code owner; a deployment keyword alone must not steal the fix.
+            continue
         any_signals = [signal for signal in rule.get("any", []) if _routing_signal_matches(corpus, signal)]
         all_matches = [
             [signal for signal in group if _routing_signal_matches(corpus, signal)]
@@ -531,6 +582,7 @@ MANDATORY_PIPELINE_GATES = {
     "C2": ["documentation", "close"],
     "C3": ["documentation", "close"],
 }
+GOVERNANCE_FULL_GATES = ("governance_activation", "governance_close")
 # These are the smallest auditable pipelines for each complexity. Specialist
 # gates are selected from task requirements instead of being baked into C3.
 BASE_PIPELINES = {
@@ -570,11 +622,13 @@ MAX_MANIFEST_BYTES = 64 * 1024 * 1024
 # dispatches use scoped report refs instead of embedding these summaries, so
 # predecessor grants are bounded by the task's report inventory instead.
 MAX_CONTEXT_REPORTS = 8
-MAX_GATE_RECOVERY_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
-MAX_ORCHESTRATE_GATE_FAILURES = int(RETRY_POLICY["phase_attempt_limit"])
-MAX_SAME_STRATEGY_FAILURES = int(RETRY_POLICY["same_strategy_limit"])
+# This bounds only repeated failures inside the private atomic commit adapter;
+# it is not a pipeline, QA, gate, worker, or rework-attempt budget.
+MAX_GATE_RECOVERY_FAILURES = 3
+REWORK_TERRA_AFTER_FAILURES = int(RETRY_POLICY["terra_after_failed_attempts"])
+REWORK_EFFORT_BY_PRIOR_FAILURES = dict(RETRY_POLICY["effort_by_prior_failures"])
 MAX_GATE_RECOVERY_EVENTS = 64
-MAX_TOOL_ERROR_LOG_INPUT_BYTES = 16384
+MAX_TOOL_ERROR_LOG_FIELDS = 64
 MAX_TOOL_ERROR_LOG_BYTES = 10 * 1024 * 1024
 MAX_QUESTIONS_PER_ATTEMPT = 64
 MAX_QUESTIONS_PER_TASK = 512
@@ -645,8 +699,8 @@ TERRA_EFFORT_BY_COMPLEXITY = _validated_effort_map(
 MODEL_EFFORT_FLOOR_BY_RISK = _validated_effort_map(
     MODEL_ROUTING.get("effort_floor_by_risk"), {"low", "moderate", "high", "critical"}, "model effort risk map"
 )
-if MODEL_ROUTING.get("max_policy") != "bounded_complex_work":
-    raise RuntimeError("bundled Cortex max effort policy must be bounded_complex_work")
+if MODEL_ROUTING.get("max_policy") != "complex_work_or_repeated_rework":
+    raise RuntimeError("bundled Cortex max effort policy must cover complex work and repeated rework")
 
 _profile_classes = MODEL_ROUTING.get("profile_classes")
 if not isinstance(_profile_classes, dict) or set(_profile_classes) != {"efficient", "adaptive", "deep"}:
@@ -746,7 +800,7 @@ TRACKER_POLICY = {
     # rather than project source.
     "ignored_directory_names": [
         "__pycache__", ".build", ".bundle", ".cache", ".dart_tool", ".direnv",
-        ".eggs", ".gradle", ".hypothesis", ".mypy_cache", ".next", ".nox",
+        ".eggs", ".expo", ".gradle", ".hypothesis", ".mypy_cache", ".next", ".nox",
         ".nyc_output", ".parcel-cache", ".phpunit.cache", ".pnpm-store",
         ".pub-cache", ".pytest_cache", ".ruff_cache", ".serverless", ".stack-work",
         ".svelte-kit", ".terraform", ".tox", ".turbo", ".venv", "BenchmarkDotNet.Artifacts",
@@ -2065,6 +2119,38 @@ def bind_host_worker_from_hook(
                         "host_resume_after_question",
                         str(resumed_attempt["attempt_id"]),
                     )
+            with state_lock(root):
+                heartbeat_loaded = _v3_task_state(root, task_id)
+                if heartbeat_loaded is None:
+                    return {"bound": False, "reason": "task_unavailable"}
+                heartbeat_task_dir, heartbeat_state, _ = heartbeat_loaded
+                heartbeat_attempt = _attempt(heartbeat_state, str(attempt.get("attempt_id") or ""))
+                if heartbeat_attempt.get("status") != "running":
+                    return {"bound": False, "reason": "worker_no_longer_running"}
+                heartbeat_at = now()
+                lease_expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+                heartbeat_attempt["last_heartbeat_at"] = heartbeat_at
+                heartbeat_attempt["worker_lease_expires_at"] = lease_expires_at
+                heartbeat_attempt["lifecycle_status"] = "running_acknowledged"
+                if isinstance(heartbeat_attempt.get("host_spawn"), dict):
+                    heartbeat_attempt["host_spawn"]["lease_expires_at"] = lease_expires_at
+                db_put_worker_session(root, {
+                    "task_id": heartbeat_state["task_id"],
+                    "attempt_id": str(heartbeat_attempt["attempt_id"]),
+                    "host_agent_id": host_agent_id,
+                    "host_task_name": host_task_name,
+                    "host_tool": str((heartbeat_attempt.get("host_spawn") or {}).get("tool") or "spawn_agent"),
+                    "status": "running",
+                    "resumable": True,
+                    "started_at": (heartbeat_attempt.get("host_spawn") or {}).get("confirmed_at"),
+                })
+                save_state(
+                    heartbeat_task_dir,
+                    heartbeat_task_dir / "state.sqlite",
+                    heartbeat_state,
+                    "host_heartbeat",
+                    str(heartbeat_attempt["attempt_id"]),
+                )
             return {
                 "bound": True,
                 "idempotent": True,
@@ -2107,7 +2193,7 @@ def finalize_host_worker_stop_from_hook(
     on a durable question remains addressable through the exact persisted host
     identity. A worker stopped without either a report or question is terminal
     failed; the coordinator must submit that exact dispatch's failure receipt
-    so the bounded gate retry policy can decide whether to re-dispatch.
+    so the unbounded corrective policy can re-dispatch with escalated effort.
     """
     project = select_project_root({"project_root": str(project_root_value or "")})
     task_id = safe_id(str(task_id_value or ""))
@@ -2182,6 +2268,8 @@ def finalize_host_worker_stop_from_hook(
         attempt["host_stopped_at"] = stopped_at
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         if report_refs:
+            attempt["lifecycle_status"] = "report_recorded"
+            attempt.pop("worker_lease_expires_at", None)
             attempt["host_stop_outcome"] = "report_recorded"
             # The report is the durable completion signal.  Do not retain the
             # provisional resumability flag written when the native worker
@@ -2197,6 +2285,8 @@ def finalize_host_worker_stop_from_hook(
             detail = f"{attempt_id}: {', '.join(report_refs)}"
             outcome = "report_recorded"
         elif open_questions:
+            attempt["lifecycle_status"] = "paused_awaiting_user"
+            attempt.pop("worker_lease_expires_at", None)
             question_refs = [str(item.get("question_id")) for item in open_questions]
             attempt["host_stop_outcome"] = "awaiting_user"
             attempt["host_resumable"] = True
@@ -2215,6 +2305,8 @@ def finalize_host_worker_stop_from_hook(
             attempt["finalization_reason"] = reason
             attempt["host_stop_outcome"] = reason
             attempt["host_resumable"] = False
+            attempt["lifecycle_status"] = "needs_recovery"
+            attempt.pop("worker_lease_expires_at", None)
             package["spawn_status"] = "stopped_without_report"
             package["host_stopped_at"] = stopped_at
             package["resumable"] = False
@@ -2311,42 +2403,26 @@ def _is_sensitive_log_key(value: object) -> bool:
     )
 
 
-def _sanitize_tool_error_value(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:
-    """Bound and redact arbitrary tool input before it reaches the error log."""
-    budget = budget if budget is not None else [512]
-    if budget[0] <= 0 or depth > 6:
-        return "<TRUNCATED>"
-    budget[0] -= 1
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= 100:
-                result["<TRUNCATED_KEYS>"] = "<TRUNCATED>"
-                break
-            key_text = redact(key, 256)
-            result[key_text] = "<REDACTED>" if _is_sensitive_log_key(key) else _sanitize_tool_error_value(item, depth=depth + 1, budget=budget)
-        return result
-    if isinstance(value, (list, tuple)):
-        items = [_sanitize_tool_error_value(item, depth=depth + 1, budget=budget) for item in value[:100]]
-        if len(value) > 100:
-            items.append("<TRUNCATED>")
-        return items
-    if value is None or isinstance(value, (bool, int, float)):
-        return value if not isinstance(value, float) or math.isfinite(value) else "<NON_FINITE>"
-    return redact(value, 2000)
-
-
-def _bounded_error_input(value: Any) -> Any:
-    sanitized = _sanitize_tool_error_value(value)
+def _tool_error_input_summary(value: Any, *, source: str) -> dict[str, Any]:
+    """Describe the input shape without retaining any caller-supplied values."""
     try:
-        encoded = json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+        byte_size = len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
     except (TypeError, ValueError):
-        encoded = json.dumps(redact(repr(value), MAX_TOOL_ERROR_LOG_INPUT_BYTES), ensure_ascii=False)
-    if len(encoded.encode("utf-8")) <= MAX_TOOL_ERROR_LOG_INPUT_BYTES:
-        return sanitized
+        byte_size = len(str(value).encode("utf-8", errors="replace"))
+    if not isinstance(value, dict):
+        return {"source": source, "kind": type(value).__name__, "byte_size": byte_size}
+    fields = sorted(
+        "<sensitive-field>" if _is_sensitive_log_key(str(key)) else redact(str(key), 128)
+        for key in value
+    )
     return {
-        "truncated": True,
-        "preview": redact(encoded[:MAX_TOOL_ERROR_LOG_INPUT_BYTES], MAX_TOOL_ERROR_LOG_INPUT_BYTES),
+        "source": source,
+        "kind": "object",
+        "field_count": len(fields),
+        "fields": fields[:MAX_TOOL_ERROR_LOG_FIELDS],
+        "fields_truncated": len(fields) > MAX_TOOL_ERROR_LOG_FIELDS,
+        "sensitive_field_count": sum(1 for key in value if _is_sensitive_log_key(str(key))),
+        "byte_size": byte_size,
     }
 
 
@@ -2373,6 +2449,12 @@ def _tool_error_context(request: Any, request_id: Any, raw_line: str) -> dict[st
             ids[key] = redact(value, 256)
     thread_id = source.get("thread_id") or request_dict.get("thread_id")
     session_id = source.get("session_id") or source.get("chat_session_id") or request_dict.get("session_id") or thread_id
+    if arguments:
+        input_value, input_source = arguments, "arguments"
+    elif params:
+        input_value, input_source = params, "params"
+    else:
+        input_value, input_source = raw_line, "raw_line"
     return {
         "method": redact(request_dict.get("method", ""), 128) or None,
         "tool": redact(params.get("name", ""), 128) or None,
@@ -2380,7 +2462,7 @@ def _tool_error_context(request: Any, request_id: Any, raw_line: str) -> dict[st
         "thread_id": redact(thread_id, 256) if thread_id else None,
         "request_id": redact(request_id, 256) if request_id is not None else None,
         "ids": ids,
-        "input": _bounded_error_input(arguments if arguments else params if params else raw_line),
+        "input_summary": _tool_error_input_summary(input_value, source=input_source),
     }
 
 
@@ -2660,12 +2742,17 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
         allowed = {"fingerprint", "severity", "status", "blocking", "summary", "details", "waiver_reason", "waived_by", "waived_at", "resolved_at"}
         if set(item) - allowed:
             raise ValueError("closure finding contains unknown fields")
-        fingerprint = str(item.get("fingerprint") or "").strip()
         summary = str(item.get("summary") or "").strip()
         severity = str(item.get("severity") or "")
         status = str(item.get("status") or "")
-        if not fingerprint or not summary or severity not in _CLOSURE_SEVERITIES or status not in _CLOSURE_STATUSES or not isinstance(item.get("blocking"), bool):
-            raise ValueError("closure finding has invalid fingerprint, severity, status, blocking, or summary")
+        fingerprint = str(item.get("fingerprint") or "").strip() or (
+            "finding-" + digest_text("\0".join((severity, summary.casefold())))[:24]
+        )
+        if not summary or severity not in _CLOSURE_SEVERITIES or status not in _CLOSURE_STATUSES or not isinstance(item.get("blocking"), bool):
+            raise ValueError(
+                "closure finding requires a non-empty summary, severity P0/P1/P2/P3/info, "
+                "status open/resolved/waived, and boolean blocking"
+            )
         details = item.get("details")
         if details is not None and not isinstance(details, (str, dict, list)):
             raise ValueError("closure finding details must be structured text")
@@ -2714,15 +2801,21 @@ def sanitize_gate_result_payload(value: Any, *, actor_ids: set[str] | None = Non
         raise ValueError(
             "gate_result failure_class must be product, infrastructure, environment, policy, or worker"
         )
-    closure = sanitize_closure_payload(
-        {
-            "decision": "fail" if decision == "blocked" else decision,
-            "findings": value["findings"],
-            "verification": value["verification"],
-            "workspace": value["workspace"],
-        },
-        actor_ids=actor_ids,
-    )
+    try:
+        closure = sanitize_closure_payload(
+            {
+                "decision": "fail" if decision == "blocked" else decision,
+                "findings": value["findings"],
+                "verification": value["verification"],
+                "workspace": value["workspace"],
+            },
+            actor_ids=actor_ids,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("closure "):
+            message = "gate_result " + message[len("closure "):]
+        raise ValueError(message) from exc
     if decision in {"rework", "fail", "blocked"} and not (
         any(
             item.get("status") == "open" and item.get("blocking")
@@ -2919,7 +3012,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} must be an object")
             allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "acceptance_criteria", "verification"}
             unknown_micro = sorted(set(raw_microtask) - allowed)
-            missing_micro = sorted({"id", "title", "objective"} - set(raw_microtask))
+            missing_micro = sorted({"id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"} - set(raw_microtask))
             if unknown_micro or missing_micro:
                 details = ([] if not unknown_micro else ["unknown: " + ", ".join(unknown_micro)]) + ([] if not missing_micro else ["missing: " + ", ".join(missing_micro)])
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} is invalid (" + "; ".join(details) + ")")
@@ -2951,12 +3044,17 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 raise ValueError(
                     f"planning microtask {microtask_id!r} requires non-empty acceptance_criteria and verification"
                 )
+            microtask_paths = _planning_paths_list(raw_microtask.get("allowed_paths"), "planning microtask allowed_paths")
+            if any(path in {".", "*"} for path in microtask_paths):
+                raise ValueError(
+                    f"planning microtask {microtask_id!r} allowed_paths must be explicit and non-broad"
+                )
             microtasks.append({
                 "id": microtask_id,
                 "title": _planning_text(raw_microtask.get("title"), "planning microtask title", maximum=500),
                 "objective": _planning_text(raw_microtask.get("objective"), "planning microtask objective"),
                 "profile": profile or None,
-                "allowed_paths": _planning_paths_list(raw_microtask.get("allowed_paths"), "planning microtask allowed_paths"),
+                "allowed_paths": microtask_paths,
                 "depends_on": dependencies,
                 "acceptance_criteria": microtask_acceptance,
                 "verification": microtask_verification,
@@ -3198,12 +3296,42 @@ def _question_config(params: dict[str, Any]) -> dict[str, Any]:
         str(params.get("custom_label") or "Your answer / additional context").strip(),
         160,
     ) or "Your answer / additional context"
+    recommendation = redact(str(params.get("recommendation") or "").strip(), 1200)
+    if not recommendation:
+        raise ValueError(
+            "worker question recommendation is required and must explain why the suggested answer is safest or best"
+        )
+    raw_recommended_ids = params.get("recommended_option_ids")
+    if isinstance(raw_recommended_ids, str):
+        raw_recommended_ids = [raw_recommended_ids]
+    recommended_option_ids = [safe_id(str(value)) for value in (raw_recommended_ids or [])]
+    recommended_answer = redact(str(params.get("recommended_answer") or "").strip(), 1200)
+    option_ids = {item["option_id"] for item in options}
+    if options:
+        if not recommended_option_ids:
+            raise ValueError("choice questions require recommended_option_ids")
+        if any(value not in option_ids for value in recommended_option_ids):
+            raise ValueError("recommended_option_ids must reference defined question options")
+        if not multiple and len(recommended_option_ids) != 1:
+            raise ValueError("single-select questions require exactly one recommended option")
+        if len(recommended_option_ids) != len(set(recommended_option_ids)):
+            raise ValueError("recommended_option_ids must be unique")
+        if recommended_answer:
+            raise ValueError("choice questions use recommended_option_ids, not recommended_answer")
+    else:
+        if recommended_option_ids:
+            raise ValueError("text questions use recommended_answer, not recommended_option_ids")
+        if not recommended_answer:
+            raise ValueError("text questions require a concrete recommended_answer")
     return {
         "header": header,
         "options": options,
         "multiple": multiple,
         "custom_label": custom_label,
         "custom_response": True,
+        "recommendation": recommendation,
+        "recommended_option_ids": recommended_option_ids,
+        "recommended_answer": recommended_answer,
     }
 
 
@@ -3219,6 +3347,8 @@ def _question_payload(params: dict[str, Any]) -> tuple[str, Any, bool, dict[str,
     require_internal_english(config["header"], "worker question header")
     require_internal_english(config["custom_label"], "worker question custom_label")
     require_internal_english(config["options"], "worker question options")
+    require_internal_english(config["recommendation"], "worker question recommendation")
+    require_internal_english(config["recommended_answer"], "worker question recommended_answer")
     digest = digest_text(json.dumps({"question": sanitized_question, "context": context, "blocking": blocking, "config": config}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return sanitized_question, context, blocking, config, digest
 
@@ -3860,10 +3990,11 @@ def _validate_result_artifacts(
     # the user, or a concurrent writer and cannot safely be attributed to this
     # worker. Preserve the delta as concurrency evidence instead of rejecting
     # an otherwise valid report with an impossible "fix the JSON" loop.
-    # Known conventional test/build/cache residue is preserved as an audit
-    # receipt, but cannot turn a read-only result into a retry loop. Unknown
-    # ignored artifacts remain a hard failure below: they may be project-owned
-    # files hidden by a custom .gitignore rule.
+    # Every ignored side effect is preserved as an audit receipt and cannot
+    # turn a read-only result into a retry loop. Recognition is classification
+    # only: an unknown or future framework remains non-blocking without being
+    # mislabeled as a known cache/build artifact. Writable gates retain their
+    # strict claimed-change reconciliation below.
     concurrent_read_only_paths = observed_in_scope if read_only_result else []
     baseline_ignored = (baseline.get("policy") or {}).get("detected_ignored_entries") or {}
     current_ignored = (current.get("policy") or {}).get("detected_ignored_entries") or {}
@@ -3879,12 +4010,9 @@ def _validate_result_artifacts(
             if entry is not None
         )
     )
-    blocking_ignored_side_effects = sorted(set(ignored_side_effects) - set(tolerated_ephemeral_artifacts))
-    if read_only_result and blocking_ignored_side_effects:
-        raise ValueError(
-            f"generated or ignored project artifacts changed during read-only result gate {gate}: "
-            + ", ".join(blocking_ignored_side_effects)
-        )
+    unclassified_ignored_side_effects = sorted(
+        set(ignored_side_effects) - set(tolerated_ephemeral_artifacts)
+    )
     unsupported = sorted(set(reported) - changed)
     if unsupported:
         raise ValueError(
@@ -3904,8 +4032,12 @@ def _validate_result_artifacts(
         "reported_paths_digest": digest_text("\n".join(reported)),
         "concurrent_change_count": len(concurrent_read_only_paths),
         "concurrent_paths_digest": digest_text("\n".join(concurrent_read_only_paths)),
+        "ignored_artifact_count": len(ignored_side_effects) if read_only_result else 0,
+        "ignored_artifacts_digest": digest_text("\n".join(ignored_side_effects)),
         "ephemeral_artifact_count": len(tolerated_ephemeral_artifacts) if read_only_result else 0,
         "ephemeral_artifacts_digest": digest_text("\n".join(tolerated_ephemeral_artifacts)),
+        "unclassified_ignored_artifact_count": len(unclassified_ignored_side_effects) if read_only_result else 0,
+        "unclassified_ignored_artifacts_digest": digest_text("\n".join(unclassified_ignored_side_effects)),
     }
 
 
@@ -4367,6 +4499,15 @@ def normalize_pipeline(pipeline: list[Any]) -> list[str]:
 
 def validate_pipeline_invariants(state: dict[str, Any], pipeline: list[str] | None = None) -> None:
     candidate = pipeline or state["current_pipeline"]
+    governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    if governance.get("effective_mode") == "full":
+        missing_governance = set(GOVERNANCE_FULL_GATES) - set(candidate)
+        if missing_governance:
+            raise ValueError("full governance pipelines must retain activation and close review gates")
+        if candidate.index("governance_activation") > candidate.index("governance_close"):
+            raise ValueError("governance activation must run before governance close")
+        if "close" in candidate and candidate.index("governance_close") > candidate.index("close"):
+            raise ValueError("governance close must run before the final close gate")
     if state.get("require_handoff"):
         missing = {"documentation", "close"} - set(candidate)
         if missing:
@@ -4376,14 +4517,177 @@ def validate_pipeline_invariants(state: dict[str, Any], pipeline: list[str] | No
     normalize_parallel_groups(state.get("parallel_groups"), candidate)
 
 
-def validate_completion_invariants(state: dict[str, Any]) -> None:
+_GOVERNANCE_OBLIGATION_DEFAULTS = {
+    "minimal": ("verification_evidence", "audit_receipt"),
+    "light": (
+        "policy_snapshot",
+        "decision_assumption_risk_evidence",
+        "process_reflection",
+        "verification_evidence",
+    ),
+    "full": (
+        "acceptance_oracle_evidence",
+        "risk_register",
+        "falsification_strategy",
+        "independent_governance_review",
+        "retrospective",
+        "verification_evidence",
+        "audit_receipt",
+    ),
+}
+
+
+def _governance_obligations_for_gate(state: dict[str, Any], gate: str) -> tuple[str, ...]:
+    governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    mode = str(governance.get("effective_mode") or "minimal").strip().lower()
+    if mode not in _GOVERNANCE_OBLIGATION_DEFAULTS:
+        return ()
+    if gate == "governance_activation":
+        return _GOVERNANCE_OBLIGATION_DEFAULTS["full"][:4] if mode == "full" else ()
+    if gate not in {"governance_close", "close"}:
+        return ()
+    if mode == "minimal":
+        return ()
+    configured = governance.get("close_obligations")
+    if isinstance(configured, (list, tuple)) and all(str(item).strip() for item in configured):
+        return tuple(dict.fromkeys(str(item).strip() for item in configured))
+    return _GOVERNANCE_OBLIGATION_DEFAULTS[mode]
+
+
+def validate_governance_obligation_evidence(
+    state: dict[str, Any],
+    gate: str,
+    gate_evidence: list[dict[str, Any]] | None = None,
+    *,
+    artifact_root: Path | None = None,
+) -> None:
+    """Require typed, scoped, immutable evidence for governance gates.
+
+    ``close_obligations`` is a policy declaration, not completion evidence.
+    Each obligation must be attached to a durable evidence id, digest, and
+    governance scope.  The evidence itself must also carry the server-created
+    immutable artifact binding.  When ``artifact_root`` is available (the
+    normal gate path), the binding is resolved against SQLite and the stored
+    JSON is checked for the same task/gate/attempt identity.  The independent
+    review obligation additionally carries a distinct reviewer identity so a
+    worker cannot self-approve governance.
+    """
+    required = _governance_obligations_for_gate(state, gate)
+    if not required:
+        return
+    governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    expected_scope = str(
+        governance.get("initiative_ref")
+        or governance.get("autonomous_scope_ref")
+        or "governance-scope-autonomous"
+    ).strip()
+    evidence = gate_evidence if gate_evidence is not None else state.get("evidence", [])
+    if not isinstance(evidence, list):
+        evidence = []
+    seen: dict[str, dict[str, Any]] = {}
+    for item in evidence:
+        if not isinstance(item, dict) or item.get("invalidated"):
+            continue
+        obligations = item.get("governance_obligations")
+        if isinstance(obligations, str):
+            obligations = [obligations]
+        elif not isinstance(obligations, (list, tuple, set)):
+            obligations = []
+        obligations = {str(value).strip() for value in obligations if str(value).strip()}
+        kind = str(item.get("kind") or "").strip()
+        if kind in required:
+            obligations.add(kind)
+        scope = str(item.get("governance_scope_ref") or item.get("scope_ref") or "").strip()
+        if scope != expected_scope:
+            continue
+        artifact_ref = str(item.get("artifact_ref") or "").strip()
+        artifact_digest = str(item.get("artifact_digest") or "").strip().lower()
+        artifact_bound = (
+            bool(re.fullmatch(r"artifact-[0-9a-f]{32}", artifact_ref))
+            and bool(re.fullmatch(r"[0-9a-f]{64}", artifact_digest))
+            and item.get("artifact_immutable") is True
+            and item.get("artifact_verified") is True
+        )
+        task_id = str(state.get("task_id") or "").strip()
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        if artifact_bound and task_id and evidence_id:
+            expected_artifact_ref = "artifact-" + hashlib.sha256(
+                f"{task_id}\0evidence\0evidence/{evidence_id}.json\0{artifact_digest}".encode("utf-8")
+            ).hexdigest()[:32]
+            artifact_bound = artifact_ref == expected_artifact_ref
+        if artifact_bound and artifact_root is not None:
+            try:
+                metadata = db_get_artifact_metadata(artifact_root, task_id, artifact_ref) if task_id else None
+                canonical = db_read_artifact_content(artifact_root, task_id, artifact_ref) if metadata else None
+                if not metadata or not metadata.get("immutable") or metadata.get("digest_sha256") != artifact_digest:
+                    artifact_bound = False
+                elif isinstance(canonical, bytes):
+                    canonical = canonical.decode("utf-8")
+                parsed = json.loads(canonical) if isinstance(canonical, str) else None
+                artifact_bound = artifact_bound and isinstance(parsed, dict) and all(
+                    parsed.get(key) == item.get(key)
+                    for key in ("task_id", "gate", "attempt_id", "evidence_id", "kind")
+                )
+            except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+                artifact_bound = False
+        if (
+            not item.get("evidence_id")
+            or not str(item.get("digest") or "").strip()
+            or not artifact_bound
+        ):
+            continue
+        for obligation in obligations:
+            if obligation in required:
+                seen.setdefault(obligation, item)
+    missing = [item for item in required if item not in seen]
+    if missing:
+        raise ValueError(
+            f"{gate} requires typed governance obligation evidence: " + ", ".join(missing)
+        )
+    review = seen.get("independent_governance_review")
+    if review is not None:
+        reviewer = str(
+            review.get("reviewer_identity")
+            or review.get("reviewer_id")
+            or review.get("reviewer")
+            or ""
+        ).strip()
+        reviewer_role = str(review.get("reviewer_role") or review.get("reviewer_role_name") or "").strip().lower()
+        owner = str(governance.get("owner") or state.get("principal") or "").strip()
+        if (
+            not reviewer
+            or reviewer == owner
+            or review.get("independent_reviewer") is False
+            or reviewer_role not in {"code_reviewer", "reviewer"}
+        ):
+            raise ValueError("independent_governance_review requires a distinct code_reviewer identity")
+    verification = seen.get("verification_evidence")
+    if verification is not None and not (
+        verification.get("verified_execution") is True
+        and verification.get("exit_code") in {0, None}
+    ):
+        raise ValueError("verification_evidence requires server-verified successful execution")
+    receipt = seen.get("audit_receipt")
+    if receipt is not None and not (
+        receipt.get("report_id") and receipt.get("report_receipt")
+    ):
+        raise ValueError("audit_receipt requires a consumed report receipt")
+
+
+def validate_completion_invariants(
+    state: dict[str, Any],
+    *,
+    artifact_root: Path | None = None,
+) -> None:
     validate_pipeline_invariants(state)
-    if not state.get("require_handoff"):
+    governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    governance_full = governance.get("effective_mode") == "full"
+    if not state.get("require_handoff") and not governance_full:
         return
     attempts = [item for item in state.get("attempts", []) if not item.get("invalidated")]
     non_terminal = [item["attempt_id"] for item in attempts if item.get("status") not in TERMINAL_ATTEMPT_STATUSES]
     if non_terminal:
-        raise ValueError("C2/C3 completion requires every attempt to be terminal: " + ", ".join(non_terminal))
+        raise ValueError("governed completion requires every attempt to be terminal: " + ", ".join(non_terminal))
     evidence = [item for item in state.get("evidence", []) if not item.get("invalidated")]
     missing_evidence = [
         item["attempt_id"]
@@ -4392,7 +4696,7 @@ def validate_completion_invariants(state: dict[str, Any]) -> None:
         if not any(record.get("attempt_id") == item["attempt_id"] for record in evidence)
     ]
     if missing_evidence:
-        raise ValueError("C2/C3 completion requires evidence for every attempt: " + ", ".join(missing_evidence))
+        raise ValueError("governed completion requires evidence for every attempt: " + ", ".join(missing_evidence))
     missing_reports = [
         item["attempt_id"]
         for item in attempts
@@ -4405,15 +4709,31 @@ def validate_completion_invariants(state: dict[str, Any]) -> None:
         )
     ]
     if missing_reports:
-        raise ValueError("C2/C3 completion requires a consumed report receipt for every attempt: " + ", ".join(missing_reports))
-    if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
-        raise ValueError("C2/C3 completion requires documentation decision evidence")
-    if "close" not in state.get("completed_gates", []):
-        raise ValueError("C2/C3 completion requires the close gate")
-    if not state.get("reassessment_receipts"):
-        raise ValueError("C2/C3 completion requires a reassessment receipt")
-    if not state.get("handoff_created") or state.get("handoff_gate") != "close":
-        raise ValueError("C2/C3 completion requires a final close handoff")
+        raise ValueError("governed completion requires a consumed report receipt for every attempt: " + ", ".join(missing_reports))
+    if state.get("require_handoff"):
+        if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
+            raise ValueError("C2/C3 completion requires documentation decision evidence")
+        if "close" not in state.get("completed_gates", []):
+            raise ValueError("C2/C3 completion requires the close gate")
+        if not state.get("reassessment_receipts"):
+            raise ValueError("C2/C3 completion requires a reassessment receipt")
+        if not state.get("handoff_created") or state.get("handoff_gate") != "close":
+            raise ValueError("C2/C3 completion requires a final close handoff")
+    if governance_full:
+        completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+        missing_governance = sorted(set(GOVERNANCE_FULL_GATES) - completed)
+        if missing_governance:
+            raise ValueError("full governance completion requires activation and close review gates: " + ", ".join(missing_governance))
+    # Full and light governance obligations are enforced from actual evidence
+    # receipts, not merely from the resolver's metadata list.
+    if governance_full:
+        validate_governance_obligation_evidence(
+            state, "governance_close", evidence, artifact_root=artifact_root
+        )
+    elif governance.get("effective_mode") == "light":
+        validate_governance_obligation_evidence(
+            state, "close", evidence, artifact_root=artifact_root
+        )
 
 
 def lock_key(path: str) -> str:
@@ -5029,12 +5349,40 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("plan_approval must be auto or required")
         follow_up = params.get("follow_up") if isinstance(params.get("follow_up"), dict) else None
         baseline_ref = store_manifest_snapshot(task_dir, baseline)
-        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": redact(params.get("user_request") or params.get("objective", ""), 4000), "objective": redact(params.get("objective", "")), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        exact_user_request = str(params.get("user_request") or params.get("objective") or "").strip()
+        if not exact_user_request:
+            raise ValueError("init_task requires the exact non-empty user request")
+        exact_user_request_digest = digest_text(exact_user_request)
+        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "objective": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
+        intent_artifact = store_immutable_artifact(
+            task_dir,
+            task_id,
+            kind="user_intent",
+            title="intent/user-request.txt",
+            mime_type="text/plain; charset=utf-8",
+            content=exact_user_request,
+            export_path="intent/user-request.txt",
+        )
+        task["user_intent_artifact_ref"] = intent_artifact["artifact_ref"]
+        task["user_intent_artifact_path"] = "intent/user-request.txt"
+        task["user_intent_byte_size"] = intent_artifact["byte_size"]
+        if intent_artifact["digest_sha256"] != exact_user_request_digest:
+            raise ValueError("immutable user-intent artifact digest does not match the exact request")
+        db_update_task_definition(root, task)
+        from cortex_runtime.projection_service import enqueue as enqueue_projection
+        intent_projection = enqueue_projection(
+            root=root,
+            task_id=task_id,
+            artifact_id=intent_artifact["artifact_ref"],
+            projection_type="user_intent",
+            export_path="intent/user-request.txt",
+            required=False,
+        )
         if thread_id and (
             thread_id != principal
             or not principal.startswith("orchestration-task-")
@@ -5444,6 +5792,7 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             "expected_model": expected_model or None,
             "model_resolution": model_resolution or None,
             "confirmed_at": now(),
+            "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
         }
         model_verification = "not_requested"
         if expected_model:
@@ -5493,6 +5842,10 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
         attempt["model_verification"] = model_verification
         attempt["dispatch_correlation"] = "coordinator_recorded_host_spawn"
         attempt["status"] = "running"
+        attempt["lifecycle_status"] = "running_acknowledged"
+        attempt["last_heartbeat_at"] = host_spawn["confirmed_at"]
+        attempt["worker_lease_expires_at"] = host_spawn["lease_expires_at"]
+        attempt.pop("spawn_lease_expires_at", None)
         attempt["started_at"] = host_spawn["confirmed_at"]
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         package["spawn_status"] = "confirmed"
@@ -5532,6 +5885,15 @@ def _validated_evidence_records(task_dir: Path, state: dict[str, Any]) -> list[d
         )
         indexed = dict(state_record)
         invalidated = bool(indexed.pop("invalidated", False))
+        # The canonical artifact is written before its catalog binding is
+        # attached to the task state.  Keep that binding server-owned while
+        # reconciling the immutable evidence body; it is intentionally not a
+        # self-referential field inside the content-addressed JSON.
+        for binding_key in (
+            "artifact_ref", "artifact_digest", "artifact_immutable", "artifact_verified"
+        ):
+            if binding_key in indexed and binding_key not in record:
+                record[binding_key] = indexed[binding_key]
         if indexed != record:
             raise ValueError(f"SQLite evidence record failed reconciliation: {evidence_id}")
         validated.append({**record, **({"invalidated": True} if invalidated else {})})
@@ -5732,6 +6094,42 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         if decision == "not_applicable" and not justification:
             raise ValueError("not_applicable documentation evidence requires justification")
     execution = execution or {}
+    raw_obligations = params.get("governance_obligations")
+    if isinstance(raw_obligations, str):
+        governance_obligations = [raw_obligations.strip()] if raw_obligations.strip() else []
+    elif isinstance(raw_obligations, (list, tuple, set)):
+        governance_obligations = [str(item).strip() for item in raw_obligations if str(item).strip()]
+    else:
+        governance_obligations = []
+    if kind in {
+        "acceptance_oracle_evidence", "risk_register", "falsification_strategy",
+        "independent_governance_review", "retrospective", "verification_evidence",
+        "audit_receipt", "policy_snapshot", "decision_assumption_risk_evidence", "process_reflection",
+    } and kind not in governance_obligations:
+        governance_obligations.append(kind)
+    state_governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    # Preserve the normal C2 evidence workflow while making the light-mode
+    # obligations explicit in the durable receipt.  These are only safe
+    # aliases for the corresponding server-observed gate evidence; callers
+    # cannot claim them by setting arbitrary completion metadata.
+    if state_governance.get("effective_mode") == "light":
+        if gate == "documentation" or kind == "documentation":
+            if "policy_snapshot" not in governance_obligations:
+                governance_obligations.append("policy_snapshot")
+        if kind not in {"command", "documentation"}:
+            for obligation in ("decision_assumption_risk_evidence", "process_reflection"):
+                if obligation not in governance_obligations:
+                    governance_obligations.append(obligation)
+        if kind == "command" and verified and (exit_code is None or int(exit_code) == 0):
+            if "verification_evidence" not in governance_obligations:
+                governance_obligations.append("verification_evidence")
+    governance_scope_ref = str(
+        params.get("governance_scope_ref")
+        or params.get("scope_ref")
+        or state_governance.get("initiative_ref")
+        or state_governance.get("autonomous_scope_ref")
+        or "governance-scope-autonomous"
+    ).strip()
     evidence = {
         "evidence_id": evidence_id,
         "task_id": state["task_id"],
@@ -5752,6 +6150,11 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "decision": decision or None,
         "justification": redact(justification, 2000) or None,
         "paths": [redact(path, 500) for path in params.get("paths", [])],
+        "governance_obligations": governance_obligations,
+        "governance_scope_ref": governance_scope_ref,
+        "reviewer_identity": redact(params.get("reviewer_identity", ""), 256) or None,
+        "reviewer_role": redact(params.get("reviewer_role", ""), 128) or None,
+        "independent_reviewer": bool(params.get("independent_reviewer")) if "independent_reviewer" in params else None,
         "created_at": now(),
     }
     if report_receipt is not None and report_paths is not None and report_record is not None:
@@ -5765,7 +6168,7 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
             report_receipt,
         )
         _recover_report_receipt(report_paths, report_record, state)
-    store_immutable_artifact(
+    artifact = store_immutable_artifact(
         task_dir,
         state["task_id"],
         kind="evidence",
@@ -5774,6 +6177,14 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         content=json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         export_path=f"evidence/{evidence_id}.json",
     )
+    # Governance close/activation validation must be able to resolve the
+    # evidence back to canonical SQLite content.  These fields are produced
+    # only after the immutable artifact write and are never accepted from the
+    # public evidence payload.
+    evidence["artifact_ref"] = artifact["artifact_ref"]
+    evidence["artifact_digest"] = artifact["digest_sha256"]
+    evidence["artifact_immutable"] = bool(artifact["immutable"])
+    evidence["artifact_verified"] = True
     write_json(task_dir / "evidence" / f"{evidence_id}.json", evidence)
     state["evidence"].append(evidence)
     if kind == "documentation":
@@ -6012,10 +6423,12 @@ def _record_commit_gate_recovery(
 def commit_gate(params: dict[str, Any]) -> dict[str, Any]:
     """Fast path for server verification/evidence and the gate transition.
 
-    Validation failures are returned as bounded recovery data instead of
-    escaping as repeated MCP errors.  After three failures for the same
-    gate/mode the task is durably blocked, giving the coordinator a terminal
-    handoff path.
+    Validation failures inside this private atomic adapter are returned as
+    bounded recovery data instead of escaping as repeated MCP errors. After
+    three failures for the same gate/mode the adapter is durably blocked,
+    giving the coordinator a terminal handoff path. This limit is intentionally
+    unrelated to pipeline, QA, review, worker, finding-remediation, or closure
+    rework attempts.
     """
     root = ledger_root(params)
     with state_lock(root):
@@ -6146,11 +6559,13 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         intent = str(params.get("intent", "add_specialist"))
         if intent not in {"add_specialist", "resequence", "rework_gate", "stop"}:
             raise ValueError("intent must be add_specialist, resequence, rework_gate, or stop")
-        if (
-            int(state.get("replan_count", 0)) >= int(state.get("replan_limit", 2))
-            and not params.get("invariant_recovery", False)
-        ):
-            raise ValueError("replan limit exhausted")
+        # ``replan_count`` is lifetime audit data, not an execution budget.
+        # Public material replans are already tied to durable worker evidence,
+        # plan approval, idempotent operation receipts, and bounded per-gate /
+        # per-strategy recovery.  A task-wide cap made long but progressing
+        # tasks impossible to finish after two legitimate review findings.
+        # Keep accepting the legacy ``replan_limit`` field for persisted-task
+        # compatibility, but never use it to block an evidence-backed replan.
         explicit_pipeline = params.get("pipeline")
         proposal_params = {"complexity": task["complexity"], "requirements": task.get("requirements", []) + signals}
         explicit_groups = params.get("parallel_groups")
@@ -6676,6 +7091,9 @@ class OperationRegistryError(ValueError):
     """The project-wide replay registry cannot safely serve lifecycle calls."""
 
 
+COORDINATOR_CAPABILITY_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 def _operation_registry_path(root: Path) -> Path:
     return root / "cortex.db"
 
@@ -6690,6 +7108,26 @@ def _operation_registry(root: Path) -> dict[str, Any]:
         raise OperationRegistryError("orchestration operation registry schema is not supported")
     if not isinstance(registry.get("starts"), dict) or not isinstance(registry.get("tasks"), dict):
         raise OperationRegistryError("orchestration operation registry is invalid")
+    # 9.2.2 briefly persisted a reusable governance bearer in this project
+    # document. Remove and invalidate that legacy material on first access;
+    # hashing a bearer that may already have been read would preserve a
+    # compromised credential. Affected active tasks therefore fail closed and
+    # require a fresh start to receive a new one-response capability.
+    scrubbed_legacy_capability = False
+    for reservation in registry["starts"].values():
+        if isinstance(reservation, dict) and "coordinator_capability" in reservation:
+            reservation.pop("coordinator_capability", None)
+            reservation.pop("coordinator_capability_digest", None)
+            scrubbed_legacy_capability = True
+    for record in registry["tasks"].values():
+        start = record.get("start") if isinstance(record, dict) else None
+        if isinstance(start, dict) and "coordinator_capability" in start:
+            start.pop("coordinator_capability", None)
+            start.pop("coordinator_capability_digest", None)
+            scrubbed_legacy_capability = True
+    if scrubbed_legacy_capability:
+        registry["updated_at"] = now()
+        db_put_global(root, "operation_registry", registry)
     return registry
 
 
@@ -6703,6 +7141,89 @@ def _write_operation_registry(root: Path, registry: dict[str, Any]) -> None:
                 raise ValueError("operation registry contains a non-canonical dispatch replay")
     registry["updated_at"] = now()
     db_put_global(root, "operation_registry", registry)
+
+
+_PENDING_COORDINATOR_CAPABILITIES: dict[tuple[str, str], str] = {}
+_PENDING_COORDINATOR_CAPABILITIES_LOCK = threading.Lock()
+
+
+def _coordinator_capability_digest(capability: str) -> str:
+    return hashlib.sha256(str(capability).encode("ascii")).hexdigest()
+
+
+def _pending_coordinator_capability_key(root: Path, task_id: str) -> tuple[str, str]:
+    return str(root.resolve()), str(task_id)
+
+
+def _stage_coordinator_capability(root: Path, task_id: str) -> tuple[str, str]:
+    """Create a one-response bearer and return it with its durable digest.
+
+    Only the digest enters the project ledger. The raw bearer lives in this
+    process just long enough for the successful start response; a lost or
+    cross-process response fails closed instead of making a reusable secret
+    recoverable from the worker-readable project database.
+    """
+    capability = secrets.token_hex(32)
+    digest = _coordinator_capability_digest(capability)
+    with _PENDING_COORDINATOR_CAPABILITIES_LOCK:
+        _PENDING_COORDINATOR_CAPABILITIES[_pending_coordinator_capability_key(root, task_id)] = capability
+    return capability, digest
+
+
+def _take_coordinator_capability(root: Path, task_id: str) -> str | None:
+    with _PENDING_COORDINATOR_CAPABILITIES_LOCK:
+        return _PENDING_COORDINATOR_CAPABILITIES.pop(
+            _pending_coordinator_capability_key(root, task_id),
+            None,
+        )
+
+
+def _coordinator_capability_matches(root: Path, task_id: str, capability: str) -> bool:
+    supplied = str(capability or "").strip().lower()
+    if not COORDINATOR_CAPABILITY_RE.fullmatch(supplied):
+        return False
+    registry = _operation_registry(root)
+    record = registry.get("tasks", {}).get(str(task_id))
+    start = record.get("start") if isinstance(record, dict) else None
+    expected_digest = str(
+        start.get("coordinator_capability_digest") if isinstance(start, dict) else ""
+    ).strip().lower()
+    return bool(
+        COORDINATOR_CAPABILITY_RE.fullmatch(expected_digest)
+        and hmac.compare_digest(_coordinator_capability_digest(supplied), expected_digest)
+    )
+
+
+def _coordinator_identity_for_capability(
+    root: Path,
+    capability: str,
+) -> tuple[str, str, str] | None:
+    """Resolve the one server-owned coordinator identity bound to a capability."""
+    supplied = str(capability or "").strip().lower()
+    if not COORDINATOR_CAPABILITY_RE.fullmatch(supplied):
+        return None
+    supplied_digest = _coordinator_capability_digest(supplied)
+    registry = _operation_registry(root)
+    matches: list[tuple[str, str, str]] = []
+    for task_id, record in registry.get("tasks", {}).items():
+        if not isinstance(record, dict):
+            continue
+        start = record.get("start")
+        expected_digest = str(
+            start.get("coordinator_capability_digest") if isinstance(start, dict) else ""
+        ).strip().lower()
+        if (
+            not COORDINATOR_CAPABILITY_RE.fullmatch(expected_digest)
+            or not hmac.compare_digest(expected_digest, supplied_digest)
+        ):
+            continue
+        principal = str(start.get("principal") or "").strip()
+        thread_id = str(start.get("thread_id") or principal).strip()
+        if principal and thread_id:
+            matches.append((str(task_id), principal, thread_id))
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 def _prune_timestamp(value: object) -> datetime | None:
@@ -7302,13 +7823,114 @@ def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
         [["scope"], ["discover"], ["architecture"], ["plan"], ["documentation"], ["review"], ["close"]]
         if knowledge_harvest else classified["parallel_groups"]
     )
-    return [
+    waves = [
         {
             "wave_id": f"wave-{index:02d}",
             "delegations": [automatic_spec(gate) for gate in group],
         }
         for index, group in enumerate(groups, 1)
     ]
+    return _append_governance_waves(waves, task)
+
+
+def _append_governance_waves(waves: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
+    """Add the bounded full-governance activation/close review waves.
+
+    The resolver is the only authority that can request ``full``.  Once it
+    does, these two server-owned waves surround the ordinary user pipeline;
+    caller-supplied waves cannot silently omit either review.  Existing
+    governance phases are preserved for idempotent retries and explicit
+    coordinator plans.
+    """
+    governance = task.get("governance") if isinstance(task.get("governance"), dict) else {}
+    if governance.get("effective_mode") != "full":
+        return waves
+    governance_locations: dict[str, list[int]] = {
+        "governance_activation": [],
+        "governance_close": [],
+    }
+    for index, wave in enumerate(waves):
+        delegations = [item for item in (wave.get("delegations") or []) if isinstance(item, dict)]
+        governance_items = [
+            item for item in delegations
+            if str(item.get("gate") or "") in governance_locations
+        ]
+        if not governance_items:
+            continue
+        if len(governance_items) != 1 or len(delegations) != 1:
+            raise ValueError("server-owned governance review waves must contain exactly one delegation")
+        item = governance_items[0]
+        gate = str(item.get("gate") or "")
+        if str(item.get("agent") or "") != "code_reviewer":
+            raise ValueError(f"{gate} is server-owned by code_reviewer")
+        governance_locations[gate].append(index)
+    for gate, locations in governance_locations.items():
+        if len(locations) > 1:
+            raise ValueError(f"full governance may contain only one {gate} wave")
+
+    def governance_wave(gate: str, wave_id: str, position: str) -> dict[str, Any]:
+        return {
+            "wave_id": wave_id,
+            "delegations": [{
+                "gate": gate,
+                "agent": "code_reviewer",
+                "selection_reason": (
+                    "Full governance requires an independent code_reviewer-owned "
+                    f"{position} review before ordinary orchestration can proceed."
+                ),
+            }],
+        }
+
+    result = list(waves)
+    if not governance_locations["governance_activation"]:
+        result.insert(0, governance_wave("governance_activation", "governance-activation", "activation"))
+    else:
+        activation_index = governance_locations["governance_activation"][0]
+        if activation_index:
+            activation_wave = result.pop(activation_index)
+            result.insert(0, activation_wave)
+    if not governance_locations["governance_close"]:
+        close_index = next(
+            (
+                index
+                for index, wave in enumerate(result)
+                if any(
+                    isinstance(item, dict) and str(item.get("gate") or "") == "close"
+                    for item in (wave.get("delegations") or [])
+                )
+            ),
+            len(result),
+        )
+        result.insert(close_index, governance_wave("governance_close", "governance-close", "close"))
+    else:
+        close_index = next(
+            (
+                index
+                for index, wave in enumerate(result)
+                if any(
+                    isinstance(item, dict) and str(item.get("gate") or "") == "close"
+                    for item in (wave.get("delegations") or [])
+                )
+            ),
+            len(result),
+        )
+        governance_close_index = next(
+            (
+                index
+                for index, wave in enumerate(result)
+                if any(
+                    isinstance(item, dict) and str(item.get("gate") or "") == "governance_close"
+                    for item in (wave.get("delegations") or [])
+                )
+            ),
+            len(result),
+        )
+        if governance_close_index > close_index:
+            governance_close_wave = result.pop(governance_close_index)
+            result.insert(close_index, governance_close_wave)
+    if len(result) > len(waves) + 2:
+        raise ValueError("full governance may add at most two lifecycle waves")
+    return result
 
 
 def _v3_host_capabilities() -> dict[str, Any]:
@@ -7384,7 +8006,21 @@ def _v3_start_reservation(
     # Its only normalization removes Desktop's injected local Cortex skill-link
     # wrapper; coordinator-derived language metadata, waves, routing, or
     # verification refinements must not turn a retry into a second active task.
-    start_digest = _orchestrate_request_digest({"user_request": task.get("user_request")})
+    # Governance inputs are part of the immutable start contract.  A retry
+    # with the same prose but a different initiative or requested floor must
+    # not silently replay an already-created task under a weaker/other policy.
+    start_digest = _orchestrate_request_digest({
+        "user_request": task.get("user_request"),
+        "initiative_ref": task.get("initiative_ref"),
+        "governance_mode": task.get("governance_mode"),
+        "risk_triggers": task.get("risk_triggers"),
+        "governance_triggers": task.get("governance_triggers"),
+        "multiple_repositories": task.get("multiple_repositories"),
+        "related_tasks": task.get("related_tasks"),
+        "long_lived_lanes": task.get("long_lived_lanes"),
+        "conflicting_resources": task.get("conflicting_resources"),
+        "multi_session_handoff": task.get("multi_session_handoff"),
+    })
     with state_lock(root):
         registry = _operation_registry(root)
         prior = registry["starts"].get(start_digest)
@@ -7410,12 +8046,14 @@ def _v3_start_reservation(
         principal = safe_id("orchestration-" + task_ref)
         thread_id = _codex_host_session_id() or principal
         submission_id = safe_id("orchestration-start-" + secrets.token_hex(8))
+        _, capability_digest = _stage_coordinator_capability(root, task_id)
         reservation = {
             "task_id": task_id,
             "task_ref": task_ref,
             "principal": principal,
             "thread_id": thread_id,
             "submission_id": submission_id,
+            "coordinator_capability_digest": capability_digest,
             "created_at": now(),
         }
         registry["starts"][start_digest] = reservation
@@ -7436,7 +8074,9 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         allowed_task = {
             "user_request", "objective", "requirements", "acceptance_criteria", "scope", "allowed_paths",
             "verification", "budget", "pause_conditions", "user_language", "language",
-            "complexity", "replan_limit", "plan_approval",
+            "complexity", "replan_limit", "plan_approval", "initiative_ref", "governance_mode",
+            "risk_triggers", "governance_triggers", "multiple_repositories", "related_tasks",
+            "long_lived_lanes", "conflicting_resources", "multi_session_handoff",
         }
         unknown_task = sorted(set(raw_task) - allowed_task)
         if unknown_task:
@@ -7465,6 +8105,20 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             task["follow_up"] = sanitize_structured(params["_follow_up"])
         task["complexity"] = _v3_complexity(raw_task.get("complexity"))
         task["acceptance_criteria"], task["verification"] = _required_task_result_contract(task)
+        governance = resolve_governance(
+            ledger_root(params),
+            complexity=task["complexity"],
+            requested_mode=raw_task.get("governance_mode", "auto"),
+            objective=user_request,
+            requirements=task.get("requirements", []),
+            scope=task.get("scope", []),
+            allowed_paths=task.get("allowed_paths", []),
+            task=task,
+            initiative_ref=raw_task.get("initiative_ref"),
+        )
+        task["initiative_ref"] = governance.get("initiative_ref")
+        task["governance_mode"] = governance.get("requested_mode")
+        task["governance"] = governance
         task["plan_approval"] = (
             "auto"
             if _is_knowledge_harvest_task(task)
@@ -7476,7 +8130,10 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             objective,
         )
         waves = (
-            _v3_compact_waves(params["waves"], task, project_root=selected_project_root)
+            _append_governance_waves(
+                _v3_compact_waves(params["waves"], task, project_root=selected_project_root),
+                task,
+            )
             if params.get("waves") is not None else _v3_auto_waves(task)
         )
         task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
@@ -7515,7 +8172,11 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     "thread_id": thread_id,
                     "task_id": task_id,
                 })
-            return _v3_response(old, task_ref, start_replayed=True)
+            response = _v3_response(old, task_ref, start_replayed=True)
+            capability = _take_coordinator_capability(ledger_root(params), task_id)
+            if capability and response.get("ok"):
+                response["authorization"] = {"coordinator_capability": capability}
+            return response
         old = orchestrate({
             "operation": "start",
             "submission_id": submission_id,
@@ -7526,7 +8187,13 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "waves": waves,
             "host_capabilities": _v3_host_capabilities(),
         })
-        return _v3_response(old, task_ref, start_replayed=replayed)
+        if isinstance(old, dict):
+            old["governance"] = governance
+        response = _v3_response(old, task_ref, start_replayed=replayed)
+        capability = _take_coordinator_capability(ledger_root(params), task_id)
+        if capability and response.get("ok"):
+            response["authorization"] = {"coordinator_capability": capability}
+        return response
     except OperationRegistryError as exc:
         return _v3_start_state_blocked_error(exc)
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
@@ -7569,7 +8236,7 @@ def _v3_active_wave_context(
     # the relative result contract; otherwise the handoff asks the
     # coordinator to submit a failed receipt that this adapter rejects as an
     # unknown slot.  Other terminal attempts (notably passed attempts kept
-    # during bounded gate rework) remain omitted when a live retry exists.
+    # during repeated gate rework) remain omitted when a live retry exists.
     reportless_failure_ids = {
         str(item.get("attempt_id") or "")
         for item in state.get("attempts", [])
@@ -7700,6 +8367,84 @@ def _v3_active_replay(params: dict[str, Any], task_id: str) -> dict[str, Any] | 
     return None
 
 
+def _governance_boundary_recheck(
+    params: dict[str, Any],
+    task: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    future_waves: Any = None,
+    results: Any = None,
+) -> dict[str, Any]:
+    """Re-resolve stated governance triggers before accepting a new plan.
+
+    Governance is not a one-time start classification.  A coordinator can
+    introduce a security, migration, cross-session, or multi-repository
+    concern in a later result or replacement wave.  Such a promotion must be
+    visible at the boundary and cannot be smuggled through a light pipeline;
+    the caller must submit the replacement with the server-owned full review
+    waves.
+    """
+    current = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    current_mode = str(current.get("effective_mode") or "minimal")
+
+    # Generated gate/agent names and opaque report references are not user
+    # statements.  Scanning their serialized JSON for words such as
+    # ``security`` promoted an ordinary smoke pipeline merely because it had
+    # a security gate.  Re-evaluation accepts only the explicit structured
+    # trigger fields that the public task contract defines.
+    trigger_keys = {
+        "risk_triggers", "governance_triggers", "security", "privacy", "credentials",
+        "sensitive_data", "destructive", "migration", "external_action", "public_contract",
+        "authorization", "artifact_integrity", "report_integrity", "verification_integrity",
+        "multiple_repositories", "related_tasks", "long_lived_lanes", "conflicting_resources",
+        "multi_session_handoff",
+    }
+
+    def explicit_triggers(value: Any) -> list[Any]:
+        found: list[Any] = []
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                normalized = str(key).strip().lower().replace("-", "_")
+                if normalized in {"risk_triggers", "governance_triggers"}:
+                    if isinstance(nested, (list, tuple, set)):
+                        found.extend(item for item in nested if item)
+                    elif isinstance(nested, dict):
+                        found.extend(key for key, enabled in nested.items() if enabled)
+                    elif nested:
+                        found.append(nested)
+                elif normalized in trigger_keys and nested:
+                    found.append(normalized)
+                elif isinstance(nested, (dict, list, tuple)):
+                    found.extend(explicit_triggers(nested))
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                found.extend(explicit_triggers(item))
+        return found
+
+    boundary_triggers = explicit_triggers(future_waves) + explicit_triggers(results)
+    if not boundary_triggers:
+        return current
+    task_probe = dict(task)
+    task_probe["risk_triggers"] = boundary_triggers
+    resolved = resolve_governance(
+        ledger_root(params),
+        complexity=task.get("complexity", state.get("complexity", "C2")),
+        requested_mode=current.get("requested_mode", task.get("governance_mode", "auto")),
+        objective=task_probe["objective"],
+        requirements=task.get("requirements", []),
+        scope=task.get("scope", []),
+        allowed_paths=task.get("allowed_paths", []),
+        task=task_probe,
+        initiative_ref=task.get("initiative_ref"),
+    )
+    if resolved.get("effective_mode") == "full" and current_mode != "full":
+        raise ValueError(
+            "new governance trigger detected at the continue boundary; submit a replacement pipeline with "
+            "server-owned governance_activation and governance_close waves"
+        )
+    return resolved
+
+
 def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Advance exactly the active Cortex wave using relative worker slots."""
     resolved_task_ref = str(params.get("task_ref") or "").strip() or None
@@ -7747,6 +8492,13 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
         if params.get("rework") and params.get("future_waves") is None:
             raise ValueError("rework=true requires explicit future_waves; Cortex never guesses a replacement pipeline")
+        _governance_boundary_recheck(
+            params,
+            task,
+            state,
+            future_waves=params.get("future_waves"),
+            results=results,
+        )
         future_waves = (
             _v3_compact_waves(
                 params["future_waves"],
@@ -7921,7 +8673,7 @@ def _v3_question_management_payload(value: object) -> dict[str, Any]:
         payload["answer_en"] = payload.pop("canonical_answer")
     command = str(payload.get("command") or "ask").strip().lower()
     # A batch translation resumes the existing durable batch through the same
-    # coordinator UI route; it is not a legacy single-question answer call.
+    # ordinary-chat route; it is not a legacy single-question answer call.
     if command == "answer" and "canonical_answers" in payload:
         command = "ask"
     if "answer" in payload or "answer_en" in payload:
@@ -7951,14 +8703,6 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
             f"{COORDINATOR_LOCK} Resume the exact same native worker with followup_task. Tell it the durable answer "
             f"is recorded, require worker_question(action={poll_action}) with the same {poll_ref} and attempt, and do not "
             "spawn a replacement worker or advance the wave before its report is recorded."
-        )
-    elif status_value == "elicitation_unavailable":
-        response["ok"] = False
-        response["outcome"] = "host_question_unavailable"
-        response["code"] = "host_question_unavailable"
-        response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the durable question open and stop. Commentary may explain context but must "
-            "not collect or fabricate the answer; retry only in a main-chat host that supports MCP elicitation."
         )
     elif status_value == "awaiting_translation":
         response["outcome"] = "awaiting_translation"
@@ -7997,14 +8741,16 @@ def _v3_question_response(response: dict[str, Any]) -> dict[str, Any]:
             f"{COORDINATOR_LOCK} Do not resume the worker from this superseded batch. Keep the durable task revision "
             "as the source of truth and wait for its current dispatch or question batch."
         )
-    elif status_value in {"decline", "cancel", "invalid_answer", "pending_user_input"}:
+    elif status_value in {"invalid_answer", "pending_user_input", "pending_user_message"}:
         response["outcome"] = "awaiting_user"
+        if isinstance(result.get("chat_interaction"), dict):
+            response["chat_interaction"] = result["chat_interaction"]
         response["next_action"] = (
-            f"{COORDINATOR_LOCK} Keep the same worker and question or batch open. Accepted batch steps are durable, "
-            "so retrying resumes at the next unanswered item. Translate the durable English question into "
-            "the task's original user language only through localized_question, localized_header, localized_options, "
-            "and localized_custom_label, then retry the native question UI when the user is ready; do not replace the "
-            "worker, alter the durable worker record, fabricate an answer, or advance the wave."
+            f"{COORDINATOR_LOCK} Render result.chat_interaction completely in the user's language as one ordinary "
+            "final assistant message, including context, why the decision matters, every option and trade-off, the "
+            "recommendation, and how to answer. Do not call a UI/input/approval/elicitation tool. End this turn after "
+            "the message. On the user's next message, preserve the exact answer, record it against this same durable "
+            "question_ref, then resume the exact same worker; never replace it or advance the wave first."
         )
     return response
 
@@ -8017,6 +8763,7 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
     payload = dict(value)
     localization_fields = {
         "localized_prompt", "localized_title", "localized_approve", "localized_cancel",
+        "localized_custom_label",
     }
     unknown = sorted(set(payload) - {"decision", "feedback", "request_id", *localization_fields})
     if unknown:
@@ -8069,39 +8816,43 @@ def _v3_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]
     return "plan-approval-" + digest_text(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))[:32]
 
 
-PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str]] = {
-    "en": ("Approve the completed plan?", "Plan review", "Approve", "Cancel"),
-    "ru": ("Утвердить завершённый план?", "Проверка плана", "Утвердить", "Отмена"),
-    "uk": ("Затвердити завершений план?", "Перевірка плану", "Затвердити", "Скасувати"),
-    "ro": ("Aprobați planul finalizat?", "Revizuirea planului", "Aprobă", "Anulează"),
-    "de": ("Den fertigen Plan genehmigen?", "Planprüfung", "Genehmigen", "Abbrechen"),
-    "fr": ("Approuver le plan finalisé ?", "Examen du plan", "Approuver", "Annuler"),
-    "es": ("¿Aprobar el plan finalizado?", "Revisión del plan", "Aprobar", "Cancelar"),
-    "it": ("Approvare il piano completato?", "Revisione del piano", "Approva", "Annulla"),
-    "pt": ("Aprovar o plano concluído?", "Revisão do plano", "Aprovar", "Cancelar"),
-    "pl": ("Zatwierdzić ukończony plan?", "Przegląd planu", "Zatwierdź", "Anuluj"),
-    "zh": ("批准已完成的计划？", "计划审核", "批准", "取消"),
-    "ja": ("完成した計画を承認しますか？", "計画の確認", "承認", "キャンセル"),
-    "ko": ("완료된 계획을 승인하시겠습니까?", "계획 검토", "승인", "취소"),
-    "el": ("Έγκριση του ολοκληρωμένου σχεδίου;", "Έλεγχος σχεδίου", "Έγκριση", "Ακύρωση"),
+PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str, str]] = {
+    "en": ("Approve the completed plan?", "Plan review", "Approve", "Cancel", "Other answer / requested plan changes"),
+    "ru": ("Утвердить завершённый план?", "Проверка плана", "Утвердить", "Отмена", "Другой ответ / требуемые изменения плана"),
+    "uk": ("Затвердити завершений план?", "Перевірка плану", "Затвердити", "Скасувати", "Інша відповідь / потрібні зміни плану"),
+    "ro": ("Aprobați planul finalizat?", "Revizuirea planului", "Aprobă", "Anulează", "Alt răspuns / modificări solicitate ale planului"),
+    "de": ("Den fertigen Plan genehmigen?", "Planprüfung", "Genehmigen", "Abbrechen", "Andere Antwort / gewünschte Planänderungen"),
+    "fr": ("Approuver le plan finalisé ?", "Examen du plan", "Approuver", "Annuler", "Autre réponse / modifications demandées au plan"),
+    "es": ("¿Aprobar el plan finalizado?", "Revisión del plan", "Aprobar", "Cancelar", "Otra respuesta / cambios solicitados al plan"),
+    "it": ("Approvare il piano completato?", "Revisione del piano", "Approva", "Annulla", "Altra risposta / modifiche richieste al piano"),
+    "pt": ("Aprovar o plano concluído?", "Revisão do plano", "Aprovar", "Cancelar", "Outra resposta / alterações solicitadas ao plano"),
+    "pl": ("Zatwierdzić ukończony plan?", "Przegląd planu", "Zatwierdź", "Anuluj", "Inna odpowiedź / wymagane zmiany planu"),
+    "zh": ("批准已完成的计划？", "计划审核", "批准", "取消", "其他答复 / 要求的计划更改"),
+    "ja": ("完成した計画を承認しますか？", "計画の確認", "承認", "キャンセル", "その他の回答 / 必要な計画変更"),
+    "ko": ("완료된 계획을 승인하시겠습니까?", "계획 검토", "승인", "취소", "기타 답변 / 요청한 계획 변경"),
+    "el": ("Έγκριση του ολοκληρωμένου σχεδίου;", "Έλεγχος σχεδίου", "Έγκριση", "Ακύρωση", "Άλλη απάντηση / απαιτούμενες αλλαγές σχεδίου"),
 }
 
 
-def _v3_plan_approval_copy(state: dict[str, Any], localization: dict[str, Any]) -> tuple[str, str, str, str]:
+def _v3_plan_approval_copy(state: dict[str, Any], localization: dict[str, Any]) -> tuple[str, str, str, str, str]:
     language = str(state.get("user_language") or "en").lower().split("-", 1)[0]
     translated = PLAN_APPROVAL_TRANSLATIONS.get(language)
     supplied = tuple(
         str(localization.get(field) or "").strip()
-        for field in ("localized_prompt", "localized_title", "localized_approve", "localized_cancel")
+        for field in (
+            "localized_prompt", "localized_title", "localized_approve", "localized_cancel",
+            "localized_custom_label",
+        )
     )
     if all(supplied):
         return supplied
     if language != "en" and translated is None:
         raise ValueError(
-            "non-English plan approval requires localized_prompt, localized_title, localized_approve, and localized_cancel"
+            "non-English plan approval requires localized_prompt, localized_title, localized_approve, "
+            "localized_cancel, and localized_custom_label"
         )
     if any(supplied):
-        raise ValueError("plan approval localization requires all four localized fields")
+        raise ValueError("plan approval localization requires all five localized fields")
     return translated or PLAN_APPROVAL_TRANSLATIONS["en"]
 
 
@@ -8111,97 +8862,82 @@ def _v3_prompt_plan_approval(
     localization: dict[str, Any],
     project_root: str = "",
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Prompt with native MCP controls, or return the declarative fallback."""
+    """Return a detailed ordinary-chat approval boundary without nested UI."""
     approval = _plan_approval(state)
     if approval.get("policy") != "required":
         raise ValueError("this task does not require post-plan approval")
     if approval.get("status") != "awaiting_user":
         raise ValueError("there is no pending plan approval for this task")
     review = dict(approval.get("review") or {})
-    prompt, title, approve_label, cancel_label = _v3_plan_approval_copy(state, localization)
+    prompt, title, approve_label, cancel_label, custom_label = _v3_plan_approval_copy(state, localization)
     request_id = str(approval.get("request_id") or _v3_plan_approval_request_id(state, approval))
-    requested_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "decision": {
-                "type": "string",
-                "title": title,
-                "oneOf": [
-                    {"const": "approve", "title": approve_label},
-                    {"const": "cancel", "title": cancel_label},
-                ],
-            },
-        },
-        "required": ["decision"],
-    }
-
-    if MCP_INTERACTIVE:
-        try:
-            action, content, _elicitation_id = _request_mcp_elicitation(
-                prompt,
-                requested_schema,
-                thread_id=str(state.get("thread_id") or ""),
-                meta={"schema": "cortex/plan-approval/v1", "request_id": request_id},
-            )
-        except (RuntimeError, OSError) as exc:
-            return None, {
-                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-                "ok": False,
-                "outcome": "host_plan_approval_unavailable",
-                "code": "host_plan_approval_unavailable",
-                "task_ref": task_ref,
-                "dispatches": [],
-                "plan_review": review,
-                "diagnostics": [{"message": redact(str(exc), 1000)}],
-                "recoverable": True,
-                "next_action": (
-                    f"{COORDINATOR_LOCK} Keep the plan pending and retry only from a host that supports native "
-                    "MCP elicitation; never infer approval from an unavailable or cancelled interaction."
-                ),
-            }
-        selected = str((content or {}).get("decision") or "").strip().lower() if isinstance(content, dict) else ""
-        if action == "accept" and selected == "approve":
-            return {"decision": "approve", "request_id": request_id}, None
-        if action == "accept" and selected == "cancel":
-            action = "cancel"
-        if action in {"cancel", "decline"}:
-            # Route Cancel through the durable engine just like the fallback
-            # interaction does.  This rechecks that the request is still
-            # pending if the plan changed while the nested UI was open.
-            return {"decision": "cancel", "request_id": request_id}, None
-        raise ValueError("native plan approval returned an invalid decision")
-
-    arguments_base = {
-        "project_root": project_root,
-        "task_ref": task_ref,
-        "intent": "plan_approval",
-    }
+    material_concerns = [*(review.get("findings") or []), *(review.get("uncertainty") or [])]
+    recommended_decision = "revise" if material_concerns else "approve"
+    recommendation_rationale = (
+        "Request revision because the current plan still records material findings or uncertainty that should be "
+        "resolved before implementation."
+        if material_concerns else
+        "Approve because the reviewed plan defines executable work packages and verification without recording "
+        "an unresolved material concern."
+    )
     interaction = {
-        "schema": "cortex/plan-approval/v1",
-        "request_id": request_id,
+        "schema": "cortex/chat-interaction/v1",
+        "kind": "plan_approval",
+        "interaction_ref": request_id,
         "title": title,
         "prompt": prompt,
+        "plan": {
+            "objective": review.get("objective"),
+            "summary": review.get("summary"),
+            "work_packages": review.get("work_packages") or [],
+            "verification": review.get("verification") or [],
+            "risks_and_uncertainty": [*(review.get("findings") or []), *(review.get("uncertainty") or [])],
+            "remaining_phases": review.get("remaining_phases") or [],
+            "report_ref": review.get("report_ref"),
+            "report_markdown_link": review.get("report_markdown_link"),
+        },
+        "choices": [
+            {"id": "approve", "label": approve_label, "meaning": "Approve this exact plan revision and continue with its implementation dispatches."},
+            {"id": "revise", "label": custom_label, "meaning": "Describe the required changes; Cortex will preserve the exact text as Planner feedback and request a revised plan."},
+            {"id": "cancel", "label": cancel_label, "meaning": "Keep the plan pending and stop until a later user message."},
+        ],
         "actions": [
             {
                 "id": "approve",
-                "label": approve_label,
-                "tool": "manage_orchestration",
                 "arguments": {
-                    **arguments_base,
+                    "project_root": project_root,
+                    "task_ref": task_ref,
+                    "intent": "plan_approval",
                     "payload": {"decision": "approve", "request_id": request_id},
                 },
             },
             {
                 "id": "cancel",
-                "label": cancel_label,
-                "tool": "manage_orchestration",
                 "arguments": {
-                    **arguments_base,
+                    "project_root": project_root,
+                    "task_ref": task_ref,
+                    "intent": "plan_approval",
                     "payload": {"decision": "cancel", "request_id": request_id},
                 },
             },
         ],
+        "llm_recommendation": {
+            "choice_id": recommended_decision,
+            "rationale": recommendation_rationale,
+        },
+        "response_instructions": (
+            "Reply in your next ordinary chat message with approval, cancellation, or the exact changes you want. "
+            "Any substantive change request is treated as revise, not approval."
+        ),
+        "coordinator_contract": (
+            "Write one clear user-language final message that summarizes the objective, every work package and its "
+            "microtasks, affected paths, dependencies, verification, material risks/limitations, and remaining phases. "
+            "Then explicitly ask for approval, explain all three response paths, and visibly label the LLM's "
+            "recommended response and rationale from llm_recommendation. Do not call a UI/input/approval/"
+            "elicitation tool. End the turn immediately. On the next user message, map only an unambiguous approval "
+            "to decision=approve; preserve any requested changes verbatim as decision=revise feedback; map an explicit "
+            "cancellation to decision=cancel. Use this exact interaction_ref as request_id."
+        ),
     }
     return None, {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -8210,11 +8946,13 @@ def _v3_prompt_plan_approval(
         "task_ref": task_ref,
         "dispatches": [],
         "plan_review": review,
+        "chat_interaction": interaction,
         "plan_approval_interaction": interaction,
         "next_action": (
-            f"{COORDINATOR_LOCK} Render plan_approval_interaction.schema=cortex/plan-approval/v1 as exactly "
-            "the supplied Approve and Cancel controls. Submit only the selected action's embedded "
-            "manage_orchestration arguments; if unsupported, leave the plan pending and do not infer approval."
+            f"{COORDINATOR_LOCK} Render chat_interaction completely in the user's language as one ordinary final "
+            "assistant message. Include the understandable plan summary and explicit approve/revise/cancel instructions. "
+            "Do not call a UI/input/approval/elicitation tool. End the turn and wait for the user's next message; never "
+            "infer approval from silence or from this prompt call."
         ),
     }
 
@@ -8616,6 +9354,109 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         return error
 
 
+def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
+    """Expose the additive v9 governance ledger without widening lifecycle calls."""
+    try:
+        project = select_project_root(params)
+        allowed = {
+            "project_root", "action", "principal", "thread_id", "coordinator_capability", "entity", "initiative_ref", "parent_ref", "title", "goal",
+            "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone",
+            "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref",
+            "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content",
+            "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref", "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint",
+            "findings", "threshold", "window_days", "proposal_ref", "trigger", "reason",
+            "limit", "offset",
+        }
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise GovernanceError("unsupported governance fields: " + ", ".join(unknown), code="unsupported_fields")
+        principal = str(params.get("principal") or "").strip()
+        thread_id = str(params.get("thread_id") or "").strip()
+        supplied_capability = str(params.get("coordinator_capability") or "").strip().lower()
+        if not principal or not thread_id:
+            if principal or thread_id:
+                raise GovernanceError(
+                    "governance requests must provide both principal and thread_id, or neither",
+                    code="coordinator_authorization_required",
+                )
+            resolved_identity = _coordinator_identity_for_capability(
+                ledger_root({"project_root": str(project)}),
+                supplied_capability,
+            )
+            if resolved_identity is None:
+                raise GovernanceError(
+                    "governance capability is not bound to one active coordinator task",
+                    code="coordinator_capability_invalid",
+                )
+            _, principal, thread_id = resolved_identity
+        if not COORDINATOR_CAPABILITY_RE.fullmatch(supplied_capability):
+            raise GovernanceError(
+                "governance mutations require the server-issued coordinator capability from start_orchestration",
+                code="coordinator_capability_required",
+            )
+        try:
+            activation = require_activation(
+                {"project_root": str(project), "principal": principal, "thread_id": thread_id}
+            )
+        except ValueError as exc:
+            raise GovernanceError(str(exc), code="coordinator_authorization_required") from exc
+        bound_principal = str(activation.get("principal") or "").strip()
+        bound_thread = str(activation.get("thread_id") or "").strip()
+        if not bound_principal or not bound_thread:
+            raise GovernanceError("active coordinator activation has no bound identity", code="coordinator_authorization_required")
+        if principal != bound_principal or thread_id != bound_thread:
+            raise GovernanceError(
+                "governance request identity does not match the active coordinator activation",
+                code="coordinator_authorization_required",
+            )
+        bound_task_id = str(activation.get("task_id") or "").strip()
+        if not _coordinator_capability_matches(
+            ledger_root({"project_root": str(project)}),
+            bound_task_id,
+            supplied_capability,
+        ):
+            raise GovernanceError(
+                "governance request does not carry the server-issued coordinator capability",
+                code="coordinator_capability_invalid",
+            )
+        payload = {
+            key: value
+            for key, value in params.items()
+            if key not in {"project_root", "principal", "thread_id", "coordinator_capability"}
+        }
+        # The active server activation, never caller JSON, owns the actor
+        # identity used in immutable governance rows and approvals.
+        payload["created_by"] = bound_principal
+        result = manage_governance_service(
+            ledger_root({"project_root": str(project)}), payload, actor_role="coordinator"
+        )
+        return {
+            "schema": "cortex/governance/v1",
+            "ok": True,
+            "outcome": "governance_updated",
+            "action": payload.get("action"),
+            "authorization": {
+                "actor": "coordinator",
+                "source": "server_activation",
+                "principal": bound_principal,
+                "thread_id": bound_thread,
+            },
+            "result": result,
+        }
+    except GovernanceError as exc:
+        return {
+            "schema": "cortex/governance/v1", "ok": False, "outcome": "needs_input", "code": exc.code,
+            "diagnostics": [{"code": exc.code, "message": redact(str(exc), 1000)}],
+            "next_action": f"{COORDINATOR_LOCK} Correct the named governance input and retry the same action without changing unrelated task state.",
+        }
+    except (ValueError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+        return {
+            "schema": "cortex/governance/v1", "ok": False, "outcome": "needs_input", "code": "governance_failed",
+            "diagnostics": [{"code": "governance_failed", "message": redact(str(exc), 1000)}],
+            "next_action": f"{COORDINATOR_LOCK} Correct the governance request or report the bounded ledger error.",
+        }
+
+
 # ``sync-cortex.sh`` validates the server through ``importlib`` without
 # pre-registering that transient module.  Legacy runtime adapters still rely
 # on the public facade, so provide a snapshot only for that validation path.
@@ -8653,7 +9494,6 @@ from cortex_runtime.questions import (
     _question_form_schema,
     _question_record_for_main,
     _question_record_view,
-    _request_mcp_elicitation,
     answer_worker_question,
     cortex_question,
     get_worker_question_updates,
@@ -8699,7 +9539,7 @@ QUESTION_TOOL_SCHEMA = {
         "canonical_answer": {"type": "string", "description": "Coordinator-supplied English translation of localized free text."},
         "canonical_answers": {"type": "object", "description": "Batch-only map of localized free-text or choice custom-response question_key to its canonical English translation. Choice labels derive English from stable option_id and must not be translated."},
         "translated_by": {"type": "string", "description": "Audit label for the coordinator that supplied batch free-text translations."},
-        "attempt_id": {"type": "string", "description": "Worker attempt. Supplying it routes the question to the coordinator instead of opening a worker UI."},
+        "attempt_id": {"type": "string", "description": "Worker attempt. Supplying it routes the durable question to the coordinator's ordinary-chat pause/resume flow."},
         "submission_id": {"type": "string", "description": "Stable worker-question submission id."},
         "question": {"type": "string", "minLength": 1},
         "header": {"type": "string"},
@@ -8727,8 +9567,22 @@ ORCHESTRATE_TASK_SCHEMA = {
         "budget": {"type": "string"},
         "pause_conditions": {"type": "array", "items": {"type": "string"}},
         "plan_approval": {"type": "string", "enum": ["auto", "required"]},
+        "initiative_ref": {"type": "string"},
+        "governance_mode": {"type": "string", "enum": ["auto", "required", "off"]},
+        "governance": {"type": "object"},
+        "risk_triggers": {"type": ["array", "object"]},
+        "governance_triggers": {"type": ["array", "object"]},
+        "multiple_repositories": {"type": "boolean"},
+        "related_tasks": {"type": "boolean"},
+        "long_lived_lanes": {"type": "boolean"},
+        "conflicting_resources": {"type": "boolean"},
+        "multi_session_handoff": {"type": "boolean"},
         "user_language": {"type": "string"},
-        "replan_limit": {"type": "integer", "minimum": 0},
+        "replan_limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Deprecated compatibility metadata; never a lifetime cap on evidence-backed replans.",
+        },
     },
     "required": ["task_id", "objective", "complexity"],
 }
@@ -8839,6 +9693,7 @@ V3_WAVE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["v3_wave"]
 START_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["start_orchestration"]
 CONTINUE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["continue_orchestration"]
 MANAGE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["manage_orchestration"]
+MANAGE_GOVERNANCE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["manage_governance"]
 WORKER_QUESTION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_question"]
 WORKER_GET_REPORT_TEMPLATE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["get_report_template"]
 WORKER_RECORD_REPORT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["record_report"]
@@ -8874,7 +9729,7 @@ TOOLS = {
     "get_delegation_reports": (get_delegation_reports, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "attempt_id": {"type": "string"}, "report_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["task_id", "principal", "attempt_id", "report_ids"]}),
     "reconcile_report_bus": (reconcile_report_bus, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
     "close_audit": (close_audit, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
-    "record_evidence": (record_evidence, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "report_receipt": {"type": "string"}, "kind": {"type": "string"}, "summary": {"type": "string"}, "digest": {"type": "string"}, "command": {"type": "string"}, "exit_code": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["task_id", "expected_revision", "gate", "summary"]}),
+    "record_evidence": (record_evidence, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "report_receipt": {"type": "string"}, "kind": {"type": "string"}, "summary": {"type": "string"}, "digest": {"type": "string"}, "command": {"type": "string"}, "exit_code": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "governance_obligations": {"type": ["string", "array"], "items": {"type": "string"}}, "governance_scope_ref": {"type": "string"}, "scope_ref": {"type": "string"}, "reviewer_identity": {"type": "string"}, "reviewer_role": {"type": "string"}, "independent_reviewer": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "gate", "summary"]}),
     "execute_verification_command": (execute_verification, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "gate": {"type": "string"}, "attempt_id": {"type": "string"}, "report_receipt": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["task_id", "expected_revision", "gate", "summary", "verification_id"]}),
     "record_gate_outcome": (record_gate, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}, "summary": {"type": "string"}, "skip_reason": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline_reason": {"type": "string"}, "pipeline_operations": {"type": "array", "items": PIPELINE_OPERATION_SCHEMA}, "allow_rework": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "gate", "outcome"]}),
     "commit_gate": (commit_gate, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "mode": {"type": "string", "enum": ["verification", "documentation"]}, "attempt_id": {"type": "string"}, "report_receipt": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}}, "required": ["task_id", "principal", "gate", "summary"]}),
@@ -8911,17 +9766,9 @@ PUBLIC_TOOLS = build_public_tools(
     read_dispatch_briefing_schema=READ_DISPATCH_BRIEFING_SCHEMA,
     read_worker_report=read_worker_report,
     read_worker_report_schema=READ_WORKER_REPORT_SCHEMA,
+    manage_governance=manage_governance,
+    manage_governance_schema=MANAGE_GOVERNANCE_SCHEMA,
 )
-
-
-def _set_mcp_openai_form(value: bool) -> None:
-    global MCP_OPENAI_FORM
-    MCP_OPENAI_FORM = value
-
-
-def _set_mcp_interactive(value: bool) -> None:
-    global MCP_INTERACTIVE
-    MCP_INTERACTIVE = value
 
 
 def main() -> None:
@@ -8936,8 +9783,6 @@ def main() -> None:
         internal_handlers=TOOLS,
         server_version=SERVER_VERSION,
         instructions=MCP_SERVER_INSTRUCTIONS,
-        set_openai_form=_set_mcp_openai_form,
-        set_interactive=_set_mcp_interactive,
         log_tool_error=log_tool_error,
     )
 
