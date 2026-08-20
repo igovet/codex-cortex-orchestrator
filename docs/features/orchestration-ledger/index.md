@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.9 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.10 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -299,8 +299,8 @@ turn. The next user message is recorded with the exact request ID. Revision
 text is preserved verbatim and reruns Planner; approve authorizes the next
 wave. Mismatched, stale, or replayed responses are rejected without dispatch.
 Cancel leaves the plan in `awaiting_user`; silence never
-infers approval. A material future-wave replacement
-or plan rework preserves the previous plan and approval in history, resets the
+infers approval. A material future-wave replacement or any pipeline operation
+that reopens `plan` preserves the previous plan and approval in history, resets the
 status to `pending_plan`, and requires a singleton replacement Planner followed
 by another approval. No-op and transport-only replacements keep approval valid.
 A revision uses
@@ -876,7 +876,7 @@ during retirement.
 
 The focused plan-approval, replan, recovery, and read-only artifact regressions
 described here are historical 9.2.4 source evidence; they do not certify the
-The 9.2.9 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
+The 9.2.10 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
 implementation loss, apply three dynamic pipeline changes beyond the persisted
 legacy replan limit, and verify every resulting gate through close. Complete
 discovery validation remains a separate governance-v10 workstream and is not

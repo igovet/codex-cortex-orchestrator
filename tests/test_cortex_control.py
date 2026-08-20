@@ -1046,6 +1046,100 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(replayed["dispatches"], [])
         self.assertEqual(self.task_state(task_dir)["attempts"][0]["report_ids"], [report_ref])
 
+    def test_stopped_replacement_planner_recovers_a_legacy_stale_approved_basis(self):
+        """A completion-pending replacement plan must request fresh approval.
+
+        This models a pre-repair ledger in which a generic rework reopened the
+        final planner gate but retained the approval for the prior plan.  The
+        replacement report is valid and host-attested, so consuming it should
+        repair the approval projection rather than failing while resolving the
+        old manifest basis.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "recover an old approval while a replacement planner is completion-pending",
+                plan_approval="required",
+                waves=[
+                    {"workers": [{"phase": "plan"}]},
+                    {"workers": [{"phase": "implementation"}]},
+                    {"workers": [{"phase": "review"}]},
+                ],
+            )
+        held = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": started["step"], "results": self.v3_results(started),
+        })
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
+        })
+        approved = control.manage_orchestration(
+            prompt["plan_approval_interaction"]["actions"][0]["arguments"]
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        old_approval = json.loads(json.dumps(self.task_state(task_dir)["plan_approval"]))
+
+        replacement = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": approved["step"], "results": self.v3_results(approved),
+            "future_waves": [
+                {"workers": [{"phase": "plan", "objective": "Replace the verified delivery plan."}]},
+                {"workers": [{"phase": "review", "objective": "Review the replacement delivery plan."}]},
+            ],
+            "rework": True,
+            "reason": "A legacy recovery must replace the approved plan.",
+        })
+        self.assertTrue(replacement["ok"], replacement)
+        self.assertEqual(replacement["dispatches"][0]["phase"], "plan")
+
+        # Recreate only the inconsistent legacy approval projection.  The
+        # current pipeline and new planner attempt remain authoritative.
+        state = self.task_state(task_dir)
+        state["plan_approval"] = old_approval
+        self.write_task_state(state)
+        replacement_attempt = next(
+            item for item in state["attempts"]
+            if item["gate"] == "plan" and not item.get("invalidated")
+        )
+        parent_session = "host-replacement-plan-parent"
+        control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
+        bound = control.bind_host_worker_from_hook(
+            str(self.project), state["task_id"], parent_session, "default",
+            "native.ReplacementPlan:01", replacement_attempt["expected_model"],
+        )
+        self.assertTrue(bound["bound"], bound)
+        report_ref = self._publish_attempt_report(task_dir, state, replacement_attempt)
+        stopped = control.finalize_host_worker_stop_from_hook(
+            str(self.project), state["task_id"], parent_session, "native.ReplacementPlan:01",
+        )
+        self.assertEqual(stopped["outcome"], "report_recorded")
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
+        })
+        self.assertEqual(inspected["outcome"], "completion_pending")
+        self.assertEqual(
+            inspected["result"]["pending_report_completions"][0]["candidate_report_refs"],
+            [report_ref],
+        )
+        continued = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": replacement["step"], "results": [{"report_ref": report_ref}],
+        })
+        self.assertTrue(continued["ok"], continued)
+        self.assertEqual(continued["outcome"], "awaiting_plan_approval")
+        repaired = self.task_state(task_dir)["plan_approval"]
+        self.assertEqual(repaired["status"], "awaiting_user")
+        self.assertEqual(repaired["plan_report_ref"], report_ref)
+        self.assertNotEqual(repaired["request_id"], old_approval["request_id"])
+        self.assertTrue(
+            any(item.get("event") == "stale_approved_recovery" for item in repaired["history"])
+        )
+
     def test_inspect_blocks_stale_stopped_planner_reports_for_fresh_planner_recovery(self):
         """No host-attested report may be selected when its plan revision is stale."""
         with mock.patch.dict(
@@ -6128,6 +6222,63 @@ class ControlPlaneTests(unittest.TestCase):
             held["plan_review"]["plan_revision"],
         )
 
+    def test_generic_plan_rework_retires_required_approval_in_the_same_state_change(self):
+        """Direct pipeline rework cannot leave an old approval live for plan."""
+        started = self.v3_start(
+            "retire approval when generic pipeline rework reopens plan",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        held = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "step": started["step"], "results": self.v3_results(started),
+        })
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
+        })
+        approved = control.manage_orchestration(
+            prompt["plan_approval_interaction"]["actions"][0]["arguments"]
+        )
+        self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
+
+        task_dir = next((self.ledger / "tasks").iterdir())
+        before = self.task_state(task_dir)
+        old_approval = json.loads(json.dumps(before["plan_approval"]))
+        updated = control.update_pipeline({
+            "project_root": str(self.project),
+            "task_id": before["task_id"],
+            "principal": before["principal"],
+            "thread_id": before["thread_id"],
+            "expected_revision": before["revision"],
+            "operations": [{"op": "rework", "gate": "plan"}],
+            "allow_rework": True,
+            "reason": "Generic recovery reopened the planner gate.",
+        })
+        state = updated["state"]
+        approval = state["plan_approval"]
+        self.assertEqual(approval["status"], "pending_plan")
+        for key in (
+            "review", "plan_report_ref", "pending_basis", "approved_basis",
+            "request_id", "requested_at", "approved_at",
+        ):
+            self.assertNotIn(key, approval)
+        reopened = approval["history"][-1]
+        self.assertEqual(reopened["event"], "plan_reopened")
+        self.assertEqual(reopened["previous"]["status"], "approved")
+        self.assertEqual(
+            reopened["previous"]["request_id"], old_approval["request_id"]
+        )
+        self.assertEqual(
+            reopened["previous"]["approved_basis"], old_approval["approved_basis"]
+        )
+        self.assertNotIn("plan", state["completed_gates"])
+        self.assertEqual(control.active_gates(state), ["plan"])
+
     def test_transport_only_future_change_does_not_invalidate_approval(self):
         started = self.v3_start(
             "keep approval across a transport-only future change",
@@ -9773,7 +9924,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.9")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.10")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
