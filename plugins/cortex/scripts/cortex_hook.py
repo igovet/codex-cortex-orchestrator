@@ -12,6 +12,14 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Hooks may be loaded through ``importlib`` by host integration checks rather
+# than executed from this directory.  Make the bundled runtime resolvable in
+# both modes, just like the MCP entrypoint, while keeping hook failures
+# fail-open below when the runtime itself is unavailable.
+_SCRIPTS_ROOT = str(Path(__file__).resolve().parent)
+if _SCRIPTS_ROOT not in sys.path:
+    sys.path.insert(0, _SCRIPTS_ROOT)
+
 try:
     from cortex import (
         bind_host_session_from_hook,

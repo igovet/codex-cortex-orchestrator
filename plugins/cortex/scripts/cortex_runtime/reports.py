@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import stat
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -94,6 +96,9 @@ _REPORT_DRAFT_TTL = timedelta(hours=1)
 _REPORT_DRAFT_PAYLOAD_FIELDS = {"report", "scoping", "planning", "gate_result", "closure"}
 _GATE_RESULT_REQUIRED_GATES = {
     "review", "governance_activation", "governance_close", "close",
+}
+_RECORD_REPORT_COORDINATOR_TRANSPORT_FIELDS = {
+    "task_ref", "dispatch_ref", "submission_id",
 }
 
 
@@ -603,6 +608,18 @@ def _report_draft_key(attempt_id: str, draft_ref: str) -> str:
     return f"report_draft:{safe_id(attempt_id)}:{safe_id(draft_ref)}"
 
 
+def _unsupported_record_report_fields_error(fields: list[str]) -> ValueError:
+    """Explain the strict worker/coordinator boundary without accepting aliases."""
+    message = "unsupported record_report fields: " + ", ".join(fields)
+    transport = sorted(set(fields) & _RECORD_REPORT_COORDINATOR_TRANSPORT_FIELDS)
+    if transport:
+        message += (
+            ". Remove coordinator transport field(s) " + ", ".join(transport)
+            + "; record_report accepts only the worker briefing identity and draft/report payload."
+        )
+    return ValueError(message)
+
+
 def _report_draft_relative_path(attempt_id: str, draft_ref: str) -> Path:
     return Path("report-drafts") / safe_id(attempt_id) / f"{safe_id(draft_ref)}.json"
 
@@ -637,6 +654,124 @@ def _delete_report_draft(
         db_delete_task_document(root, task_id, document_key)
 
 
+def _read_private_report_draft(path: Path) -> str:
+    """Read one worker-editable draft from its verified opened descriptor.
+
+    Unlike immutable briefings, report drafts are deliberately writable by the
+    worker.  Do not repair their permissions here: a caller may have atomically
+    replaced the file, and chmodding a path after a separate lookup is both an
+    unsafe race and an unexpected mutation of caller-authored data.  Check the
+    descriptor that is actually read instead.
+    """
+    try:
+        path = _runtime._reject_symlink_ancestry(path, "report draft")
+    except ValueError as exc:
+        raise ValueError("report draft must remain a private regular non-symlink file") from exc
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("report draft must remain a private regular non-symlink file") from exc
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("report draft must remain a private regular non-symlink file")
+        current_uid = getattr(os, "geteuid", None)
+        if callable(current_uid) and info.st_uid != current_uid():
+            raise ValueError("report draft must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError("report draft permissions must be exactly private 0600")
+        if info.st_size > _runtime.MAX_JSON_BYTES:
+            raise ValueError("report draft is oversized")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _runtime.MAX_JSON_BYTES:
+                raise ValueError("report draft is oversized")
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError("report draft is unreadable") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _write_system_report_draft_file(draft_path: Path, envelope: dict[str, Any], *, create: bool) -> None:
+    """Safely create or replace one server-owned private draft file.
+
+    This is intentionally separate from worker-authored direct edits.  The
+    file descriptor receives mode 0600 before it is linked into place, so this
+    lifecycle never needs a path-based chmod after an atomic replace.
+    """
+    draft_path = _runtime._reject_symlink_ancestry(
+        draft_path, "report draft", allow_missing_leaf=True,
+    )
+    draft_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _runtime._reject_symlink_ancestry(draft_path.parent, "report draft parent")
+    payload = _runtime._json_text(
+        envelope,
+        label=f"JSON document '{draft_path.name}'",
+        max_bytes=_runtime.MAX_JSON_BYTES,
+    ).encode("utf-8")
+    temporary: str | None = None
+    if create:
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(draft_path, flags, 0o600)
+    else:
+        try:
+            existing = draft_path.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError("report draft file is missing; call get_report_template again on this attempt") from exc
+        if not stat.S_ISREG(existing.st_mode):
+            raise ValueError("report draft must remain a private regular non-symlink file")
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{draft_path.name}.", suffix=".tmp", dir=draft_path.parent,
+        )
+    try:
+        try:
+            os.fchmod(descriptor, 0o600)
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise OSError("report draft write made no progress")
+                written += count
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if temporary is not None:
+            os.replace(temporary, draft_path)
+            temporary = None
+        _runtime._fsync_directory(draft_path.parent)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _discard_unregistered_system_report_draft(draft_path: Path) -> None:
+    """Remove only the private regular file created before draft metadata exists."""
+    try:
+        info = draft_path.lstat()
+    except FileNotFoundError:
+        return
+    current_uid = getattr(os, "geteuid", None)
+    owned_by_current_user = not callable(current_uid) or info.st_uid == current_uid()
+    if (
+        stat.S_ISREG(info.st_mode)
+        and owned_by_current_user
+        and stat.S_IMODE(info.st_mode) == 0o600
+    ):
+        draft_path.unlink()
+        _runtime._fsync_directory(draft_path.parent)
+
+
 def _stage_report_draft_file(
     root: Path,
     task_dir: Path,
@@ -651,7 +786,12 @@ def _stage_report_draft_file(
     draft_ref = "draft-" + secrets.token_hex(16)
     document_key = _report_draft_key(attempt_id, draft_ref)
     relative_path = _report_draft_relative_path(attempt_id, draft_ref)
-    draft_path = _contained_path(task_dir, task_dir / relative_path, "report draft")
+    try:
+        draft_path = _contained_path(task_dir, task_dir / relative_path, "report draft")
+    except ValueError as exc:
+        if "symlink" in str(exc).lower():
+            raise ValueError("report draft must remain a private regular non-symlink file") from exc
+        raise
     created_at = datetime.now(timezone.utc)
     metadata = {
         "schema": _REPORT_DRAFT_SCHEMA,
@@ -664,12 +804,15 @@ def _stage_report_draft_file(
         "created_at": created_at.isoformat(),
         "expires_at": (created_at + _REPORT_DRAFT_TTL).isoformat(),
     }
-    _runtime.write_json(draft_path, envelope)
+    try:
+        _write_system_report_draft_file(draft_path, envelope, create=True)
+    except Exception:
+        _discard_unregistered_system_report_draft(draft_path)
+        raise
     try:
         db_put_task_document(root, task_id, document_key, metadata)
     except Exception:
-        if draft_path.exists():
-            draft_path.unlink()
+        _discard_unregistered_system_report_draft(draft_path)
         raise
     prefix = f"report_draft:{safe_id(attempt_id)}:"
     for key, previous in db_list_task_documents(root, task_id, prefix=prefix):
@@ -727,18 +870,15 @@ def _load_report_draft_file(
     expected_relative = _report_draft_relative_path(attempt_id, normalized_ref)
     if relative_path != expected_relative or relative_path.is_absolute() or ".." in relative_path.parts:
         raise ValueError("report draft path is outside its exact worker attempt")
-    draft_path = _contained_path(task_dir, task_dir / relative_path, "report draft")
+    try:
+        draft_path = _contained_path(task_dir, task_dir / relative_path, "report draft")
+    except ValueError as exc:
+        if "symlink" in str(exc).lower():
+            raise ValueError("report draft must remain a private regular non-symlink file") from exc
+        raise
     if _parse_utc_timestamp(metadata["expires_at"], field="expires_at") <= datetime.now(timezone.utc):
         raise ValueError("report draft has expired; call get_report_template again on this attempt")
-    try:
-        info = draft_path.lstat()
-    except FileNotFoundError as exc:
-        raise ValueError("report draft file is missing; call get_report_template again on this attempt") from exc
-    if draft_path.is_symlink() or not stat.S_ISREG(info.st_mode):
-        raise ValueError("report draft must remain a private regular non-symlink file")
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        raise ValueError("report draft permissions are too broad; restore private 0600 permissions")
-    text = _read_private_text(draft_path, "report draft", max_bytes=_runtime.MAX_JSON_BYTES)
+    text = _read_private_report_draft(draft_path)
     try:
         envelope = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -756,7 +896,7 @@ def _load_report_draft_file(
 
 
 def _write_report_draft_file(draft_path: Path, envelope: dict[str, Any]) -> None:
-    _runtime.write_json(draft_path, envelope)
+    _write_system_report_draft_file(draft_path, envelope, create=False)
 
 
 def _merge_patch(target: Any, patch: Any) -> Any:
@@ -1394,7 +1534,7 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "gate_result", "closure", "draft_ref",
         })
         if unknown:
-            raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
+            raise _unsupported_record_report_fields_error(unknown)
         for field in ("project_root", "task_id", "attempt_id", "profile"):
             if not str(params.get(field) or "").strip():
                 raise ValueError(f"{field} is required; copy the exact value from this worker's Cortex briefing")
@@ -1492,9 +1632,10 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             code = "report_changed_files_invalid"
             outcome = "needs_correction"
             next_action = (
-                "Keep only safe project-relative file paths in report.changed_files, move explanatory prose to "
-                "findings or evidence, then retry record_report on this same attempt. Continue correcting any later "
-                "caller-correctable validation diagnostic until the report is accepted."
+                "Keep only safe project-relative paths changed relative to this exact worker attempt baseline in "
+                "report.changed_files. Remove pre-existing, concurrent, or another attempt's paths; move relevant "
+                "context to findings or evidence, then retry record_report on this same attempt. Continue correcting "
+                "any later caller-correctable validation diagnostic until the report is accepted."
             )
         elif any(fragment in message for fragment in (
             "does not exist", "does not belong to this task", "owned by a different principal",
@@ -1780,7 +1921,7 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
         } | _REPORT_DRAFT_PAYLOAD_FIELDS
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported record_report fields: " + ", ".join(unknown))
+            raise _unsupported_record_report_fields_error(unknown)
         for field in ("project_root", "task_id", "attempt_id", "profile", "draft_ref"):
             if not str(params.get(field) or "").strip():
                 raise ValueError(f"{field} is required; copy it exactly from get_report_template")

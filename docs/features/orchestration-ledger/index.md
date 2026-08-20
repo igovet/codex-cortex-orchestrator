@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.10 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.11 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -572,12 +572,22 @@ questions list. Its successful native final is only
 `REPORT_RECORDED report_ref=<value>` plus at most a two-sentence summary; a
 tool failure returns only the exact error. Independent draft-shape mistakes are
 returned together as `{path, message, fix}` diagnostics; later semantic
-diagnostics use the same structure. A changed draft file requires another
+diagnostics use the same structure. The direct draft must remain a current-user
+regular non-symlink file with exact `0600` mode; the runtime verifies the
+opened descriptor and rejects, rather than path-repairs, an unsafe replacement.
+Public worker `record_report` identity is exactly `project_root`, `task_id`,
+`attempt_id`, and `profile`; `task_ref`, `dispatch_ref`, and `submission_id`
+are coordinator transport fields and are rejected. Required result evidence
+markers retain their exact generated prefixes; a missing-marker diagnostic
+supplies the exact marker and criterion to add with concrete observed proof.
+A changed draft file requires another
 `record_report` call with the same ref. A non-retryable error or unavailable exact identity
 remains a blocker. A legacy full-payload `record_report` remains
 accepted for compatibility. Host-sandboxed read-only gates record ordinary
 source deltas observed in the shared checkout as concurrency evidence rather
-than attributing them to the worker; claimed `changed_files` still fail
+than attributing them to the worker; claimed `changed_files` must name only
+paths changed relative to that exact attempt baseline, so pre-existing,
+concurrent, or another-attempt paths fail
 validation. Every ignored side effect is non-blocking at a read-only gate and
 is stored as a digest-only audit receipt. Conventional cross-language
 generated directories/roots/files, virtual environments, build output, and
@@ -876,7 +886,7 @@ during retirement.
 
 The focused plan-approval, replan, recovery, and read-only artifact regressions
 described here are historical 9.2.4 source evidence; they do not certify the
-The 9.2.10 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
+9.2.11 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
 implementation loss, apply three dynamic pipeline changes beyond the persisted
 legacy replan limit, and verify every resulting gate through close. Complete
 discovery validation remains a separate governance-v10 workstream and is not
