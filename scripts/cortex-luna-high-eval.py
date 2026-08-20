@@ -77,6 +77,10 @@ RESULT_FAILURE_PATTERNS = (
     ("advance completion attempt_ids must be unique", "duplicate_attempt_result"),
     ("advance contains attempts outside the active wave", "wrong_attempt_result"),
     ("advance is missing completions for", "missing_attempt_result"),
+    # This is a caller-shape error, not a missing native identity.  Keep it
+    # distinct from the generic dispatch-ref failures so the live evaluator
+    # proves that its own success receipt contract remains unambiguous.
+    ("successful results use report_ref only; do not supply dispatch_ref", "success_with_dispatch_ref"),
     ("dispatch_ref", "dispatch_identity"),
     ("unanswered blocking worker question", "open_worker_question"),
     ("report_ref does not belong", "wrong_report_ref"),
@@ -1463,14 +1467,18 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "private orchestrate. The Documentation worker must create docs/finding-fixture.md whose full exact "
             "content is `Corrective documentation fixture fixed.\\n`, persist a strict report with "
             f"{report_contract}, and list docs/finding-fixture.md in changed_files. Read its durable report, close "
-            "that completed native child, and continue the returned step with its exact report_ref. "
+            "that completed native child, and continue the returned step with exactly "
+            "results=[{\"report_ref\":\"<returned report_ref>\"}]. For this successful singleton result, omit "
+            "dispatch_ref, status, reason, and next_strategy. dispatch_ref belongs only to a reportless non-success "
+            "result and must never be copied from the dispatch into a successful continuation. "
             "Then execute the returned fresh Review dispatch. That Review worker must read the original review and "
             "corrective documentation report refs from its briefing/context and persist a strict report plus one "
             "canonical top-level gate_result: decision=pass; its only finding has the exact fingerprint above, "
             "status=resolved, blocking=false, and resolved_at; verification has executed/not_executed/required_missing/"
             "limitations arrays with required_missing=[]; workspace has exactly modified/untracked/staged/committed. "
             "Do not invent any finding. Read the durable fresh-review report, close that completed child, and continue "
-            "with its exact report_ref. "
+            "with exactly the same successful results shape: only its report_ref. If a public call rejects this shape, "
+            "read the one returned diagnostic and correct only that named field; never repeat an unchanged continuation. "
         )
         return continuation + (
             "Cortex will prepare a Close dispatch after accepting that review: STOP there. "

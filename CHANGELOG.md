@@ -1,5 +1,21 @@
 # Changelog
 
+## [9.2.14] - 2026-08-20
+
+This source-tree patch prevents an origin verifier from receiving a report
+contract that is impossible to satisfy after multiple corrective routes.
+
+- Retain every current, server-bound, passed corrective receipt for each active
+  finding/origin binding through QA and security frontier compaction, rather
+  than retaining an incomplete target-gate projection.
+- Before dispatching an origin verifier, require every active closure-rework
+  route to have its current corrective receipt. A missing receipt returns the
+  recoverable `closure_rework_preflight_required` result before any worker or
+  report draft is created.
+- Cover two independent corrective routes through QA and security to a final
+  Review whose first valid PASS-resolution is accepted, plus the no-dispatch
+  missing-receipt path.
+
 ## [9.2.13] - 2026-08-20
 
 This source-tree patch closes two fail-closed governance finding-route gaps.

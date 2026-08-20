@@ -99,6 +99,10 @@ class LiveFindingReworkContractTests(HostPrivateControlStoreTestMixin, unittest.
         self.assertIn(EVALUATOR.FINDING_REWORK_FINGERPRINT, prompt)
         self.assertIn("fresh review rerun", prompt)
         self.assertIn("do not start a task", prompt)
+        self.assertIn('results=[{"report_ref":"<returned report_ref>"}]', prompt)
+        self.assertIn("omit dispatch_ref, status, reason, and next_strategy", prompt)
+        self.assertIn("dispatch_ref belongs only to a reportless non-success result", prompt)
+        self.assertIn("never repeat an unchanged continuation", prompt)
         self.assertIn("STOP there", prompt)
         self.assertNotIn("Call start_orchestration exactly once", prompt)
         self.assertEqual(EVALUATOR.FINDING_REWORK_LIVE_TIMEOUT_SECONDS, 300)
@@ -266,6 +270,87 @@ class LiveFindingReworkContractTests(HostPrivateControlStoreTestMixin, unittest.
                 [(item["fingerprint"], item["status"]) for item in findings],
                 [(EVALUATOR.FINDING_REWORK_FINGERPRINT, "open")],
             )
+
+    def test_source_mode_successful_continuation_uses_only_report_ref_after_native_cleanup(self) -> None:
+        """A source-mode child has no trusted hook, so its receipt is the handoff.
+
+        Native ``close_agent`` is intentionally outside the public Cortex API
+        in this deterministic test.  The important server-visible state after
+        the normal spawn/wait/read/close sequence is therefore still
+        ``awaiting_host_spawn`` plus the worker's durable report.  A successful
+        continuation must consume exactly that receipt, never the dispatch
+        correlation token that was used to start the child.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+            (project / "README.md").write_text("# finding fixture\n", encoding="utf-8")
+            seeded = EVALUATOR.seed_finding_rework_documentation(project)
+            task_dir = EVALUATOR.canonical_task_directories(project)[0]
+            state = EVALUATOR.cortex.load_task_state_for_artifact(task_dir)
+            documentation = next(
+                item for item in state["attempts"]
+                if item["gate"] == "documentation" and not item.get("invalidated")
+            )
+            target = project / EVALUATOR.FINDING_REWORK_DOCUMENTATION_PATH
+            target.parent.mkdir()
+            target.write_text(EVALUATOR.FINDING_REWORK_DOCUMENTATION_CONTENT, encoding="utf-8")
+            worker_report = EVALUATOR.report(
+                "Corrective documentation report recorded.",
+                project,
+                [EVALUATOR.FINDING_REWORK_DOCUMENTATION_PATH],
+            )
+            worker_report["evidence"].append(
+                "Predecessor review: " + ", ".join(documentation["context_report_ids"])
+            )
+            for index, _criterion in enumerate(documentation["acceptance_criteria"], 1):
+                worker_report["evidence"].append(
+                    f"Gate acceptance {index}: PASS - Corrective fixture content was written."
+                )
+            for index, _criterion in enumerate(documentation["verification"], 1):
+                worker_report["evidence"].append(
+                    f"Gate verification {index}: PASS - Exact fixture content was verified."
+                )
+            worker_report["evidence"].append(
+                EVALUATOR.cortex.dispatch_briefing_review_marker(documentation["briefing_digest"])
+            )
+            recorded = EVALUATOR.cortex.publish_worker_report({
+                "project_root": str(project),
+                "task_id": state["task_id"],
+                "attempt_id": documentation["attempt_id"],
+                "profile": documentation["profile"],
+                "report": worker_report,
+            })
+            self.assertTrue(recorded["ok"], recorded)
+
+            # ``dispatch_ref`` identifies an unreported failure only.  Keeping
+            # this rejection prior to the good handoff proves it is atomic:
+            # close_agent cannot make a source-mode receipt invalid.
+            rejected = EVALUATOR.cortex.continue_orchestration({
+                "project_root": str(project),
+                "task_ref": seeded["task_ref"],
+                "step": 2,
+                "results": [{
+                    "report_ref": recorded["report_ref"],
+                    "dispatch_ref": documentation["dispatch_ref"],
+                }],
+            })
+            self.assertFalse(rejected["ok"])
+            self.assertIn("report_ref only", rejected["diagnostics"][0]["message"])
+            unchanged = EVALUATOR.cortex.load_task_state_for_artifact(task_dir)
+            self.assertEqual(
+                next(item for item in unchanged["attempts"] if item["attempt_id"] == documentation["attempt_id"])["status"],
+                EVALUATOR.cortex.AWAITING_HOST_SPAWN,
+            )
+
+            advanced = EVALUATOR.cortex.continue_orchestration({
+                "project_root": str(project),
+                "task_ref": seeded["task_ref"],
+                "step": 2,
+                "results": [{"report_ref": recorded["report_ref"]}],
+            })
+            self.assertTrue(advanced["ok"], advanced)
+            self.assertEqual([item["phase"] for item in advanced["dispatches"]], ["review"])
 
     def test_live_supervisor_enforces_timeout_on_unterminated_host_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

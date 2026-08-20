@@ -5561,6 +5561,236 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(completed["ok"], completed)
         self.assertEqual(completed["outcome"], "completed")
 
+    def test_multi_route_rework_preserves_every_corrective_receipt_for_final_review(self):
+        """Compaction must not make a final origin-verifier report impossible.
+
+        Two active routes retain their passed corrective receipts. QA and
+        security acknowledge both corrective reports before the final Review.
+        That reviewer still receives both server-bound correction refs and can
+        publish its first PASS-resolution report without a validation retry.
+        """
+        started = self.v3_start(
+            "multi-route closure rework retains all corrective receipts",
+            waves=[
+                {"workers": [{"phase": "implementation", "profile": "general"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "qa", "profile": "build_verification"}]},
+                {"workers": [{"phase": "security", "profile": "security_auditor"}]},
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        )
+        self.assertTrue(started["ok"], started)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        initial_documentation = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("initial implementation completed")),
+        })
+        qa = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": initial_documentation["step"],
+            "results": self.v3_results(initial_documentation, self.v3_report("initial documentation completed")),
+        })
+        security = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": qa["step"],
+            "results": self.v3_results(qa, self.v3_report("initial QA completed")),
+        })
+        initial_review_response = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": security["step"],
+            "results": self.v3_results(security, self.v3_report("initial security completed")),
+        })
+        self.assertTrue(initial_review_response["ok"], initial_review_response)
+        self.assertEqual(initial_review_response["dispatches"][0]["phase"], "review")
+        state = self.task_state(task_dir)
+        initial_review = next(item for item in state["attempts"] if item["gate"] == "review")
+        review_finding = {
+            "fingerprint": "multi-review-correction-001",
+            "severity": "P1",
+            "status": "open",
+            "blocking": True,
+            "summary": "Review requires an implementation correction.",
+            "details": {"affected_paths": ["src/example.py"]},
+        }
+        origin_report, _ = self._report_for_attempt(
+            task_dir, initial_review, self.v3_report("initial review found an implementation defect")
+        )
+        origin_ref = self._publish_closure_report(task_dir, state, initial_review, {
+            "decision": "rework",
+            "findings": [review_finding],
+            "verification": {"executed": ["focused review"], "not_executed": [], "required_missing": [], "limitations": []},
+            "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+        }, report=origin_report)
+        rework = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": initial_review_response["step"],
+            "results": [{"report_ref": origin_ref}],
+        })
+        self.assertTrue(rework["ok"], rework)
+        self.assertEqual([item["phase"] for item in rework["dispatches"]], ["implementation"])
+
+        # Add a second active origin-verifier route before the implementation
+        # correction reports. Its target is documentation, so the final Review
+        # will require both independently server-bound corrective receipts.
+        current = self.task_state(task_dir)
+        current["closure_rework"]["governance_activation"] = {
+            "status": "rework_required",
+            "target_gate": "documentation",
+            "rerun_gates": ["governance_activation", "review", "close"],
+            "finding_fingerprints": ["multi-governance-correction-001"],
+            "source_report_refs": [origin_ref],
+            "task_revision": int(current.get("task_revision") or 1),
+            "iteration": 1,
+            "at": control.now(),
+        }
+        control.db_upsert_task_finding(
+            self.ledger,
+            current["task_id"],
+            {
+                "fingerprint": "multi-governance-correction-001",
+                "severity": "P1",
+                "status": "open",
+                "blocking": True,
+                "summary": "Activation verification also requires the documentation correction.",
+            },
+            source={
+                "transition": "opened",
+                "report_id": origin_ref,
+                "receipt_ref": f"report-receipt-{origin_ref}",
+                "report_artifact_ref": "artifact-multi-governance-origin",
+                "report_content_digest": "b" * 64,
+                "attempt_id": "governance-activation-origin",
+                "gate": "governance_activation",
+                "task_revision": int(current.get("task_revision") or 1),
+            },
+        )
+        self.write_task_state(current)
+
+        implementation_results = self.v3_results(
+            rework, self.v3_report("implementation correction completed")
+        )
+        implementation_ref = implementation_results[0]["report_ref"]
+        documentation = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": rework["step"],
+            "results": implementation_results,
+        })
+        self.assertTrue(documentation["ok"], documentation)
+        self.assertEqual(documentation["dispatches"][0]["phase"], "documentation")
+        documentation_results = self.v3_results(
+            documentation, self.v3_report("documentation correction completed")
+        )
+        documentation_ref = documentation_results[0]["report_ref"]
+        qa = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": documentation["step"],
+            "results": documentation_results,
+        })
+        self.assertTrue(qa["ok"], qa)
+        self.assertEqual(qa["dispatches"][0]["phase"], "qa")
+        qa_results = self.v3_results(qa, self.v3_report("QA acknowledged both corrective reports"))
+        security = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": qa["step"],
+            "results": qa_results,
+        })
+        self.assertTrue(security["ok"], security)
+        self.assertEqual(security["dispatches"][0]["phase"], "security")
+        security_results = self.v3_results(
+            security, self.v3_report("Security acknowledged both corrective reports")
+        )
+        rerun_review = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": security["step"],
+            "results": security_results,
+        })
+        self.assertTrue(rerun_review["ok"], rerun_review)
+        self.assertEqual(rerun_review["dispatches"][0]["phase"], "review")
+
+        current = self.task_state(task_dir)
+        final_review = next(
+            item for item in current["attempts"]
+            if item["gate"] == "review" and not item.get("invalidated")
+        )
+        self.assertIn(implementation_ref, final_review["context_report_ids"])
+        self.assertIn(documentation_ref, final_review["context_report_ids"])
+
+        resolved = dict(
+            review_finding,
+            status="resolved",
+            blocking=False,
+            resolved_at="2026-08-20T00:00:00Z",
+        )
+        resolution_report, _ = self._report_for_attempt(
+            task_dir, final_review, self.v3_report("review verified both corrective receipts")
+        )
+        accepted = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": current["task_id"],
+            "attempt_id": final_review["attempt_id"],
+            "profile": final_review["profile"],
+            "report": resolution_report,
+            "closure": {
+                "decision": "pass",
+                "findings": [resolved],
+                "verification": {"executed": ["focused final review"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertTrue(accepted["ok"], accepted)
+
+    def test_origin_verifier_preflight_returns_recoverable_response_when_correction_is_missing(self):
+        started = self.v3_start(
+            "origin verifier must not be dispatched before correction exists",
+            waves=[
+                {"workers": [{"phase": "implementation", "profile": "general"}]},
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        implementation = state["attempts"][0]
+        state["closure_rework"] = {
+            "review": {
+                "status": "rework_required",
+                "target_gate": "implementation",
+                "rerun_gates": ["review"],
+                "finding_fingerprints": ["missing-correction-preflight-001"],
+                "source_report_refs": ["report-origin-missing-correction"],
+                "task_revision": int(state.get("task_revision") or 1),
+                "iteration": 1,
+                "at": control.now(),
+            },
+        }
+        control.db_upsert_task_finding(
+            self.ledger,
+            state["task_id"],
+            {
+                "fingerprint": "missing-correction-preflight-001",
+                "severity": "P1",
+                "status": "open",
+                "blocking": True,
+                "summary": "A correction must exist before Review can resolve this finding.",
+            },
+            source={
+                "transition": "opened",
+                "report_id": "report-origin-missing-correction",
+                "receipt_ref": "report-receipt-origin-missing-correction",
+                "report_artifact_ref": "artifact-origin-missing-correction",
+                "report_content_digest": "c" * 64,
+                "attempt_id": "review-origin-missing-correction",
+                "gate": "review",
+                "task_revision": int(state.get("task_revision") or 1),
+            },
+        )
+        self.write_task_state(state)
+        rejected = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("implementation completed")),
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "closure_rework_preflight_required")
+        self.assertEqual(rejected["outcome"], "rework_preflight_required")
+        self.assertEqual(rejected["dispatches"], [])
+        self.assertEqual(rejected["diagnostics"][0]["origin_gate"], "review")
+        self.assertEqual(rejected["diagnostics"][0]["target_gate"], "implementation")
+
     def test_corrective_documentation_cannot_resolve_its_review_finding(self):
         started = self.v3_start(
             "documentation cannot close a review finding",
@@ -10140,7 +10370,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.13")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.14")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
