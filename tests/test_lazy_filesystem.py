@@ -1,6 +1,7 @@
 """Regression coverage for SQLite-first task layout and lazy projections."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -20,9 +21,18 @@ class LazyFilesystemTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
-        self.ledger = self.project / ".codex/cortex"
+        self.host_store = Path(self.temp.name) / "host-private-store"
+        self.host_store.mkdir(mode=0o700)
+        self.host_store.chmod(0o700)
+        self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
+        os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
+        self.ledger = control.ledger_root_path({"project_root": str(self.project)})
 
     def tearDown(self) -> None:
+        if self._previous_host_store is None:
+            os.environ.pop(control.HOST_CONTROL_STORE_ENV, None)
+        else:
+            os.environ[control.HOST_CONTROL_STORE_ENV] = self._previous_host_store
         self.temp.cleanup()
 
     def _start(self, objective: str = "lazy filesystem projection") -> dict:
@@ -77,7 +87,7 @@ class LazyFilesystemTests(unittest.TestCase):
         control.planning_paths(task_dir)
         self.assertFalse(task_dir.exists())
 
-    def test_briefing_is_the_only_eager_projection_and_reports_are_on_demand(self) -> None:
+    def test_briefing_and_exact_intent_are_the_only_eager_projections_and_reports_are_on_demand(self) -> None:
         started = self._start()
         self.assertTrue(started["ok"], started)
         task_dir = next((self.ledger / "tasks").iterdir())
@@ -85,7 +95,7 @@ class LazyFilesystemTests(unittest.TestCase):
         attempt = state["attempts"][0]
 
         files = [path.relative_to(task_dir).as_posix() for path in task_dir.rglob("*") if path.is_file()]
-        self.assertEqual(files, [attempt["briefing_file"]])
+        self.assertEqual(sorted(files), sorted([attempt["briefing_file"], "intent/user-request.txt"]))
         self.assertFalse((task_dir / "reports").exists())
         self.assertFalse((task_dir / "questions").exists())
         self.assertFalse((task_dir / "planning").exists())
@@ -104,7 +114,8 @@ class LazyFilesystemTests(unittest.TestCase):
             "report_ref": published["report_ref"],
         })
         self.assertTrue(read["ok"], read)
-        markdown = Path(read["report_markdown_path"])
+        self.assertFalse(read["publication_required"])
+        markdown = task_dir / "reports/markdown" / f"{published['report_ref']}.md"
         self.assertTrue(markdown.is_file())
         self.assertFalse((task_dir / "reports/records").exists())
         self.assertFalse((task_dir / "reports/receipts").exists())

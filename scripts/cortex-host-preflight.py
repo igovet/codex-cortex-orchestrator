@@ -651,22 +651,10 @@ def inspect_mcp_config(codex_home: Path, interpreter: Path | None) -> dict[str, 
             f"Cortex MCP default_tools_approval_mode must be approve (found {observed})",
             "Run the approved Cortex installer to set Cortex MCP approval to approve, then rerun the preflight.",
         )
-    approval_policy = payload.get("approval_policy")
-    granular_policy = approval_policy.get("granular") if isinstance(approval_policy, dict) else None
-    if isinstance(approval_policy, dict) and granular_policy is not None:
-        enabled = granular_policy.get("mcp_elicitations") if isinstance(granular_policy, dict) else None
-        if enabled is not True:
-            observed = "false" if enabled is False else "missing"
-            return check(
-                "cortex_mcp_config",
-                False,
-                f"Codex granular approval policy must set mcp_elicitations = true (found {observed})",
-                "Set approval_policy.granular.mcp_elicitations to true, then start a new Codex task and rerun the preflight.",
-            )
     return check(
         "cortex_mcp_config",
         True,
-        "same-user Cortex MCP configuration enables approval mode approve and native worker questions",
+        "same-user Cortex MCP configuration enables approval mode approve; Cortex questions use ordinary chat",
     )
 
 

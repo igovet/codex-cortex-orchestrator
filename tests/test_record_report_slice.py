@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 SCRIPTS = Path(__file__).parents[1] / "plugins" / "cortex" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -56,7 +58,13 @@ class _UnitOfWork:
         return _Atomic()
 
 
-class RecordReportSliceTests(unittest.TestCase):
+class RecordReportSliceTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.set_up_host_private_control_store()
+
+    def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
+
     def test_domain_ports_and_use_case_do_not_depend_on_runtime_facades(self):
         modules = ("domain.py", "ports.py", "use_case.py")
         root = SCRIPTS / "cortex_runtime" / "record_report"
@@ -140,7 +148,7 @@ class RecordReportSliceTests(unittest.TestCase):
                 second = control.record_report(payload)
                 self.assertFalse(first["idempotent"])
                 self.assertTrue(second["idempotent"])
-                ledger = project / ".codex" / "cortex"
+                ledger = control.ledger_root_path(scope)
                 jobs = list_projection_jobs(ledger, task_id="slice-task", limit=20)
                 projection_types = {job["projection_type"] for job in jobs}
                 self.assertTrue({"report_json", "report_receipt", "report_markdown"}.issubset(projection_types))

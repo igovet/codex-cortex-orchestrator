@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.1":
-        fail("plugin manifest must identify cortex at release version 9.2.1")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.5":
+        fail("plugin manifest must identify cortex at release version 9.2.5")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -154,8 +154,8 @@ def main() -> int:
         fail("profile contract must define the Cortex model-routing policy")
     if model_routing.get("configured_default_model") != "gpt-5.6-luna":
         fail("model routing must keep Luna as the configured hidden-agent default")
-    if model_routing.get("max_policy") != "bounded_complex_work":
-        fail("model routing must reserve automatic max for bounded complex Luna work")
+    if model_routing.get("max_policy") != "complex_work_or_repeated_rework":
+        fail("model routing must allow automatic max for complex work and repeated unresolved rework")
     if model_routing.get("security", {}).get("model") != "gpt-5.6-sol":
         fail("security model routing must select Sol")
     if model_routing.get("explorer", {}).get("model") != "gpt-5.6-luna":
@@ -211,6 +211,7 @@ def main() -> int:
     expected_gates = {
         "scope", "plan", "discover", "architecture", "database_architecture", "implementation",
         "qa", "security", "performance", "accessibility", "ux", "review", "documentation", "close",
+        "governance_activation", "governance_close",
     }
     gate_briefings = profile_contract.get("gate_briefings")
     if not isinstance(gate_briefings, dict) or set(gate_briefings) != expected_gates:
@@ -224,8 +225,12 @@ def main() -> int:
             fail(f"gate briefing lacks acceptance or verification: {gate}")
     shared = profile_contract.get("shared_worker_contract", {})
     retry_policy = shared.get("retry_policy")
-    if retry_policy != {"phase_attempt_limit": 3, "same_strategy_limit": 2}:
-        fail("shared worker contract must separate phase and same-strategy retry limits")
+    if retry_policy != {
+        "pipeline_rework": "unbounded_while_acceptance_or_findings_require_correction",
+        "terra_after_failed_attempts": 2,
+        "effort_by_prior_failures": {"1": "high", "2": "xhigh", "3+": "max"},
+    }:
+        fail("shared worker contract must define unbounded rework with model/effort escalation")
     prompt_budgets = shared.get("prompt_budgets")
     if prompt_budgets != {
         "bootstrap_hard_bytes": 1500,
@@ -253,11 +258,12 @@ def main() -> int:
         fail("shared worker contract must define the complete cortex/report/v1 payload")
     expected_public_operations = {
         "start_orchestration", "continue_orchestration", "manage_orchestration",
+        "manage_governance",
         "worker_question", "get_report_template", "record_report",
         "read_dispatch_briefing", "read_worker_report",
     }
     if set(shared.get("public_operations", [])) != expected_public_operations:
-        fail("shared worker contract must declare the eight public Cortex operations")
+        fail("shared worker contract must declare the nine public Cortex operations")
     if shared.get("worker_operations") != [
         "read_dispatch_briefing", "read_worker_report", "worker_question",
         "get_report_template", "record_report",
@@ -269,7 +275,8 @@ def main() -> int:
     ):
         fail("worker briefing fallback must be exact-identity/digest scoped")
     if set(shared.get("coordinator_operations", [])) != {
-        "start_orchestration", "continue_orchestration", "manage_orchestration", "read_worker_report",
+        "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance",
+        "read_worker_report",
     }:
         fail("coordinator operations must own lifecycle and report reading")
     if shared.get("worker_final_response") != "compact_report_ref_and_at_most_two_sentence_summary_or_exact_error":
@@ -282,7 +289,7 @@ def main() -> int:
         or shared.get("caller_correctable_tool_errors")
         != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
         or shared.get("read_only_workspace_delta")
-        != "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail"
+        != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
     ):
         fail("shared worker contract must define staged draft finalization and read-only concurrency semantics")
     if (

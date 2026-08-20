@@ -4,9 +4,16 @@ on:
   push:
   pull_request:
 
+concurrency:
+  # A newer push or PR update supersedes older evidence for the same ref.
+  # Keep independent branches and pull requests running in parallel.
+  group: cortex-offline-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   offline-validation:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +66,14 @@ jobs:
           result = json.loads(Path('/tmp/cortex-benchmark.json').read_text(encoding='utf-8'))
           if result.get('target_met') is not True:
               raise SystemExit('Cortex benchmark target was not met')
+          PY
+          python -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30 | tee /tmp/cortex-manifest-benchmark.json
+          python -B - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('/tmp/cortex-manifest-benchmark.json').read_text(encoding='utf-8'))
+          if result.get('target_met') is not True:
+              raise SystemExit('Cortex manifest benchmark target was not met')
           PY
       - name: Probe fresh plugin registration when Codex CLI is available
         run: |

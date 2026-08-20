@@ -24,8 +24,8 @@
     "user_decisions": "workers_must_escalate_material_branches_to_main_chat",
     "internal_language": "en",
     "user_facing_language": "main_coordinator_only_task_language",
-    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"],
-    "coordinator_operations": ["start_orchestration", "read_worker_report", "continue_orchestration", "manage_orchestration"],
+    "public_operations": ["start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"],
+    "coordinator_operations": ["start_orchestration", "read_worker_report", "continue_orchestration", "manage_orchestration", "manage_governance"],
     "worker_operations": ["read_dispatch_briefing", "read_worker_report", "worker_question", "get_report_template", "record_report"],
     "normal_flow": ["start_orchestration", "worker_question", "get_report_template", "record_report", "read_worker_report", "continue_orchestration"],
     "recovery_operations": ["manage_orchestration"],
@@ -38,15 +38,16 @@
     "report_draft_lifecycle": "template_private_file_direct_or_patch_atomic_record_one_hour_consume",
     "report_finalization": "identity_draft_ref_same_file_validate_commit_then_delete",
     "caller_correctable_tool_errors": "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable",
-    "read_only_workspace_delta": "ordinary_source_changes_are_concurrency_evidence_recognized_ephemeral_test_build_cache_artifacts_tolerated_arbitrary_ignored_side_effects_fail",
+    "read_only_workspace_delta": "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified",
     "repository_intelligence": "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback",
     "codebase_memory_project_resolution": "derive_canonical_path_key_then_single_exact_root_list_fallback",
     "codebase_memory_project_key_algorithm": "cbm_project_name_from_path_safe_ascii_utf8hex_fnv1a200",
     "codebase_memory_refresh_profiles": ["planner", "explorer", "architect", "database_architect"],
     "codebase_memory_fallback": "one_bounded_attempt_then_repository_native_tools_without_looping",
     "retry_policy": {
-      "phase_attempt_limit": 3,
-      "same_strategy_limit": 2
+      "pipeline_rework": "unbounded_while_acceptance_or_findings_require_correction",
+      "terra_after_failed_attempts": 2,
+      "effort_by_prior_failures": {"1":"high","2":"xhigh","3+":"max"}
     },
     "prompt_budgets": {
       "bootstrap_hard_bytes": 1500,
@@ -184,6 +185,18 @@
       "verification": [
         "Ground the discovery brief in supplied knowledge indexes and current repository structure.",
         "Check domain boundaries for gaps, overlap, dependency cycles, and unverifiable completion criteria."
+      ]
+    },
+    "governance_activation": {
+      "objective": "Independently validate the full-governance activation boundary for: {task_objective}",
+      "ownership": "Own the activation review only; verify the initiative, policy snapshot, scope, dependencies, and risk floor before ordinary workers proceed.",
+      "acceptance": [
+        "Confirm that the resolved full-governance mode, autonomous or initiative scope, resolution reasons, policy snapshot, and required lifecycle gates are durable and internally consistent.",
+        "Treat unfinished implementation, absent downstream deliverables, and unrun downstream task verification as expected preconditions rather than findings; reject only missing, stale, conflicting, or unauthorized activation inputs."
+      ],
+      "verification": [
+        "Trace activation claims to the server-supplied governance context, immutable policy digest, resolved pipeline, and exact task start contract.",
+        "Attempt to falsify the activation scope, authorization, policy floor, and lifecycle-gate assumptions without evaluating future delivery completion."
       ]
     },
     "plan": {
@@ -342,6 +355,18 @@
         "Report exact commands, cwd, exit codes, decisive sanitized output, and omitted checks.",
         "Treat any claim without observed successful execution as unverified."
       ]
+    },
+    "governance_close": {
+      "objective": "Independently verify full-governance closure and retrospective evidence for: {task_objective}",
+      "ownership": "Own the final governance review only; verify the acceptance oracle, risk disposition, falsification review, policy snapshot, independent review, and retrospective without editing source files.",
+      "acceptance": [
+        "Use this independent report and its verified predecessor receipts to provide concrete evidence for every full-governance close obligation at the current task revision.",
+        "Record residual risk, falsification results, retrospective conclusions, unresolved questions, and any required corrective route; do not require the post-review server evidence projection or final handoff to exist before this report."
+      ],
+      "verification": [
+        "Cross-check the supplied governance context, task contract, current source, verification results, predecessor report receipts, and dependency state for matching scope and digests.",
+        "Attempt to falsify the oracle, risk, implementation, documentation, and retrospective claims before reporting; Cortex projects the independent-review evidence and audit receipt only after a valid report is consumed."
+      ]
     }
   },
   "model_routing": {
@@ -365,7 +390,7 @@
     "luna_efficient_effort_by_complexity": {"C1":"high","C2":"high","C3":"xhigh"},
     "terra_effort_by_complexity": {"C1":"high","C2":"high","C3":"xhigh"},
     "effort_floor_by_risk": {"low":"medium","moderate":"medium","high":"high","critical":"xhigh"},
-    "max_policy": "bounded_complex_work"
+    "max_policy": "complex_work_or_repeated_rework"
   },
   "implementation_routing": {
     "fallback": "general",
@@ -420,7 +445,7 @@
     {"name":"architect","filename":"architect.toml","sandbox":"read-only","route_category":"automatic","gates":["architecture"],"description":"Read-only system architect for component boundaries, data flow, API contracts, and architecture decisions.","select_when":"System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.","avoid_when":"The design is already settled and the remaining work is bounded implementation."},
     {"name":"backend_dev","filename":"backend-dev.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Backend implementation specialist for APIs, business logic, persistence, and server-side tests.","select_when":"A bounded server, API, service, business-logic, or persistence change must be implemented.","avoid_when":"The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery."},
     {"name":"build_verification","filename":"build-verification.toml","sandbox":"read-only","route_category":"automatic","gates":["qa","close"],"description":"Read-only build and test verifier that reports exact command outcomes without changing source files.","select_when":"Independent non-mutating build, test, packaging, installation, or release-readiness proof is required.","avoid_when":"A failing check must be diagnosed or repaired."},
-    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","route_category":"automatic","gates":["review"],"description":"Read-only code reviewer for correctness, regressions, security, performance, and missing tests.","select_when":"A completed or proposed change needs independent defect-focused review.","avoid_when":"The primary need is implementation, planning, or broad repository discovery."},
+    {"name":"code_reviewer","filename":"code-reviewer.toml","sandbox":"read-only","route_category":"automatic","gates":["review","governance_activation","governance_close"],"description":"Read-only code reviewer for correctness, regressions, security, performance, and missing tests.","select_when":"A completed or proposed change needs independent defect-focused review.","avoid_when":"The primary need is implementation, planning, or broad repository discovery."},
     {"name":"data_engineer","filename":"data-engineer.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Data engineering specialist for ETL, migrations, validation, rollbacks, and data-integrity checks.","select_when":"Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.","avoid_when":"Only database schema design is needed, with no data-operation implementation."},
     {"name":"database_architect","filename":"database-architect.toml","sandbox":"read-only","route_category":"automatic","gates":["database_architecture"],"description":"Read-only database architect for schemas, indexes, migrations, query plans, and compatibility risks.","select_when":"Schema, index, query-plan, migration, locking, or rollback design needs specialist review.","avoid_when":"The approved design only needs migration or data-pipeline implementation."},
     {"name":"debugger","filename":"debugger.toml","sandbox":"workspace-write","route_category":"manual","gates":[],"description":"Debugging specialist that reproduces failures, proves root cause, implements focused fixes, and verifies regressions.","select_when":"A failure must be reproduced and its root cause proven before a focused repair.","avoid_when":"The desired behavior and implementation path are already known."},

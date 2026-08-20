@@ -1,13 +1,11 @@
-"""Durable worker-question bus and MCP elicitation bridge."""
+"""Durable worker-question bus and ordinary-chat pause/resume bridge."""
 from __future__ import annotations
 
 import json
 import re
-import secrets
-import sys
 from typing import Any
 
-from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
+from cortex_runtime.core.runtime_bindings import bind_symbols
 
 
 bind_symbols(
@@ -42,7 +40,6 @@ bind_symbols(
         "question_bus_paths",
         "redact",
         "require_internal_english",
-        "respond",
         "safe_id",
         "sanitize_structured",
         "state_lock",
@@ -162,6 +159,129 @@ def _batch_is_stale(record: dict[str, Any], state: dict[str, Any]) -> bool:
     return int(record.get("task_revision") or 1) < _batch_revision(state)
 
 
+def _attempt_generation(attempt: dict[str, Any]) -> int:
+    """Return the durable corrective generation for one worker attempt.
+
+    Attempts created before the revision-aware retry work do not carry an
+    explicit generation.  Their retry escalation already records the number
+    of preceding failed attempts, so use that as a backwards-compatible
+    generation projection instead of treating every legacy attempt as the
+    same lifetime quota bucket.
+    """
+    raw = attempt.get("attempt_generation")
+    try:
+        if raw is not None:
+            return max(1, int(raw))
+    except (TypeError, ValueError):
+        pass
+    escalation = attempt.get("rework_escalation")
+    if isinstance(escalation, dict):
+        try:
+            return max(1, int(escalation.get("prior_failure_count") or 0) + 1)
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _current_plan_revision(state: dict[str, Any], attempt: dict[str, Any]) -> object:
+    """Project the current approved/pending planner revision when present.
+
+    The first non-planning wave intentionally has no plan revision.  Keeping
+    an explicit ``None`` in the question envelope is preferable to inventing
+    a revision number and makes old task ledgers readable without migration.
+    """
+    for value in (
+        attempt.get("plan_revision"),
+        state.get("plan_revision"),
+        (state.get("plan_approval") or {}).get("approved_basis", {}).get("plan_revision")
+        if isinstance((state.get("plan_approval") or {}).get("approved_basis"), dict) else None,
+        (state.get("plan_approval") or {}).get("pending_basis", {}).get("plan_revision")
+        if isinstance((state.get("plan_approval") or {}).get("pending_basis"), dict) else None,
+    ):
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _question_revision_context(state: dict[str, Any], attempt: dict[str, Any]) -> dict[str, object]:
+    return {
+        "task_revision": _batch_revision(state),
+        "plan_revision": _current_plan_revision(state, attempt),
+        "attempt_generation": _attempt_generation(attempt),
+    }
+
+
+def _legacy_question_is_stale(record: dict[str, Any], state: dict[str, Any], attempt: dict[str, Any]) -> bool:
+    """Whether a single-question record can no longer resume its worker.
+
+    Batch questions already had revision semantics.  Legacy single questions
+    must receive the same protection: a material steer, retry generation, or
+    invalidated worker turns an unanswered question into a terminal,
+    explicitly non-resumable record.
+    """
+    if record.get("status") != "open":
+        return False
+    context = _question_revision_context(state, attempt)
+    try:
+        record_revision = int(record.get("task_revision") or 1)
+    except (TypeError, ValueError):
+        record_revision = 1
+    try:
+        record_generation = int(record.get("attempt_generation") or 1)
+    except (TypeError, ValueError):
+        record_generation = 1
+    if record_revision < int(context["task_revision"]):
+        return True
+    if record_generation < int(context["attempt_generation"]):
+        return True
+    return bool(attempt.get("invalidated"))
+
+
+def _supersede_legacy_question(
+    task_dir: Any,
+    state: dict[str, Any],
+    record: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Persist a stale single question as terminal without accepting an answer."""
+    if record.get("status") != "open":
+        return record
+    if reason is None:
+        if attempt.get("invalidated"):
+            reason = "worker attempt was superseded before its question was answered"
+        else:
+            reason = "task revision superseded this unresolved question"
+    record.update({
+        "status": "superseded",
+        "superseded_at": now(),
+        "superseded_reason": redact(reason, 400),
+        "resume": False,
+    })
+    _write_question_record(task_dir, state, record)
+    return record
+
+
+def _supersede_stale_legacy_questions(
+    task_dir: Any,
+    state: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> bool:
+    changed = False
+    for record in records:
+        try:
+            attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        except ValueError:
+            # The normal task-document validator catches this condition.  Do
+            # not silently reclassify a malformed record as a safe stale one.
+            raise
+        if _legacy_question_is_stale(record, state, attempt):
+            _supersede_legacy_question(task_dir, state, record, attempt)
+            changed = True
+    return changed
+
+
 def _supersede_batch(
     task_dir: Any,
     state: dict[str, Any],
@@ -197,16 +317,43 @@ def _batch_question_config(value: object) -> dict[str, Any]:
     custom_label = redact(str(value.get("custom_label") or "Your answer").strip(), 160) or "Your answer"
     context = redact(str(value.get("context") or "").strip(), 2000)
     recommendation = redact(str(value.get("recommendation") or "").strip(), 1000)
+    raw_recommended_ids = value.get("recommended_option_ids")
+    if isinstance(raw_recommended_ids, str):
+        raw_recommended_ids = [raw_recommended_ids]
+    recommended_option_ids = [safe_id(str(item)) for item in (raw_recommended_ids or [])]
+    recommended_answer = redact(str(value.get("recommended_answer") or "").strip(), 1200)
     options = _question_options(value.get("options"))
     if question_type == "text" and options:
         raise ValueError("text batch questions must not define options")
     if question_type != "text" and not options:
         raise ValueError("selection batch questions require options")
+    if not recommendation:
+        raise ValueError(
+            "batch worker question recommendation is required and must explain why the suggested answer is best"
+        )
+    option_ids = {item["option_id"] for item in options}
+    if question_type == "text":
+        if recommended_option_ids:
+            raise ValueError("text batch questions use recommended_answer, not recommended_option_ids")
+        if not recommended_answer:
+            raise ValueError("text batch questions require a concrete recommended_answer")
+    else:
+        if not recommended_option_ids:
+            raise ValueError("selection batch questions require recommended_option_ids")
+        if any(item not in option_ids for item in recommended_option_ids):
+            raise ValueError("recommended_option_ids must reference defined batch question options")
+        if question_type == "single_select" and len(recommended_option_ids) != 1:
+            raise ValueError("single_select batch questions require exactly one recommended option")
+        if len(recommended_option_ids) != len(set(recommended_option_ids)):
+            raise ValueError("recommended_option_ids must be unique")
+        if recommended_answer:
+            raise ValueError("selection batch questions use recommended_option_ids, not recommended_answer")
     require_internal_english(question, "batch worker question")
     require_internal_english(header, "batch worker question header")
     require_internal_english(custom_label, "batch worker question custom_label")
     require_internal_english(context, "batch worker question context")
     require_internal_english(recommendation, "batch worker question recommendation")
+    require_internal_english(recommended_answer, "batch worker question recommended_answer")
     require_internal_english(options, "batch worker question options")
     _require_self_contained_question(question, "batch worker question")
     _require_meaningful_decision_label(header, "batch worker question header")
@@ -224,6 +371,8 @@ def _batch_question_config(value: object) -> dict[str, Any]:
         "localized_custom_label": custom_label,
         "context": context,
         "recommendation": recommendation,
+        "recommended_option_ids": recommended_option_ids,
+        "recommended_answer": recommended_answer,
     }
 
 
@@ -264,7 +413,7 @@ def _batch_answer_view(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _batch_progress(record: dict[str, Any]) -> dict[str, Any]:
-    """Return bounded durable progress for the sequential batch UI."""
+    """Return bounded durable progress for an ordinary-chat batch."""
     questions = list(record.get("questions") or [])
     answers = record.get("answers") if isinstance(record.get("answers"), dict) else {}
     remaining = [
@@ -305,16 +454,41 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         question, context, blocking, config, content_digest = _question_payload(params)
         paths = question_bus_paths(task_dir)
         records = _question_records(paths, state)
+        _supersede_stale_legacy_questions(task_dir, state, records)
         existing = next(
-            (item for item in records if item.get("attempt_id") == attempt_id and item.get("submission_id") == submission_id),
+            (
+                item for item in records
+                if item.get("attempt_id") == attempt_id
+                and item.get("submission_id") == submission_id
+                and item.get("status") != "superseded"
+            ),
             None,
         )
         if existing is not None:
             if existing.get("content_digest") != content_digest:
                 raise ValueError("idempotent question submission_id was reused with different content")
             return {"idempotent": True, "question": existing, "cursor": _question_sequence(records)}
-        if len(records) >= MAX_QUESTIONS_PER_TASK or sum(item.get("attempt_id") == attempt_id for item in records) >= MAX_QUESTIONS_PER_ATTEMPT:
-            raise ValueError("question count quota exhausted")
+        revision_context = _question_revision_context(state, attempt)
+        active_revision_records = [
+            item for item in records
+            if int(item.get("task_revision") or 1) == int(revision_context["task_revision"])
+            and item.get("status") != "superseded"
+        ]
+        active_generation_records = [
+            item for item in active_revision_records
+            if item.get("attempt_id") == attempt_id
+            and int(item.get("attempt_generation") or 1) == int(revision_context["attempt_generation"])
+        ]
+        if len(active_revision_records) >= MAX_QUESTIONS_PER_TASK:
+            raise ValueError(
+                "question count quota exhausted for the active task revision; pause automatic work and request a "
+                "new user strategy or task revision instead of reusing historical question capacity"
+            )
+        if len(active_generation_records) >= MAX_QUESTIONS_PER_ATTEMPT:
+            raise ValueError(
+                "question count quota exhausted for the active attempt generation; pause automatic work and request "
+                "a user decision or dispatch a materially revised strategy"
+            )
         numbers = [int(str(item["question_id"]).removeprefix("question-")) for item in records]
         question_id = f"question-{max(numbers, default=0) + 1:04d}"
         sequence = _question_sequence(records) + 1
@@ -324,6 +498,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "task_id": state["task_id"],
             "gate": attempt["gate"],
             "attempt_id": attempt_id,
+            **revision_context,
             "submission_id": submission_id,
             "profile": attempt["profile"],
             "question": question,
@@ -334,6 +509,9 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "multiple": config["multiple"],
             "custom_label": config["custom_label"],
             "custom_response": True,
+            "recommendation": config["recommendation"],
+            "recommended_option_ids": config["recommended_option_ids"],
+            "recommended_answer": config["recommended_answer"],
             "status": "open",
             "content_digest": content_digest,
             "published_sequence": sequence,
@@ -485,7 +663,8 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("worker question identity does not match an active facade-managed attempt")
         if action == "poll_batch":
             if any(params.get(field) not in (None, "", [], {}) for field in (
-                "question_ref", "question", "header", "options", "multiple", "custom_label", "context", "batch"
+                "question_ref", "question", "header", "options", "multiple", "custom_label", "context", "batch",
+                "recommendation", "recommended_option_ids", "recommended_answer"
             )):
                 raise ValueError("poll_batch accepts only batch_ref and worker identity fields")
             batch_ref = safe_id(str(params.get("batch_ref") or ""))
@@ -501,7 +680,8 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             if str(params.get("question_ref") or "").strip() or str(params.get("batch_ref") or "").strip():
                 raise ValueError("ask_batch must omit question_ref and batch_ref")
             if any(params.get(field) not in (None, "", [], {}) for field in (
-                "question", "header", "options", "multiple", "custom_label", "context"
+                "question", "header", "options", "multiple", "custom_label", "context",
+                "recommendation", "recommended_option_ids", "recommended_answer"
             )):
                 raise ValueError("ask_batch accepts only batch and worker identity fields")
             result = _publish_worker_question_batch(params, task_dir, state, attempt)
@@ -533,6 +713,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             _require_meaningful_decision_label(params.get("header") or question, "worker question header")
             for option in _question_options(params.get("options")):
                 _require_meaningful_decision_label(option.get("label_en"), "worker question option")
+            _question_config(params)
             submission_id = safe_id(
                 f"public-{attempt_id}-question-"
                 + digest_text(json.dumps({
@@ -542,6 +723,9 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                     "options": params.get("options"),
                     "multiple": bool(params.get("multiple", False)),
                     "custom_label": params.get("custom_label"),
+                    "recommendation": params.get("recommendation"),
+                    "recommended_option_ids": params.get("recommended_option_ids"),
+                    "recommended_answer": params.get("recommended_answer"),
                 }, ensure_ascii=False, sort_keys=True, default=str))[:16]
             )
             result = publish_worker_question({
@@ -567,13 +751,26 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             }
         question_ref = safe_id(str(params.get("question_ref") or ""))
         if any(params.get(field) not in (None, "", [], {}) for field in (
-            "question", "header", "options", "multiple", "custom_label", "context"
+            "question", "header", "options", "multiple", "custom_label", "context",
+            "recommendation", "recommended_option_ids", "recommended_answer"
         )):
             raise ValueError("poll accepts only the question_ref and worker identity fields")
         records = _question_records(question_bus_paths(task_dir), state)
         record = next((item for item in records if item.get("question_id") == question_ref), None)
         if record is None or record.get("attempt_id") != attempt_id or record.get("profile") != profile:
             raise ValueError("question_ref does not belong to this worker attempt")
+        if _legacy_question_is_stale(record, state, attempt):
+            _supersede_legacy_question(task_dir, state, record, attempt)
+        if record.get("status") == "superseded":
+            return {
+                "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": True,
+                "outcome": "question_superseded",
+                "question_ref": question_ref,
+                "status": "superseded",
+                "resume": False,
+                "next_action": "Do not resume this worker from the superseded question; wait for current revision guidance or a replacement dispatch.",
+            }
         if record.get("status") != "answered":
             return {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -674,27 +871,30 @@ def _normalize_question_answer(value: object) -> tuple[Any, str]:
 
 
 def list_worker_questions(params: dict[str, Any]) -> dict[str, Any]:
-    _, task_dir, state = load_state(str(params["task_id"]), params)
-    authorize_principal(state, params)
-    all_records = _question_records(question_bus_paths(task_dir), state)
-    records = list(all_records)
-    attempt_id = str(params.get("attempt_id", "")).strip()
-    if attempt_id:
-        attempt_id = safe_id(attempt_id)
-        _attempt(state, attempt_id)
-        records = [item for item in records if item["attempt_id"] == attempt_id]
-    requested_status = str(params.get("status", "")).strip()
-    if requested_status:
-        records = [item for item in records if item["status"] == requested_status]
-    return {
-        "schema": QUESTION_SCHEMA,
-        "task_id": state["task_id"],
-        "questions": [_question_record_view(item) for item in records],
-        "cursor": _question_sequence(all_records),
-        "open_count": sum(item.get("status") == "open" for item in all_records),
-        "open_question_ids": [item["question_id"] for item in all_records if item.get("status") == "open"],
-        "next_action": "answer each open question in published_sequence order; do not choose on the user's behalf" if any(item.get("status") == "open" for item in all_records) else "continue worker monitoring",
-    }
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        authorize_principal(state, params)
+        all_records = _question_records(question_bus_paths(task_dir), state)
+        _supersede_stale_legacy_questions(task_dir, state, all_records)
+        records = list(all_records)
+        attempt_id = str(params.get("attempt_id", "")).strip()
+        if attempt_id:
+            attempt_id = safe_id(attempt_id)
+            _attempt(state, attempt_id)
+            records = [item for item in records if item["attempt_id"] == attempt_id]
+        requested_status = str(params.get("status", "")).strip()
+        if requested_status:
+            records = [item for item in records if item["status"] == requested_status]
+        return {
+            "schema": QUESTION_SCHEMA,
+            "task_id": state["task_id"],
+            "questions": [_question_record_view(item) for item in records],
+            "cursor": _question_sequence(all_records),
+            "open_count": sum(item.get("status") == "open" for item in all_records),
+            "open_question_ids": [item["question_id"] for item in all_records if item.get("status") == "open"],
+            "next_action": "answer each open question in published_sequence order; do not choose on the user's behalf" if any(item.get("status") == "open" for item in all_records) else "continue worker monitoring",
+        }
 
 
 def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
@@ -716,6 +916,20 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         record = next((item for item in records if item.get("question_id") == question_id), None)
         if record is None:
             raise ValueError("question_id does not belong to this task")
+        attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
+        if _legacy_question_is_stale(record, state, attempt):
+            _supersede_legacy_question(task_dir, state, record, attempt)
+        if record.get("status") == "superseded":
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "superseded",
+                "question_id": question_id,
+                "idempotent": False,
+                "resume": False,
+                "question": record,
+                "cursor": _question_sequence(records),
+                "next_action": "Do not deliver this stale answer to the worker; ask a replacement question for the current task revision if the decision is still needed.",
+            }
         option_map = {item["option_id"]: item.get("label_en") or item.get("label") for item in record.get("options") or []}
         option_ids = []
         custom_text = ""
@@ -784,7 +998,7 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
-    """Build a native MCP form with optional single/multi-select and a final free-form field."""
+    """Build the legacy structured-answer shape for stored compatibility data."""
     properties: dict[str, Any] = {}
     options = list(config.get("options") or [])
     if options:
@@ -818,61 +1032,6 @@ def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
     return {"type": "object", "properties": properties}
 
 
-def _request_mcp_elicitation(
-    message: str,
-    requested_schema: dict[str, Any],
-    *,
-    thread_id: str = "",
-    turn_id: str = "",
-    meta: dict[str, Any] | None = None,
-) -> tuple[str, dict[str, Any] | None, str]:
-    """Ask the Codex host to render its native MCP elicitation UI."""
-    request_id = f"cortex-question-{secrets.token_hex(12)}"
-    respond({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": "elicitation/create",
-        "params": {
-            "message": message,
-            # Codex's OpenAI extension can render richer form fallbacks (such
-            # as attachment-capable free-form input). Use it only when the
-            # connected host advertised the extension; otherwise remain
-            # standards-compliant with MCP form mode.
-            "mode": "openai/form" if bound_symbol("questions", "MCP_OPENAI_FORM") else "form",
-            "requestedSchema": requested_schema,
-            "_meta": {
-                "cortex": {
-                    "schema": QUESTION_SCHEMA,
-                    "thread_id": thread_id,
-                    "turn_id": turn_id or None,
-                    **(meta if isinstance(meta, dict) else {}),
-                },
-            },
-        },
-    })
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            raise RuntimeError("MCP client closed before answering cortex.question")
-        try:
-            response = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if response.get("id") != request_id:
-            if response.get("id") is not None and response.get("method"):
-                respond({"jsonrpc": "2.0", "id": response.get("id"), "error": {"code": -32601, "message": "Cortex is waiting for the active user question"}})
-            continue
-        if "error" in response:
-            error = response.get("error") or {}
-            raise RuntimeError(redact(str(error.get("message") or "MCP elicitation was rejected"), 1000))
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise RuntimeError("MCP elicitation returned an invalid response")
-        action = str(result.get("action") or "cancel").strip().lower()
-        content = result.get("content") if isinstance(result.get("content"), dict) else None
-        return action, content, request_id
-
-
 def _question_answer_from_content(content: dict[str, Any] | None, config: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     content = content or {}
     option_aliases: dict[str, str] = {}
@@ -889,13 +1048,13 @@ def _question_answer_from_content(content: dict[str, Any] | None, config: dict[s
         selections = [redact(item, 200) for item in selections if str(item).strip()]
         selections = [option_aliases.get(item, item) for item in selections]
         if options and any(item not in options for item in selections):
-            raise ValueError("MCP elicitation returned an unknown question option")
+            raise ValueError("chat answer contains an unknown question option")
     else:
         raw_selection = content.get("selection")
         selections = [redact(raw_selection, 200)] if raw_selection not in (None, "") else []
         selections = [option_aliases.get(item, item) for item in selections]
         if options and selections and selections[0] not in options:
-            raise ValueError("MCP elicitation returned an unknown question option")
+            raise ValueError("chat answer contains an unknown question option")
     custom = content.get("custom_response", "")
     normalized_custom, custom_text = _normalize_question_answer(custom)
     # Some hosts return a ``selection`` value even when the rendered form has
@@ -1030,7 +1189,7 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
 
 
 def _batch_form_schema(question: dict[str, Any]) -> dict[str, Any]:
-    """Render exactly one batch item, with free-form context beside choices."""
+    """Build one legacy structured batch-answer shape for compatibility."""
     key = question["question_key"]
     question_type = question["question_type"]
     title = question.get("localized_question") or question["canonical_question"]
@@ -1094,14 +1253,14 @@ def _batch_answer_from_content(
     content: dict[str, Any] | None,
     question: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate one native step without accepting answers for later slides."""
+    """Validate one structured chat answer without accepting later items."""
     if not isinstance(content, dict):
-        raise ValueError("MCP elicitation returned an invalid batch response")
+        raise ValueError("chat answer returned an invalid batch response")
     key = str(question["question_key"])
     question_type = question["question_type"]
     allowed_fields = {key} if question_type == "text" else {key, "custom_response"}
     if key not in content or not set(content).issubset(allowed_fields):
-        raise ValueError("MCP elicitation must answer only the current batch question")
+        raise ValueError("chat answer must answer only the current batch question")
     raw = content[key]
     custom_original = ""
     if question_type == "text":
@@ -1120,7 +1279,7 @@ def _batch_answer_from_content(
         else:
             option_ids = [safe_id(str(raw))] if str(raw or "").strip() else []
         if not option_ids or len(option_ids) != len(set(option_ids)) or any(item not in option_map for item in option_ids):
-            raise ValueError("MCP elicitation returned an unknown or empty batch option")
+            raise ValueError("chat answer returned an unknown or empty batch option")
         original = option_ids if question_type == "multi_select" else option_ids[0]
         raw_custom = content.get("custom_response", "")
         if isinstance(raw_custom, (dict, list)):
@@ -1358,8 +1517,110 @@ def _supersede_batch_for_main(params: dict[str, Any], batch_id: str) -> dict[str
         return record
 
 
+def _chat_question_item(question: dict[str, Any]) -> dict[str, Any]:
+    """Return one self-contained display projection for an ordinary chat message."""
+    options = [
+        {
+            "option_id": option["option_id"],
+            "label": option.get("label_localized") or option.get("label_en") or option["option_id"],
+            "description": option.get("description_localized") or option.get("description") or "",
+        }
+        for option in question.get("options") or []
+    ]
+    question_text = (
+        question.get("localized_question")
+        or question.get("canonical_question")
+        or question.get("question")
+        or ""
+    )
+    context = question.get("context") or ""
+    recommended_ids = list(question.get("recommended_option_ids") or [])
+    option_by_id = {str(item["option_id"]): item for item in options}
+    recommended_options = [option_by_id[item] for item in recommended_ids if item in option_by_id]
+    recommendation = str(question.get("recommendation") or "").strip()
+    recommended_answer = str(question.get("recommended_answer") or "").strip()
+    if not recommendation or (options and not recommended_options) or (not options and not recommended_answer):
+        raise ValueError("question cannot be shown without an explicit model recommendation")
+    return {
+        "question_key": question.get("question_key"),
+        "type": question.get("question_type") or (
+            "multi_select" if question.get("multiple") else "single_select" if options else "text"
+        ),
+        "header": question.get("localized_header") or question.get("header") or question_text,
+        "question": question_text,
+        "context": context,
+        "why_needed": context or "This decision is required before the paused worker can continue safely.",
+        "options": options,
+        "llm_recommendation": {
+            "recommended_options": recommended_options,
+            "recommended_answer": recommended_answer or None,
+            "rationale": recommendation,
+        },
+        "custom_response_allowed": True,
+        "custom_label": (
+            question.get("localized_custom_label")
+            or question.get("custom_label")
+            or "Your answer or additional constraints"
+        ),
+    }
+
+
+def _chat_question_interaction(
+    *, question_ref: str, questions: list[dict[str, Any]], progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Describe the user-visible message and exact durable resume boundary."""
+    return {
+        "schema": "cortex/chat-interaction/v1",
+        "kind": "worker_question",
+        "interaction_ref": question_ref,
+        "title": "Input required to continue the Cortex task",
+        "summary": (
+            "A Cortex worker is paused because continuing without this decision could change scope, behavior, "
+            "risk, or acceptance criteria. The same durable task and worker will resume after the answer."
+        ),
+        "questions": [_chat_question_item(item) for item in questions],
+        **({"progress": progress} if progress else {}),
+        "response_instructions": (
+            "Answer in your next ordinary chat message. Name the option label or option_id when selecting an option; "
+            "for multiple questions, answer each numbered question. You may describe another choice and its "
+            "constraints."
+        ),
+        "coordinator_contract": (
+            "Render every question, its context and why it matters, every option label and description, material "
+            "trade-offs, and a visibly labelled 'LLM recommendation' naming the recommended option(s) or exact "
+            "text answer plus its rationale in the user's language as one ordinary final assistant "
+            "message. Do not call any UI, input, approval, or elicitation tool. End the turn immediately after the "
+            "message. On the user's next message, treat it as the answer unless they explicitly replace or cancel the "
+            "task; preserve the exact user text, record it against interaction_ref, and only then resume the exact "
+            "same worker."
+        ),
+    }
+
+
+def _batch_answers_from_chat(record: dict[str, Any], raw_answers: object) -> dict[str, dict[str, Any]]:
+    """Normalize coordinator-interpreted chat answers into durable batch steps."""
+    if not isinstance(raw_answers, dict) or not raw_answers:
+        raise ValueError("batch chat answers must be a non-empty object keyed by question_key")
+    questions = {str(item["question_key"]): item for item in record.get("questions") or []}
+    unknown = sorted(set(raw_answers) - set(questions))
+    if unknown:
+        raise ValueError("batch chat answers contain an unknown question_key: " + ", ".join(unknown))
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, raw in raw_answers.items():
+        question = questions[key]
+        if isinstance(raw, dict):
+            answer_value = raw.get("answer", raw.get("value", raw.get("answer_original")))
+            content = {key: answer_value}
+            if question.get("question_type") != "text" and str(raw.get("custom_response") or "").strip():
+                content["custom_response"] = raw["custom_response"]
+        else:
+            content = {key: raw}
+        normalized[key] = _batch_answer_from_content(content, question)
+    return normalized
+
+
 def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, Any]:
-    """Surface a durable batch as one native question at a time."""
+    """Surface or answer a durable batch through ordinary main-chat messages."""
     record = _supersede_batch_for_main(params, batch_id)
     if record.get("status") == "superseded":
         return {
@@ -1413,110 +1674,52 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
         }
 
     view = _localized_batch_view(record, params)
+    if params.get("answers") is not None:
+        answers = _batch_answers_from_chat(record, params.get("answers"))
+        record, idempotent = _persist_batch_answers(params, batch_id, answers)
+        if record.get("status") == "awaiting_translation":
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "awaiting_translation",
+                "question_id": batch_id,
+                "batch_ref": batch_id,
+                "answer_original": record.get("answer_original"),
+                "answer_custom_original": record.get("answer_custom_original"),
+                "answer_original_language": record.get("answer_original_language"),
+                "answer_option_ids": record.get("answer_option_ids"),
+                "translation_required_for": record.get("translation_required_for") or [],
+                "durable": {"batch": record},
+                "next_action": "Translate only the listed free-text values, then resubmit canonical_answers for this same batch_ref.",
+            }
+        return {
+            "schema": QUESTION_SCHEMA,
+            "status": "answered",
+            "question_id": batch_id,
+            "batch_ref": batch_id,
+            "answers": _batch_answer_view(record),
+            "idempotent": idempotent,
+            "durable": {"batch": record},
+        }
     stored = record.get("answers") if isinstance(record.get("answers"), dict) else {}
     unanswered = [
         item for item in view.get("questions") or []
         if str(item.get("question_key") or "") not in stored
     ]
     progress = _batch_progress(record)
-    if not bool(params.get("interactive", True)):
-        current = unanswered[0] if unanswered else None
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "pending_user_input",
-            "question_id": batch_id,
-            "batch_ref": batch_id,
-            "question": current,
-            "ui": _batch_form_schema(current) if current else None,
-            "progress": progress,
-            "next_action": "invoke cortex.question with interactive=true from the main Codex chat",
-            "recoverable": True,
-            "durable": {"batch": record},
-        }
-    last_elicitation_id = str(record.get("last_elicitation_id") or "") or None
-    total = len(view.get("questions") or [])
-    for question in unanswered:
-        current_progress = _batch_progress(record)
-        position = int(current_progress["answered"]) + 1
-        try:
-            action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
-                f"{position} / {total}",
-                _batch_form_schema(question),
-                thread_id=str(params.get("thread_id") or ""),
-                turn_id=str(params.get("turn_id") or ""),
-            )
-        except RuntimeError as exc:
-            return {
-                "schema": QUESTION_SCHEMA,
-                "status": "elicitation_unavailable",
-                "question_id": batch_id,
-                "batch_ref": batch_id,
-                "error": redact(str(exc), 1000),
-                "progress": current_progress,
-                "recoverable": True,
-                "durable": {"batch": record},
-            }
-        if action != "accept":
-            return {
-                "schema": QUESTION_SCHEMA,
-                "status": action if action in {"decline", "cancel"} else "cancel",
-                "question_id": batch_id,
-                "batch_ref": batch_id,
-                "elicitation_id": elicitation_id,
-                "progress": current_progress,
-                "durable": {"batch": record},
-            }
-        try:
-            answer = _batch_answer_from_content(content, question)
-            record = _persist_batch_step_answer(
-                params,
-                batch_id,
-                str(question["question_key"]),
-                answer,
-                elicitation_id=elicitation_id,
-            )
-        except ValueError as exc:
-            return {
-                "schema": QUESTION_SCHEMA,
-                "status": "invalid_answer",
-                "question_id": batch_id,
-                "batch_ref": batch_id,
-                "error": redact(str(exc), 1000),
-                "progress": _batch_progress(record),
-                "recoverable": True,
-                "durable": {"batch": record},
-            }
-        last_elicitation_id = elicitation_id
-        if record.get("status") == "superseded":
-            return {
-                "schema": QUESTION_SCHEMA, "status": "superseded", "question_id": batch_id,
-                "batch_ref": batch_id, "resume": False, "durable": {"batch": record},
-            }
-    if record.get("status") == "awaiting_translation":
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "awaiting_translation",
-            "question_id": batch_id,
-            "batch_ref": batch_id,
-            "elicitation_id": last_elicitation_id,
-            "progress": _batch_progress(record),
-            "answer_original": record.get("answer_original"),
-            "answer_custom_original": record.get("answer_custom_original"),
-            "answer_original_language": record.get("answer_original_language"),
-            "answer_option_ids": record.get("answer_option_ids"),
-            "translation_required_for": record.get("translation_required_for") or [],
-            "next_action": "Translate only the listed free-text answers or custom responses, then call the same batch question_ref with canonical_answers.",
-            "durable": {"batch": record},
-        }
     return {
         "schema": QUESTION_SCHEMA,
-        "status": "answered",
+        "status": "pending_user_message",
         "question_id": batch_id,
         "batch_ref": batch_id,
-        "elicitation_id": last_elicitation_id,
-        "progress": _batch_progress(record),
-        "answers": _batch_answer_view(record),
+        "progress": progress,
+        "chat_interaction": _chat_question_interaction(
+            question_ref=batch_id,
+            questions=unanswered,
+            progress=progress,
+        ),
+        "recoverable": True,
         "durable": {"batch": record},
+        "next_action": "Send chat_interaction as an ordinary final chat message and end the turn; wait for the user's next message.",
     }
 
 
@@ -1581,7 +1784,7 @@ def _localized_question_view(record: dict[str, Any], params: dict[str, Any]) -> 
 
 
 def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
-    """Route worker questions to the coordinator and render main-chat UI questions."""
+    """Route worker questions to a durable ordinary-chat pause boundary."""
     task_id = str(params.get("task_id") or "").strip()
     principal = str(params.get("principal") or "").strip()
     question_id = str(params.get("question_id") or "").strip()
@@ -1595,6 +1798,15 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
         if question_id.startswith("batch-"):
             return _cortex_question_batch(params, question_id)
         record = _question_record_for_main(params, question_id)
+        if record.get("status") == "superseded":
+            return {
+                "schema": QUESTION_SCHEMA,
+                "status": "superseded",
+                "question_id": question_id,
+                "resume": False,
+                "durable": {"question": record},
+                "next_action": "Do not present or answer a question from a superseded task revision.",
+            }
         if record.get("status") == "answered":
             return {
                 "schema": QUESTION_SCHEMA,
@@ -1627,109 +1839,30 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
             })
             return {
                 "schema": QUESTION_SCHEMA,
-                "status": "pending_user_input",
+                "status": "pending_user_message",
                 "question_id": durable["question"]["question_id"],
                 "question": question,
-                "ui": config,
-                "next_action": "coordinator must list_worker_questions and invoke cortex.question in the main chat with this question_id",
+                "chat_interaction": _chat_question_interaction(
+                    question_ref=durable["question"]["question_id"],
+                    questions=[{**durable["question"], **config, "canonical_question": question}],
+                ),
+                "next_action": "Send chat_interaction as an ordinary final chat message and end the turn; wait for the user's next message.",
                 "recoverable": True,
                 "durable": durable,
             }
 
-    if not bool(params.get("interactive", True)):
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "pending_user_input",
-            "question_id": (durable or {}).get("question", {}).get("question_id"),
-            "question": question,
-            "ui": config,
-            "next_action": "invoke cortex.question with interactive=true from the main Codex chat",
-            "recoverable": True,
-            "durable": durable,
-        }
-    try:
-        # The composition binding resolves this narrow host seam at call time,
-        # allowing integrations and tests to replace it without a runtime
-        # dependency on the executable facade.
-        action, content, elicitation_id = bound_symbol("questions", "_request_mcp_elicitation")(
-            question,
-            _question_form_schema(config),
-            thread_id=str(params.get("thread_id") or ""),
-            turn_id=str(params.get("turn_id") or ""),
-        )
-    except RuntimeError as exc:
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "elicitation_unavailable",
-            "question_id": (durable or {}).get("question", {}).get("question_id"),
-            "question": question,
-            "error": redact(str(exc), 1000),
-            "next_action": "surface this question with a host-native user-input UI or retry from the main chat",
-            "recoverable": True,
-            "durable": durable,
-        }
-    if action != "accept":
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": action if action in {"decline", "cancel"} else "cancel",
-            "question_id": (durable or {}).get("question", {}).get("question_id"),
-            "question": question,
-            "elicitation_id": elicitation_id,
-            "answer": None,
-            "durable": durable,
-        }
-    try:
-        answer, answer_text = _question_answer_from_content(content, config)
-    except ValueError as exc:
-        return {"schema": QUESTION_SCHEMA, "status": "invalid_answer", "question": question, "error": str(exc), "recoverable": True, "durable": durable}
-    if answer is None:
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "invalid_answer",
-            "question_id": (durable or {}).get("question", {}).get("question_id"),
-            "question": question,
-            "elicitation_id": elicitation_id,
-            "next_action": "retry cortex.question and choose an option or enter a custom response",
-            "recoverable": True,
-            "durable": durable,
-        }
-    custom_answer = answer.get("custom_response") if isinstance(answer, dict) else None
-    user_language = str(params.get("user_language") or "en")
-    if custom_answer not in (None, "", [], {}) and not user_language.lower().startswith("en") and not params.get("canonical_answer"):
-        return {
-            "schema": QUESTION_SCHEMA,
-            "status": "awaiting_translation",
-            "question_id": question_id or (durable or {}).get("question", {}).get("question_id"),
-            "question": question,
-            "elicitation_id": elicitation_id,
-            "answer_original": answer,
-            "answer_original_language": user_language,
-            "answer_option_ids": answer.get("option_ids") or [],
-            "next_action": "Translate only the free-text portion to English, then answer the same durable question with answer plus answer_en.",
-            "durable": durable,
-        }
-    answered = None
-    if question_id:
-        answer_submission_id = str(params.get("answer_submission_id") or "").strip()
-        if not answer_submission_id:
-            answer_submission_id = f"answer-{question_id}-{digest_text(answer_text)[:16]}"
-        answered = answer_worker_question({
-            **params,
-            "question_id": question_id,
-            "submission_id": safe_id(answer_submission_id),
-            "answer": answer,
-            "answer_en": params.get("canonical_answer"),
-            "resume_context": {"source": "cortex.question", "elicitation_id": elicitation_id, "ui": config, "user_language": user_language},
-        })
     return {
         "schema": QUESTION_SCHEMA,
-        "status": "answered",
+        "status": "pending_user_message",
         "question_id": question_id or (durable or {}).get("question", {}).get("question_id"),
         "question": question,
-        "elicitation_id": elicitation_id,
-        "answer": answer,
-        "answer_text": answer_text,
-        "durable": answered or durable,
+        "chat_interaction": _chat_question_interaction(
+            question_ref=question_id or str((durable or {}).get("question", {}).get("question_id") or ""),
+            questions=[{**(durable or {}).get("question", {}), **config, "canonical_question": question}],
+        ),
+        "next_action": "Send chat_interaction as an ordinary final chat message and end the turn; wait for the user's next message.",
+        "recoverable": True,
+        "durable": durable,
     }
 
 

@@ -11,14 +11,15 @@ predecessor evidence digest, and semantic future-pipeline digest. A material
 future-wave change must explicitly rework the plan and obtain approval again;
 no-op and transport-only changes retain approval.
 
-The approval prompt has two transport forms. An initialized stdio session can
-answer the native `elicitation/create` request; direct callers must render the
-returned `cortex/plan-approval/v1` interaction's exactly supplied Approve and
-Cancel actions and submit their embedded arguments. Button responses require
-the opaque request ID for the current plan basis, so copying an old action or
-inventing a free-form approval is rejected. A cancelled or unsupported
-interaction keeps the plan pending and must not be treated as approval; use a
-later non-empty `revise` feedback request to rerun the Planner.
+The approval prompt has one transport: Cortex returns a detailed
+`cortex/chat-interaction/v1` ordinary-chat projection. The coordinator renders
+the complete plan, response meanings, and visibly labelled LLM recommendation
+as its final assistant message, calls no UI/input/approval/elicitation tool,
+then ends the turn. The user's next message is recorded with the opaque request
+ID for the current plan basis, so copying an old response is rejected.
+Non-empty change text is preserved verbatim as Planner revision feedback and
+cannot silently approve the plan. Cancellation or silence keeps the plan
+pending.
 
 The strict seven-field `cortex/report/v1` remains unchanged. Scope's additive
 `scoping` sibling is owned only by Planner Scope and is limited to a discovery
@@ -40,7 +41,9 @@ brief, context files, and at most eight validated domains.
   tampered history, missing objects, changed statements, and inconsistent
   `user_version` state fail closed.
 - New task-start and per-attempt baselines are immutable, content-addressed
-  records in `cortex.db`. State and attempts retain compact
+  records in the host-private `cortex.db` at the default
+  `~/.codex/cortex/projects/p-<sha256>/` root (or validated host-only override).
+  State and attempts retain compact
   `manifest-<sha256>` refs instead of copying paths or manifest bodies.
   Identical project state deduplicates, but every dispatch still captures the
   project again to detect external changes. These snapshots reconcile actual
@@ -50,12 +53,27 @@ brief, context files, and at most eight validated domains.
   Final receipts retain manifest digests and change proof. If
   `allow_rework` reopens that task, Cortex first captures a fresh active
   baseline; stale deleted snapshots are never reused.
-- Schema v8 adds task/plan revisions, native worker sessions, attempt messages,
+- Schema v9 historically added the governance ledger beside the v8 task/plan
+  revisions; schema v10 enforces artifact-authoritative bodies, exact scope,
+  linear revisions, and durable idempotent submissions, while schema v11 adds
+  an append-only status/approval-basis lifecycle chain and governed link and
+  initiative-completion integrity. The task ledger still includes native
+  worker sessions, attempt messages,
   trace/tool observations, and question-batch storage. Schema v7 does not use
   one artifact identity for everything. A content blob
   may be shared by digest, a logical artifact is task-scoped, and an export
   path is separately authorized. Do not use a filesystem path as canonical
   evidence or infer a blob's lifecycle from an optional projection.
+- A pre-v10 upgrade reconciles only deterministic v9 duplicate scope revisions
+  and sibling successors, ordered by creation time and record reference. A
+  missing scope link, cross-scope predecessor, missing predecessor, cycle, or
+  incomplete graph fails closed before the v10 uniqueness constraints are
+  applied. A revision retry with the same `submission_id` replays its committed
+  successor; changed content conflicts instead of creating a sibling.
+- Initiative completion/closure requires every linked `milestone` and
+  `deliverable` task to have terminal ledger status `completed`. A governed
+  initiative-task link cannot be deleted while a governance record references
+  the pair, whether directly or through typed governance links.
 - Projection jobs are durable outbox rows, not background hints. A caller must
   not write an export directly or acknowledge a job without its lease and
   digest verification. Required briefing projections are capabilities; all
@@ -78,6 +96,12 @@ brief, context files, and at most eight validated domains.
 
 ## Public v5 coordinator contract
 
+- The stdio MCP process has one immutable launch-time audience. Missing or
+  unspecified audience uses the compatibility projection exposing all nine
+  public operations, so `$cortex:orchestrator` works in an ordinary Desktop
+  launch. Explicit `worker` and `coordinator` audiences remain strict
+  five-tool projections; JSON-RPC initialization and tool arguments cannot
+  change or elevate the process.
 - Normal flow is `start_orchestration` once, then
   `continue_orchestration` once per completed relative `step`.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
@@ -86,7 +110,13 @@ brief, context files, and at most eight validated domains.
   `worker_question`, `get_report_template`, and `record_report`,
   identity/digest-scoped
   `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
-  public surface is exactly eight tools.
+  registry contains nine operations. The unspecified audience is a
+  compatibility projection exposing all nine; explicit launch-time audiences
+  expose exactly five: the worker projection has `worker_question`,
+  `get_report_template`, `record_report`, `read_dispatch_briefing`, and scoped
+  `read_worker_report`; the coordinator projection has
+  `start_orchestration`, `continue_orchestration`, `manage_orchestration`,
+  `manage_governance`, and scoped `read_worker_report`.
 - Every task-scoped continuation, management, recovery, or report-read call
   requires the exact `task_ref` returned by a successful lifecycle response.
   An unscoped management call never inspects or selects a project task and
@@ -112,7 +142,13 @@ brief, context files, and at most eight validated domains.
   `REPORT_RECORDED report_ref=<value>` plus at most a
   two-sentence summary. The coordinator reads the full report through
   `read_worker_report`; successor workers may use that tool only for explicitly
-  supplied predecessor refs with exact scope identifiers. Non-success results omit report refs and require a
+  supplied predecessor refs with exact scope identifiers. Coordinator reads
+  are repeatable, but report-link publication is an at-most-once completion
+  event: only the first complete read after the matching durable native-worker
+  stop returns `publication_required=true`, a link, and a bounded completion
+  update. Publish the link once in the same user-language message as a short
+  summary of what completed and what happens next; never publish a bare link,
+  and never repeat it after an early read or reread. Non-success results omit report refs and require a
   normalized status plus reason. Workers never call lifecycle, pipeline,
   gate, delegation, or management operations and never paste report JSON into
   the native parent result. If `record_report` fails, the native final contains
@@ -126,10 +162,11 @@ brief, context files, and at most eight validated domains.
   decision that repository evidence cannot resolve. It returns a compact
   question ref plus a complete decision handoff to the parent: why input is
   needed, every full self-contained question, concrete outcome-based options,
-  descriptions, trade-offs, and a recommendation. The coordinator must first
-  publish a detailed user-language commentary preamble, then call native MCP
-  elicitation exactly once; the preamble supplies context but must not collect
-  or replace the native answer. Open blocking questions reject both
+  descriptions, trade-offs, and a recommendation. `recommendation` is
+  mandatory and identifies exact `recommended_option_ids`, or a concrete
+  `recommended_answer` for text. The coordinator renders the detailed
+  user-language interaction as its final assistant message, calls no UI tool,
+  and ends the turn until the next user message. Open blocking questions reject both
   `record_report` and `continue_orchestration`. Do not encode missing product
   intent as assumptions.
 - Embedded predecessor handoffs are mandatory input. Read and reconcile every
@@ -162,7 +199,7 @@ brief, context files, and at most eight validated domains.
 - The same correction contract applies to every allowed worker tool, including
   `worker_question`, `get_report_template`, `read_dispatch_briefing`, and
   `read_worker_report`: fix the named diagnostic and retry on the same attempt;
-  rejected calls do not consume the failed phase-attempt budget. Briefing,
+  rejected calls do not create a failed worker outcome or change escalation counters. Briefing,
   report, and coordinator artifact reads normalize `max_bytes` above 32768 to
   the server bound. Stop only for `retryable: false` or an explicit integrity,
   storage, permission, or unavailable-identity blocker.
@@ -177,6 +214,11 @@ brief, context files, and at most eight validated domains.
   dispatches, never call it again for that `task_ref`; a replay is a receipt,
   contains no dispatches, and cannot authorize a duplicate wave. A genuinely
   lost first response is recovered once through management inspect.
+- Coordinator capability recovery is not a worker operation or an identifier-
+  only fallback. It is available on the normal compatibility or explicit
+  coordinator audience and requires exact active principal/thread/task identity
+  plus the non-durable recovery proof returned with the original authorization
+  response. The proof rotates with the bearer; only verifiers are durable.
 - Active corrections use `manage_orchestration(intent="steer")` with the
   original `user_message` and canonical English `message_en` when needed.
   Cortex records a task revision and resumes only addressable native workers
@@ -203,21 +245,15 @@ brief, context files, and at most eight validated domains.
 - Dispatch arguments contain only native parameters. Expected model/tool/
   effort is routing metadata, not actual host attestation. Do not add a native
   model when configured-default Luna intentionally omits it.
-- Modern Codex clients advertise the `openai/form` MCP extension under
-  initialize capabilities; the legacy boolean is still accepted. A durable UI
-  question uses `manage_orchestration(intent="question")` and must return a
-  recoverable unsupported result rather than guessing when the host cannot
-  render elicitation. In a granular Codex approval policy,
-  `mcp_elicitations` must be `true`; when it is `false` or missing, Codex
-  rejects the request before any form is shown and the worker correctly
-  remains paused. Host preflight and `sync-cortex.sh --check` fail closed on
-  that configuration.
-- Localized question labels are transient UI projections. Answers retain the
+- Durable questions use `manage_orchestration(intent="question")`, which
+  returns ordinary-chat display data and a durable pause boundary. The
+  coordinator must stop after sending it and must not infer an answer from
+  silence or host capabilities.
+- Localized question labels are transient display projections. Answers retain the
   original value/language and require canonical `answer_en` for localized free
   text or a choice's custom response. Every choice step renders optional
-  `custom_response` beside its stable options. `ask_batch` accepts 1–32 stable
-  questions but the native UI renders
-  only one step at a time under one durable `batch_ref`; each accepted step is
+  free-form constraint beside its stable options. `ask_batch` accepts 1–32 stable
+  questions under one durable `batch_ref`; each accepted chat answer is
   checkpointed, and cancellation resumes at the next unanswered question. A
   localized batch is an ordered projection: an exact complete canonical key
   set is used when supplied, otherwise question and option display data maps
@@ -240,8 +276,26 @@ brief, context files, and at most eight validated domains.
   prompts, arguments, results, source paths, and arbitrary host diagnostic
   content are redacted. Heartbeats are emitted every 15 seconds while the parent runs, and
   the per-scenario timeout defaults to 1,800 seconds (`--live-timeout-seconds`
-  accepts 10..7200). Timeout or interruption terminates the complete process
-  group, escalating from `SIGTERM` to `SIGKILL` after ten seconds. Normal or
+  accepts 10..7200). The dedicated `finding_rework_documentation` source-mode
+  smoke is an exception: its deterministic public-API source prelude opens the
+  exact Review finding, then real Documentation and fresh Review workers prove
+  the corrective resolution trace. It has a hard 300-second maximum (the flag
+  may only reduce it). Timeout or interruption terminates the complete process
+  group, escalating from `SIGTERM` to `SIGKILL` after ten seconds. The separate
+  `finding_rework_documentation_full` C2 scenario does not seed the
+  opening finding: real Review, Documentation, fresh Review, and Close workers
+  must reach the close-bound server handoff. Its independent hard cap is 1,800
+  seconds; the timeout flag may only reduce that cap. This full route also
+  exercises host-level per-agent MCP provisioning: its parent may have the coordinator
+  endpoint, while each spawned worker may have the worker endpoint. An ordinary
+  static launch uses the nine-operation compatibility projection; strict
+  per-agent provisioning is the role-separation assurance check, never a reason
+  to merge the strict tool surfaces. The scenario proves the canonical
+  receipt-bound route and observed native lifecycle, but source mode's
+  `--ignore-user-config` deliberately excludes trusted Cortex hooks, so it does
+  not prove durable native child-ID/model binding to an attempt. A separate
+  hook-enabled integration test is required for that higher-assurance claim. A `SKIP`, timeout, or
+  incomplete trace is not final live evidence for either scenario. Normal or
   supervised exits clean the private runtime and temporary project; a crash or
   external `SIGKILL` may leave OS-temp residue. A live
   `SKIP` means missing release evidence, not pass. Failed scenarios retain a
@@ -315,9 +369,10 @@ brief, context files, and at most eight validated domains.
   `dispatch_ref`, `status="failed"`, and
   `reason="native_worker_stopped_without_report"`; wait, respawn, and
   `followup_task` are invalid for that child. Only the fresh top-level
-  dispatch returned by Cortex may retry, but the third phase attempt requires
-  a materially different `next_strategy` or an explicit replan; the third
-  failure blocks with a durable handoff. PostToolUse recovery scans all
+  dispatch returned by Cortex may retry without an attempt limit. Cortex raises
+  the effort floor after repeated failures and may route eligible ordinary work
+  to Terra after two prior failures; `next_strategy` remains optional audit
+  evidence and an unchanged strategy never blocks correction. PostToolUse recovery scans all
   non-invalidated reportless
   attempts in the current gate, not only the last attempt, so a later
   completed retry does not hide an earlier failure receipt that is still
@@ -423,10 +478,11 @@ and v8 ledger. They are not caller-facing request envelopes.
   file; read-only workers may send a small RFC 7396 merge patch or complete
   replacement through `record_report`. Correct all named fields and retry
   `record_report` with the same `draft_ref`. A new template supersedes an old
-  or expired draft. Rejected records explicitly consume no worker attempt; only
-  failed worker attempts count toward the phase budget: at most three per
-  phase, with no more than two using the same strategy. Before a third phase
-  attempt, provide a materially different `next_strategy` or replan.
+  or expired draft. Rejected records explicitly create no worker failure.
+  Genuine failed outcomes remain durable escalation evidence, but corrective
+  work is unbounded while acceptance or findings require it: the effort floor
+  progresses through `high`, `xhigh`, and `max`, with Terra selected for
+  eligible ordinary work after two prior failures. `next_strategy` is optional.
   `record_report` validates the exact current draft and state, then atomically
   persists it and deletes the file and metadata only after commit. Legacy
   full-payload recording remains compatible. Stop only for a non-retryable
@@ -438,19 +494,22 @@ and v8 ledger. They are not caller-facing request envelopes.
 - Host-sandboxed read-only gates share a checkout with other work. Ordinary
   source deltas observed during the gate are recorded as concurrency evidence,
   not attributed to the worker. The worker must still report
-  `changed_files: []`; claimed changes remain hard failures. Validation ignores
-  only manifest-recognized ephemeral outputs: conventional generated
-  directories/roots/files, virtual environments, recognized build-output
-  directories, and bytecode suffixes. Matching conventional paths remain
-  tolerated when a project lists them in `.gitignore`; arbitrary
-  `.gitignore` outputs and unrecognized cache, coverage, snapshot, or
-  generated artifacts remain hard failures.
+  `changed_files: []`; claimed changes remain hard failures. Every ignored
+  side effect is non-blocking and stored in a digest-only audit receipt, so an
+  unknown framework cannot trap a valid report in a retry loop. Conventional
+  generated directories/roots/files, virtual environments, build output, and
+  bytecode receive the additional `ephemeral` classification; unrecognized
+  `.gitignore` paths receive an explicit `unclassified` count and digest.
+  This rule is framework-independent and does not ignore real dotfiles that
+  remain part of the project manifest.
 - The exact lifecycle start envelope is `{operation:"start", project_root, principal,
   thread_id, submission_id, host_capabilities, task, waves}`. `task` requires
   `{task_id, objective, complexity}` where complexity is `C1`, `C2`, or `C3`;
   it additionally accepts `requirements`, `acceptance_criteria`, `scope`,
   `allowed_paths`, `verification`, `budget`, `pause_conditions`,
-  `user_language`, and non-negative `replan_limit`. `host_capabilities`
+  `user_language`, and deprecated non-negative `replan_limit` compatibility
+  metadata. The latter is retained when older tasks resume but is never a
+  lifetime cap on evidence-backed public replans. `host_capabilities`
   requires a non-empty `spawn_agent_models` array and additionally accepts
   `available_models`, `spawn_agent_default_model`, `create_thread_models`, and
   `available_thread_models`. `task` and `host_capabilities` reject every other
@@ -582,7 +641,8 @@ and v8 ledger. They are not caller-facing request envelopes.
   use Terra.
   Efficient Luna uses `high`/`high`/`xhigh`, bounded adaptive Luna uses
   `high`/`xhigh`/`max`, and Terra uses `high`/`high`/`xhigh` across C1/C2/C3.
-  Automatic `max` is limited to bounded C3 Luna work. Explicit Luna/Terra overrides
+  Automatic `max` is used for C3 adaptive Luna work and after three or more
+  unresolved corrective failures. Explicit Luna/Terra overrides
   cannot lower the computed effort floor.
 - Host model confirmation is strict: an `advance` completion must include the
   actual `host_model`. Cortex verifies it against `expected_model`, even when
@@ -636,17 +696,20 @@ and v8 ledger. They are not caller-facing request envelopes.
   the generic `default` event plus its observed model. Ambiguous, missing, or
   model-mismatched matches fail closed; the hook never guesses which worker to
   bind.
-- The main orchestrator owns the full optional pipeline: `start` receives the
-  complete plan and Cortex appends the mandatory `documentation` and `close`
-  audit gates. During work, `advance` may replace future waves under a revision
-  guard; changing completed work is detected as rework automatically, while
-  the internal `allow_rework` guard remains fail-closed for runtime callers.
-- Pipeline gate IDs are canonical lowercase identifiers (`plan`, `discover`,
-  `architecture`, `database_architecture`, `implementation`, `qa`, `security`,
-  `performance`, `accessibility`, `ux`, `review`, `documentation`, `close`).
-  The MCP boundary normalizes a bounded set of human labels such as
-  `planning`, `discovery`, and `verification` for adapter compatibility, but
-  still rejects unknown IDs instead of guessing.
+- The main orchestrator owns the full optional pipeline:
+  `start_orchestration` receives the complete plan and Cortex appends the
+  mandatory `documentation` and `close` audit gates. During work,
+  `continue_orchestration` may replace future waves under a revision guard;
+  changing completed work is detected as rework automatically, while the
+  internal `allow_rework` guard remains fail-closed for runtime callers.
+- Pipeline gate IDs are canonical lowercase identifiers (`scope`, `plan`,
+  `discover`, `architecture`, `database_architecture`, `implementation`, `qa`,
+  `security`, `performance`, `accessibility`, `ux`, `review`, `documentation`,
+  `governance_activation`, `governance_close`, `close`). The last two are
+  server-owned `code_reviewer` gates in a full-governance pipeline. The MCP
+  boundary normalizes a bounded set of human labels such as `planning`,
+  `discovery`, and `verification` for adapter compatibility, but still rejects
+  unknown IDs instead of guessing.
 - Independent gates can be grouped into ordered public `waves`. Only
   gates in the first unfinished wave are executable; each gate is completed
   and evidenced independently, and the next wave cannot start until all gates
@@ -655,6 +718,15 @@ and v8 ledger. They are not caller-facing request envelopes.
 - An advance completion with a terminal non-passed status needs a reason. A
   final handoff must account for all project paths; incomplete payloads return
   an actionable validation result without a partial durable transition.
+- Manifest budget exhaustion is diagnostic evidence only. If either the
+  baseline or current capture is partial, reconciliation is incomplete and
+  cannot authorize read-only mutation auditing, a handoff, or terminal close.
+- The no-progress circuit breaker groups materially identical outcomes from
+  canonical findings, manifest/result digests, verification, strategy, and
+  failure class; free-text `reason` prose is retained only through an audit
+  digest. After the repeat limit, recovery must begin with one Planner wave and
+  materially change pipeline, strategy, or verification, unless that Planner
+  wave names a class-matched infrastructure/environment remediation.
 - Recovery is bounded. Invalid gate proof is recorded as a recovery event, and
   repeated failures for the same gate/mode eventually block the task with an
   explicit handoff/resume action. Use the same submission id only for an

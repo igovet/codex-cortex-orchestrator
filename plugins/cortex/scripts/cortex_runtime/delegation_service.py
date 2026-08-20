@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import stat
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,11 @@ bind_symbols(
         "AGENTS",
         "AWAITING_HOST_SPAWN",
         "DOCUMENTATION_EVIDENCE_KINDS",
-        "MAX_ORCHESTRATE_GATE_FAILURES",
-        "MAX_SAME_STRATEGY_FAILURES",
         "PROFILES",
+        "PROMPT_BUDGETS",
         "QUESTION_SCHEMA",
+        "REWORK_EFFORT_BY_PRIOR_FAILURES",
+        "REWORK_TERRA_AFTER_FAILURES",
         "REPORT_SCHEMA",
         "SCHEMA",
         "_contained_path",
@@ -44,6 +46,7 @@ bind_symbols(
         "canonical_profile",
         "capture_project_manifest",
         "digest_text",
+        "db_put_worker_session",
         "host_spawn_bootstrap",
         "host_spawn_prompt",
         "ledger_root",
@@ -70,7 +73,7 @@ bind_symbols(
     ),
 )
 from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
-from cortex_runtime.ledger_db import fail_projection_job
+from cortex_runtime.ledger_db import fail_projection_job, list_projection_jobs
 
 
 def _next_attempt_id(state: dict[str, Any], task_dir: Path, gate: str) -> str:
@@ -131,6 +134,12 @@ def _ensure_briefing_task_directory(task_dir: Path) -> None:
 def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     prepared: dict[str, Any]
+    compiled_plan_job: dict[str, Any] | None = None
+    compiled_plan_path: Path | None = None
+    compiled_plan_digest: str | None = None
+    intent_job: dict[str, Any] | None = None
+    intent_path: Path | None = None
+    intent_digest: str | None = None
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
@@ -173,8 +182,8 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         if gate == "documentation" and agent != "technical_writer":
             raise ValueError("documentation gate must be delegated to technical_writer")
         retry = int(params.get("retry", 0))
-        if retry < 0 or retry > 2:
-            raise ValueError("retry must be between 0 and 2")
+        if retry < 0:
+            raise ValueError("retry must be non-negative")
         if gate == "documentation":
             # A facade documentation wave may intentionally contain several
             # parallel writers.  Their orchestration keys are the identity of
@@ -219,36 +228,75 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                 }
         prior_failed_attempts = [
             attempt for attempt in state["attempts"]
-            if attempt["gate"] == gate and attempt["status"] == "failed" and not attempt.get("invalidated")
+            if attempt["gate"] == gate and attempt["status"] == "failed"
         ]
-        if len(prior_failed_attempts) >= MAX_ORCHESTRATE_GATE_FAILURES:
-            raise ValueError(f"retry budget exhausted for gate '{gate}'")
         requested_strategy = redact(params.get("strategy", ""), 1000) or "default"
-        same_strategy_failures = sum(
-            str(attempt.get("strategy") or "default").strip().casefold() == requested_strategy.casefold()
-            for attempt in prior_failed_attempts
+        recorded_failures = int((state.get("orchestrate_gate_failure_counts") or {}).get(gate, 0))
+        active_rework_iterations = [
+            max(0, int(item.get("iteration") or 1) - 1)
+            for item in (state.get("closure_rework") or {}).values()
+            if isinstance(item, dict)
+            and item.get("status") == "rework_required"
+            and item.get("target_gate") == gate
+        ]
+        prior_failure_count = max(
+            len(prior_failed_attempts),
+            recorded_failures,
+            max(active_rework_iterations, default=0),
         )
-        if (
-            len(prior_failed_attempts) >= MAX_SAME_STRATEGY_FAILURES
-            and same_strategy_failures >= MAX_SAME_STRATEGY_FAILURES
-        ):
-            raise ValueError(
-                "same_strategy_limit reached; the third phase attempt requires a materially different strategy"
-            )
         briefing = render_gate_briefing(gate, task_definition.get("objective", ""), agent)
         ownership = str(params.get("ownership", "")).strip() or briefing["ownership"]
         objective = str(params.get("objective", "")).strip() or briefing["objective"]
         requested_task_kind = str(params.get("task_kind") or "").strip()
         requested_risk = str(params.get("risk") or "").strip().lower()
         task_kind, risk = task_kind_and_risk(params, gate)
+        route_params = dict(params)
+        effort_order = {name: index for index, name in enumerate(("low", "medium", "high", "xhigh", "max"))}
+        automatic_model_escalated = False
+        if prior_failure_count:
+            effort_floor = (
+                REWORK_EFFORT_BY_PRIOR_FAILURES["1"]
+                if prior_failure_count == 1 else
+                REWORK_EFFORT_BY_PRIOR_FAILURES["2"]
+                if prior_failure_count == 2 else
+                REWORK_EFFORT_BY_PRIOR_FAILURES["3+"]
+            )
+            requested_effort = str(route_params.get("requested_reasoning_effort") or "").strip().lower()
+            route_params["requested_reasoning_effort"] = max(
+                (requested_effort, effort_floor) if requested_effort in effort_order else (effort_floor,),
+                key=effort_order.__getitem__,
+            )
+            explicit_user_model = str(route_params.get("user_requested_model") or "").strip()
+            if (
+                prior_failure_count >= REWORK_TERRA_AFTER_FAILURES
+                and agent not in {"explorer", "security_auditor"}
+                and gate != "security"
+                and not explicit_user_model
+            ):
+                route_params["requested_model"] = "gpt-5.6-terra"
+                automatic_model_escalated = True
+            selection_reason += (
+                f" Rework escalation after {prior_failure_count} unresolved attempt(s): "
+                f"minimum effort {route_params['requested_reasoning_effort']}"
+                + (" with Terra." if route_params.get("requested_model") == "gpt-5.6-terra" else ".")
+            )
         dispatch_mode, luna_fallback, route, thread_environment = dispatch_context(
-            params,
+            route_params,
             gate=gate,
             agent=agent,
             task_kind=task_kind,
             complexity=str(state.get("complexity", "C1")),
             resolve_dispatch_route=resolve_dispatch_route,
         )
+        route["rework_escalation"] = {
+            "prior_failure_count": prior_failure_count,
+            "unbounded_rework": True,
+            "effort_floor": route.get("selected_reasoning_effort"),
+            "model_escalated": bool(
+                automatic_model_escalated
+                and route.get("selected_model") == "gpt-5.6-terra"
+            ),
+        }
         required_lists = delegation_lists(params, task_definition, briefing)
         context_report_ids = [safe_id(str(item)) for item in params.get("context_report_ids", [])]
         report_paths = report_bus_paths(task_dir)
@@ -306,7 +354,8 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                 "updates_tool": "get_worker_question_updates",
                 "coordinator_list_tool": "list_worker_questions",
                 "coordinator_answer_tool": "answer_worker_question",
-                "coordinator_ui_tool": "cortex.question",
+                "coordinator_surface": "ordinary_final_chat_message",
+                "pause_until": "next_user_message",
                 "answer_location": "main_chat",
             }
         )
@@ -325,16 +374,120 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = [redact(item, 1000) for item in task_definition.get("pause_conditions", [])][:100]
+        if gate in {"governance_activation", "governance_close"}:
+            governance = (
+                task_definition.get("governance")
+                if isinstance(task_definition.get("governance"), dict)
+                else state.get("governance")
+                if isinstance(state.get("governance"), dict)
+                else {}
+            )
+            # Governance workers cannot enumerate server-owned ledger state.
+            # Give them one bounded, immutable-context projection instead of
+            # forcing them to infer activation from unfinished deliverables.
+            package["governance_context"] = sanitize_structured({
+                "schema": governance.get("schema"),
+                "requested_mode": governance.get("requested_mode"),
+                "effective_mode": governance.get("effective_mode"),
+                "complexity": governance.get("complexity") or state.get("complexity"),
+                "reasons": list(governance.get("reasons") or []),
+                "trigger_evidence": list(governance.get("trigger_evidence") or []),
+                "initiative_ref": governance.get("initiative_ref") or "",
+                "autonomous_scope_ref": governance.get("autonomous_scope_ref") or "",
+                "policy_snapshot": governance.get("policy_snapshot") or {},
+                "policy_snapshot_digest": governance.get("policy_snapshot_digest"),
+                "close_obligations": list(governance.get("close_obligations") or []),
+                "current_pipeline": list(state.get("current_pipeline") or []),
+            })
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
-        package["task_user_request"] = redact(
-            task_definition.get("user_request") or task_definition.get("objective", ""), 4000
-        )
+        package.pop("task_objective", None)
+        package["user_intent"] = {
+            "projection": redact(
+                task_definition.get("user_request_projection")
+                or task_definition.get("user_request")
+                or task_definition.get("objective", ""),
+                1600,
+            ),
+            "artifact_ref": task_definition.get("user_intent_artifact_ref"),
+            "artifact_path": str(
+                _contained_path(
+                    task_dir,
+                    task_dir / str(task_definition.get("user_intent_artifact_path") or "intent/user-request.txt"),
+                    "user intent artifact",
+                )
+            ),
+            "digest_sha256": task_definition.get("user_request_digest"),
+            "byte_size": task_definition.get("user_intent_byte_size"),
+        }
+        intent_path = Path(str(package["user_intent"]["artifact_path"]))
+        intent_digest = str(package["user_intent"].get("digest_sha256") or "")
+        intent_jobs = [
+            job for job in list_projection_jobs(root, task_id=state["task_id"], limit=100)
+            if job.get("projection_type") == "user_intent"
+            and job.get("artifact_id") == package["user_intent"].get("artifact_ref")
+        ]
+        if len(intent_jobs) != 1:
+            raise ValueError("exactly one immutable user-intent projection is required before dispatch")
+        intent_job = intent_jobs[0]
+        if isinstance(params.get("plan_unit"), dict):
+            compiled_plan = sanitize_structured(params["plan_unit"])
+            compiled_relative = f"planning/compiled/{attempt_id}.json"
+            compiled_plan_path = _contained_path(
+                task_dir, task_dir / compiled_relative, "compiled plan unit"
+            )
+            compiled_artifact = store_immutable_artifact(
+                task_dir,
+                state["task_id"],
+                kind="compiled_plan_unit",
+                title=compiled_relative,
+                mime_type="application/json",
+                content=json.dumps(compiled_plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                export_path=compiled_relative,
+            )
+            compiled_plan_digest = str(compiled_artifact["digest_sha256"])
+            compiled_plan_job = enqueue_projection(
+                root=root,
+                task_id=state["task_id"],
+                artifact_id=compiled_artifact["artifact_ref"],
+                projection_type="compiled_plan_unit",
+                export_path=compiled_relative,
+                required=True,
+            )
+            package["plan_unit"] = {
+                "schema": "cortex/compiled-plan-unit-ref/v1",
+                "artifact_ref": compiled_artifact["artifact_ref"],
+                "artifact_path": str(compiled_plan_path),
+                "digest_sha256": compiled_plan_digest,
+                "byte_size": compiled_artifact["byte_size"],
+                "microtask_count": len(compiled_plan.get("microtasks") or []),
+                "package_ids": list(compiled_plan.get("package_ids") or []),
+                "read_required": True,
+            }
         package["intent_clarification_required"] = bool(task_definition.get("intent_clarification_required", False))
         package["intent_clarification_reason"] = redact(
             task_definition.get("intent_clarification_reason", ""), 500
         ) or None
         full_briefing = host_spawn_prompt(agent, package)
+        briefing_bytes = len(full_briefing.encode("utf-8"))
+        prompt_budget_key = (
+            "harvest_briefing_hard_bytes" if package["mode"] == "harvest"
+            else "ordinary_briefing_hard_bytes"
+        )
+        prompt_budget = int(PROMPT_BUDGETS[prompt_budget_key])
+        if briefing_bytes > prompt_budget:
+            raise ValueError(
+                f"dispatch briefing exceeds {prompt_budget_key}: {briefing_bytes}>{prompt_budget}"
+            )
+        package["briefing_bytes"] = briefing_bytes
+        package["briefing_hard_budget_bytes"] = prompt_budget
+        spawn_requested_at = now()
+        spawn_lease_expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=10)
+        ).isoformat()
+        package["spawn_requested_at"] = spawn_requested_at
+        package["spawn_lease_expires_at"] = spawn_lease_expires_at
+        package["lifecycle_status"] = "awaiting_spawn_ack"
         briefing_artifact = store_immutable_artifact(
             task_dir, state["task_id"], kind="dispatch_briefing", title=briefing_file,
             mime_type="text/markdown", content=full_briefing, export_path=briefing_file,
@@ -360,7 +513,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         spawn_request["briefing_path"] = str(briefing_path)
         spawn_request["briefing_digest"] = briefing_digest
         spawn_request["message"] = host_spawn_bootstrap(
-            agent, briefing_path, briefing_digest, dispatch_ref, state["task_id"], attempt_id, project_root
+            agent, briefing_path, briefing_digest, dispatch_ref, state["task_id"], attempt_id, project_root,
+            intent_path=package["user_intent"]["artifact_path"],
+            intent_digest=package["user_intent"]["digest_sha256"],
+            plan_unit_path=(package.get("plan_unit") or {}).get("artifact_path"),
+            plan_unit_digest=(package.get("plan_unit") or {}).get("digest_sha256"),
         )
         if visible_thread:
             # create_thread calls this field `prompt`; retaining `message`
@@ -368,7 +525,16 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             spawn_request["prompt"] = spawn_request["message"]
             spawn_request["title"] = display_name
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        db_put_worker_session(ledger_root(params), {
+            "task_id": state["task_id"],
+            "attempt_id": attempt_id,
+            "host_task_name": task_name,
+            "host_tool": str(spawn_request.get("host_tool") or "spawn_agent"),
+            "status": "awaiting_spawn",
+            "resumable": True,
+            "started_at": spawn_requested_at,
+        })
         _, delegation_index = _delegation_report_index(report_paths, state["task_id"], attempt_id)
         delegation_index["context_report_ids"] = context_report_ids
         delegation_index["updated_at"] = now()
@@ -395,8 +561,37 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     # and replace operations on the filesystem.  A failure is persisted as a
     # recoverable outbox failure and deliberately returns no spawn request.
     projection_key = str(briefing_job["projection_key"])
+    active_projection_key = projection_key
     try:
         _ensure_briefing_task_directory(briefing_path.parent.parent)
+        if intent_job is not None and intent_path is not None and intent_digest:
+            active_projection_key = str(intent_job["projection_key"])
+            intent_materialized = (
+                intent_job
+                if intent_job.get("status") == "ready"
+                else materialize_job(root, {**intent_job}, worker_id=f"intent-{dispatch_ref}")
+            )
+            if (
+                intent_materialized.get("status") != "ready"
+                or str(intent_materialized.get("materialized_digest") or "") != intent_digest
+                or not intent_path.is_file()
+                or hashlib.sha256(intent_path.read_bytes()).hexdigest() != intent_digest
+            ):
+                raise ValueError("required immutable user-intent projection is not ready")
+            intent_path.chmod(0o400)
+        if compiled_plan_job is not None and compiled_plan_path is not None and compiled_plan_digest is not None:
+            active_projection_key = str(compiled_plan_job["projection_key"])
+            compiled_materialized = materialize_job(
+                root, {**compiled_plan_job}, worker_id=f"compiled-plan-{dispatch_ref}",
+            )
+            if (
+                compiled_materialized.get("status") != "ready"
+                or str(compiled_materialized.get("materialized_digest") or "") != compiled_plan_digest
+                or hashlib.sha256(compiled_plan_path.read_bytes()).hexdigest() != compiled_plan_digest
+            ):
+                raise ValueError("required compiled plan projection is not ready")
+            compiled_plan_path.chmod(0o400)
+        active_projection_key = projection_key
         materialized = materialize_job(
             root, {**briefing_job}, worker_id=f"dispatch-{dispatch_ref}",
         )
@@ -411,7 +606,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         briefing_path.chmod(0o400)
     except Exception as exc:
         try:
-            fail_projection_job(root, projection_key, str(exc))
+            fail_projection_job(root, active_projection_key, str(exc))
         except Exception:
             # Preserve the materialization failure; a lease that cannot be
             # marked failed is still recoverable when it expires.

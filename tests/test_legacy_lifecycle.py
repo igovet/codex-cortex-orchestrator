@@ -8,20 +8,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex
 from cortex_runtime import ledger_db
 
 
-class LegacyLifecycleTests(unittest.TestCase):
+class LegacyLifecycleTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        self.set_up_host_private_control_store()
         self.project = Path(self.temporary.name) / "project"
         self.project.mkdir()
         self.root = self.project / ".codex" / "cortex"
 
     def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
         self.temporary.cleanup()
 
     def manage(self, payload: dict[str, object]) -> dict[str, object]:
@@ -142,15 +146,18 @@ class LegacyLifecycleTests(unittest.TestCase):
         self.assertEqual(projection_marker.read_text(encoding="utf-8"), "current projection")
         self.assertIsNotNone(ledger_db.load_task(self.root, "current-task"))
 
-    def test_legacy_workflow_is_not_started_by_normal_ledger_initialization(self) -> None:
+    def test_normal_ledger_initialization_refuses_unsupported_legacy_state(self) -> None:
         self.root.mkdir(parents=True)
         legacy_file = self.root / "task-index.json"
         legacy_file.write_text("{}", encoding="utf-8")
+        private_root = cortex.ledger_root_path({"project_root": str(self.project)})
 
-        cortex.ledger_root({"project_root": str(self.project)})
+        with self.assertRaisesRegex(ValueError, "legacy project-local Cortex directory has no regular cortex.db"):
+            cortex.ledger_root({"project_root": str(self.project)})
 
         self.assertTrue(legacy_file.exists())
         self.assertFalse((self.root / "legacy-archives").exists())
+        self.assertFalse(private_root.exists())
 
 
 if __name__ == "__main__":  # pragma: no cover

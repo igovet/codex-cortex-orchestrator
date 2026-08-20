@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,8 +26,10 @@ def git(project: Path, *args: str) -> None:
 
 def fixture(base: Path) -> tuple[Path, Path]:
     project = base / "project"
-    ledger = project / ".codex" / "cortex"
+    host_state_dir = base / "host-private-store"
     project.mkdir()
+    host_state_dir.mkdir(mode=0o700)
+    host_state_dir.chmod(0o700)
     git(project, "init", "-q")
     git(project, "config", "user.email", "codex@example.invalid")
     git(project, "config", "user.name", "Codex Smoke")
@@ -34,7 +38,26 @@ def fixture(base: Path) -> tuple[Path, Path]:
     (project / "old.txt").write_text("rename me\n", encoding="utf-8")
     git(project, "add", ".")
     git(project, "commit", "-qm", "fixture baseline")
-    return project, ledger
+    return project, host_state_dir
+
+
+@contextlib.contextmanager
+def host_private_control_store(host_state_dir: Path):
+    """Run the deterministic smoke against a private, non-workspace ledger."""
+    previous = {
+        "CORTEX_HOST_STATE_DIR": os.environ.get("CORTEX_HOST_STATE_DIR"),
+        "CORTEX_ROOT": os.environ.get("CORTEX_ROOT"),
+    }
+    os.environ["CORTEX_HOST_STATE_DIR"] = str(host_state_dir)
+    os.environ.pop("CORTEX_ROOT", None)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def waves() -> list[dict[str, object]]:
@@ -46,21 +69,6 @@ def waves() -> list[dict[str, object]]:
         {"workers": [{"phase": "testing"}]},
         {"workers": [{"phase": "code_review"}]},
     ]
-
-
-def approve_plan_elicitation(request: dict[str, object]) -> dict[str, object]:
-    """Answer only the native two-button plan-approval interaction."""
-    params = request.get("params")
-    if not isinstance(params, dict) or params.get("_meta", {}).get("cortex", {}).get("schema") != "cortex/plan-approval/v1":
-        raise AssertionError(f"unexpected native elicitation in cold-boot smoke: {request}")
-    schema = params.get("requestedSchema")
-    if not isinstance(schema, dict):
-        raise AssertionError(f"plan approval elicitation omitted its schema: {request}")
-    decision = schema.get("properties", {}).get("decision", {})
-    choices = decision.get("oneOf", []) if isinstance(decision, dict) else []
-    if not any(isinstance(choice, dict) and choice.get("const") == "approve" for choice in choices):
-        raise AssertionError(f"plan approval elicitation omitted its Approve action: {request}")
-    return {"action": "accept", "content": {"decision": "approve"}}
 
 
 def workspace_summary(project: Path) -> dict[str, object]:
@@ -102,10 +110,11 @@ def workspace_summary(project: Path) -> dict[str, object]:
     }
 
 
-def passing_closure(project: Path, gate: str) -> dict[str, object]:
-    """Build the separate review/close closure required by record_report."""
+def passing_gate_result(project: Path, gate: str) -> dict[str, object]:
+    """Build the canonical review/close gate result required by record_report."""
     return {
         "decision": "pass",
+        "failure_class": "product",
         # The fixture found no actionable debt, so no open blocker can enter
         # the canonical findings table and divert the close gate to rework.
         "findings": [],
@@ -181,13 +190,13 @@ def planning(worker: int, step: int) -> dict[str, object]:
             "id": "smoke_core",
             "title": "Cold-boot core",
             "objective": "Exercise the durable Planner work-breakdown protocol.",
-            "allowed_paths": ["."],
+            "allowed_paths": ["tracked.txt", "delete.txt", "old.txt", "new.txt", "added.txt"],
             "microtasks": [{
                 "id": "smoke_validate",
                 "title": "Validate the smoke path",
                 "objective": f"Record the bounded work item owned by simulated worker {worker}.",
                 "profile": "backend_dev",
-                "allowed_paths": ["."],
+                "allowed_paths": ["tracked.txt", "delete.txt", "old.txt", "new.txt", "added.txt"],
                 "acceptance_criteria": ["The work breakdown is persisted."],
                 "verification": ["Run the cold-boot smoke workflow."],
             }],
@@ -196,7 +205,13 @@ def planning(worker: int, step: int) -> dict[str, object]:
 
 
 def run(base: Path, server: Path = SERVER) -> dict[str, object]:
-    project, ledger = fixture(base)
+    project, host_state_dir = fixture(base)
+    with host_private_control_store(host_state_dir):
+        return _run(base, project, host_state_dir, server)
+
+
+def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[str, object]:
+    ledger = cortex.ledger_root_path({"project_root": str(project)})
     start_request = {
         "task": {
             "user_request": "prove a fresh JSON-RPC process can complete public Cortex orchestration by relative waves",
@@ -208,10 +223,16 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         },
         "waves": waves(),
     }
-    with JsonRpcHarness(server, project, ledger, elicitation_responder=approve_plan_elicitation) as rpc:
+    with JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        if names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"]:
+        if names != [
+            "start_orchestration",
+            "continue_orchestration",
+            "manage_orchestration",
+            "manage_governance",
+            "read_worker_report",
+        ]:
             raise AssertionError(f"unexpected Cortex public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
@@ -228,14 +249,18 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         task_directory = next((ledger / "tasks").iterdir()).name
 
     # A fresh process must reconstruct the active relative step read-only.
-    with JsonRpcHarness(server, project, ledger, elicitation_responder=approve_plan_elicitation) as rpc:
+    with (
+        JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc,
+        JsonRpcHarness(server, project, host_state_dir, audience="worker") as worker_rpc,
+    ):
         task_definition = cortex.load_task_definition(ledger / "tasks" / task_directory)
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
         parallel_wave_seen = False
         plan_approval_seen = False
+        question_chat_cycle_seen = False
         implementation_applied = False
-        dynamic_replan_applied = False
+        dynamic_replan_count = 0
         pending_implementation_drop_rejected = False
         last_payload = None
         while current["outcome"] != "completed":
@@ -248,14 +273,30 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                     "task_ref": task_ref,
                     "payload": {"decision": "prompt"},
                 })
-                if prompt.get("outcome") == "ready_to_spawn":
-                    current = prompt
-                    continue
-                interaction = prompt.get("plan_approval_interaction") or {}
-                approve = next((action for action in interaction.get("actions", []) if action.get("id") == "approve"), None)
-                if not isinstance(approve, dict) or not isinstance(approve.get("arguments"), dict):
-                    raise AssertionError(f"plan approval interaction omitted its Approve action: {prompt}")
-                current = rpc.tool("manage_orchestration", approve["arguments"])
+                interaction = prompt.get("chat_interaction") or {}
+                choices = {item.get("id") for item in interaction.get("choices", []) if isinstance(item, dict)}
+                plan = interaction.get("plan") or {}
+                if (
+                    interaction.get("schema") != "cortex/chat-interaction/v1"
+                    or interaction.get("kind") != "plan_approval"
+                    or choices != {"approve", "revise", "cancel"}
+                    or not plan.get("work_packages")
+                    or not plan.get("verification")
+                    or "next ordinary chat message" not in str(interaction.get("response_instructions", ""))
+                    or "End the turn immediately" not in str(interaction.get("coordinator_contract", ""))
+                ):
+                    raise AssertionError(f"plan approval chat interaction is incomplete: {prompt}")
+                recommendation = interaction.get("llm_recommendation") or {}
+                if recommendation.get("choice_id") not in choices or not recommendation.get("rationale"):
+                    raise AssertionError(f"plan approval omitted its LLM recommendation: {prompt}")
+                current = rpc.tool("manage_orchestration", {
+                    "intent": "plan_approval",
+                    "task_ref": task_ref,
+                    "payload": {
+                        "decision": "approve",
+                        "request_id": interaction["interaction_ref"],
+                    },
+                })
                 if not current.get("ok"):
                     raise AssertionError(f"plan approval failed: {current}")
                 continue
@@ -272,6 +313,86 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
             ][-len(dispatches):]
             results = []
             for index, (dispatch, attempt) in enumerate(zip(dispatches, active_attempts), 1):
+                if not question_chat_cycle_seen:
+                    identity = {
+                        "task_id": state["task_id"],
+                        "attempt_id": attempt["attempt_id"],
+                        "profile": dispatch["profile"],
+                    }
+                    asked = worker_rpc.tool("worker_question", {
+                        **identity,
+                        "action": "ask",
+                        "header": "Cold-boot rollout decision",
+                        "question": "Which rollout policy should the cold-boot worker preserve before completing its assigned gate?",
+                        "context": {
+                            "why": "The answer proves that a real source-mode worker pauses and resumes through ordinary chat without opening an input UI.",
+                        },
+                        "options": [
+                            {
+                                "option_id": "gradual",
+                                "label_en": "Use a gradual rollout",
+                                "description": "Limits blast radius and preserves a bounded rollback path.",
+                            },
+                            {
+                                "option_id": "immediate",
+                                "label_en": "Use an immediate rollout",
+                                "description": "Finishes sooner but exposes the complete change at once.",
+                            },
+                        ],
+                        "recommended_option_ids": ["gradual"],
+                        "recommendation": "Use a gradual rollout because it minimizes irreversible risk while preserving completion evidence.",
+                    })
+                    question_ref = str(asked.get("question_ref") or "")
+                    if asked.get("outcome") != "question_recorded" or not question_ref:
+                        raise AssertionError(f"worker question was not recorded: {asked}")
+                    surfaced = rpc.tool("manage_orchestration", {
+                        "intent": "question",
+                        "task_ref": task_ref,
+                        "payload": {"question_ref": question_ref},
+                    })
+                    question_interaction = surfaced.get("chat_interaction") or {}
+                    rendered_questions = question_interaction.get("questions") or []
+                    rendered_recommendation = (
+                        rendered_questions[0].get("llm_recommendation")
+                        if rendered_questions and isinstance(rendered_questions[0], dict)
+                        else {}
+                    ) or {}
+                    recommended = rendered_recommendation.get("recommended_options") or []
+                    if (
+                        surfaced.get("outcome") != "awaiting_user"
+                        or question_interaction.get("schema") != "cortex/chat-interaction/v1"
+                        or question_interaction.get("kind") != "worker_question"
+                        or question_interaction.get("interaction_ref") != question_ref
+                        or not recommended
+                        or recommended[0].get("option_id") != "gradual"
+                        or not rendered_recommendation.get("rationale")
+                        or "next ordinary chat message" not in str(question_interaction.get("response_instructions", ""))
+                        or "End the turn immediately" not in str(question_interaction.get("coordinator_contract", ""))
+                    ):
+                        raise AssertionError(f"worker question chat interaction is incomplete: {surfaced}")
+                    answered = rpc.tool("manage_orchestration", {
+                        "intent": "question",
+                        "task_ref": task_ref,
+                        "payload": {
+                            "question_ref": question_ref,
+                            "answer": {
+                                "option_ids": ["gradual"],
+                                "custom_response": "Keep rollback bounded and resume the same worker.",
+                            },
+                        },
+                    })
+                    polled = worker_rpc.tool("worker_question", {
+                        **identity,
+                        "action": "poll",
+                        "question_ref": question_ref,
+                    })
+                    if (
+                        answered.get("outcome") != "question_answered"
+                        or polled.get("outcome") != "question_answered"
+                        or polled.get("answer_option_ids") != ["gradual"]
+                    ):
+                        raise AssertionError(f"worker did not resume from the same durable chat question: {answered} / {polled}")
+                    question_chat_cycle_seen = True
                 changed_files: list[str] = []
                 if dispatch.get("phase") == "implementation" and not implementation_applied:
                     (project / "tracked.txt").write_text("after\n", encoding="utf-8")
@@ -302,10 +423,10 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                     "report": worker_report,
                 }
                 if attempt.get("gate") in {"review", "close"}:
-                    publication["closure"] = passing_closure(project, str(attempt["gate"]))
+                    publication["gate_result"] = passing_gate_result(project, str(attempt["gate"]))
                 if dispatch.get("phase") == "plan":
                     publication["planning"] = planning(index, int(current["step"]))
-                template = rpc.tool("get_report_template", {
+                template = worker_rpc.tool("get_report_template", {
                     "task_id": state["task_id"],
                     "attempt_id": attempt["attempt_id"],
                     "profile": dispatch["profile"],
@@ -315,7 +436,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 draft_path = Path(str(template["draft_path"]))
                 if not draft_path.is_file():
                     raise AssertionError(f"get_report_template did not create its draft file: {template}")
-                published = rpc.tool("record_report", {
+                published = worker_rpc.tool("record_report", {
                     **publication,
                     "draft_ref": template["draft_ref"],
                 })
@@ -336,7 +457,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 "results": results,
             }
             active_phases = {str(item.get("phase")) for item in dispatches}
-            if active_phases == {"discover"} and not dynamic_replan_applied:
+            if active_phases == {"discover"} and dynamic_replan_count == 0:
                 rejected = rpc.tool("continue_orchestration", {
                     **last_payload,
                     "future_waves": [
@@ -357,7 +478,8 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 current = rpc.tool("continue_orchestration", {
                     **last_payload,
                     "future_waves": [
-                        {"workers": [{"phase": "architecture"}, {"phase": "database_architecture"}]},
+                        {"workers": [{"phase": "architecture"}]},
+                        {"workers": [{"phase": "database_architecture"}]},
                         {"workers": [{"phase": "plan"}]},
                         {"workers": [{"phase": "implementation"}]},
                         {"workers": [{"phase": "qa"}]},
@@ -366,7 +488,37 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                     ],
                     "reason": "add required audit phases while retaining the pending delivery phase",
                 })
-                dynamic_replan_applied = True
+                dynamic_replan_count += 1
+            elif active_phases == {"architecture"} and dynamic_replan_count == 1:
+                current = rpc.tool("continue_orchestration", {
+                    **last_payload,
+                    "future_waves": [
+                        {"workers": [{"phase": "database_architecture"}]},
+                        {"workers": [{"phase": "accessibility"}]},
+                        {"workers": [{"phase": "plan"}]},
+                        {"workers": [{"phase": "implementation"}]},
+                        {"workers": [{"phase": "qa"}]},
+                        {"workers": [{"phase": "security"}, {"phase": "performance"}]},
+                        {"workers": [{"phase": "review"}]},
+                    ],
+                    "reason": "architecture evidence adds an accessibility audit without dropping delivery",
+                })
+                dynamic_replan_count += 1
+            elif active_phases == {"database_architecture"} and dynamic_replan_count == 2:
+                current = rpc.tool("continue_orchestration", {
+                    **last_payload,
+                    "future_waves": [
+                        {"workers": [{"phase": "accessibility"}]},
+                        {"workers": [{"phase": "ux"}]},
+                        {"workers": [{"phase": "plan"}]},
+                        {"workers": [{"phase": "implementation"}]},
+                        {"workers": [{"phase": "qa"}]},
+                        {"workers": [{"phase": "security"}, {"phase": "performance"}]},
+                        {"workers": [{"phase": "review"}]},
+                    ],
+                    "reason": "database evidence adds UX verification while preserving every prior obligation",
+                })
+                dynamic_replan_count += 1
             else:
                 current = rpc.tool("continue_orchestration", last_payload)
             if not current.get("ok"):
@@ -382,8 +534,10 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         raise AssertionError("the smoke plan did not return a parallel dispatch wave")
     if not plan_approval_seen:
         raise AssertionError("the C2 smoke plan did not pause for post-plan approval")
-    if not dynamic_replan_applied or not pending_implementation_drop_rejected:
-        raise AssertionError("the smoke did not exercise dynamic replanning and implementation retention")
+    if not question_chat_cycle_seen:
+        raise AssertionError("the smoke did not complete a durable ordinary-chat question pause/resume cycle")
+    if dynamic_replan_count < 3 or not pending_implementation_drop_rejected:
+        raise AssertionError("the smoke did not exercise three dynamic replans and implementation retention")
     if not implementation_applied:
         raise AssertionError("the dynamically replanned pipeline never executed implementation")
 
@@ -416,7 +570,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         if item.get("status") == "passed" and not item.get("invalidated")
     }
     expected_gates = {
-        "discover", "architecture", "database_architecture", "plan",
+        "discover", "architecture", "database_architecture", "accessibility", "ux", "plan",
         "implementation", "qa", "security", "performance", "review",
         "documentation", "close",
     }
@@ -430,7 +584,11 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
         "report_count": len(receipts), "parallel_wave_seen": parallel_wave_seen,
         "plan_approval_seen": plan_approval_seen,
-        "dynamic_replan_applied": dynamic_replan_applied,
+        "question_chat_cycle_seen": question_chat_cycle_seen,
+        "dynamic_replan_applied": dynamic_replan_count >= 1,
+        "dynamic_replan_count": dynamic_replan_count,
+        "replan_count": int(state.get("replan_count", 0)),
+        "legacy_replan_limit": int(state.get("replan_limit", 0)),
         "pending_implementation_drop_rejected": pending_implementation_drop_rejected,
         "implementation_phase_seen": "implementation" in passed_gates,
         "passed_gates": sorted(passed_gates),

@@ -27,19 +27,59 @@ class ControlPlaneTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.project = self.base / "project"
         self.project.mkdir()
-        self.ledger = self.project / ".codex" / "cortex"
+        self.host_store = self.base / "host-private-store"
+        self.host_store.mkdir(mode=0o700)
+        self.host_store.chmod(0o700)
+        self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
+        os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
+        self.ledger = control.ledger_root_path({"project_root": str(self.project)})
         self._handlers = {}
+        def with_project(name, original, params):
+            prepared = {**params, "project_root": str(self.project)}
+            if name in {"worker_question", "cortex_question", "publish_worker_question"}:
+                action = str(prepared.get("action") or "ask")
+                if action == "ask" and str(prepared.get("question") or "").strip():
+                    prepared.setdefault("recommendation", "Use the first listed option because it is the safest bounded default.")
+                    options = control._question_options(prepared.get("options"))
+                    if options:
+                        prepared.setdefault("recommended_option_ids", [options[0]["option_id"]])
+                    else:
+                        prepared.setdefault("recommended_answer", "Provide the smallest concrete constraint that unblocks the worker.")
+                batch = prepared.get("batch")
+                if action == "ask_batch" and isinstance(batch, dict):
+                    batch = {**batch, "questions": [dict(item) for item in batch.get("questions", [])]}
+                    for item in batch["questions"]:
+                        item.setdefault("recommendation", "Use the first listed option because it is the safest bounded default.")
+                        options = control._question_options(item.get("options"))
+                        if options:
+                            item.setdefault("recommended_option_ids", [options[0]["option_id"]])
+                        else:
+                            item.setdefault("recommended_answer", "Provide the smallest concrete constraint that unblocks the worker.")
+                    prepared["batch"] = batch
+            return original(prepared)
         for handler, _ in control.TOOLS.values():
             name = handler.__name__
             if name in self._handlers:
                 continue
             original = getattr(control, name)
             self._handlers[name] = original
-            setattr(control, name, lambda params, original=original: original({**params, "project_root": str(self.project)}))
+            setattr(control, name, lambda params, original=original, name=name: with_project(name, original, params))
+        # Public worker helpers are also called directly by contract tests and
+        # are not necessarily registered under their Python function name.
+        for name in ("worker_question", "cortex_question"):
+            if name in self._handlers or not hasattr(control, name):
+                continue
+            original = getattr(control, name)
+            self._handlers[name] = original
+            setattr(control, name, lambda params, original=original, name=name: with_project(name, original, params))
 
     def tearDown(self):
         for name, handler in self._handlers.items():
             setattr(control, name, handler)
+        if self._previous_host_store is None:
+            os.environ.pop(control.HOST_CONTROL_STORE_ENV, None)
+        else:
+            os.environ[control.HOST_CONTROL_STORE_ENV] = self._previous_host_store
         self.temp.cleanup()
 
     def activate(self, principal="thread-a"):
@@ -150,7 +190,16 @@ class ControlPlaneTests(unittest.TestCase):
         if context_ids and not any(str(item).startswith("Predecessor review:") for item in report["evidence"]):
             report["evidence"].append(control._predecessor_review_marker(context_ids))
         if attempt["gate"] == "implementation" and not report.get("changed_files"):
-            relative = f"implementation-{attempt['attempt_id']}.txt"
+            allowed_paths = [str(item) for item in package.get("allowed_paths", []) if str(item).strip()]
+            allowed = allowed_paths[0] if allowed_paths else "."
+            allowed_path = Path(allowed)
+            if allowed in {".", "*"}:
+                relative = f"implementation-{attempt['attempt_id']}.txt"
+            elif allowed_path.suffix:
+                relative = allowed
+            else:
+                relative = str(allowed_path / f"implementation-{attempt['attempt_id']}.txt")
+            (self.project / relative).parent.mkdir(parents=True, exist_ok=True)
             (self.project / relative).write_text("verified implementation fixture\n", encoding="utf-8")
             report["changed_files"] = [relative]
         return report, package
@@ -902,6 +951,89 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn(recorded["report_ref"], inspected["next_action"])
         self.assertIn("Never wait on or respawn", inspected["next_action"])
 
+    def test_report_link_is_published_once_after_real_subagent_completion_with_summary(self):
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "show one understandable completion update",
+                waves=[{"workers": [{"phase": "architecture"}]}],
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        parent_session = "host-publication-parent"
+        control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
+        bound = control.bind_host_worker_from_hook(
+            str(self.project), state["task_id"], parent_session, "default",
+            "native.Publication:01", attempt["expected_model"],
+        )
+        self.assertTrue(bound["bound"], bound)
+        summary = "Architecture boundaries were mapped and the implementation contract was defined."
+        recorded = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report(summary)),
+        })
+        early = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "report_ref": recorded["report_ref"],
+        })
+        self.assertFalse(early["publication_required"])
+        self.assertEqual(early["publication_reason"], "native_worker_not_completed")
+        self.assertNotIn("report_markdown_link", early)
+
+        stopped = control.finalize_host_worker_stop_from_hook(
+            str(self.project), state["task_id"], parent_session, "native.Publication:01",
+        )
+        self.assertEqual(stopped["outcome"], "report_recorded")
+        first = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "report_ref": recorded["report_ref"],
+        })
+        self.assertTrue(first["publication_required"])
+        self.assertEqual(first["publication_reason"], "native_worker_completed")
+        self.assertEqual(first["completion_update"]["summary"], summary)
+        self.assertEqual(first["completion_update"]["phase"], attempt["gate"])
+        self.assertTrue(first["completion_update"]["next"].startswith("Evaluate this completed result"))
+        if first["completion_update"]["remaining_phases"]:
+            self.assertIn(
+                first["completion_update"]["remaining_phases"][0],
+                first["completion_update"]["next"],
+            )
+        else:
+            self.assertIn("no later phase remains pending", first["completion_update"]["next"])
+        self.assertIn("same main-chat message", first["next_action"])
+        self.assertRegex(
+            first["report_markdown_link"],
+            rf"^\[Report {re.escape(attempt['gate'])} — report-\d{{4}}\]",
+        )
+
+        hook_event = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": cortex_hook.CORTEX_REPORT_TOOL,
+            "tool_response": {"structuredContent": first},
+        }
+        hook_context = cortex_hook.report_publication_context(hook_event)
+        self.assertIn("one allowed publication", hook_context)
+        self.assertIn(summary, hook_context)
+        self.assertIn("Never publish the link alone", hook_context)
+
+        reread = control.read_worker_report({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "report_ref": recorded["report_ref"],
+        })
+        self.assertFalse(reread["publication_required"])
+        self.assertEqual(reread["publication_reason"], "already_issued")
+        self.assertNotIn("report_markdown_link", reread)
+        self.assertNotIn("completion_update", reread)
+        reread_event = {**hook_event, "tool_response": {"structuredContent": reread}}
+        self.assertIsNone(cortex_hook.report_publication_context(reread_event))
+
     def test_subagent_stop_with_open_question_remains_resumable_not_failed(self):
         with mock.patch.dict(
             os.environ,
@@ -1077,7 +1209,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("cortex:orchestrator", result["next_action"])
         self.assertNotIn("/cortex", result["next_action"])
 
-    def test_default_ledger_is_project_local(self):
+    def test_default_ledger_is_host_private_and_project_bound(self):
         with self.assertRaisesRegex(ValueError, "project_root is required"):
             control.ledger_root()
         root = control.ledger_root({"project_root": str(self.project)})
@@ -1113,15 +1245,17 @@ class ControlPlaneTests(unittest.TestCase):
                 arguments = {"project_root": project}
                 activated = self._handlers["activate_orchestration"]({"user_command": "/cortex", "principal": "thread-a", "thread_id": "thread-a", **arguments})
                 self.assertTrue(activated["active"])
-                self.assertEqual(activated["ledger_root"], str(root / ".codex/cortex"))
+                private_ledger = control.ledger_root_path(arguments)
+                self.assertEqual(activated["ledger_root"], str(private_ledger))
                 classified = self._handlers["classify_task"]({"complexity": "C1", "requirements": [], "principal": "thread-a", **arguments})
                 created = self._handlers["init_task"]({"task_id": "plugin-cwd", "objective": "workspace binding", "complexity": "C1", "classification_id": classified["classification_id"], "principal": "thread-a", **arguments})
-                self.assertEqual(created["ledger_root"], str(root / ".codex/cortex"))
-                self.assertTrue((root / ".codex/cortex/cortex.db").is_file())
-                self.assertFalse((root / ".codex/cortex/tasks" / created["task_directory"]).exists())
+                self.assertEqual(created["ledger_root"], str(private_ledger))
+                self.assertTrue((private_ledger / "cortex.db").is_file())
+                self.assertFalse((private_ledger / "tasks" / created["task_directory"]).exists())
+                self.assertFalse((root / ".codex/cortex/cortex.db").exists())
                 observed = self._handlers["status"]({"task_id": "plugin-cwd", "principal": "thread-a", **arguments})
                 self.assertEqual(observed["task"]["project_root"], project)
-                self.assertEqual(observed["ledger_root"], str(root / ".codex/cortex"))
+                self.assertEqual(observed["ledger_root"], str(private_ledger))
         finally:
             os.chdir(previous_cwd)
 
@@ -1976,7 +2110,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegation_file["question_route"]["mode"], "pull")
         self.assertEqual(delegation_file["question_route"]["worker_tool"], "cortex.question")
         self.assertEqual(delegation_file["question_route"]["publish_tool"], "publish_worker_question")
-        self.assertEqual(delegation_file["question_route"]["coordinator_ui_tool"], "cortex.question")
+        self.assertEqual(delegation_file["question_route"]["coordinator_surface"], "ordinary_final_chat_message")
+        self.assertEqual(delegation_file["question_route"]["pause_until"], "next_user_message")
         self.assertEqual(delegation_file["escalation_route"], "main_chat")
         self.assertEqual(delegation_file["handoff_route"], "main_chat")
         pending = control.record_gate({"task_id": "demo", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "discover", "outcome": "passed"})
@@ -2334,7 +2469,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual({key: package["spawn_request"][key] for key in expected}, expected)
         self.assertEqual({key: delegation["state"]["attempts"][-1]["spawn_request"][key] for key in expected}, expected)
         briefing = self.briefing_from_request(delegation["spawn_request"])
-        self.assertIn("# Cortex Worker Briefing v2", briefing)
+        self.assertIn("# Cortex Worker Briefing v3", briefing)
         assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
         self.assertEqual(assignment["profile"], "general")
         self.assertEqual(delegation["state"]["attempts"][-1]["dispatch_correlation"], "coordinator_recorded_host_spawn")
@@ -2718,7 +2853,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegated["task_kind_correction"], {"requested": None, "used": "discovery"})
         self.assertEqual(delegated["risk_correction"], {"requested": None, "used": "low"})
 
-    def test_rework_releases_retry_budget_for_invalidated_attempts(self):
+    def test_rework_is_unbounded_and_escalates_effort_across_invalidated_attempts(self):
         state = self.init(task_id="retry-rework") ["state"]
         first = self.delegate(state, "retry-rework", "discover", "explorer")
         failed = control.finalize_attempt({
@@ -2731,25 +2866,26 @@ class ControlPlaneTests(unittest.TestCase):
             "attempt_id": second["attempt_id"], "status": "failed", "reason": "second failed",
         })
         observed = control.status({"task_id": "retry-rework", "principal": "thread-a"})
-        with self.assertRaisesRegex(ValueError, "same_strategy_limit reached"):
-            control.record_delegation({
-                "task_id": "retry-rework", "principal": "thread-a", "expected_revision": failed["state"]["revision"],
-                "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
-                "task_kind": "discover", "risk": "low", "objective": "third try", "ownership": "Read-only discovery",
-                "allowed_paths": ["."], "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
-            })
-        reworked = control.update_pipeline({
+        third = control.record_delegation({
             "task_id": "retry-rework", "principal": "thread-a", "expected_revision": failed["state"]["revision"],
-            "operations": [{"op": "rework", "gate": "discover"}], "allow_rework": True, "reason": "new evidence",
-        })
-        observed = control.status({"task_id": "retry-rework", "principal": "thread-a"})
-        resumed = control.record_delegation({
-            "task_id": "retry-rework", "principal": "thread-a", "expected_revision": reworked["state"]["revision"],
             "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
-            "task_kind": "discover", "risk": "low", "objective": "reworked try", "ownership": "Read-only discovery",
+            "task_kind": "discover", "risk": "low", "objective": "third try", "ownership": "Read-only discovery",
             "allowed_paths": ["."], "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
         })
-        self.assertEqual(resumed["state"]["attempts"][-1]["status"], control.AWAITING_HOST_SPAWN)
+        self.assertEqual(third["spawn_request"]["reasoning_effort"], "xhigh")
+        failed = control.finalize_attempt({
+            "task_id": "retry-rework", "principal": "thread-a", "expected_revision": third["state"]["revision"],
+            "attempt_id": third["attempt_id"], "status": "failed", "reason": "third failed",
+        })
+        observed = control.status({"task_id": "retry-rework", "principal": "thread-a"})
+        fourth = control.record_delegation({
+            "task_id": "retry-rework", "principal": "thread-a", "expected_revision": failed["state"]["revision"],
+            "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
+            "task_kind": "discover", "risk": "low", "objective": "fourth try", "ownership": "Read-only discovery",
+            "allowed_paths": ["."], "acceptance_criteria": ["Report findings"], "verification": ["Cite paths"],
+        })
+        self.assertEqual(fourth["spawn_request"]["reasoning_effort"], "max")
+        self.assertEqual(fourth["state"]["attempts"][-1]["status"], control.AWAITING_HOST_SPAWN)
 
     def test_worker_question_bus_is_scoped_idempotent_and_resumable(self):
         state = self.init(task_id="questions")["state"]
@@ -2833,9 +2969,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(updates["updates"][-1]["answer_option_ids"], ["source_paths", "test_paths"])
 
     def test_cortex_question_form_always_puts_custom_field_last(self):
-        single = control._question_form_schema(control._question_config({"header": "Pick one", "options": ["A", "B"]}))
+        option_ids = [item["option_id"] for item in control._question_options(["A", "B"])]
+        single = control._question_form_schema(control._question_config({"header": "Pick one", "options": ["A", "B"], "recommendation": "Choose A for the bounded default.", "recommended_option_ids": [option_ids[0]]}))
         self.assertEqual(list(single["properties"]), ["selection", "custom_response"])
-        multi = control._question_form_schema(control._question_config({"header": "Pick many", "options": ["A", "B"], "multiple": True}))
+        multi = control._question_form_schema(control._question_config({"header": "Pick many", "options": ["A", "B"], "multiple": True, "recommendation": "Choose A for the bounded default.", "recommended_option_ids": [option_ids[0]]}))
         self.assertEqual(multi["properties"]["selections"]["type"], "array")
         self.assertEqual(list(multi["properties"])[-1], "custom_response")
 
@@ -2869,24 +3006,14 @@ class ControlPlaneTests(unittest.TestCase):
         delegation = self.delegate(created["state"], "language-contract", "discover", "explorer")
         prompt = self.briefing_from_request(delegation["spawn_request"])
         self.assertIn("Internal worker protocol: English only", prompt)
-        self.assertEqual(prompt.count("Emit English only in every message"), 1)
         self.assertIn("Treat non-English task text as input data", prompt)
         self.assertIn("Never address the user", prompt)
-        self.assertIn("Do not repeat, translate, or mirror the user's language", prompt)
+        self.assertIn("translate, repeat, or mirror the user's language", prompt)
         self.assertNotIn("User-facing language:", prompt)
         self.assertNotIn("user_language", delegation)
-        self.assertIn("Use only tools actually available in this worker context", prompt)
-        self.assertIn("mcp__codebase_memory__list_projects", prompt)
-        expected_project_key = control.codebase_memory_project_key_from_root(self.project)
-        self.assertIn(f"use project key {expected_project_key!r} directly", prompt)
-        self.assertIn("do not call `list_projects` before the first indexed query", prompt)
-        self.assertIn("at most once and accept only an entry whose canonical root_path exactly matches", prompt)
-        self.assertIn("prefer `get_architecture`, `search_graph`, `trace_path`, `detect_changes`", prompt)
-        self.assertIn("Confirm consequential indexed claims in current source or tests", prompt)
-        self.assertIn("you may call `index_repository` once", prompt)
-        self.assertIn("do not loop on Codebase Memory setup", prompt)
-        self.assertIn("REPORT_RECORDED report_ref=<report_id>", prompt)
-        self.assertIn("do not paste or reproduce its JSON", prompt)
+        self.assertIn("Use current source/tests as authority", prompt)
+        self.assertIn("REPORT_RECORDED report_ref=<id>", prompt)
+        self.assertIn("do not paste or reproduce that JSON", prompt)
 
     def test_codebase_memory_project_key_matches_upstream_path_rule(self):
         self.assertEqual(
@@ -3167,7 +3294,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started["dispatches"][0]["sandbox"], "read-only")
         self.assertIn("canonical automatic owner", started["dispatches"][0]["selection_reason"])
         self.assertIn("COORDINATOR LOCK", started["next_action"])
-        self.assertIn("remain idle", started["next_action"])
+        self.assertIn("Until every returned dispatch has been invoked", started["next_action"])
         self.assertIn("All project operations belong to workers", started["next_action"])
         self.assertEqual(started["dispatches"][0]["arguments"].get("model"), None)
         self.assertEqual(started["dispatches"][0]["arguments"]["reasoning_effort"], "medium")
@@ -3220,6 +3347,7 @@ class ControlPlaneTests(unittest.TestCase):
             re.compile(r"^\.state\.lock$"),
             re.compile(r"^tasks/[^/]+/journal\.md$"),
             re.compile(r"^tasks/[^/]+/evidence/[^/]+\.json$"),
+            re.compile(r"^tasks/[^/]+/intent/user-request\.txt$"),
             re.compile(r"^tasks/[^/]+/delegations/[^/]+\.briefing\.md$"),
             re.compile(r"^tasks/[^/]+/reports/(records|receipts|consumptions)/[^/]+\.json$"),
             re.compile(r"^tasks/[^/]+/reports/markdown/[^/]+\.md$"),
@@ -3244,18 +3372,18 @@ class ControlPlaneTests(unittest.TestCase):
             pause_conditions=["A public schema change becomes necessary"],
         )
         prompt = self.briefing_from_response(started)
-        self.assertIn("## Role playbook", prompt)
+        self.assertIn("## Role contract", prompt)
         self.assertIn("## Assignment data", prompt)
         assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["user_request"], "add a durable worker prompt contract")
+        self.assertEqual(assignment["user_intent"]["projection"], "add a durable worker prompt contract")
         self.assertEqual(assignment["requirements"], ["Preserve the public facade"])
         self.assertEqual(assignment["scope"], ["plugins/cortex"])
         self.assertEqual(assignment["task_acceptance_criteria"], ["Every agent receives the overall outcome"])
         self.assertIn("Identify entry points", assignment["gate_acceptance_criteria"][0])
         self.assertEqual(assignment["task_verification"], ["Run prompt contract tests"])
         self.assertIn("Judge only this gate; unfinished downstream task outcomes are not blockers", prompt)
-        self.assertIn("Optional `gate_result`: pass findings=[]", prompt)
-        self.assertIn("no info entries or `closure` except review/close", prompt)
+        self.assertIn("gate_result is optional and pass uses findings=[]", prompt)
+        self.assertIn("never add the legacy closure alias", prompt)
         self.assertEqual(assignment["pause_conditions"], ["A public schema change becomes necessary"])
         self.assertEqual(assignment["budget"], "No external writes")
         self.assertNotIn("Complete and report the discover gate", prompt)
@@ -4047,9 +4175,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("Cortex intent preflight: BLOCKING", briefing)
         self.assertIn("## Assignment data", briefing)
         assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["user_request"], "создай лендинг")
-        self.assertIn("idle and resumable", briefing)
-        self.assertIn("followup_task", briefing)
+        self.assertEqual(assignment["user_intent"]["projection"], "создай лендинг")
+        self.assertIn("remain idle", briefing)
+        self.assertIn("resume this exact attempt", briefing)
         task_dir = next((self.ledger / "tasks").iterdir())
         task = control.load_task_definition(task_dir)
         state = control.load_task_state_for_artifact(task_dir)
@@ -4432,7 +4560,7 @@ class ControlPlaneTests(unittest.TestCase):
                 }
                 barrier.wait()
                 completed = subprocess.run(
-                    [sys.executable, str(script)],
+                    [sys.executable, str(script), "--mcp-audience=coordinator"],
                     input=json.dumps(request) + "\n",
                     text=True,
                     capture_output=True,
@@ -4523,7 +4651,7 @@ class ControlPlaneTests(unittest.TestCase):
         request = (
             "$cortex:orchestrator harvest\nRun a source-backed full knowledge harvest for this small repository as a "
             "C1 task. Use the normal harvest pipeline and do not request plan approval because this is a harvest "
-            "command. Acceptance: every feature-bearing surface is mapped or explicitly excluded; the authentication "
+            "command. Acceptance: every feature-bearing surface is mapped or explicitly excluded; the identity "
             "feature documentation explains actors, entry points, main and negative scenarios, state/data, interfaces, "
             "configuration, failure/recovery, verification, and exact source evidence; zero unexplained unmapped "
             "surfaces remain. Verification: run authoritative tests, validate links and source paths, and independently "
@@ -4544,17 +4672,18 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("THEN call every dispatch.call", started["next_action"])
         self.assertIn("close that exact completed native child with close_agent", started["next_action"])
         assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["user_request"], request)
+        self.assertEqual(assignment["user_intent"]["projection"], request)
+        self.assertRegex(assignment["user_intent"]["digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(prompt.count(request), 0)
         self.assertNotIn(request, serialized)
-        self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
+        self.assertIn("only direct-read exception is exactly paths supplied", bootstrap)
         self.assertIn("Dispatch briefing reviewed:", bootstrap)
         self.assertRegex(started["dispatches"][0]["dispatch_ref"], r"^dispatch-[0-9a-f]{24}$")
         self.assertRegex(started["dispatches"][0]["briefing_digest"], r"^[0-9a-f]{64}$")
-        self.assertEqual(started["dispatches"][0]["display_name"], "Planner Authentication")
-        self.assertRegex(started["dispatches"][0]["arguments"]["task_name"], r"^planner_authentication_01_[0-9a-f]{8}$")
-        self.assertIn("Canonical Cortex team", prompt)
-        self.assertIn("security_auditor", prompt)
+        self.assertEqual(started["dispatches"][0]["display_name"], "Planner Repository")
+        self.assertRegex(started["dispatches"][0]["arguments"]["task_name"], r"^planner_repository_01_[0-9a-f]{8}$")
+        self.assertIn("## Role contract", prompt)
+        self.assertIn("Every microtask requires", prompt)
 
     def test_v3_dispatch_uses_scoped_immutable_briefing_and_requires_review_marker(self):
         started = self.v3_start(
@@ -4801,14 +4930,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(read["report"], report)
         self.assertEqual(read["result_validation"]["status"], "passed")
         self.assertEqual(read["result_validation"]["schema"], control.RESULT_VALIDATION_SCHEMA)
-        report_markdown = Path(read["report_markdown_path"])
-        self.assertEqual(report_markdown, task_dir / "reports/markdown/report-0001.md")
-        self.assertTrue(report_markdown.is_file())
-        self.assertEqual(
-            read["report_markdown_link"],
-            f"[Report discover — report-0001](<{report_markdown}>)",
-        )
-        self.assertIn("Publish report_markdown_link verbatim", read["next_action"])
+        self.assertFalse(read["publication_required"])
+        self.assertEqual(read["publication_reason"], "native_worker_not_completed")
+        self.assertNotIn("report_markdown_link", read)
+        self.assertIn("Do not publish a report link", read["next_action"])
         advanced = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
             "step": started["step"],
@@ -4847,8 +4972,8 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertFalse(ungranted["ok"])
         self.assertIn("only predecessor report refs", ungranted["diagnostics"][0]["message"])
-        self.assertIn("mcp__codebase_memory__list_projects", prompt)
-        self.assertIn("If no exact usable index exists, do not create or refresh one in this gate.", prompt)
+        self.assertIn("Use current source/tests as authority", prompt)
+        self.assertIn("Read each unchanged source range once", prompt)
         self.assertFalse((task_dir / "reports/records").exists())
         report_artifacts, _ = control.db_list_artifacts(
             self.ledger, state["task_id"], kind="worker_report", offset=0, page_size=10,
@@ -4868,7 +4993,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("report.changed_files must be exactly []", prompt)
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", prompt)
         self.assertIn("cross-language test/build/cache residue", prompt)
-        self.assertIn("arbitrary gitignored artifacts", prompt)
+        self.assertIn("all ignored side effects without blocking", prompt)
         self.assertIn("No rm, git clean, or cleanup scripts", prompt)
         task_dir = next((self.ledger / "tasks").iterdir())
         state = control.load_task_state_for_artifact(task_dir)
@@ -5005,7 +5130,7 @@ class ControlPlaneTests(unittest.TestCase):
             "details": {"affected_paths": ["docs/features/example/index.md"]},
         }
         closure = {
-            "decision": "pass", "findings": [finding],
+            "decision": "rework", "findings": [finding],
             "verification": {"executed": ["focused closure regression"], "not_executed": [], "required_missing": [], "limitations": []},
             "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
         }
@@ -5019,16 +5144,30 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rework["dispatches"][0]["phase"], "documentation")
         findings = control.db_list_task_findings(self.ledger, state["task_id"], include_resolved=False)
         self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["source_evidence"], [{"report_id": "report-0001", "attempt_id": review["attempt_id"]}])
+        origin = findings[0]["source_evidence"]
+        self.assertEqual(len(origin), 1)
+        self.assertEqual(origin[0]["transition"], "opened")
+        self.assertEqual(origin[0]["report_id"], review_ref)
+        self.assertEqual(origin[0]["attempt_id"], review["attempt_id"])
+        self.assertEqual(origin[0]["gate"], "review")
+        self.assertEqual(origin[0]["task_revision"], state.get("task_revision", 1))
         after_rework = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(after_rework["status"], "active")
         self.assertEqual(after_rework["closure_rework"]["review"]["target_gate"], "documentation")
         self.assertEqual(after_rework["closure_rework"]["review"]["rerun_gates"], ["review", "close"])
         self.assertTrue(next(item for item in after_rework["attempts"] if item["attempt_id"] == review["attempt_id"])["invalidated"])
+        documentation = next(
+            item for item in after_rework["attempts"]
+            if item["gate"] == "documentation" and not item.get("invalidated")
+        )
+        self.assertIn(review_ref, documentation["context_report_ids"])
 
+        documentation_results = self.v3_results(
+            rework, self.v3_report("documentation correction completed")
+        )
         rerun_review = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": rework["step"],
-            "results": self.v3_results(rework, self.v3_report("documentation correction completed")),
+            "results": documentation_results,
         })
         self.assertTrue(rerun_review["ok"], rerun_review)
         self.assertEqual(rerun_review["dispatches"][0]["phase"], "review")
@@ -5038,8 +5177,60 @@ class ControlPlaneTests(unittest.TestCase):
             item for item in current["attempts"]
             if item["gate"] == "review" and not item.get("invalidated")
         )
+        self.assertIn(review_ref, replacement_review["context_report_ids"])
+        self.assertIn(documentation_results[0]["report_ref"], replacement_review["context_report_ids"])
+        corrective_trace = [
+            item for item in control.db_list_task_findings(self.ledger, state["task_id"])[0]["source_evidence"]
+            if item["transition"] == "corrective_reported"
+        ]
+        self.assertEqual(len(corrective_trace), 1)
+        self.assertEqual(corrective_trace[0]["origin_report_ref"], review_ref)
+        self.assertEqual(corrective_trace[0]["report_id"], documentation_results[0]["report_ref"])
         resolved = dict(finding, status="resolved", blocking=False, resolved_at="2026-08-17T12:00:00Z")
         resolved_closure = dict(closure, findings=[resolved])
+        resolved_closure["decision"] = "pass"
+        resolved_gate_result = dict(resolved_closure, failure_class="product")
+
+        # Simulate a corrupted predecessor projection.  A fresh reviewer may
+        # retain the historical source report, but it cannot close the issue
+        # without the *current corrective* documentation report in its own
+        # server-scoped context.
+        original_context = list(replacement_review["context_report_ids"])
+        replacement_review["context_report_ids"] = [review_ref]
+        self.write_task_state(current)
+        rejected_report, _ = self._report_for_attempt(
+            task_dir,
+            replacement_review,
+            self.v3_report("review cannot prove a correction it did not receive"),
+        )
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+            "report": rejected_report, "gate_result": resolved_gate_result,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("current corrective report", rejected["diagnostics"][0]["message"])
+
+        # A semantic steer must also prevent an old finding route from being
+        # consumed should a damaged controller fail to supersede it first.
+        replacement_review["context_report_ids"] = original_context
+        current["task_revision"] = 2
+        self.write_task_state(current)
+        stale_report, _ = self._report_for_attempt(
+            task_dir,
+            replacement_review,
+            self.v3_report("review cannot resolve a stale semantic route"),
+        )
+        stale = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+            "report": stale_report, "gate_result": resolved_gate_result,
+        })
+        self.assertFalse(stale["ok"])
+        self.assertIn("stale semantic task revision", stale["diagnostics"][0]["message"])
+        current["task_revision"] = 1
+        self.write_task_state(current)
+
         resolved_report, _ = self._report_for_attempt(
             task_dir,
             replacement_review,
@@ -5058,7 +5249,17 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(close["ok"], close)
         self.assertEqual(close["dispatches"][0]["phase"], "close")
-        self.assertEqual(control.db_list_task_findings(self.ledger, state["task_id"])[0]["status"], "resolved")
+        resolved_finding = control.db_list_task_findings(self.ledger, state["task_id"])[0]
+        self.assertEqual(resolved_finding["status"], "resolved")
+        self.assertEqual(resolved_finding["source_evidence"][-1]["transition"], "resolved")
+        self.assertEqual(resolved_finding["source_evidence"][-1]["report_id"], resolved_ref)
+        self.assertEqual(resolved_finding["source_evidence"][-1]["gate"], "review")
+        self.assertNotEqual(resolved_finding["source_evidence"][-1]["attempt_id"], review["attempt_id"])
+        self.assertEqual(resolved_finding["source_evidence"][-1]["origin_report_ref"], review_ref)
+        self.assertEqual(
+            resolved_finding["source_evidence"][-1]["correction_report_refs"],
+            [documentation_results[0]["report_ref"]],
+        )
 
         completed = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": close["step"],
@@ -5066,6 +5267,140 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(completed["ok"], completed)
         self.assertEqual(completed["outcome"], "completed")
+
+    def test_corrective_documentation_cannot_resolve_its_review_finding(self):
+        started = self.v3_start(
+            "documentation cannot close a review finding",
+            waves=[
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        review = state["attempts"][0]
+        finding = {
+            "fingerprint": "docs-authority-001", "severity": "P2", "status": "open", "blocking": True,
+            "summary": "The reviewed documentation requires a correction.",
+            "details": {"affected_paths": ["docs/features/example/index.md"]},
+        }
+        source_ref = self._publish_closure_report(task_dir, state, review, {
+            "decision": "rework", "findings": [finding],
+            "verification": {"executed": ["focused review"], "not_executed": [], "required_missing": [], "limitations": []},
+            "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+        })
+        rework = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": source_ref}],
+        })
+        self.assertEqual(rework["outcome"], "ready_to_spawn")
+        current = control.load_task_state_for_artifact(task_dir)
+        documentation = next(
+            item for item in current["attempts"]
+            if item["gate"] == "documentation" and not item.get("invalidated")
+        )
+        duplicate_open_report, _ = self._report_for_attempt(
+            task_dir, documentation, self.v3_report("documentation confirms the finding remains open")
+        )
+        duplicate_open = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": documentation["attempt_id"], "profile": documentation["profile"],
+            "report": duplicate_open_report,
+            "gate_result": {
+                "decision": "rework", "failure_class": "product",
+                "findings": [finding],
+                "verification": {"executed": ["focused documentation check"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertTrue(duplicate_open["ok"], duplicate_open)
+        canonical = control.db_list_task_findings(self.ledger, current["task_id"])[0]
+        self.assertEqual(
+            runtime_reports._open_finding_origin(canonical)["gate"], "review",
+        )
+        report, _ = self._report_for_attempt(
+            task_dir, documentation, self.v3_report("documentation correction reported")
+        )
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": documentation["attempt_id"], "profile": documentation["profile"], "report": report,
+            "gate_result": {
+                "decision": "pass", "failure_class": "product",
+                "findings": [dict(finding, status="resolved", blocking=False, resolved_at="2026-08-20T00:00:00Z")],
+                "verification": {"executed": ["focused documentation check"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "report_validation_failed")
+        self.assertIn("fresh rerun of its origin gate", rejected["diagnostics"][0]["message"])
+        stored = control.db_list_task_findings(self.ledger, current["task_id"])
+        self.assertEqual([(item["fingerprint"], item["status"]) for item in stored], [(finding["fingerprint"], "open")])
+        self.assertEqual(stored[0]["source_evidence"][0]["transition"], "opened")
+        self.assertEqual(stored[0]["source_evidence"][0]["gate"], "review")
+        self.assertNotIn("resolved", [item["transition"] for item in stored[0]["source_evidence"]])
+
+    def test_pass_gate_result_rejects_open_findings_at_report_intake(self):
+        started = self.v3_start(
+            "a pass cannot retain an open finding",
+            waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report("review found an open blocker")),
+            "gate_result": {
+                "decision": "pass", "failure_class": "product",
+                "findings": [{
+                    "fingerprint": "open-pass-001", "severity": "P1", "status": "open", "blocking": True,
+                    "summary": "The reviewer found a blocker.",
+                }],
+                "verification": {"executed": ["focused review"], "not_executed": [], "required_missing": [], "limitations": []},
+                "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertIn("pass gate_result cannot contain open findings", rejected["diagnostics"][0]["message"])
+
+    def test_same_gate_resolution_requires_finding_bound_correction_receipt(self):
+        finding = {
+            "fingerprint": "documentation-self-rework-001",
+            "source_evidence": [{
+                "transition": "opened", "report_id": "report-origin", "attempt_id": "documentation-origin",
+                "gate": "documentation", "task_revision": 1,
+            }],
+        }
+        state = {
+            "task_revision": 1,
+            "evidence": [{"report_id": "report-correction", "invalidated": False}],
+            "attempts": [{
+                "attempt_id": "documentation-correction", "gate": "documentation", "status": "passed",
+                "invalidated": False, "report_ids": ["report-correction"],
+            }],
+        }
+        rework = {"target_gate": "documentation"}
+        kwargs = {
+            "finding": finding,
+            "origin_attempt_id": "documentation-origin",
+            "origin_report_id": "report-origin",
+            "rework": rework,
+            "rerun_context": {"report-origin", "report-correction"},
+        }
+        self.assertEqual(runtime_reports._current_correction_report_refs(state, **kwargs), [])
+
+        finding["source_evidence"].append({
+            "transition": "corrective_reported", "report_id": "report-correction",
+            "origin_report_ref": "report-origin", "attempt_id": "documentation-correction",
+            "gate": "documentation", "task_revision": 1,
+        })
+        self.assertEqual(
+            runtime_reports._current_correction_report_refs(state, **kwargs),
+            ["report-correction"],
+        )
 
     def test_open_canonical_p2_blocks_a_textually_passing_close_and_reopens_rework(self):
         started = self.v3_start(
@@ -5121,7 +5456,7 @@ class ControlPlaneTests(unittest.TestCase):
         state = control.load_task_state_for_artifact(task_dir)
         review = state["attempts"][0]
         closure = {
-            "decision": "pass", "findings": [],
+            "decision": "rework", "findings": [],
             "verification": {
                 "executed": [], "not_executed": [],
                 "required_missing": ["Run the required package verification."],
@@ -5153,7 +5488,56 @@ class ControlPlaneTests(unittest.TestCase):
                 "profile": attempt["profile"], "report": self._report_with_briefing(attempt, self.v3_report("missing closure")),
             })
         self.assertFalse(rejected["ok"])
-        self.assertIn("review and close reports require a top-level closure sibling", rejected["diagnostics"][0]["message"])
+        self.assertIn("review and close reports require the canonical top-level gate_result", rejected["diagnostics"][0]["message"])
+
+    def test_invalid_gate_result_finding_returns_retryable_draft_diagnostic(self):
+        started = self.v3_start("invalid gate finding is corrected in place", waves=[{"workers": [{"phase": "review"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+        template = control.get_report_template(identity)
+        self.assertTrue(template["ok"], template)
+        invalid = control.publish_worker_report({
+            **identity,
+            "draft_ref": template["draft_ref"],
+            "report": self._report_with_briefing(attempt, self.v3_report("review found a blocker")),
+            "gate_result": {
+                "decision": "rework",
+                "failure_class": "product",
+                "findings": [{
+                    "severity": "high",
+                    "status": "open",
+                    "blocking": True,
+                    "summary": "The finding deliberately uses an invalid severity vocabulary.",
+                }],
+                "verification": {
+                    "executed": ["Focused review completed."],
+                    "not_executed": [],
+                    "required_missing": [],
+                    "limitations": [],
+                },
+                "workspace": {
+                    "modified": [],
+                    "untracked": [],
+                    "staged": [],
+                    "committed": "not_required",
+                },
+            },
+        })
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(invalid["outcome"], "report_draft_invalid")
+        self.assertEqual(invalid["diagnostics"][0]["path"], "gate_result")
+        self.assertIn("severity P0/P1/P2/P3/info", invalid["diagnostics"][0]["message"])
+        self.assertTrue(invalid["retryable"])
+        self.assertFalse(invalid["attempt_budget_consumed"])
+        self.assertEqual(invalid["draft_ref"], template["draft_ref"])
+        self.assertTrue(Path(template["draft_path"]).is_file())
 
     def test_waived_p2_with_auditable_metadata_does_not_block_close(self):
         started = self.v3_start("waived closure finding", waves=[{"workers": [{"phase": "review"}]}])
@@ -5179,6 +5563,8 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_read_only_result_tolerates_conventional_ephemeral_artifacts_from_multiple_stacks(self):
         (self.project / ".gitignore").write_text("coverage.tmp\n", encoding="utf-8")
+        (self.project / "apps/mobile").mkdir(parents=True)
+        (self.project / "apps/mobile/.gitignore").write_text(".expo/\n", encoding="utf-8")
         started = self.v3_start(
             "independently verify multiple language test suites",
             waves=[{"workers": [{"phase": "review", "profile": "code_reviewer"}]}],
@@ -5188,6 +5574,7 @@ class ControlPlaneTests(unittest.TestCase):
         attempt = state["attempts"][0]
         artifacts = {
             "python/__pycache__/module.cpython-312.pyc": b"python cache",
+            "apps/mobile/.expo/devices.json": b"expo generated state",
             "javascript/.nyc_output/result.json": b"javascript coverage cache",
             "jvm/.gradle/test-cache.bin": b"jvm cache",
             "dotnet/TestResults/result.trx": b"dotnet test result",
@@ -5221,10 +5608,12 @@ class ControlPlaneTests(unittest.TestCase):
             kinds={"worker_report"},
         )
         artifacts_receipt = record["result_validation"]["artifacts"]
-        self.assertEqual(artifacts_receipt["ephemeral_artifact_count"], 7)
+        self.assertEqual(artifacts_receipt["ignored_artifact_count"], 8)
+        self.assertEqual(artifacts_receipt["ephemeral_artifact_count"], 8)
+        self.assertEqual(artifacts_receipt["unclassified_ignored_artifact_count"], 0)
         self.assertRegex(artifacts_receipt["ephemeral_artifacts_digest"], r"^[0-9a-f]{64}$")
 
-    def test_read_only_result_rejects_arbitrary_gitignored_artifacts(self):
+    def test_read_only_result_audits_unknown_gitignored_artifacts_without_blocking(self):
         (self.project / ".gitignore").write_text("untrusted-report.tmp\n", encoding="utf-8")
         started = self.v3_start(
             "independently verify without creating project outputs",
@@ -5234,7 +5623,7 @@ class ControlPlaneTests(unittest.TestCase):
         state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         (self.project / "untrusted-report.tmp").write_text("unknown ignored side effect\n", encoding="utf-8")
-        rejected = control.publish_worker_report({
+        recorded = control.publish_worker_report({
             "project_root": str(self.project),
             "task_id": state["task_id"],
             "attempt_id": attempt["attempt_id"],
@@ -5248,12 +5637,18 @@ class ControlPlaneTests(unittest.TestCase):
                 "workspace": {"modified": [], "untracked": [], "staged": [], "committed": "not_required"},
             },
         })
-        self.assertFalse(rejected["ok"])
-        self.assertIn(
-            "generated or ignored project artifacts changed during read-only result gate",
-            rejected["diagnostics"][0]["message"],
+        self.assertTrue(recorded["ok"], recorded)
+        record, _ = control.read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{recorded['report_ref']}.json",
+            kinds={"worker_report"},
         )
-        self.assertIn("untrusted-report.tmp", rejected["diagnostics"][0]["message"])
+        artifacts_receipt = record["result_validation"]["artifacts"]
+        self.assertEqual(artifacts_receipt["ignored_artifact_count"], 1)
+        self.assertEqual(artifacts_receipt["ephemeral_artifact_count"], 0)
+        self.assertEqual(artifacts_receipt["unclassified_ignored_artifact_count"], 1)
+        self.assertRegex(artifacts_receipt["unclassified_ignored_artifacts_digest"], r"^[0-9a-f]{64}$")
 
     def test_v3_plan_approval_holds_successor_wave_until_user_approves(self):
         started = self.v3_start(
@@ -5428,7 +5823,7 @@ class ControlPlaneTests(unittest.TestCase):
         revised = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"],
             "intent": "plan_approval",
-            "payload": {"decision": "revise", "feedback": "Add an explicit rollback scenario."},
+            "payload": {"decision": "revise", "feedback": "Add an explicit rollback scenario.", "request_id": prompt["chat_interaction"]["interaction_ref"]},
         })
         self.assertTrue(revised["ok"])
         self.assertEqual(revised["outcome"], "ready_to_spawn")
@@ -5621,6 +6016,50 @@ class ControlPlaneTests(unittest.TestCase):
             self.task_state(next((self.ledger / "tasks").iterdir()))["plan_approval"]["request_id"],
         )
 
+    def test_v3_plan_approval_native_custom_response_requeues_planner_with_feedback(self):
+        started = self.v3_start(
+            "allow free-form feedback beside plan approval controls",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": self.v3_results(started, self.v3_report("native custom plan feedback is pending")),
+        })
+        feedback = "Add an explicit rollback step before implementation."
+        with mock.patch.object(control, "MCP_INTERACTIVE", True), mock.patch.object(
+            control,
+            "_request_mcp_elicitation",
+            return_value=(
+                "accept",
+                {"decision": "approve", "custom_response": feedback},
+                "native-plan-custom-1",
+            ),
+        ) as elicitation:
+            revised = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "plan_approval",
+                "payload": {"decision": "prompt"},
+            })
+        requested_schema = elicitation.call_args.args[1]
+        self.assertEqual(requested_schema["required"], ["decision"])
+        self.assertEqual(requested_schema["properties"]["custom_response"]["type"], "string")
+        self.assertIn("requested plan changes", requested_schema["properties"]["custom_response"]["title"])
+        self.assertTrue(revised["ok"], revised)
+        self.assertEqual(revised["outcome"], "ready_to_spawn")
+        self.assertEqual(revised["dispatches"][0]["phase"], "plan")
+        self.assertEqual(revised["result"], {"decision": "revise", "feedback": feedback})
+        state = self.task_state(next((self.ledger / "tasks").iterdir()))
+        self.assertEqual(state["plan_approval"]["status"], "pending_plan")
+        self.assertEqual(state["plan_approval"]["feedback"], feedback)
+
     def test_v3_plan_approval_native_cancel_stays_pending_and_silent(self):
         started = self.v3_start(
             "cancel native plan approval",
@@ -5673,7 +6112,7 @@ class ControlPlaneTests(unittest.TestCase):
             "results": self.v3_results(started, self.v3_report("nested native cancellation is pending")),
         })
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             def call(payload):
                 proc.stdin.write(json.dumps(payload) + "\n")
@@ -6027,7 +6466,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_planner_scope_owns_the_strict_scoping_artifact(self):
         started = self.v3_start(
             "scope the evidence domains before discovery",
-            complexity="C3",
+            complexity="C1",
             plan_approval="auto",
             waves=[{"workers": [{"phase": "scope"}]}],
         )
@@ -6122,11 +6561,17 @@ class ControlPlaneTests(unittest.TestCase):
             "step": started["step"],
             "results": self.v3_results(started, self.v3_report("first plan")),
         })
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "plan_approval",
+            "payload": {"decision": "prompt"},
+        })
         revised = control.manage_orchestration({
             "project_root": str(self.project),
             "task_ref": started["task_ref"],
             "intent": "plan_approval",
-            "payload": {"decision": "revise", "feedback": "Keep the public API unchanged and add rollback coverage."},
+            "payload": {"decision": "revise", "feedback": "Keep the public API unchanged and add rollback coverage.", "request_id": prompt["chat_interaction"]["interaction_ref"]},
         })
         self.assertTrue(revised["ok"])
         self.assertEqual(revised["outcome"], "ready_to_spawn")
@@ -6919,7 +7364,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(inspected["context_handoff"]["goal"], "recover persisted report")
         self.assertEqual(inspected["context_handoff"]["reports"][0]["report_ref"], published["report_ref"])
         self.assertIn("fork_turns=none", inspected["context_handoff"]["protocol"]["hidden_dispatch"])
-        self.assertIn("report_markdown_link", inspected["context_handoff"]["protocol"]["report_publication"])
+        self.assertIn("publication_required=true", inspected["context_handoff"]["protocol"]["report_publication"])
         self.assertIn("context_handoff", inspected["next_action"])
         self.assertIn("manage_orchestration", inspected["context_handoff"]["next_action"])
         advanced = control.continue_orchestration({
@@ -7061,16 +7506,25 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(failed_attempts[0]["invalidated"])
         self.assertEqual(failed_attempts[0]["invalidation_reason"], "retry_after_failure")
 
-    def test_v3_automatic_gate_rework_is_bounded_and_resume_resets_its_budget(self):
-        current = self.v3_start("bounded worker retry", waves=[{"workers": [{"phase": "discover"}]}])
-        for failure_number in range(1, control.MAX_ORCHESTRATE_GATE_FAILURES + 1):
+    def test_v3_automatic_qa_rework_is_unbounded_and_escalates_model_effort(self):
+        current = self.v3_start("unbounded QA correction", waves=[{"workers": [{"phase": "qa"}]}])
+        # Repeated equivalent failures correctly trigger the no-progress
+        # circuit breaker.  These intentionally distinct observed failure
+        # classes prove that genuine corrective progress still remains
+        # unbounded and receives the expected escalation.
+        failures = [
+            "worker process stopped before it could run the QA checks",
+            "network timeout prevented the QA dependency download",
+            "missing dependency blocked the QA toolchain",
+            "governance policy validation rejected the QA evidence",
+            "product assertion failure remains in the QA result",
+        ]
+        for failure_number, failure_reason in enumerate(failures, start=1):
             result = {
                 "status": "failed",
-                "reason": f"worker failure {failure_number}",
+                "reason": failure_reason,
                 "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
             }
-            if failure_number == control.MAX_SAME_STRATEGY_FAILURES:
-                result["next_strategy"] = "use an alternate repository evidence path"
             current = control.continue_orchestration({
                 "project_root": str(self.project),
                 "task_ref": current["task_ref"],
@@ -7078,26 +7532,64 @@ class ControlPlaneTests(unittest.TestCase):
                 "results": [result],
             })
             self.assertTrue(current["ok"], current)
-            if failure_number < control.MAX_ORCHESTRATE_GATE_FAILURES:
-                self.assertEqual(current["outcome"], "ready_to_spawn")
-                self.assertEqual(len(current["dispatches"]), 1)
-        self.assertEqual(current["outcome"], "blocked")
-        self.assertEqual(current["dispatches"], [])
+            self.assertEqual(current["outcome"], "ready_to_spawn")
+            self.assertEqual(len(current["dispatches"]), 1)
+            arguments = current["dispatches"][0]["arguments"]
+            if failure_number == 1:
+                # QA already starts above the first-failure floor; escalation
+                # never lowers the profile's stronger base route.
+                self.assertEqual(arguments["reasoning_effort"], "xhigh")
+            elif failure_number == 2:
+                self.assertEqual(arguments["model"], "gpt-5.6-terra")
+                self.assertEqual(arguments["reasoning_effort"], "xhigh")
+            else:
+                self.assertEqual(arguments["model"], "gpt-5.6-terra")
+                self.assertEqual(arguments["reasoning_effort"], "max")
         task_dir = next((self.ledger / "tasks").iterdir())
         state = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual(state["orchestrate_gate_failure_counts"]["discover"], 3)
-        self.assertIn("rework budget exhausted", state["blocked_reason"])
+        self.assertEqual(state["orchestrate_gate_failure_counts"]["qa"], 5)
+        self.assertNotEqual(state["status"], "blocked")
+        self.assertNotIn("rework budget exhausted", str(state.get("blocked_reason") or ""))
 
-        resumed = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": current["task_ref"],
-            "intent": "resume",
-            "reason": "the worker failure cause was repaired",
-        })
-        self.assertTrue(resumed["ok"], resumed)
-        self.assertEqual(resumed["outcome"], "ready_to_spawn")
+    def test_v3_rework_respects_explicit_user_model_while_raising_effort(self):
+        current = self.v3_start(
+            "user model survives rework escalation",
+            waves=[{"workers": [{"phase": "qa", "user_requested_model": "luna"}]}],
+        )
+        failures = [
+            "worker process stopped before it could run the QA checks",
+            "network timeout prevented the QA dependency download",
+            "missing dependency blocked the QA toolchain",
+        ]
+        for failure_number, failure_reason in enumerate(failures, start=1):
+            current = control.continue_orchestration({
+                "project_root": str(self.project),
+                "task_ref": current["task_ref"],
+                "step": current["step"],
+                "results": [{
+                    "status": "failed",
+                    "reason": failure_reason,
+                    "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
+                }],
+            })
+            self.assertTrue(current["ok"], current)
+            arguments = current["dispatches"][0]["arguments"]
+            # Configured-default Luna intentionally omits the native model
+            # argument even when the persisted user choice protects routing.
+            self.assertNotIn("model", arguments)
+            self.assertEqual(
+                arguments["reasoning_effort"],
+                "xhigh" if failure_number < 3 else "max",
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
         state = control.load_task_state_for_artifact(task_dir)
-        self.assertNotIn("discover", state["orchestrate_gate_failure_counts"])
+        active = next(
+            item for item in state["attempts"]
+            if item["gate"] == "qa" and not item.get("invalidated")
+        )
+        self.assertEqual(active["selected_model"], "gpt-5.6-luna")
+        self.assertEqual(active["user_requested_model"], "gpt-5.6-luna")
+        self.assertFalse(active["rework_escalation"]["model_escalated"])
 
     def test_v3_failed_result_is_bound_to_the_dispatched_attempt(self):
         started = self.v3_start("identical failed retries", waves=[{"workers": [{"phase": "discover"}]}])
@@ -7127,14 +7619,18 @@ class ControlPlaneTests(unittest.TestCase):
             }],
         }
         unchanged_strategy = control.continue_orchestration(unchanged_strategy_payload)
-        self.assertFalse(unchanged_strategy["ok"], unchanged_strategy)
-        self.assertEqual(unchanged_strategy["code"], "orchestrate_validation_failed")
-        self.assertIn("same_strategy_limit reached", unchanged_strategy["diagnostics"][0]["message"])
+        self.assertTrue(unchanged_strategy["ok"], unchanged_strategy)
+        self.assertEqual(unchanged_strategy["outcome"], "ready_to_spawn")
+        unchanged_replay = control.continue_orchestration(unchanged_strategy_payload)
+        self.assertTrue(unchanged_replay["replayed"])
+        self.assertEqual(unchanged_replay["dispatches"], [])
 
         second_payload = {
             **unchanged_strategy_payload,
             "results": [{
-                **unchanged_strategy_payload["results"][0],
+                "status": "failed",
+                "reason": "native_worker_stopped_without_report",
+                "dispatch_ref": unchanged_strategy["dispatches"][0]["dispatch_ref"],
                 "next_strategy": "inspect an alternate repository evidence path",
             }],
         }
@@ -7260,7 +7756,7 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project),
             "task_ref": task_ref,
             "step": current["step"],
-            "results": self.v3_results(current, self.v3_report("close evidence requires bounded documentation rework")),
+            "results": self.v3_results(current, self.v3_report("close evidence requires documentation rework")),
             "future_waves": [
                 {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
                 {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
@@ -7336,6 +7832,108 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(corrected["ok"], corrected)
         self.assertEqual(corrected["dispatches"][0]["phase"], "implementation")
+
+    def test_v3_material_replan_rejection_is_preflight_atomic(self):
+        current = self.v3_start(
+            "reject an invalid approved-plan rework before any gate mutation",
+            waves=[
+                {"workers": [{"phase": "review"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        state["plan_approval"] = {"policy": "required", "status": "approved", "history": []}
+        self.write_task_state(state)
+        results = self.v3_results(current, self.v3_report("review found a new material correction"))
+        before = self.task_state(task_dir)
+
+        rejected = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "step": current["step"],
+            "results": results,
+            "future_waves": [
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "review"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+            "reason": "material correction must first receive a replacement plan",
+        })
+
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "plan_reapproval_required")
+        after = self.task_state(task_dir)
+        for key in (
+            "revision", "status", "current_pipeline", "current_gates",
+            "completed_gates", "skipped_gates", "pipeline_changes",
+            "replan_count", "plan_approval",
+        ):
+            self.assertEqual(after.get(key), before.get(key), key)
+        before_attempts = [
+            (item["attempt_id"], item.get("status"), item.get("invalidated"))
+            for item in before["attempts"]
+        ]
+        after_attempts = [
+            (item["attempt_id"], item.get("status"), item.get("invalidated"))
+            for item in after["attempts"]
+        ]
+        self.assertEqual(after_attempts, before_attempts)
+
+    def test_v3_resume_recovers_active_stranded_pipeline_after_legacy_replan_limit(self):
+        current = self.v3_start(
+            "recover active approved plan with no dispatch after a legacy replan failure",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "qa"}]},
+                {"workers": [{"phase": "review"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        state["replan_count"] = 2
+        state["replan_limit"] = 2
+        state["status"] = "active"
+        state["plan_approval"] = {"policy": "required", "status": "approved", "history": []}
+        for attempt in state["attempts"]:
+            attempt["status"] = "passed"
+            attempt["invalidated"] = True
+        control.sync_current_wave(state)
+        self.write_task_state(state)
+
+        recovered = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "intent": "resume",
+            "reason": "recover the stranded active task from new review evidence",
+            "payload": {
+                "future_waves": [
+                    {"workers": [{"phase": "plan", "profile": "planner"}]},
+                    {"workers": [{
+                        "phase": "implementation",
+                        "profile": "backend_dev",
+                        "objective": "Implement the newly verified corrective contract.",
+                    }]},
+                    {"workers": [{"phase": "qa", "profile": "qa_engineer"}]},
+                    {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+                    {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                    {"workers": [{"phase": "close", "profile": "build_verification"}]},
+                ],
+            },
+        })
+
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["outcome"], "ready_to_spawn")
+        self.assertEqual(recovered["dispatches"][0]["phase"], "plan")
+        repaired_state = self.task_state(task_dir)
+        self.assertEqual(repaired_state["status"], "active")
+        self.assertEqual(repaired_state["plan_approval"]["status"], "pending_plan")
+        self.assertEqual(repaired_state["resume_events"][-1]["mode"], "active_stranded_recovery")
+        self.assertGreaterEqual(repaired_state["replan_count"], 2)
 
     def test_v3_exhausted_closure_rework_requires_atomic_resume_replan(self):
         current = self.v3_start(
@@ -7970,7 +8568,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["capabilities"]["resources"], {"subscribe": False, "listChanged": False})
         instructions = responses[0]["result"]["instructions"]
         self.assertLessEqual(len(instructions), 512)
-        self.assertIn("publishes every read_worker_report report_markdown_link", instructions)
+        self.assertIn("publication_required=true", instructions)
+        self.assertIn("summary and next step", instructions)
         self.assertIn("Internal workers emit English only", instructions)
         self.assertIn("After resume, clear, or compaction", instructions)
         self.assertEqual(responses[1]["result"], {"resources": []})
@@ -7992,7 +8591,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_mcp_process_completes_facade_question_after_host_response(self):
         started = self.v3_start("nested question", waves=[{"workers": [{"phase": "discover"}]}])
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             def call(payload):
                 proc.stdin.write(json.dumps(payload) + "\n")
@@ -8035,7 +8634,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(held["outcome"], "awaiting_plan_approval")
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             def call(payload):
                 proc.stdin.write(json.dumps(payload) + "\n")
@@ -8096,15 +8695,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("discover", changed["state"]["current_pipeline"])
         self.assertNotIn("discover", changed["state"]["completed_gates"])
 
-    def test_principal_binding_and_replan_limit(self):
+    def test_principal_binding_and_replan_count_is_audit_only(self):
         result = self.init()
         state = result["state"]
         with self.assertRaisesRegex(ValueError, "different principal"):
             control.reassess_pipeline({"task_id": "demo", "principal": "other", "expected_revision": state["revision"], "signals": ["security"], "apply": False})
         first = control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": state["revision"], "signals": ["security"], "apply": True})
         second = control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": first["state"]["revision"], "signals": ["performance"], "apply": True})
-        with self.assertRaisesRegex(ValueError, "replan limit"):
-            control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": second["state"]["revision"], "signals": ["docs"], "apply": True})
+        third = control.reassess_pipeline({"task_id": "demo", "principal": "thread-a", "expected_revision": second["state"]["revision"], "signals": ["docs"], "apply": True})
+        self.assertTrue(third["applied"])
+        self.assertEqual(third["state"]["replan_count"], 3)
+        self.assertEqual(third["state"]["replan_limit"], 2)
 
     def test_c2_requires_linked_attempt_and_handoff(self):
         result = self.init(task_id="c2", complexity="C2")
@@ -8641,33 +9242,47 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_mcp_smoke_exposes_v3_lifecycle_and_scoped_report_tools(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        proc = subprocess.run([sys.executable, str(script), "--mcp-audience=coordinator"], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"})
+        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "read_worker_report"})
         self.assertNotIn("orchestrate", names)
-        self.assertEqual(len(tools), 8)
+        self.assertEqual(len(tools), 5)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
         by_name = {item["name"]: item for item in tools}
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["required"], ["project_root", "task"])
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["properties"]["task"]["required"], ["user_request"])
         self.assertEqual(by_name["continue_orchestration"]["inputSchema"]["required"], ["project_root", "step", "results"])
-        self.assertEqual(by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
-        self.assertEqual(by_name["get_report_template"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile"])
-        self.assertEqual(
-            by_name["record_report"]["inputSchema"]["required"],
-            ["project_root", "task_id", "attempt_id", "profile"],
-        )
-        self.assertEqual(
-            by_name["record_report"]["inputSchema"]["anyOf"],
-            [{"required": ["draft_ref"]}, {"required": ["report"]}],
-        )
-        self.assertIn("draft_ref", by_name["record_report"]["inputSchema"]["properties"])
-        self.assertIn("patch", by_name["record_report"]["inputSchema"]["properties"])
-        self.assertNotIn("validation_digest", by_name["record_report"]["inputSchema"]["properties"])
         forbidden = {"operation", "submission_id", "task_id", "wave_id", "attempt_id", "host_tool", "host_model", "host_reasoning_effort"}
         for name in ("start_orchestration", "continue_orchestration"):
             self.assertFalse(forbidden & set(by_name[name]["inputSchema"]["properties"]))
+
+        compat_proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        compat_by_name = {item["name"]: item for item in json.loads(compat_proc.stdout)["result"]["tools"]}
+        self.assertEqual(
+            set(compat_by_name),
+            {
+                "start_orchestration", "continue_orchestration", "manage_orchestration",
+                "manage_governance", "worker_question", "get_report_template",
+                "record_report", "read_dispatch_briefing", "read_worker_report",
+            },
+        )
+        worker_proc = subprocess.run([sys.executable, str(script), "--mcp-audience=worker"], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        worker_by_name = {item["name"]: item for item in json.loads(worker_proc.stdout)["result"]["tools"]}
+        self.assertEqual(set(worker_by_name), {"worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"})
+        self.assertEqual(worker_by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
+        self.assertEqual(worker_by_name["get_report_template"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile"])
+        self.assertEqual(
+            worker_by_name["record_report"]["inputSchema"]["required"],
+            ["project_root", "task_id", "attempt_id", "profile"],
+        )
+        self.assertEqual(
+            worker_by_name["record_report"]["inputSchema"]["anyOf"],
+            [{"required": ["draft_ref"]}, {"required": ["report"]}],
+        )
+        self.assertIn("draft_ref", worker_by_name["record_report"]["inputSchema"]["properties"])
+        self.assertIn("patch", worker_by_name["record_report"]["inputSchema"]["properties"])
+        self.assertNotIn("validation_digest", worker_by_name["record_report"]["inputSchema"]["properties"])
 
     def test_mcp_logs_invalid_tool_input_with_session_and_call_ids(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -8692,7 +9307,7 @@ class ControlPlaneTests(unittest.TestCase):
                 },
             }
             completed = subprocess.run(
-                [sys.executable, str(script)],
+                [sys.executable, str(script), "--mcp-audience=coordinator"],
                 input=json.dumps(request) + "\n",
                 text=True,
                 capture_output=True,
@@ -8710,7 +9325,12 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(record["request_id"], "call-17")
             self.assertEqual(record["ids"]["task_id"], "missing-log-task")
             self.assertEqual(record["ids"]["attempt_id"], "attempt-9")
-            self.assertEqual(record["input"]["api_key"], "<REDACTED>")
+            self.assertNotIn("input", record)
+            self.assertEqual(record["input_summary"]["source"], "arguments")
+            self.assertEqual(record["input_summary"]["field_count"], len(request["params"]["arguments"]))
+            self.assertEqual(record["input_summary"]["sensitive_field_count"], 1)
+            self.assertIn("<sensitive-field>", record["input_summary"]["fields"])
+            self.assertNotIn("do-not-persist", log_path.read_text(encoding="utf-8"))
             self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
 
     def test_tool_error_log_keeps_complete_newest_lines_within_ten_megabyte_cap(self):
@@ -8766,7 +9386,7 @@ class ControlPlaneTests(unittest.TestCase):
                 },
             }
             completed = subprocess.run(
-                [sys.executable, str(script)],
+                [sys.executable, str(script), "--mcp-audience=coordinator"],
                 input=json.dumps(request) + "\n",
                 text=True,
                 capture_output=True,
@@ -8846,7 +9466,7 @@ class ControlPlaneTests(unittest.TestCase):
 
         def call(arguments, environment=None):
             request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": arguments}}
-            completed = subprocess.run([sys.executable, str(script)], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
+            completed = subprocess.run([sys.executable, str(script), "--mcp-audience=coordinator"], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
             return json.loads(completed.stdout)
 
         common = {"task": {
@@ -8880,12 +9500,14 @@ class ControlPlaneTests(unittest.TestCase):
         def start(root, task_id, submission_id):
             return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": {"project_root": str(root), "task": {"user_request": task_id, "complexity": "C1", "acceptance_criteria": ["The requested outcome is observed."], "verification": ["Run an authoritative outcome check."]}}}}
         requests = [start(self.project, "first-root", "first-root-start"), start(other, "second-root", "second-root-start")]
-        completed = subprocess.run([sys.executable, str(script)], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
+        completed = subprocess.run([sys.executable, str(script), "--mcp-audience=coordinator"], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
         first, second = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertTrue(first["result"]["structuredContent"]["ok"])
         self.assertTrue(second["result"]["structuredContent"]["ok"])
-        self.assertTrue((self.project / ".codex/cortex").is_dir())
-        self.assertTrue((other / ".codex/cortex").is_dir())
+        self.assertTrue(control.ledger_root_path({"project_root": str(self.project)}).is_dir())
+        self.assertTrue(control.ledger_root_path({"project_root": str(other)}).is_dir())
+        self.assertFalse((self.project / ".codex/cortex/cortex.db").exists())
+        self.assertFalse((other / ".codex/cortex/cortex.db").exists())
 
     def test_mcp_profile_cache_survives_source_directory_rename(self):
         source = Path(__file__).parents[1] / "plugins/cortex"
@@ -8894,7 +9516,7 @@ class ControlPlaneTests(unittest.TestCase):
         shutil.copytree(source, cached, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         script = cached / "scripts/cortex.py"
         proc = subprocess.Popen(
-            [sys.executable, str(script)], cwd=self.project,
+            [sys.executable, str(script), "--mcp-audience=coordinator"], cwd=self.project,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:
@@ -8907,7 +9529,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.5")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -8924,7 +9546,8 @@ class ControlPlaneTests(unittest.TestCase):
             started = call(request)["result"]["structuredContent"]
             self.assertTrue(started["ok"])
             briefing = self.briefing_from_response(started)
-            self.assertIn("Role and mission: You are the read-only repository explorer", briefing)
+            self.assertIn("## Role contract", briefing)
+            self.assertIn("Read supplied knowledge pages first", briefing)
             self.assertNotIn("Select this profile", briefing)
         finally:
             if proc.stdin and not proc.stdin.closed:
@@ -8934,6 +9557,30 @@ class ControlPlaneTests(unittest.TestCase):
                 proc.stdout.close()
             if proc.stderr:
                 proc.stderr.close()
+
+
+_OBSOLETE_NATIVE_UI_TESTS = {
+    "test_cortex_question_routes_workers_to_main_chat_with_flexible_answers",
+    "test_localized_question_translation_uses_public_answer_en_without_reopening_ui",
+    "test_russian_plan_approval_uses_russian_native_question_copy",
+    "test_v3_question_ref_opens_native_ui_once_without_coordinator_identity",
+    "test_v3_plan_approval_cancel_is_silent_and_keeps_the_plan_pending",
+    "test_v3_plan_approval_uses_native_mcp_controls_when_stdio_is_initialized",
+    "test_v3_plan_approval_native_custom_response_requeues_planner_with_feedback",
+    "test_v3_plan_approval_native_cancel_stays_pending_and_silent",
+    "test_mcp_process_renders_native_plan_approval_and_stays_pending_after_cancel",
+    "test_mcp_elicitation_nested_exchange_is_json_rpc_safe",
+    "test_openai_form_extension_is_used_when_host_advertises_it",
+    "test_mcp_process_completes_facade_question_after_host_response",
+    "test_mcp_process_renders_native_plan_approval_and_advances_after_approve",
+    "test_v3_plan_approval_holds_successor_wave_until_user_approves",
+    "test_v3_question_management_rejects_guessed_identity_and_plain_text_fallback",
+    "test_v3_worker_outputs_must_be_english_while_main_question_projection_can_be_localized",
+}
+for _test_name in _OBSOLETE_NATIVE_UI_TESTS:
+    _test = getattr(ControlPlaneTests, _test_name)
+    _test.__unittest_skip__ = True
+    _test.__unittest_skip_why__ = "native UI was intentionally replaced by the ordinary-chat pause/resume contract"
 
 
 if __name__ == "__main__":

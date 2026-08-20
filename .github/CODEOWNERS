@@ -1,0 +1,8 @@
+# Cortex runtime, release metadata, tests, and documentation require an
+# explicit maintainer review before protected-branch merge.
+* @igovet
+
+/plugins/cortex/ @igovet
+/.github/workflows/ @igovet
+/scripts/ @igovet
+/tests/ @igovet

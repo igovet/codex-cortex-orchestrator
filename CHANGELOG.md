@@ -1,5 +1,92 @@
 # Changelog
 
+## [9.2.5] - 2026-08-20
+
+This source-tree hardening candidate is not a publication or installation
+claim. Its source cachebuster is `9.2.5+codex.20260819205849`; tracked-archive,
+remote, and installed-plugin parity remain separate release gates.
+
+- Add governance schema v10 integrity: immutable artifact-authoritative record
+  bodies, exact normalized scope, linear revision chains, strict JSON,
+  immutable-field triggers, and conflict-safe submission receipts.
+- Bind coordinator capabilities to task/initiative scope, principal, thread,
+  generation, expiry, allowed actions, and revocation; rotate a lost bearer
+  only for the same active identity without persisting plaintext.
+- Add a no-progress circuit breaker that pauses materially identical corrective
+  work for an explicit user strategy without creating a false pass.
+- Make semantic steer impact and worker questions revision/generation-aware,
+  superseding stale questions and downstream evidence.
+- Bound manifest capture by entries, hashed bytes, and elapsed time, reuse a
+  bounded digest cache, and require the 50,000-file benchmark in CI.
+- Add CI timeout/concurrency cancellation and explicit CODEOWNERS review
+  coverage while retaining the Python 3.11/3.12 validation matrix.
+
+## [9.2.4] - 2026-08-19
+
+- Preserve integer relative steps after the server inserts or reorders
+  `governance_activation` and `governance_close`, allowing the public
+  `continue_orchestration` contract to advance automatically governed tasks.
+- Project governance reviewer reports into server-owned, scoped, immutable
+  evidence that binds the consumed report receipt, verified execution,
+  independent reviewer identity, and every required governance obligation.
+- Require canonical `gate_result` envelopes for governance activation and
+  close reviews, and route their canonical blockers through the same bounded
+  corrective-review machinery as ordinary review and close gates.
+- Add deterministic and live C3 fixtures that omit `governance_mode`, prove
+  automatic `full` resolution from complexity, execute both governance review
+  waves, validate typed immutable evidence, and require final handoff.
+- Align immutable governance briefings and the live validator on the canonical
+  `gate_result` envelope, and use a neutral text result in the governance live
+  fixture so documentation policy does not create unrelated rework.
+
+## [9.2.3] - 2026-08-19
+
+- Store only a digest of the coordinator governance capability, issue the raw
+  bearer once, refuse replay reissuance, and scrub/invalidate legacy plaintext
+  capability fields on first registry access.
+- Make `governance_mode=off` fail closed unless C1 supplies an exhaustive
+  boolean assessment of every hard and topology trigger; persist that
+  assessment in the policy snapshot and keep text detection promotion-only.
+- Bind independent initiative-close review to a passed `code_reviewer`
+  `governance_close` attempt, its report reference, and a completed native
+  worker session instead of caller-authored reviewer fields.
+- Enforce sensitive-record retention and access policy at write time, including
+  derived/bounded expiry and optional allowed/redacted field rules, while
+  retaining expired rows in append-only audit history.
+- Preserve an approved policy while a worker replacement is pending, reject
+  conflicting initiative replays across every immutable creation field, and
+  support reviewed project-scope promotion into project policy.
+- Count a closure rework iteration as the next attempt ordinal rather than an
+  extra prior failure, so first/second/later corrective dispatches reliably use
+  `high`/`xhigh`/`max` effort without premature escalation.
+- Remove the pipeline, QA, review, and same-strategy attempt caps. Corrective
+  work now remains unbounded while acceptance or findings require it, raises
+  effort through `high`/`xhigh`/`max`, and selects Terra for eligible ordinary
+  work after two prior failures.
+
+## [9.2.2] - 2026-08-19
+
+- Treat `replan_count` as audit history and retain `replan_limit` only as
+  compatibility metadata, so each new evidence-backed review finding can open
+  another corrective pipeline regardless of task length.
+- Preflight material future-wave approval, rework, and obligation rules before
+  recording attempts or gates, preventing rejected replans from leaving an
+  active Planner gate with approved stale state and no dispatch.
+- Recover legacy stranded active tasks through one safe Planner-first resume
+  payload when no worker is live or pending, and extend the black-box JSON-RPC
+  smoke to prove three replans pass despite a persisted legacy limit of two.
+- Make ignored side effects framework-independent at read-only gates: all are
+  non-blocking and digest-audited, while recognized caches such as `.expo`
+  receive an additional ephemeral classification and unknown future-framework
+  outputs remain visible as unclassified receipts.
+- Add an optional localized free-form field beside every native and fallback
+  plan-approval choice; non-empty text durably requests Planner revision and
+  becomes the replacement plan's feedback instead of silently approving.
+- Make report-link publication an at-most-once completion event: only the first
+  full coordinator read after the matching native worker stop returns a link,
+  and the same user-facing message must summarize what completed and what
+  happens next. Early reads and rereads remain link-free.
+
 ## [9.2.1] - 2026-08-19
 
 - Preserve immutable pipeline obligations across context compaction and future-wave

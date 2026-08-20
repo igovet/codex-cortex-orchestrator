@@ -37,7 +37,7 @@ def main() -> int:
         "relative_v3_mcp_calls": facade,
         "reduction": round(reduction, 4),
         "target_met": facade == 1 + args.waves + args.workers * 4 and facade < baseline,
-        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"],
+        "public_tools": ["start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"],
         "normal_operations": ["start_orchestration", "get_report_template", "record_report", "read_worker_report", "continue_orchestration"],
         "record_report_payload": ["project_root", "task_id", "attempt_id", "profile", "draft_ref"],
         "note": "Call-count contract benchmark; template creation writes one private report file, validation and finalization reuse that file without regenerating its body, durable worker report writes and coordinator reads are included, and native host spawn calls are excluded.",

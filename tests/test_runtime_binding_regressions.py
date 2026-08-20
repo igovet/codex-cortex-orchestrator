@@ -1,6 +1,7 @@
 """Focused regressions for facade-to-runtime composition bindings."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,9 +18,18 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
-        self.ledger = self.project / ".codex" / "cortex"
+        self.host_store = Path(self.temp.name) / "host-private-store"
+        self.host_store.mkdir(mode=0o700)
+        self.host_store.chmod(0o700)
+        self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
+        os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
+        self.ledger = control.ledger_root_path({"project_root": str(self.project)})
 
     def tearDown(self) -> None:
+        if self._previous_host_store is None:
+            os.environ.pop(control.HOST_CONTROL_STORE_ENV, None)
+        else:
+            os.environ[control.HOST_CONTROL_STORE_ENV] = self._previous_host_store
         self.temp.cleanup()
 
     def _started_task(self) -> tuple[Path, dict]:
@@ -47,6 +57,8 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
             "profile": attempt["profile"],
             "action": "ask",
             "question": "Which externally visible behavior is authoritative?",
+            "recommendation": "Preserve the currently documented public behavior unless repository evidence proves it is incorrect.",
+            "recommended_answer": "Preserve the currently documented public behavior.",
         })
         self.assertTrue(asked["ok"], asked)
         self.assertFalse((task_dir / "questions").exists())

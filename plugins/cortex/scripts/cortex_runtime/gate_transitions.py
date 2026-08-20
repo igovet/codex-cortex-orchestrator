@@ -43,6 +43,7 @@ bind_symbols(
         "sync_current_wave",
         "task_manifest_baseline",
         "validate_completion_invariants",
+        "validate_governance_obligation_evidence",
     ),
 )
 
@@ -96,7 +97,10 @@ def _validate_skip(
 ) -> dict[str, Any] | None:
     if outcome != "skipped":
         return None
-    if gate == "close" or (gate == "documentation" and state.get("require_delegation")):
+    governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    if gate == "close" or (gate == "documentation" and state.get("require_delegation")) or (
+        governance.get("effective_mode") == "full" and gate in {"governance_activation", "governance_close"}
+    ):
         return _recoverable(
             state,
             revision_correction,
@@ -308,15 +312,28 @@ def _validate_handoff_and_close(
     if not manifest or not manifest.get("complete"):
         raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
     baseline_manifest = task_manifest_baseline(task_dir, state)
+    baseline_partial = baseline_manifest.get("partial_manifest")
+    if isinstance(baseline_partial, dict) and baseline_partial.get("partial"):
+        raise ValueError(
+            "C2/C3 close requires a complete baseline manifest; "
+            f"capture stopped at {baseline_partial.get('reason') or 'a configured limit'}"
+        )
     current_manifest = capture_project_manifest(
         Path(load_task_definition(task_dir, state)["project_root"]),
         policy=baseline_manifest.get("policy"),
     )
+    current_partial = current_manifest.get("partial_manifest")
+    if isinstance(current_partial, dict) and current_partial.get("partial"):
+        raise ValueError(
+            "C2/C3 close requires a complete final manifest; "
+            f"capture stopped at {current_partial.get('reason') or 'a configured limit'}"
+        )
     if current_manifest["digest"] != manifest.get("current_digest"):
         raise ValueError("project files changed after the final handoff; create a new complete handoff")
 
 
 def _apply_transition(
+    root: Path,
     task_dir: Path,
     state: dict[str, Any],
     params: dict[str, Any],
@@ -374,7 +391,7 @@ def _apply_transition(
     if outcome in {"passed", "skipped"}:
         candidate_wave = sync_current_wave(state)
         if not candidate_wave:
-            validate_completion_invariants(state)
+            validate_completion_invariants(state, artifact_root=root)
             state["status"] = "completed"
     else:
         sync_current_wave(state)
@@ -393,6 +410,15 @@ def _persist_transition(
 ) -> None:
     if completed:
         closed_receipt, _ = reconcile_manifest(task_dir, state, [])
+        if not (closed_receipt.get("comparison") or {}).get("complete", False):
+            # A bounded/partial final capture cannot prove that the terminal
+            # file set is accounted for.  Keep the task out of completed
+            # state; the receipt remains available to the caller as bounded
+            # diagnostic evidence through the reconciliation path.
+            raise ValueError(
+                "cannot complete task with an incomplete final manifest; "
+                "recapture the project after the manifest limit is resolved"
+            )
         closed_paths = list(closed_receipt["comparison"]["changed_paths"])
         closed_receipt["reported_paths"] = closed_paths
         closed_receipt["unaccounted_paths"] = []
@@ -448,7 +474,7 @@ def _closure_rework_target(
     )
     approval_status = str((state.get("plan_approval") or {}).get("status") or "")
     if (
-        gate in {"review", "close"}
+        gate in {"review", "governance_activation", "governance_close", "close"}
         and approval_status in {"approved", "not_required"}
         and "implementation" in obligations
         and not implementation_passed
@@ -537,6 +563,7 @@ def _activate_closure_rework(
     ))
     rework = state.setdefault("closure_rework", {})
     prior = rework.get(gate)
+    iteration = int(prior.get("iteration") or 0) + 1 if isinstance(prior, dict) else 1
     if (
         not isinstance(prior, dict)
         or prior.get("finding_fingerprints") != fingerprints
@@ -549,11 +576,23 @@ def _activate_closure_rework(
             "finding_fingerprints": fingerprints,
             # Rework invalidates the review/close receipt that raised the
             # finding.  Keep its immutable report reference in durable state
+            # as historical provenance, rather than as current gate evidence,
             # so the corrective worker receives the exact defect rather than
-            # a generic implementation assignment.
+            # a generic implementation assignment.  The semantic revision
+            # binds this exceptional handoff to the task meaning it reviewed.
             "source_report_refs": report_refs,
+            "task_revision": int(state.get("task_revision") or 1),
+            "iteration": iteration,
             "at": now(),
         }
+    elif isinstance(prior, dict):
+        prior.update({
+            "status": "rework_required",
+            "target_gate": target_gate,
+            "task_revision": int(state.get("task_revision") or 1),
+            "iteration": iteration,
+            "at": now(),
+        })
     sync_current_wave(state)
     return target_gate
 
@@ -588,6 +627,17 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
         )
         if recovery is not None:
             return recovery
+        if outcome == "passed":
+            validate_governance_obligation_evidence(
+                state,
+                gate,
+                # Light-mode close obligations are intentionally accumulated
+                # across documentation/review/verification gates.  Full
+                # governance-close evidence is also safe to resolve from the
+                # complete immutable receipt set at this boundary.
+                None if gate == "close" else current_attempt_evidence,
+                artifact_root=root,
+            )
         _validate_handoff_and_close(
             task_dir,
             state,
@@ -596,7 +646,8 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             current_attempt_evidence=current_attempt_evidence,
         )
         if outcome in {"passed", "failed"} and (
-            gate in {"review", "close"} or bool(params.get("enforce_canonical_findings"))
+            gate in {"review", "governance_activation", "governance_close", "close"}
+            or bool(params.get("enforce_canonical_findings"))
         ):
             blockers = db_task_findings_blockers(root, state["task_id"])
             if blockers:
@@ -624,7 +675,9 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
                     "state": state,
                     "revision_correction": revision_correction,
                     "gate_rework": True,
-                    "closure_rework": gate in {"review", "close"},
+                    "closure_rework": gate in {
+                        "review", "governance_activation", "governance_close", "close",
+                    },
                     "reason": "gate_blockers",
                     "gate": gate,
                     "target_gate": target_gate,
@@ -632,6 +685,7 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
                     "blockers": actionable,
                 }
         completed, operations = _apply_transition(
+            root,
             task_dir,
             state,
             params,

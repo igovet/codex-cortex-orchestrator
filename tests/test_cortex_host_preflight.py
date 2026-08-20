@@ -232,7 +232,7 @@ class CortexHostPreflightTests(unittest.TestCase):
                 "status": "READY",
             })
 
-    def test_blocks_granular_policy_that_disables_mcp_elicitations(self) -> None:
+    def test_chat_question_flow_does_not_require_mcp_elicitations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             plugin = base / "plugin"
@@ -248,12 +248,11 @@ class CortexHostPreflightTests(unittest.TestCase):
 
             completed = self.run_preflight(environment, "--plugin-root", str(plugin))
 
-            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.returncode, 0)
             payload = json.loads(completed.stdout)
             checks = {item["name"]: item for item in payload["checks"]}
-            self.assertEqual(checks["cortex_mcp_config"]["status"], "FAIL")
-            self.assertIn("mcp_elicitations = true", checks["cortex_mcp_config"]["detail"])
-            self.assertIn("cortex_mcp_config", payload["mcp"]["blocking_checks"])
+            self.assertEqual(checks["cortex_mcp_config"]["status"], "PASS")
+            self.assertNotIn("cortex_mcp_config", payload["mcp"]["blocking_checks"])
 
     def test_reports_missing_codex_independently_when_other_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

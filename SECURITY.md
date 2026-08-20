@@ -2,11 +2,16 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.1` source line. The public
+Security fixes are prepared for the current `9.2.5` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
+
+The 9.2.5 source candidate adds governance schema v11 integrity checks. Its
+exact source cachebuster is `9.2.5+codex.20260819205849`; tracked-release and
+installed-plugin parity remain separate gates, and this source-tree note is not
+a publication or installation claim.
 
 ## Reporting a vulnerability
 
@@ -30,10 +35,15 @@ an existing public tag.
 
 ## Security boundaries
 
-Cortex writes its durable ledger only below the selected project's
-`.codex/cortex` directory. The release excludes runtime state, bytecode,
-symlinks, and secret-prone paths. The installer backs up only authenticated
-legacy targets and refuses unexpected paths or symlink ancestry.
+Cortex writes its durable ledger below the host-private state root, which
+defaults to `~/.codex/cortex/projects/p-<sha256>/`. The host-only
+`CORTEX_HOST_STATE_DIR` override must be private and outside the workspace.
+The release excludes runtime state, bytecode, symlinks, and secret-prone
+paths. A legacy project-local `.codex/cortex` database is moved only by a
+same-filesystem atomic rename after secure ancestry, database, and split-state
+checks; unsafe, non-database, or cross-filesystem state fails closed. The
+installer backs up only authenticated legacy targets and refuses unexpected
+paths or symlink ancestry.
 
 Worker prompts are immutable, read-only briefing artifacts addressed by an
 exact path and SHA-256 digest. Native dispatch carries only the compact
@@ -55,8 +65,49 @@ Reports retain the strict seven-field
 `cortex/report/v1` contract. The sensitive diagnostic log at
 `~/.codex/logs/cortex-tool-errors.jsonl` is permission-protected and capped at
 10 MiB by retaining complete newest records and dropping the oldest records
-first. Secrets, credentials, personal data, and private report contents must
+first. New records retain only value-free input shape metadata (source, byte
+size, bounded top-level field names, and sensitive-field count), never tool
+argument values, report bodies, question text, or user-authored content.
+Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
+
+The governance bearer is returned only with the original successful start
+response. Governance schema v11 persists only SHA-256 verifiers plus
+server-owned claims: exact task/initiative scope, principal, thread, allowed
+actions, generation, expiry, and revocation history. It also persists only a
+verifier for a separate, non-durable coordinator recovery proof. It never
+persists either reusable plaintext value or reissues them on an idempotent
+retry. If the response is lost, recovery is available through the normal
+compatibility projection or an explicit `coordinator` MCP audience, and
+requires the exact same principal/thread/task plus the original recovery
+proof; it rotates a new bearer and proof, revokes the old generation, and
+records a non-secret audit event. An explicit `worker` audience cannot call the
+surface. It cannot recover a bearer for another task or identity. Any legacy
+plaintext bearer or proof is deleted and invalidated on first registry access;
+the affected task fails closed instead of preserving a possibly compromised
+credential. Workers must never receive or persist this coordinator-only bearer
+or recovery proof.
+
+Schema v11 also appends every governance record status and approval-basis
+transition to an immutable, cryptographically linked lifecycle chain. The
+mutable current projection is accepted only when it matches that chain. A
+pre-v10 upgrade deterministically reconciles safe v9 duplicate scope revisions
+and sibling successors before v10 uniqueness constraints; missing scope links,
+cross-scope predecessors, cycles, and other ambiguous graphs fail closed. A
+governance-linked initiative task link cannot be deleted, and an initiative
+cannot become completed or closed until every linked milestone/deliverable
+task has ledger status `completed`.
+
+`governance_mode=off` is fail-closed: C1 callers must submit an exhaustive
+boolean assessment of all documented hard and topology triggers. Keyword
+classification and positive structured evidence may only raise the governance
+floor. Sensitive governance records require an approved exact-scope/type
+policy with bounded `retention_days` and allowed actor roles; record expiry is
+derived or constrained by that policy, optional allowed/redacted field rules
+are enforced before persistence, and expired rows remain only as audit
+history. Independent close evidence is bound to the canonical passed
+`governance_close` code-reviewer attempt, its report reference, and a completed
+native worker session rather than caller-authored reviewer labels.
 
 Each worker-authored report envelope remains bounded to 64 KiB and each
 attempt to 32 reports. The server-owned decision snapshot may enlarge the
@@ -70,12 +121,29 @@ task-wide canonical `resolved_user_decisions` snapshot; replacement briefings
 carry a bounded recent projection so answered intent survives attempt changes.
 
 Worker-facing caller, input, and schema validation failures are structured as
-same-attempt corrections and do not consume recovery budget. Failed work may
-reuse one strategy at most twice and may fail one phase at most three times;
-the third attempt requires a materially different strategy or pipeline replan.
+same-attempt corrections and do not consume recovery budget. Evidence-backed
+pipeline rework has no fixed attempt or same-strategy quota while acceptance,
+verification, or canonical findings remain unresolved. A materially identical
+no-progress signature is a separate liveness boundary: autonomous retries
+pause for an explicit new strategy, preserving the failed gate and evidence
+instead of synthesizing a pass. Recovery must begin with a singleton Planner
+wave and materially change the failed pipeline, strategy, or verification
+contract; infrastructure/environment pauses may instead name a class-matched
+remediation in that Planner wave. Free-text completion/resume reason prose is
+audit-only and cannot release the pause. Repeated failures automatically raise
+reasoning effort and, for eligible workers, escalate routing to Terra instead
+of silently closing the task.
 Only explicit non-retryable integrity, storage, permission, or unavailable
 identity failures terminate that worker attempt. Bounded briefing, report, and
 coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
+
+Manifest capture is fail-closed and bounded by maximum entries, hashed bytes,
+and elapsed time. Budget exhaustion returns a partial result with a reason and
+cannot authorize read-only mutation reconciliation, a complete handoff, or
+terminal close. A bounded stat-keyed digest cache is an optimization only.
+The release workflow requires the 50,000-file benchmark to report
+`target_met: true`; benchmark output is temporary and must not contain
+credentials or enter the release archive.
 
 Required plan approval is bound to a specific plan revision, planner report,
 verified predecessor evidence digest, and semantic future-pipeline digest. A
@@ -84,30 +152,40 @@ approval; no-op or transport-only changes do not invalidate it. A mismatch
 blocks dispatch with recoverable reapproval guidance.
 
 Questions shown to users by the root coordinator must be localized to the
-user's original language. Before native MCP elicitation, the root must publish
-a detailed user-language commentary preamble explaining why the decision is
-needed, its consequences, and the recommendation. That commentary provides
-context only: it must not collect an answer or replace the native elicitation
-control. Worker protocol messages and durable worker reports remain English.
+user's original language. Cortex returns a bounded `cortex/chat-interaction/v1`
+projection; the root renders it as one detailed ordinary final assistant
+message and ends the turn. It must not call a UI, input, approval, or
+elicitation tool. The user's next ordinary message is recorded against the same
+durable interaction before the exact worker resumes. Worker protocol messages
+and durable worker reports remain English.
 Workers return `QUESTION_RECORDED` with a complete handoff containing the
 decision context, full self-contained questions, concrete outcome-based options,
-descriptions, trade-offs, and recommendation. Generic numbered, A/B, or
+descriptions, trade-offs, and recommendation. Every question must name the
+LLM's recommended option IDs or recommended free-text answer and explain the
+rationale. Generic numbered, A/B, or
 recommended/alternative placeholders are rejected; descriptions may be shown
-with rendered options. Localized UI text must not alter canonical question or
+with rendered options. Localized chat projection text must not alter canonical question or
 answer values. Batch projections accept the documented `localized_question`,
 `localized_header`, `localized_options`, and `localized_custom_label` fields,
 plus the compatibility aliases `question`, `header`, `options`, and
-`custom_label`. Choice forms always include optional free-form input in
-addition to server-owned options. Localized custom text is preserved in its
+`custom_label`. Choice questions always permit optional free-form constraints
+in addition to server-owned options. Localized custom text is preserved in its
 original form and withheld from workers until a canonical English translation
 is recorded. Successors may reopen a resolved decision only after an explicit
 current user change.
+
+Question records also bind task revision, plan revision, and attempt strategy
+generation. A material steer supersedes unresolved questions and downstream
+evidence; a stale answer cannot be applied to a newer revision. Quotas are
+scoped to the active revision/generation rather than becoming a permanent
+cross-revision denial of a required blocking question.
 
 The archive boundary is validated from `git archive HEAD`, not the mutable
 working tree. A repository with an unborn `HEAD` has no release archive to
 validate: `--require-tracked` must remain a publication blocker until an
 authorized initial commit exists and the check passes against it.
 
-This repository is a source candidate only. The 9.2.1+codex.20260819110617
-build has not been installed into a user's plugin and is not published or
-tagged.
+This repository is a source candidate only. The prior
+9.2.4+codex.20260819182839 build was not installed from this checkout and is
+not published or tagged here. The current source cachebuster is
+`9.2.5+codex.20260819205849`; installation and publication remain pending.

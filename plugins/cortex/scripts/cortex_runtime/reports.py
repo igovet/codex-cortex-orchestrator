@@ -92,6 +92,289 @@ _REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v2"
 _LEGACY_REPORT_DRAFT_SCHEMA = "cortex/report-draft-file/v1"
 _REPORT_DRAFT_TTL = timedelta(hours=1)
 _REPORT_DRAFT_PAYLOAD_FIELDS = {"report", "scoping", "planning", "gate_result", "closure"}
+_GATE_RESULT_REQUIRED_GATES = {
+    "review", "governance_activation", "governance_close", "close",
+}
+
+
+def _semantic_task_revision(state: dict[str, Any]) -> int:
+    """Return the durable user-meaningful task revision, never state CAS rev."""
+    value = state.get("task_revision") or 1
+    try:
+        revision = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("task state has an invalid semantic task revision") from exc
+    if revision < 1:
+        raise ValueError("task state has an invalid semantic task revision")
+    return revision
+
+
+def _finding_transition_source(
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    report_id: str,
+    report_artifact_ref: str,
+    content_digest: str,
+    transition: str,
+    kind: str | None = None,
+    resolution_route: dict[str, Any] | None = None,
+    corrective_origin_report_ref: str | None = None,
+) -> dict[str, Any]:
+    """Build server-owned provenance for one canonical finding transition.
+
+    ``task_findings`` is the materialized current state, while its bounded
+    ``source_evidence`` history is the lightweight traceability graph used by
+    report intake.  None of these values come from the worker report: the
+    server binds them to the immutable report artifact it just stored.
+    """
+    source: dict[str, Any] = {
+        "transition": transition,
+        "report_id": report_id,
+        "receipt_ref": f"report-receipt-{report_id}",
+        "report_artifact_ref": report_artifact_ref,
+        "report_content_digest": content_digest,
+        "attempt_id": str(attempt["attempt_id"]),
+        "gate": str(attempt["gate"]),
+        "task_revision": _semantic_task_revision(state),
+    }
+    if kind:
+        source["kind"] = kind
+    if corrective_origin_report_ref:
+        source["origin_report_ref"] = corrective_origin_report_ref
+    if resolution_route is not None:
+        source["origin_report_ref"] = resolution_route["origin_report_ref"]
+        source["correction_report_refs"] = resolution_route["correction_report_refs"]
+    return source
+
+
+def _open_finding_origin(
+    finding: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Return the immutable first trusted open event for a finding.
+
+    Subsequent workers may report the same fingerprint as still open, but they
+    must never replace the verifier/gate that owns its resolution authority.
+    """
+    sources = finding.get("source_evidence")
+    if not isinstance(sources, list):
+        return None
+    for source in sources:
+        if not isinstance(source, dict) or source.get("transition") != "opened":
+            continue
+        required = (
+            "report_id", "receipt_ref", "report_artifact_ref", "report_content_digest",
+            "attempt_id", "gate", "task_revision",
+        )
+        if all(str(source.get(field) or "").strip() for field in required):
+            return source
+    return None
+
+
+def _current_correction_report_refs(
+    state: dict[str, Any],
+    *,
+    finding: dict[str, Any],
+    origin_attempt_id: str,
+    origin_report_id: str,
+    rework: dict[str, Any],
+    rerun_context: set[str],
+) -> list[str]:
+    """Return only current corrective reports that the verifier was given.
+
+    The source report is durable historical context after rework invalidates
+    its receipt; it is not the evidence that a correction happened.  A
+    correction ref must be server-bound to this exact fingerprint and origin
+    before a current, passed corrective attempt can supply it to the resolver.
+    This keeps the handoff directional: source finding -> corrective work ->
+    originating verifier.
+    """
+    target_gate = str(rework.get("target_gate") or "")
+    if not target_gate:
+        return []
+    current_revision = _semantic_task_revision(state)
+    corrected_refs = {
+        str(source.get("report_id") or "")
+        for source in finding.get("source_evidence") or []
+        if isinstance(source, dict)
+        and source.get("transition") == "corrective_reported"
+        and source.get("origin_report_ref") == origin_report_id
+        and source.get("gate") == target_gate
+        and int(source.get("task_revision") or 0) == current_revision
+        and str(source.get("report_id") or "")
+    }
+    if not corrected_refs:
+        return []
+    current_evidence = {
+        str(item.get("report_id") or "")
+        for item in state.get("evidence") or []
+        if isinstance(item, dict)
+        and not item.get("invalidated")
+        and str(item.get("report_id") or "")
+    }
+    correction_refs: list[str] = []
+    for candidate in state.get("attempts") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            candidate.get("gate") != target_gate
+            or candidate.get("status") != "passed"
+            or candidate.get("invalidated")
+            or str(candidate.get("attempt_id") or "") == origin_attempt_id
+        ):
+            continue
+        for report_id in candidate.get("report_ids") or []:
+            value = str(report_id or "")
+            if (
+                value in corrected_refs
+                and value in rerun_context
+                and value in current_evidence
+                and value not in correction_refs
+            ):
+                correction_refs.append(value)
+    return correction_refs
+
+
+def _corrective_finding_origins(
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return active rework fingerprints this attempt is allowed to correct.
+
+    This server-only association is written after the immutable report exists.
+    It is intentionally based on the route and scoped context—not on worker
+    prose—so a later verifier can consume an exact correction receipt.
+    """
+    current_revision = _semantic_task_revision(state)
+    context_refs = {str(item) for item in attempt.get("context_report_ids") or []}
+    routes: list[tuple[str, str]] = []
+    for rework in (state.get("closure_rework") or {}).values():
+        if (
+            not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+            or rework.get("target_gate") != attempt.get("gate")
+            or int(rework.get("task_revision") or 0) != current_revision
+        ):
+            continue
+        source_refs = {
+            str(item) for item in rework.get("source_report_refs") or [] if str(item)
+        }
+        if not source_refs or not source_refs.issubset(context_refs):
+            continue
+        for fingerprint in rework.get("finding_fingerprints") or []:
+            value = str(fingerprint or "")
+            if value:
+                routes.extend((value, source_ref) for source_ref in source_refs)
+    return list(dict.fromkeys(routes))
+
+
+def _validate_finding_resolution_transitions(
+    root: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    gate_result: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Fail closed unless the origin verifier reruns against its exact handoff.
+
+    Corrective workers may prove that they changed an artifact, but they do
+    not own the review finding they received.  A finding can become resolved
+    only when the gate that opened it runs again through the server-recorded
+    corrective route and receives the immutable origin report in its scoped
+    predecessor context. ``record_report`` separately enforces the
+    acknowledgement for that full context, so the worker cannot merely name a
+    fingerprint in free text.
+    """
+    if gate_result is None:
+        return {}
+    known = {
+        str(item.get("fingerprint") or ""): item
+        for item in _runtime.db_list_task_findings(root, state["task_id"], include_resolved=True)
+        if isinstance(item, dict)
+    }
+    seen: set[str] = set()
+    resolution_routes: dict[str, dict[str, Any]] = {}
+    current_revision = _semantic_task_revision(state)
+    rerun_context = {str(item) for item in attempt.get("context_report_ids") or []}
+    for proposed in gate_result.get("findings") or []:
+        if not isinstance(proposed, dict):  # Sanitization is authoritative.
+            continue
+        fingerprint = str(proposed.get("fingerprint") or "")
+        if fingerprint in seen:
+            raise ValueError("gate_result must not contain duplicate finding fingerprints")
+        seen.add(fingerprint)
+        if proposed.get("status") != "resolved":
+            continue
+        current = known.get(fingerprint)
+        if current is None or current.get("status") != "open":
+            raise ValueError(
+                "gate_result resolved finding must name one currently open canonical fingerprint"
+            )
+        origin = _open_finding_origin(current)
+        if origin is None:
+            raise ValueError(
+                "gate_result resolved finding has no trusted origin evidence; "
+                "rerun the originating verification gate before closing it"
+            )
+        origin_gate = str(origin["gate"])
+        origin_attempt = str(origin["attempt_id"])
+        origin_report = str(origin["report_id"])
+        try:
+            origin_revision = int(origin["task_revision"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "gate_result resolved finding has invalid trusted origin revision"
+            ) from exc
+        if origin_revision != current_revision:
+            raise ValueError(
+                "gate_result resolved finding comes from a stale semantic task revision; "
+                "re-run the current verification route"
+            )
+        if str(attempt.get("gate") or "") != origin_gate:
+            raise ValueError(
+                "gate_result resolved finding may be published only by a fresh rerun of its origin gate"
+            )
+        if str(attempt.get("attempt_id") or "") == origin_attempt:
+            raise ValueError(
+                "gate_result resolved finding requires a fresh rerun attempt, not its origin attempt"
+            )
+        if origin_report not in rerun_context:
+            raise ValueError(
+                "gate_result resolved finding requires its exact immutable origin report in the rerun handoff"
+            )
+        rework = (state.get("closure_rework") or {}).get(origin_gate)
+        if not isinstance(rework, dict) or rework.get("status") != "rework_required":
+            raise ValueError(
+                "gate_result resolved finding requires an active server-recorded corrective rework route"
+            )
+        if int(rework.get("task_revision") or 0) != current_revision:
+            raise ValueError(
+                "gate_result resolved finding belongs to a superseded corrective route; "
+                "use the current semantic task revision"
+            )
+        expected_fingerprints = {str(item) for item in rework.get("finding_fingerprints") or []}
+        if fingerprint not in expected_fingerprints or origin_report not in {
+            str(item) for item in rework.get("source_report_refs") or []
+        }:
+            raise ValueError(
+                "gate_result resolved finding does not match the active corrective rework route"
+            )
+        correction_refs = _current_correction_report_refs(
+            state,
+            finding=current,
+            origin_attempt_id=origin_attempt,
+            origin_report_id=origin_report,
+            rework=rework,
+            rerun_context=rerun_context,
+        )
+        if not correction_refs:
+            raise ValueError(
+                "gate_result resolved finding requires the current corrective report in the verifier handoff"
+            )
+        resolution_routes[fingerprint] = {
+            "origin_report_ref": origin_report,
+            "correction_report_refs": correction_refs,
+        }
+    return resolution_routes
 
 
 def _report_draft_key(attempt_id: str, draft_ref: str) -> str:
@@ -458,15 +741,17 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 "resume this same worker after the coordinator records the user answer"
             )
         report = sanitize_report_payload(params.get("report"))
-        is_closure_gate = attempt.get("gate") in {"review", "close"}
+        is_closure_gate = attempt.get("gate") in _GATE_RESULT_REQUIRED_GATES
         actor_ids = {str(params.get("principal") or "").strip(), str(params.get("profile") or "").strip()}
         actor_ids.update(str(alias).strip() for alias in _attempt_identity_aliases(attempt))
         closure = sanitize_closure_payload(params["closure"], actor_ids={item for item in actor_ids if item}) if params.get("closure") is not None else None
         gate_result = _runtime.sanitize_gate_result_payload(
             params["gate_result"], actor_ids={item for item in actor_ids if item}
         ) if params.get("gate_result") is not None else None
-        if closure is not None and attempt.get("gate") not in {"review", "close"}:
-            raise ValueError("closure is only valid for review and close attempts")
+        if closure is not None and attempt.get("gate") not in _GATE_RESULT_REQUIRED_GATES:
+            raise ValueError(
+                "closure is only valid for review, governance review, and close attempts"
+            )
         if gate_result is not None and closure is not None:
             compatible = {key: gate_result[key] for key in ("decision", "findings", "verification", "workspace")}
             if compatible != closure:
@@ -477,9 +762,19 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
         if params.get("_require_close_validation"):
             _validate_close_report(task_dir, state, attempt, report)
         if is_closure_gate and gate_result is None and closure is None:
-            raise ValueError("review and close reports require a top-level closure sibling or canonical gate_result")
+            if attempt.get("gate") in {"review", "close"}:
+                raise ValueError(
+                    "review and close reports require the canonical top-level gate_result"
+                )
+            raise ValueError(
+                "governance review reports require the canonical top-level gate_result"
+            )
         if gate_result is None and closure is not None:
             gate_result = {**closure, "failure_class": "product"}
+        # ``closure`` remains accepted only as an input compatibility alias.
+        # Canonical digests, artifacts, reports, and successor prompts contain
+        # exactly one result envelope: gate_result.
+        closure = None
         raw_planning = params.get("planning")
         planning = None
         if raw_planning is not None:
@@ -621,6 +916,42 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                     "draft_path": str(draft_path),
                 }
             return outcome
+        canonical_gate_result = gate_result or closure
+        verification_finding: dict[str, Any] | None = None
+        resolution_routes: dict[str, dict[str, Any]] = {}
+        if canonical_gate_result is not None:
+            missing_checks = canonical_gate_result["verification"]["required_missing"]
+            existing_verification = {
+                str(item.get("fingerprint") or ""): item
+                for item in _runtime.db_list_task_findings(root, state["task_id"], include_resolved=True)
+                if isinstance(item, dict)
+            }.get("verification-required-missing")
+            result_fingerprints = {
+                str(item.get("fingerprint") or "")
+                for item in canonical_gate_result.get("findings") or []
+                if isinstance(item, dict)
+            }
+            if missing_checks or (
+                isinstance(existing_verification, dict)
+                and existing_verification.get("status") == "open"
+                and "verification-required-missing" not in result_fingerprints
+            ):
+                verification_finding = {
+                    "fingerprint": "verification-required-missing",
+                    "severity": "P1" if missing_checks else "P3",
+                    "status": "open" if missing_checks else "resolved",
+                    "blocking": bool(missing_checks),
+                    "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
+                    "details": missing_checks,
+                }
+            transition_validation_result = dict(canonical_gate_result)
+            if verification_finding is not None:
+                transition_validation_result["findings"] = [
+                    *canonical_gate_result["findings"], verification_finding,
+                ]
+            resolution_routes = _validate_finding_resolution_transitions(
+                root, state, attempt, transition_validation_result
+            )
         attempt_count = sum(1 for item in authoritative if item.get("attempt_id") == attempt_id)
         if attempt_count >= _runtime.MAX_REPORTS_PER_ATTEMPT:
             raise ValueError("per-attempt report count quota exhausted")
@@ -654,20 +985,75 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             export_path=f"reports/records/{report_id}.json",
         )
         record["report_artifact_ref"] = report_artifact["artifact_ref"]
-        canonical_gate_result = gate_result or closure
+        resolved_fingerprints = {
+            str(finding.get("fingerprint") or "")
+            for finding in (canonical_gate_result or {}).get("findings") or []
+            if isinstance(finding, dict) and finding.get("status") == "resolved"
+        }
+        current_findings = {
+            str(finding.get("fingerprint") or ""): finding
+            for finding in _runtime.db_list_task_findings(root, state["task_id"], include_resolved=True)
+            if isinstance(finding, dict) and finding.get("status") == "open"
+        }
+        # A corrective report is a first-class, server-bound bridge in the
+        # trace graph. It applies only to the active route whose immutable
+        # source report is actually in this worker's scoped context. A resolver
+        # cannot self-create this receipt in the same report it uses to close.
+        for fingerprint, origin_report_ref in _corrective_finding_origins(state, attempt):
+            finding = current_findings.get(fingerprint)
+            if finding is None or fingerprint in resolved_fingerprints:
+                continue
+            _runtime.db_upsert_task_finding(
+                root,
+                state["task_id"],
+                finding,
+                source=_finding_transition_source(
+                    state,
+                    attempt,
+                    report_id=report_id,
+                    report_artifact_ref=str(report_artifact["artifact_ref"]),
+                    content_digest=content_digest,
+                    transition="corrective_reported",
+                    corrective_origin_report_ref=origin_report_ref,
+                ),
+            )
         if canonical_gate_result is not None:
             for finding in canonical_gate_result["findings"]:
-                _runtime.db_upsert_task_finding(root, state["task_id"], finding, source={"report_id": report_id, "attempt_id": attempt_id})
-            missing_checks = canonical_gate_result["verification"]["required_missing"]
-            verification_finding = {
-                "fingerprint": "verification-required-missing",
-                "severity": "P1" if missing_checks else "P3",
-                "status": "open" if missing_checks else "resolved",
-                "blocking": bool(missing_checks),
-                "summary": "Required verification is missing" if missing_checks else "Required verification is complete",
-                "details": missing_checks,
-            }
-            _runtime.db_upsert_task_finding(root, state["task_id"], verification_finding, source={"report_id": report_id, "attempt_id": attempt_id, "kind": "verification"})
+                transition = "resolved" if finding.get("status") == "resolved" else (
+                    "waived" if finding.get("status") == "waived" else "opened"
+                )
+                _runtime.db_upsert_task_finding(
+                    root,
+                    state["task_id"],
+                    finding,
+                    source=_finding_transition_source(
+                        state,
+                        attempt,
+                        report_id=report_id,
+                        report_artifact_ref=str(report_artifact["artifact_ref"]),
+                        content_digest=content_digest,
+                        transition=transition,
+                        resolution_route=resolution_routes.get(str(finding.get("fingerprint") or "")),
+                    ),
+                )
+            if verification_finding is not None:
+                verification_transition = (
+                    "opened" if verification_finding["status"] == "open" else "resolved"
+                )
+                _runtime.db_upsert_task_finding(
+                    root,
+                    state["task_id"],
+                    verification_finding,
+                    source=_finding_transition_source(
+                        state,
+                        attempt,
+                        report_id=report_id,
+                        report_artifact_ref=str(report_artifact["artifact_ref"]),
+                        content_digest=content_digest,
+                        transition=verification_transition,
+                        kind="verification",
+                    ),
+                )
         receipt = {
             "schema": REPORT_SCHEMA, "receipt_id": f"report-receipt-{report_id}", "report_id": report_id,
             "task_id": state["task_id"], "gate": attempt["gate"], "attempt_id": attempt_id,
@@ -917,14 +1303,16 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "scoping ", "planner scope reports require", "planning ", "planner reports require", "C2/C3 close report",
             "result requires", "result evidence", "result contains unresolved", "result test", "read-only result gate",
             "project files changed during read-only",
-            "review and close reports require a top-level closure sibling",
+            "review and close reports require the canonical top-level gate_result",
+            "governance review reports require the canonical top-level gate_result",
+            "closure ", "gate_result ", "non-pass gate_result ",
         )):
             code = "report_validation_failed"
             outcome = "needs_correction"
             next_action = (
                 "Correct only the report fields named by the diagnostic and retry record_report on this same task "
                 "and attempt. Repeat for every later caller-correctable validation diagnostic until the report is "
-                "accepted; rejected validation calls do not consume the failed phase-attempt budget. Do not guess "
+                "accepted; rejected validation calls do not create a worker failure, and pipeline rework has no attempt budget. Do not guess "
                 "identity, remove required evidence, end the worker, or paste the report into the parent channel."
             )
         else:
@@ -960,6 +1348,11 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
         "report_ref": record["report_id"],
         "receipt_ref": receipt["receipt_id"],
         "summary": redact(record.get("report", {}).get("summary", ""), 500),
+        "report_transport_status": "recorded",
+        "gate_decision": (
+            (record.get("gate_result") or {}).get("decision")
+            if isinstance(record.get("gate_result"), dict) else "reported"
+        ),
         "idempotent": bool(result.get("idempotent")),
         "next_action": "Return only REPORT_RECORDED, report_ref, and at most a two-sentence summary to the parent coordinator.",
     }
@@ -1318,11 +1711,14 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                     "id": "<replace with stable_package_id>",
                     "title": "<replace with package title>",
                     "objective": "<replace with package objective>",
+                    "allowed_paths": ["<replace with narrow project-relative path>"],
                     "depends_on": [],
                     "microtasks": [{
                         "id": "<replace with globally_unique_microtask_id>",
                         "title": "<replace with microtask title>",
                         "objective": "<replace with microtask objective>",
+                        "profile": "<replace with canonical implementation profile>",
+                        "allowed_paths": ["<replace with narrow project-relative path>"],
                         "depends_on": [],
                         "acceptance_criteria": ["<replace with observable acceptance criterion>"],
                         "verification": ["<replace with exact verification>"],
@@ -1330,7 +1726,7 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
                 }],
             }
             required_top_level.append("planning")
-        if gate in {"review", "close"}:
+        if gate in _GATE_RESULT_REQUIRED_GATES:
             template["gate_result"] = {
                 "decision": "pass",
                 "failure_class": "product",
@@ -1615,6 +2011,92 @@ def _worker_report_error_path(message: str) -> str:
     return "$"
 
 
+def _claim_coordinator_report_publication(
+    root: Path,
+    state: dict[str, Any],
+    record: dict[str, Any],
+    report_ref: str,
+    *,
+    complete: bool,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Issue one completion publication only after the native worker stopped.
+
+    Report reads are intentionally repeatable. Human-visible completion
+    publication is not: it is an at-most-once event bound to the durable
+    SubagentStop receipt, and worker-scoped predecessor reads never claim it.
+    """
+    if not complete:
+        return False, "report_read_incomplete", None
+    attempt_id = safe_id(str(record.get("attempt_id") or ""))
+    attempt = next(
+        (
+            item for item in state.get("attempts", [])
+            if isinstance(item, dict) and str(item.get("attempt_id") or "") == attempt_id
+        ),
+        None,
+    )
+    if not isinstance(attempt, dict):
+        return False, "producer_attempt_unavailable", None
+    if attempt.get("invalidated"):
+        return False, "producer_attempt_invalidated", None
+    stopped_reports = {safe_id(str(item)) for item in attempt.get("host_report_refs") or []}
+    if (
+        attempt.get("host_stop_outcome") != "report_recorded"
+        or not attempt.get("host_stopped_at")
+        or report_ref not in stopped_reports
+    ):
+        return False, "native_worker_not_completed", None
+
+    document_key = "report_publication:" + report_ref
+    with state_lock(root):
+        existing = db_get_task_document(root, str(state["task_id"]), document_key)
+        if isinstance(existing, dict):
+            return False, "already_issued", existing
+        publication = {
+            "schema": "cortex/report-publication/v1",
+            "status": "issued",
+            "task_id": str(state["task_id"]),
+            "report_ref": report_ref,
+            "attempt_id": attempt_id,
+            "phase": str(record.get("gate") or "report"),
+            "host_stopped_at": attempt.get("host_stopped_at"),
+            "issued_at": now(),
+        }
+        db_put_task_document(root, str(state["task_id"]), document_key, publication)
+    return True, "native_worker_completed", publication
+
+
+def _report_completion_update(
+    state: dict[str, Any],
+    record: dict[str, Any],
+    report_ref: str,
+) -> dict[str, Any]:
+    report = record.get("report") if isinstance(record.get("report"), dict) else {}
+    phase = str(record.get("gate") or "report")
+    completed_or_skipped = {
+        str(item) for item in [*state.get("completed_gates", []), *state.get("skipped_gates", [])]
+    }
+    remaining = [
+        str(item) for item in state.get("current_pipeline", [])
+        if str(item) != phase and str(item) not in completed_or_skipped
+    ]
+    next_step = (
+        f"Evaluate this completed result, then continue the Cortex pipeline. "
+        f"Next pending pipeline phase: {remaining[0]}."
+        if remaining else
+        "Evaluate this completed result, then ask Cortex to finalize the pipeline; no later phase remains pending."
+    )
+    return {
+        "schema": "cortex/report-completion-update/v1",
+        "report_ref": report_ref,
+        "phase": phase,
+        "worker": redact(str((record.get("producer") or {}).get("profile") or "worker"), 100),
+        "summary": redact(str(report.get("summary") or "Worker completed the delegated phase."), 500),
+        "remaining_phases": remaining,
+        "next": next_step,
+    }
+
+
 def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Read one active-task report by compact ref for a coordinator or successor worker."""
     try:
@@ -1739,15 +2221,38 @@ def read_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "project, and include the exact generated Predecessor review acknowledgement in report.evidence."
             )
         else:
-            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
-            result.update({
-                "report_markdown_path": str(markdown_path),
-                "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
-                "next_action": (
-                    "Publish report_markdown_link verbatim in the main chat before any other Cortex lifecycle call; "
-                    "the link is mandatory coordinator output, not optional metadata."
-                ),
-            })
+            publication_required = False
+            publication_reason = "report_read_incomplete"
+            publication = None
+            if result.get("complete"):
+                # Materialize before claiming the at-most-once event so an
+                # export failure cannot permanently consume publication.
+                markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+                publication_required, publication_reason, publication = _claim_coordinator_report_publication(
+                    root, state, record, report_ref, complete=True,
+                )
+            result["publication_required"] = publication_required
+            result["publication_reason"] = publication_reason
+            if publication_required:
+                completion_update = _report_completion_update(state, record, report_ref)
+                result.update({
+                    "report_markdown_path": str(markdown_path),
+                    "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
+                    "completion_update": completion_update,
+                    "publication": publication,
+                    "next_action": (
+                        "Publish report_markdown_link exactly once in the same main-chat message as a concise "
+                        "user-language summary of completion_update.summary and what happens next from "
+                        "completion_update.next. Never publish a bare link. Then evaluate the report before the "
+                        "next Cortex lifecycle call."
+                    ),
+                })
+            else:
+                result["next_action"] = (
+                    "Use the report content for evaluation only. Do not publish a report link or repeat a prior "
+                    "completion update; publication is allowed only on the first complete coordinator read after "
+                    "the native worker's durable completion."
+                )
         return result
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         message = redact(str(exc), 1000)

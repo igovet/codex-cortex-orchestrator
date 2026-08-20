@@ -4,6 +4,23 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
+## Unreleased / 9.2.5 draft
+
+This is a source-tree hardening candidate, not a published release. Its source
+cachebuster is `9.2.5+codex.20260819205849`. Full-suite, live-governance,
+tracked archive, and installed-plugin results are recorded separately; no
+plugin installation or user `~/.codex` mutation is implied by this section.
+
+The draft scope is governance schema v11 integrity (artifact-authoritative
+bodies, exact scope, linear revisions, strict JSON, immutable-field triggers,
+idempotent submissions, append-only status/approval-basis lifecycle authority,
+deterministic pre-v10 v9 reconciliation, linked milestone/deliverable success,
+and governed-link deletion restrictions), scoped capability claims with
+coordinator-audience same-identity recovery proof and revocation,
+no-progress pause semantics, revision-aware steer and questions,
+bounded/cache-backed manifest capture, the 50,000-file benchmark, and
+CI/CODEOWNERS release evidence.
+
 ## Package contract
 
 - `.agents/plugins/marketplace.json` is the only marketplace manifest.
@@ -11,8 +28,8 @@ approval exists.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.1` (the current candidate is
-  `9.2.1+codex.20260819110617`; installed builds may carry a cachebuster).
+  `9.2.5` (the current source candidate is
+  `9.2.5+codex.20260819205849`; installed builds may carry a cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
   `python3` from `PATH`. The installer, MCP server, and lifecycle hooks use the
@@ -31,10 +48,41 @@ retired nested marketplace, `.codex` state, bytecode, secret-prone filenames
 and credential-store paths, missing public policy documents, private local
 home paths in public files, and explicit release placeholders.
 
+Runtime coordination state is host-private and defaults to
+`~/.codex/cortex/projects/p-<sha256>/`; a private, outside-workspace
+`CORTEX_HOST_STATE_DIR` is the only host override. Legacy project-local
+`.codex/cortex` databases move only through validated same-filesystem atomic
+rename, and unsafe, split, non-database, or cross-filesystem legacy state fails
+closed.
+
 The installer validates `HOME` and `CODEX_HOME` ancestry, preserves the user
 MCP approval override, and creates a collision-safe private backup only before
 changing a configured global default-subagent model. It never inspects or
 removes previous orchestration state or unrelated plugin files.
+
+Governance schema v11 makes immutable content artifacts authoritative, enforces
+exact normalized scope and linear revisions, and fails closed on strict-JSON or
+immutable-field violations. Its append-only lifecycle chain authorizes status
+and approval basis; deterministic v9 conflicts are reconciled before v10
+indexes, while ambiguous graphs fail closed. Linked milestone/deliverable
+tasks must be terminally successful for initiative completion, and governed
+initiative-task links cannot be deleted. Coordinator capabilities are
+short-lived claims bound to task/initiative, principal, thread, generation,
+expiry, and allowed actions; same-identity recovery is available only on the
+explicit coordinator audience and requires the non-durable proof returned with
+authorization, rotating and revoking generations without storing plaintext
+bearers or proofs. Corrective work has no fixed attempt quota, but a materially
+identical no-progress signature pauses autonomous retries for an explicit user
+strategy. Recovery is Planner-first and must materially change pipeline,
+strategy, or verification, or name a matching environment remediation; reason
+prose is audit-only. Material steer classifies the earliest affected gate;
+questions are bound to task/plan revision and strategy generation.
+
+Manifest capture is bounded by entries, hashed bytes, and elapsed time, with a
+bounded digest cache. Partial captures remain diagnostic only and cannot
+authorize mutation reconciliation, handoff, or terminal close. CI requires the 50,000-file manifest benchmark to report
+`target_met: true`; the workflow keeps Python 3.11/3.12, a 30-minute timeout,
+per-ref cancellation, and the existing release gates.
 
 Report finalization uses a private draft file: `get_report_template`
 creates a fully structured JSON file with mode `0600` and returns `draft_ref`,
@@ -53,9 +101,14 @@ Host-sandboxed read-only gates treat ordinary shared-checkout source deltas as
 concurrency evidence. Recognized cross-language test, build, and cache residue
 is retained in the audit receipt; claimed changes, unknown artifacts, and
 arbitrary `.gitignore` outputs remain failures.
-Worker input/schema validation is retryable on the same attempt and consumes no
-recovery budget. Failed work has separate same-strategy and total phase limits
-of two and three; a third attempt requires a different strategy or replan.
+Worker input/schema validation is retryable on the same attempt and creates no
+failed worker outcome. Failed work remains durable escalation evidence but has
+no pipeline or same-strategy attempt limit: effort rises through `high`,
+`xhigh`, and `max`, with Terra selected for eligible ordinary work after two
+prior failures. A materially identical no-progress signature is the separate
+liveness boundary: it pauses autonomous work and requires an explicit new
+strategy without synthesizing a pass. A different strategy is optional for
+ordinary retries, but required to resume that pause.
 Bounded briefing, report, and coordinator
 artifact reads clamp oversized `max_bytes` to 32768; explicit non-retryable
 integrity, storage, permission, or unavailable-identity failures remain
@@ -66,27 +119,39 @@ terminal.
 Run the commands in `docs/project/verification.md`. A release candidate must
 pass the full regression suite, marketplace validation, Python and shell syntax
 checks, cold-boot smoke test, isolated fresh-plugin probe, and the blocking
-tracked-release archive validation.
+tracked-release archive validation. The CI manifest gate must also run
+`python3 -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds
+30` and reject any result without `target_met: true`.
 
 The read-only host gate is separate from source and archive evidence:
 `cortex-host-preflight.py --json` must report `mcp.status=READY` only for the
 same Codex user with a matching enabled `cortex@cortex` registration, approval
-configuration (including MCP elicitation for granular policy), cache-backed
+configuration, cache-backed
 hook trust, and all other prerequisite checks.
 The named `Hetzner_Bots` host remains blocked until an approved Node >=16
 installation source is available; no guessed package-source command is a
 release step. Follow [SSH host troubleshooting](project/ssh-hetzner-troubleshooting.md)
 for the safe same-user sequence and the bounded stopped-worker recovery.
 
-The 9.2.1 source candidate passed the fresh 524-test suite, marketplace
-validation, cold-boot smoke, deterministic fixtures, composite benchmark, and
-isolated fresh-plugin probe. The installed-plugin check, full lifecycle live
-scenario, and tracked archive gate remain separate release checks. The
-installed user plugin is out of scope; no installation or `~/.codex` mutation
-is part of this candidate. The evidence-first pipeline,
+The 9.2.4 source candidate passed the complete 550-test regression suite (16 intentional
+native-UI skips), focused governance/migration and repeated rework escalation
+regressions, cold-boot smoke, deterministic fixtures, marketplace validation,
+the isolated source-mode live `follow_up_partial` task, the isolated
+fresh-plugin probe, syntax/diff checks, no-write installer dry
+run, the composite benchmark, and the source-mode live `automatic_governance`
+C3 lifecycle. That live scenario omitted governance mode/trigger inputs,
+resolved `auto` to `full`, completed the server-added activation and close
+reviews plus implementation/documentation/close, and passed every evidence,
+cleanup, handoff, and no-forcing check. Matching installed-plugin verification
+remains blocked until an explicitly authorized update. The default
+five-scenario live release matrix was not rerun after this fix, and the tracked
+release archive gate remains a separate release check. Host preflight correctly
+reports the user's still-installed 9.2.3 copy as stale relative to this 9.2.4
+source; no installation or `~/.codex` mutation is part of this candidate.
+The evidence-first pipeline,
 scope artifact, plan-basis digests, v1 resume compatibility, 10 MiB
 tail-preserving error-log cap, and Bash 3.2 launcher compatibility require
-focused regression coverage. The 9.2.1 ledger starts from SQLite only: its
+focused regression coverage. The 9.2.4 ledger starts from SQLite only: its
 checksummed migrations operate SQLite-to-SQLite, while pre-SQLite task files
 are left untouched and never become coordination state. Installation preserves
 the user MCP approval override. Targeted development validation, full
@@ -98,7 +163,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.1 release commit only with explicit authorization.
+- Create the Cortex 9.2.5 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

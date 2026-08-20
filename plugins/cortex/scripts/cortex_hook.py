@@ -16,11 +16,13 @@ try:
     from cortex import (
         bind_host_session_from_hook,
         bind_host_worker_from_hook,
+        ledger_root_path,
         finalize_host_worker_stop_from_hook,
     )
 except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open.
     bind_host_session_from_hook = None
     bind_host_worker_from_hook = None
+    ledger_root_path = None
     finalize_host_worker_stop_from_hook = None
 
 try:
@@ -96,7 +98,7 @@ WORKER_CONTEXT = (
     "Never call Cortex lifecycle, pipeline, gate, delegation, or management operations. For a Cortex-managed "
     "dispatch, follow the exact worker identity supplied in that dispatch. Before project work, read only the exact "
     "immutable briefing path supplied by the native bootstrap, verify its read-only mode and SHA-256, and never list "
-    "or directly read any other .codex/cortex path except the exact report draft_path later returned by "
+    "or directly read any other Cortex host-control path except the exact report draft_path later returned by "
     "get_report_template. Include the bootstrap's exact Dispatch briefing reviewed digest "
     "marker in report evidence. If and only if the host filesystem read cannot open that exact path, call public "
     "read_dispatch_briefing with the complete identity/digest tuple from the bootstrap; if its bounded response is incomplete, continue only with its exact next_cursor. You may call public read_worker_report "
@@ -149,14 +151,25 @@ def project_directory(event: dict) -> Path:
         if not candidate.is_dir():
             continue
         for parent in (candidate, *candidate.parents):
-            ledger = reject_symlink_ancestry(parent / ".codex" / "cortex", "Cortex root")
-            if ledger.is_dir():
+            if ledger_root_path is None:
+                break
+            try:
+                ledger = ledger_root_path({"project_root": str(parent)})
+                database = ledger / "cortex.db"
+                info = database.lstat()
+            except (OSError, ValueError):
+                continue
+            if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
                 return parent
     raise ValueError("Cortex project root is unavailable")
 
 
 def root(event: dict) -> Path:
-    return reject_symlink_ancestry(project_directory(event) / ".codex" / "cortex", "Cortex root")
+    if ledger_root_path is None:
+        raise ValueError("Cortex host ledger resolver is unavailable")
+    project = project_directory(event)
+    ledger = ledger_root_path({"project_root": str(project)})
+    return reject_symlink_ancestry(ledger, "Cortex host ledger")
 
 
 def valid_task_id(value: object) -> str | None:
@@ -540,12 +553,23 @@ def report_publication_context(event: dict) -> str | None:
     if str(event.get("hook_event_name")) != "PostToolUse" or str(event.get("tool_name")) != CORTEX_REPORT_TOOL:
         return None
     result = structured_tool_result(event)
+    if not isinstance(result, dict) or result.get("publication_required") is not True:
+        return None
     link = str(result.get("report_markdown_link") or "") if isinstance(result, dict) else ""
     if not link or len(link) > 4096 or "\n" in link or not link.startswith("["):
         return None
+    completion = result.get("completion_update")
+    if not isinstance(completion, dict):
+        return None
+    summary = str(completion.get("summary") or "").strip()
+    next_step = str(completion.get("next") or "").strip()
+    if not summary or not next_step or len(summary) > 1000 or len(next_step) > 1000:
+        return None
     return (
-        "REPORT PUBLICATION REQUIRED: publish this exact report_markdown_link verbatim in the main chat now, before "
-        f"any other Cortex report read or lifecycle call: {link}"
+        "REPORT COMPLETION PUBLICATION REQUIRED: the native subagent durably completed and this is the one allowed "
+        "publication. In one main-chat message, briefly explain in the user's language what completed using only "
+        f"this bounded summary ({summary}), what happens next using this bounded next-step basis ({next_step}), and "
+        f"include this exact report_markdown_link once: {link}. Never publish the link alone or on a later reread."
     )
 
 
@@ -756,7 +780,7 @@ def stopped_worker_after_wait_context(
         f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_report'). Do not wait on, respawn, "
         f"or follow up the stopped native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). "
         f"{inspect}; then submit exactly one result with status='failed', this dispatch_ref, and this reason so Cortex can apply its "
-        "bounded retry policy."
+        "unbounded corrective policy and raise effort after repeated failures."
     )
 
 
@@ -1027,7 +1051,8 @@ def main() -> None:
                         f"Call manage_orchestration(intent='inspect', task_ref={public_ref!r}) exactly once before any other lifecycle, dispatch, or report-read call. "
                         "Treat the returned context_handoff, current pipeline, report refs, and relative step as authoritative. "
                         "Do not call start_orchestration again, replay completed dispatches, or reconstruct state from the transcript. "
-                        "Publish every returned report_markdown_link verbatim in the main chat before the next lifecycle call."
+                        "Publish a report link only when read_worker_report returns publication_required=true; include "
+                        "its completion summary and next-step explanation in the same message, and never republish on reread."
                     )
                 else:
                     context += (

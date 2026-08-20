@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -30,7 +32,13 @@ COLD_BOOT = load_script("cortex_cold_boot_smoke_fixture", "cortex-cold-boot-smok
 LUNA_EVAL = load_script("cortex_luna_high_eval_fixture", "cortex-luna-high-eval.py")
 
 
-class VerificationFixtureContractTests(unittest.TestCase):
+class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.set_up_host_private_control_store()
+
+    def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
+
     def test_fixture_closures_are_valid_and_have_no_open_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"
@@ -38,13 +46,19 @@ class VerificationFixtureContractTests(unittest.TestCase):
             subprocess.run(["git", "init", "-q"], cwd=project, check=True)
             (project / "changed.txt").write_text("fixture\n", encoding="utf-8")
 
-            for factory in (COLD_BOOT.passing_closure, LUNA_EVAL.passing_closure):
+            for factory in (COLD_BOOT.passing_gate_result, LUNA_EVAL.passing_closure):
                 closure = factory(project, "close")
                 self.assertEqual(closure["decision"], "pass")
                 self.assertEqual(closure["findings"], [])
                 self.assertEqual(closure["verification"]["required_missing"], [])
                 self.assertEqual(closure["workspace"]["untracked"], ["changed.txt"])
-                self.assertEqual(cortex.sanitize_closure_payload(closure), closure)
+                closure_compatible = {
+                    key: value for key, value in closure.items() if key != "failure_class"
+                }
+                self.assertEqual(
+                    cortex.sanitize_closure_payload(closure_compatible),
+                    closure_compatible,
+                )
 
     def test_deterministic_fixtures_complete_from_canonical_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -58,10 +72,84 @@ class VerificationFixtureContractTests(unittest.TestCase):
 
         self.assertEqual(cold_boot["status"], "PASS")
         self.assertTrue(cold_boot["dynamic_replan_applied"])
+        self.assertGreaterEqual(cold_boot["dynamic_replan_count"], 3)
+        self.assertGreater(cold_boot["replan_count"], cold_boot["legacy_replan_limit"])
         self.assertTrue(cold_boot["pending_implementation_drop_rejected"])
         self.assertTrue(cold_boot["implementation_phase_seen"])
         self.assertTrue(luna)
         self.assertTrue(all(item["outcome"] == "completed" for item in luna))
+
+    def test_auto_c3_governance_completes_through_public_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "automatic-governance"
+            project.mkdir()
+            (project / "README.md").write_text("# governance fixture\n", encoding="utf-8")
+            started = cortex.start_orchestration(
+                {
+                    "project_root": str(project),
+                    "task": {
+                        "user_request": "Complete a high-impact cross-system governance fixture.",
+                        "complexity": "C3",
+                        "acceptance_criteria": ["The governed fixture completes."],
+                        "verification": ["Verify the governed lifecycle."],
+                        "plan_approval": "auto",
+                    },
+                    "waves": [
+                        {"workers": [{"phase": "implementation"}]},
+                        {"workers": [{"phase": "documentation"}]},
+                        {"workers": [{"phase": "close"}]},
+                    ],
+                }
+            )
+            completed = LUNA_EVAL.finish(project, started)
+            ledger = cortex.ledger_root({"project_root": str(project)})
+            registry = cortex._operation_registry(ledger)
+            task_id = next(iter(registry["tasks"]))
+            _task_dir, state, task = cortex._v3_task_state(ledger, task_id)
+            # Exercise the same full-governance completion validator against
+            # the server-projected evidence that the public lifecycle
+            # produced.  This guards the boundary between automatic C3
+            # governance evidence and the v10 ledger hardening contract.
+            cortex.validate_governance_obligation_evidence(
+                state,
+                "governance_close",
+                artifact_root=ledger,
+            )
+
+        self.assertEqual(started["requested_mode"], "auto")
+        self.assertEqual(started["effective_mode"], "full")
+        self.assertEqual(started["step"], 1)
+        self.assertEqual(completed["outcome"], "completed")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(task["governance"]["reasons"], ["complexity:C3"])
+        self.assertEqual(
+            state["completed_gates"],
+            [
+                "governance_activation",
+                "implementation",
+                "documentation",
+                "governance_close",
+                "close",
+            ],
+        )
+        governance_attempts = {
+            item["gate"]: item
+            for item in state["attempts"]
+            if item.get("gate") in {"governance_activation", "governance_close"}
+        }
+        self.assertEqual(set(governance_attempts), {"governance_activation", "governance_close"})
+        self.assertTrue(all(item["agent"] == "code_reviewer" for item in governance_attempts.values()))
+        self.assertTrue(all(item["status"] == "passed" for item in governance_attempts.values()))
+        governance_evidence = [
+            item
+            for item in state["evidence"]
+            if item.get("gate") in {"governance_activation", "governance_close"}
+        ]
+        self.assertEqual(len(governance_evidence), 2)
+        self.assertTrue(all(item["artifact_immutable"] for item in governance_evidence))
+        self.assertTrue(all(item["artifact_verified"] for item in governance_evidence))
+        self.assertTrue(all(item["verified_execution"] for item in governance_evidence))
+        self.assertTrue(state["handoff_created"])
 
     def test_live_prompt_uses_the_ordered_profile_report_contract(self) -> None:
         fields = list(cortex.REPORT_FIELDS)
@@ -70,8 +158,9 @@ class VerificationFixtureContractTests(unittest.TestCase):
             f"exactly {len(fields)} report fields: {', '.join(fields)}",
             prompt,
         )
-        self.assertIn("separate compatible top-level closure sibling", prompt)
-        self.assertIn("both a top-level gate_result", prompt)
+        self.assertIn("exactly one canonical top-level gate_result", prompt)
+        self.assertIn("Do not add the legacy closure alias", prompt)
+        self.assertIn("For every review, governance review, or close dispatch", prompt)
         self.assertIn(f"strict {len(fields)}-key report", prompt)
         self.assertIn("Treat a native child as successful only", prompt)
         self.assertIn("status=failed, the exact dispatch_ref", prompt)
@@ -111,6 +200,30 @@ class VerificationFixtureContractTests(unittest.TestCase):
         self.assertIn("embedded Approve action arguments", prompt)
         self.assertIn("Only after it returns outcome=awaiting_plan_approval", prompt)
         self.assertIn("never call approval before that continue", prompt)
+
+    def test_automatic_governance_live_prompt_does_not_force_governance(self) -> None:
+        prompt = LUNA_EVAL.live_prompt(
+            "automatic_governance", Path("/workspace/cortex-live")
+        )
+        contract = prompt.split("<cortex_task_contract>", 1)[1].split(
+            "</cortex_task_contract>", 1
+        )[0]
+        self.assertIn('"complexity":"C3"', contract)
+        self.assertIn("result.txt", contract)
+        self.assertNotIn("result.md", contract)
+        self.assertNotIn("governance_mode", contract)
+        self.assertNotIn("governance_triggers", contract)
+        self.assertNotIn("risk_triggers", contract)
+        self.assertIn("server default auto mode must resolve solely from C3 complexity", prompt)
+        self.assertIn("requested_mode=auto", prompt)
+        self.assertIn("effective_mode=full", prompt)
+        self.assertIn("governance_activation is first", prompt)
+        self.assertIn("governance_close is immediately before close", prompt)
+        self.assertIn("Do not call manage_governance", prompt)
+        self.assertIn("do not call manage_orchestration", prompt)
+        self.assertIn("strict state machine for all five sequential server waves", prompt)
+        self.assertIn("the only legal next tool call is every returned dispatch.call", prompt)
+        self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
 
     def test_targeted_live_prompts_carry_complete_start_and_follow_up_contracts(self) -> None:
         compact = LUNA_EVAL.live_prompt("compact_parallel", Path("/workspace/cortex-live"))

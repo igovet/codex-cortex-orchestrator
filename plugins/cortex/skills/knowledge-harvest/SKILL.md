@@ -61,7 +61,8 @@ coverage, page-content, and validation contracts are mandatory.
    independently compare the fresh source inventory with the coverage matrix
    and written pages. Any unmapped surface, placeholder, thin page, broken
    source link, undocumented failure path, or unsupported coverage claim
-   fails review and triggers bounded documentation rework.
+   fails review and triggers unbounded documentation rework until the gap is
+   resolved or an explicit non-retryable blocker is recorded.
 7. **Close:** Dispatch `build_verification` to check links, paths, generated
    blocks, formatting, repository-native documentation checks, and the final
    coverage statement without editing files.

@@ -56,7 +56,7 @@ def bound_symbol(component: str, name: str) -> Any:
     Most runtime services copy their declared dependencies at import time with
     :func:`bind_symbols`.  This narrow accessor is reserved for host seams
     which are intentionally replaceable at runtime (for example the MCP
-    elicitation adapter used by tests and host integrations).  It keeps that
+    transport adapter used by tests and host integrations).  It keeps that
     behavior without importing the executable facade from a runtime module.
     """
     if _bindings is None:

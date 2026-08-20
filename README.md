@@ -13,10 +13,10 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.1-7c3aed" alt="Cortex 9.2.1" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.5-7c3aed" alt="Cortex 9.2.5" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
-        <img src="https://img.shields.io/badge/Ledger-cortex%2Fv8-0f766e" alt="cortex/v8 ledger" />
+        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v11-0f766e" alt="task schema v8 and governance schema v11" />
       </p>
     </td>
   </tr>
@@ -57,9 +57,8 @@ Then complete the setup end to end:
    plugin (or use the README's documented remove/reinstall update flow) with:
    codex plugin add cortex@cortex --json
 4. Preserve existing ~/.codex/config.toml settings and add or correct every
-   Cortex-required setting documented in the README: multi_agent_v2 = true,
-   agents.default_subagent_model = "gpt-5.6-luna", and, if this installation
-   uses granular approvals, approval_policy.granular.mcp_elicitations = true.
+   Cortex-required setting documented in the README: multi_agent_v2 = true and
+   agents.default_subagent_model = "gpt-5.6-luna".
    Keep user approval review enabled; do not enable Ask for me / Approve for me.
 5. Complete the required Cortex hook-trust flow and run the README's relevant
    verification checks. Start a new Codex task if the README requires it.
@@ -89,6 +88,7 @@ choice is required, explain exactly what is needed and ask me before proceeding.
 - [How orchestration works](#how-orchestration-works)
 - [Profiles and model routing](#profiles-and-model-routing)
 - [Developing Cortex](#developing-cortex)
+- [Support Cortex 💜](#support-cortex-)
 - [Verification and diagnostics](#verification-and-diagnostics)
 
 ---
@@ -240,17 +240,10 @@ Marketplace installation does not replace these global Codex settings. Verify
 both values yourself before starting the first Cortex task and after changing
 Codex configuration.
 
-If you choose Codex's granular approval policy, this additional setting is
-also required for Cortex:
-
-```toml
-approval_policy = { granular = { mcp_elicitations = true } }
-```
-
-Keep any other granular approval settings in the same table. Cortex uses
-host-native MCP elicitation for durable worker questions; when this value is
-`false` or missing, Cortex host-preflight and `sync-cortex.sh --check` report
-the configuration as not ready.
+Cortex questions and plan approval use ordinary chat messages and do not
+require or invoke MCP form elicitation. The coordinator sends one detailed
+final assistant message, ends the turn, and resumes the same durable task when
+the user replies in the next ordinary message.
 
 You may also approve all tools exposed by the local Cortex MCP server:
 
@@ -590,25 +583,54 @@ transitions.
 ```mermaid
 flowchart LR
     U["User goal"] --> R["Root coordinator"]
-    R --> S["Scope (C3 / harvest)"]
-    S --> D["Discover"]
-    R --> D
-    D --> A["Design gates"]
-    A --> P["Final Planner"]
-    P --> W1["Specialist 1"]
-    P --> W2["Specialist 2"]
-    P --> W3["Specialist N"]
-    W1 --> B["Reports and evidence"]
-    W2 --> B
-    W3 --> B
-    B --> G{"Gate passed?"}
-    G -- "no" --> P
-    G -- "decision needed" --> Q["Question for the user"]
-    Q --> W1
-    G -- "yes" --> N["Next wave"]
-    N --> C["Verified completion"]
-    R <--> L[("Local SQLite ledger")]
+    R --> M{"Governance resolver<br/>mode, complexity, and qualified triggers"}
+
+    M -- "minimal or light" --> P["Resolved task pipeline"]
+    M -- "full" --> GA["governance_activation<br/>code_reviewer"]
+    GA --> P
+
+    P --> W["Ordered worker waves"]
+    W --> B["Immutable reports and evidence"]
+    B --> G{"Gate result"}
+    G -- "rework" --> P
+    G -- "user decision" --> Q["Ordinary-chat user question"]
+    Q --> P
+    G -- "passed: minimal / light" --> C["Final close and handoff"]
+    G -- "passed: full" --> GC["governance_close<br/>code_reviewer"]
+    GC --> C
+
+    R <--> L[("Host-private SQLite ledger<br/>task v8 + governance v11")]
 ```
+
+### Governance resolution
+
+Before dispatching the resolved pipeline, Cortex evaluates the requested
+governance mode, task complexity, and qualified risk or topology signals. The
+requested mode is `auto`, `required`, or `off`; the effective mode is
+`minimal`, `light`, or `full`.
+
+| Request and context | Effective mode | Result |
+| --- | --- | --- |
+| `auto`, C1, and no qualified signal | `minimal` | Runs the resolved task pipeline with verification evidence and an audit receipt. |
+| `auto`, C2, and no qualified signal | `light` | Retains the resolved task pipeline and adds policy, decision/assumption/risk, process-reflection, and verification obligations at close. |
+| `auto` with C3 or a qualified signal | `full` | The server inserts independent governance review before ordinary work and immediately before final close. |
+| `required` at any complexity | `full` | The server applies the same full-governance lifecycle. |
+| `off` | `minimal` only for C1 with a complete Boolean assessment of every documented trigger; C2/C3 or any triggered risk is rejected. |
+
+Qualified signals include security, privacy, credentials or sensitive data,
+destructive work, migrations, external actions, public-contract,
+authorization, or integrity work, and explicit multi-repository, linked-task,
+long-lived-lane, conflicting-resource, or multi-session topology. Counts
+alone do not raise the governance mode.
+
+In `full` mode, the server owns the two additional read-only review gates:
+`governance_activation` runs first, and `governance_close` runs immediately
+before final `close`. Both are assigned to `code_reviewer`; the server binds
+their evidence to immutable artifacts and report receipts. The close review
+also requires the matching linked task, report, and completed independent
+native reviewer session. The coordinator cannot omit either gate from a
+full-governance pipeline. For the record model, capability boundary, and
+integrity rules, see the [orchestration ledger documentation](docs/features/orchestration-ledger/index.md).
 
 ### The orchestration cycle
 
@@ -628,7 +650,8 @@ flowchart LR
    discover → architecture → plan → documentation → review → close`.
    Architecture, database architecture, and UX gates precede plan; security,
    performance, and accessibility remain post-implementation audits before
-   review.
+   review. These are base routes: the governance resolver may wrap any route
+   with the full-mode review gates described above.
 4. **Precise dispatch.** Every worker receives a profile, model, reasoning
    effort, allowed paths, ownership, acceptance criteria, and verification
    responsibilities.
@@ -642,6 +665,10 @@ flowchart LR
    `planning`. The server also attaches the task-wide
    `resolved_user_decisions` snapshot. These siblings do not alter the seven
    worker-authored report fields.
+   A report read is repeatable, but its user-facing completion link is not:
+   only the first complete coordinator read after the matching native worker
+   stop may publish the link. That same message summarizes what completed and
+   what happens next; early reads and rereads remain link-free.
 7. **Fresh approvals and adaptive replanning.** Required approval is available
    only after the final plan. The review records the plan revision, planner
    report reference, verified-predecessor digest, and semantic future-pipeline
@@ -649,18 +676,57 @@ flowchart LR
    resets approval to `pending_plan`, and requires a replacement Planner plus a
    new approval. No-op and transport-only changes do not invalidate approval;
    stale basis digests block dispatch with recoverable reapproval guidance. The
-   approval decision is an interactive **Approve/Cancel** control: initialized
-   stdio hosts receive native MCP elicitation, while direct callers receive a
-   `cortex/plan-approval/v1` interaction containing exactly those two actions
-   and their embedded `manage_orchestration` arguments. Button submissions are
-   bound to an opaque request ID; cancellation stays silent and pending, and a
-   host that cannot render the interaction never implies approval.
+   approval decision is a detailed `cortex/chat-interaction/v1` ordinary-chat
+   hold. The message summarizes the objective, work packages, paths,
+   dependencies, verification, risks, remaining phases, all
+   approve/revise/cancel outcomes, and the LLM-recommended response with its
+   rationale. The turn then ends. The next user message is bound to the opaque
+   request ID; revision text is preserved verbatim, cancellation stays pending,
+   and silence never implies approval.
 8. **Automatic documentation sync.** When completed work changes durable
    behavior, interfaces, architecture, commands, decisions, or ownership,
    Cortex dispatches a technical writer to update the affected project and
    feature documentation before closing the task.
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
+
+### Unreleased / 9.2.5 hardening draft
+
+The current source-tree hardening draft extends governance with schema v11
+integrity guarantees. Governance record bodies are read from verified
+immutable content artifacts; exact normalized scope, task/initiative links,
+linear revisions, strict JSON, immutable-field triggers, and idempotent
+submission receipts fail closed on corruption or replay conflict. Schema v11
+adds an append-only lifecycle chain for status and approval-basis authority,
+requires terminal success for linked milestone/deliverable tasks before an
+initiative can complete, and prevents deletion of initiative-task links that
+are referenced by governance records. Pre-v10 upgrades deterministically
+reconcile safe v9 duplicate revisions/sibling successors and fail closed on
+ambiguous scope or predecessor graphs. Coordinator capabilities are
+short-lived scoped claims carrying principal, thread, generation, expiry, and
+allowed actions. A lost bearer can be rotated on the normal compatibility or
+explicit coordinator audience with the same active identity and the
+non-durable recovery proof returned by authorization; old generations are
+revoked and plaintext is never stored. An explicit worker audience cannot call
+the recovery surface.
+
+Corrective work remains open-ended while acceptance or findings require work,
+but a repeated materially identical no-progress signature pauses autonomous
+retries for an explicit user strategy without producing a false pass. The
+pause can be released only by a Planner-first recovery whose downstream
+pipeline, strategy, or verification contract materially changes, or whose
+Planner wave names a class-matched infrastructure/environment remediation;
+free-text reason prose is retained only as audit evidence. Material steer
+classifies the earliest affected gate and invalidates downstream proof;
+worker questions are bound to task/plan revision and strategy generation.
+Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
+reuse a bounded digest cache. A partial capture remains diagnostic evidence
+only: it cannot authorize read-only mutation reconciliation, a handoff, or
+terminal close. CI runs the 50,000-file manifest benchmark and requires
+`target_met: true`. The exact 9.2.5 cachebuster and full release/live results
+remain pending until the candidate is committed and validated. The
+repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
+for runtime, release workflow, scripts, tests, and documentation changes.
 
 ### Why this is more reliable than ordinary multi-agent work
 
@@ -702,9 +768,11 @@ plugins/cortex/
 
 The public MCP surface is deliberately small. The coordinator uses
 `start_orchestration`, `continue_orchestration`, `manage_orchestration`, and
-reads predecessor reports with `read_worker_report`. Workers use
+the coordinator-only `manage_governance` surface; it reads predecessor reports
+with `read_worker_report`. Workers use
 `read_dispatch_briefing`, `worker_question`, `get_report_template`,
-and `record_report`.
+`record_report`, and scoped `read_worker_report` for explicitly granted
+predecessor refs.
 
 Worker briefings carry the verified transitive predecessor frontier, not inline
 report bodies or the entire task history. A passed report covers only the exact
@@ -716,31 +784,53 @@ retain the newest eight summaries; full history remains in SQLite.
 Material worker questions are handed off with more than a bare reference:
 `QUESTION_RECORDED` is followed by why input is needed, full self-contained
 questions, concrete outcome-based options, descriptions, trade-offs, and a
-recommendation. Before calling native MCP elicitation, the root publishes a
-detailed commentary preamble in the user's language. That message explains the
-decision but must not collect or replace the native answer. Localized batch
+recommendation. Cortex returns one detailed ordinary-chat projection in the
+user's language; the root sends it as the final assistant message and ends the
+turn without calling any UI/input/approval/elicitation tool. The user's next
+message is recorded before the same worker resumes. Every question explicitly
+names the option(s) the LLM recommends—or a concrete recommended text answer—
+and explains why. Localized batch
 items use `localized_question`, `localized_header`, `localized_options`, and
 `localized_custom_label`; `question`, `header`, `options`, and `custom_label`
 remain compatibility aliases. Generic numbered, A/B, or
 recommended/alternative placeholders are rejected, and option descriptions
-may be rendered with the native choices. Every choice form also renders an
-optional free-form field. Its text is preserved beside the stable option IDs
+may be rendered with the choices. Every choice also permits optional free-form
+constraints. That text is preserved beside the stable option IDs
 and translated to canonical English before a worker resumes when necessary.
 
 The complete worker assignment is stored in an immutable briefing protected by
 a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
 exact `dispatch_ref`, briefing path, and digest; the worker reads and verifies
-that briefing before project work. Worker Briefing v2 JSON-serializes every
+that briefing before project work. Worker Briefing v3 JSON-serializes every
 task-controlled assignment value inside one explicitly untrusted data block;
-the surrounding authority, role playbook, phase overlay, evidence rules, and
-worker protocol remain fixed instructions. Ordinary profiles do not carry
+the surrounding authority, bounded role contract, optional mode overlay,
+evidence rules, and worker protocol remain fixed instructions. Its byte budget
+is enforced before dispatch. Ordinary profiles do not carry
 harvest specialization; exact harvest routes add a conditional mode overlay.
-A worker never browses
-unrelated `.codex/cortex` coordination data. Canonical state is stored in the
-local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
-tasks without that field resume their persisted pipeline unchanged.
+A worker never browses unrelated Cortex coordination data. Canonical state is
+stored in the host-private SQLite `cortex/v8` task ledger plus its additive v11
+governance ledger. By default the ledger lives below
+`~/.codex/cortex/projects/p-<sha256>/`; `CORTEX_HOST_STATE_DIR` is a host-only
+override and must resolve to a private directory outside the workspace. A
+legacy project-local `.codex/cortex` database is eligible only for a
+same-filesystem atomic rename after ancestry, database, and split-state checks;
+unsafe, non-database, or cross-filesystem legacy state fails closed.
+New tasks use pipeline contract v2; active v1 tasks without that field resume
+their persisted pipeline unchanged.
 
-The eight public MCP tools are the v5 surface. Workers build from
+The v5 registry contains nine MCP operations. An unspecified or unknown
+transport audience uses a compatibility projection exposing all nine, so an
+ordinary Desktop launch makes `$cortex:orchestrator` operational. Explicit
+`worker` and `coordinator` audiences remain strict five-operation projections:
+the worker projection contains `worker_question`, `get_report_template`,
+`record_report`, `read_dispatch_briefing`, and scoped `read_worker_report`; the
+coordinator projection contains `start_orchestration`,
+`continue_orchestration`, `manage_orchestration`, `manage_governance`, and
+scoped `read_worker_report`. The audience is fixed for the stdio process and
+cannot be selected through
+JSON-RPC initialization or tool arguments. Coordinators also use the server-owned `manage_governance` surface for initiatives, dependencies,
+immutable governance records, active snapshots, constrained exceptions, and
+coordinator-approved policy promotion. Workers build from
 `get_report_template`, which creates a private fully structured JSON file and
 returns its short `draft_ref` and absolute `draft_path` without echoing the
 body. A worker fills that file and calls `record_report` with the same
@@ -753,10 +843,14 @@ or storage blockers are terminal. Successful finalization revalidates the
 current draft and state, commits the durable report atomically, and deletes the
 draft post-commit. Bounded briefing, report, and coordinator artifact reads
 clamp oversized `max_bytes` requests to 32768 and continue with cursors.
-Failed work has two independent limits: at most two failures may reuse one
-strategy, while a phase may fail at most three times total. Before a third phase
-attempt, the coordinator supplies a materially different `next_strategy` or
-replans the future pipeline.
+QA, review, implementation, and corrective pipeline rework are unbounded while
+acceptance criteria, required verification, or canonical findings remain
+unresolved. Failure counts are audit and routing inputs, never a completion
+shortcut. Cortex raises the next worker's reasoning effort to `high`, `xhigh`,
+then `max`; after two unresolved attempts it selects Terra for ordinary
+adaptive/deep work unless the user explicitly chose another model. An optional
+`next_strategy` or evidence-backed replan may improve the approach but is never
+required merely to continue fixing defects.
 Drafts expire after one hour and a new template supersedes
 the prior attempt draft. Read-only
 workers do not claim source changes observed in the shared checkout as their
@@ -772,6 +866,25 @@ coordinator; worker protocol messages and durable reports remain English.
 Sensitive MCP exceptions are appended to
 `~/.codex/logs/cortex-tool-errors.jsonl`; the writer retains complete newest
 records and caps the file at 10 MiB by dropping oldest records first.
+
+Governance authorization is returned once by the original successful start;
+the project ledger stores only its SHA-256 digest and a separate digest for a
+non-durable coordinator recovery proof. An idempotent start retry does not
+recover or reissue either value. Capability recovery is available through the
+compatibility or explicit coordinator MCP audience and requires the exact task,
+principal, thread, and original recovery proof; the proof rotates with the
+bearer and is never durable. An explicit worker audience cannot call this
+surface. Legacy plaintext capabilities are removed and invalidated on first
+registry access. Explicit
+`governance_mode=off` is accepted only for C1 after an exhaustive boolean
+assessment of every documented hard and topology trigger; prose detection may
+raise the floor but can never authorize `off`. Sensitive governance records
+require an approved exact-type policy with `retention_days` and
+`allowed_roles`; the server derives or bounds `expires_at`, enforces optional
+field/redaction lists, and retains expired rows only in append-only audit
+history. Initiative close review is accepted only when its immutable artifact
+resolves to a passed `code_reviewer` `governance_close` attempt, matching report
+reference, and completed independent native worker session.
 
 ---
 
@@ -808,7 +921,8 @@ Cortex selects a model based on task type, complexity, and the cost of failure:
 | Deep / Terra | `high` | `high` | `xhigh` |
 | Security / Sol | minimum `medium` | minimum `high` | minimum `xhigh` |
 
-Automatic `max` effort is limited to bounded C3 Luna work. Risk also raises the
+Automatic `max` effort is used for C3 adaptive Luna work and after three or
+more unresolved corrective failures on eligible work. Risk also raises the
 minimum effort: low/moderate → `medium`, high → `high`, and critical → `xhigh`.
 If Luna is unavailable on the host, Cortex may use a hidden Terra fallback, but
 it never labels Terra as Luna and never creates a visible sidebar task without
@@ -822,10 +936,12 @@ the prior plan, approval, and basis digests in history. This makes a changed
 specialist, dependency, path, acceptance criterion, or verification step
 auditable without silently reinterpreting a completed wave.
 
-The root coordinator model is an operator choice separate from worker routing.
-Luna `xhigh` is the practical default for multi-wave orchestration. Terra is a
-better fit when reports conflict, strategy is unclear, or a routing/completion
-mistake would be expensive.
+The root coordinator (the conductor for the orchestration) is an operator
+choice separate from worker routing. Use **Terra** with `high` reasoning effort
+as the default. Raise the conductor to **Terra** with `xhigh` only for very
+large or unusually tangled tasks—for example, when reports conflict, strategy
+is unclear, or a routing/completion mistake would be expensive. This setting
+does not change Cortex's per-worker model policy.
 
 ---
 
@@ -914,6 +1030,16 @@ compatibility.
 
 ---
 
+## Support Cortex 💜
+
+Cortex remains open source, and if it is useful to your work, you can support its continued
+development and maintenance through [GitHub Sponsors](https://github.com/sponsors/igovet).
+Sponsorship helps fund testing and experimentation with multi-agent orchestration, plus the
+infrastructure, tooling, documentation, skills, and MCP integrations that make it better.
+Sponsorship is entirely optional—a simple way to help sustain the project.
+
+---
+
 ## Verification and diagnostics
 
 Run the relevant checks before publishing a change:
@@ -923,6 +1049,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 python3 scripts/validate-cortex-marketplace.py
 python3 scripts/cortex-cold-boot-smoke.py
 python3 scripts/cortex-luna-high-eval.py
+python3 -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30
 python3 -m py_compile plugins/cortex/scripts/cortex.py plugins/cortex/scripts/cortex_hook.py
 bash -n scripts/sync-cortex.sh
 ./scripts/sync-cortex.sh --check
@@ -933,7 +1060,29 @@ does **not** install or update the user's plugin:
 
 ```bash
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
+# Prove C3 automatically activates and completes full governance.
+python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
+# Narrow live handoff smoke: a deterministic public-API source prelude opens
+# the finding; real Documentation and fresh Review workers must resolve it
+# through the exact handoff route (hard 300 s).
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+# Full C2 real-host lifecycle: opening Review → corrective Documentation →
+# fresh Review → Close → completed server-owned handoff (hard 1800 s).
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
 ```
+
+The full source-mode scenario is a release-gate candidate only on a host that
+can provision strict MCP access **per native process**: the parent may receive
+an explicit `coordinator` endpoint, while every spawned child may receive the
+`worker` endpoint. An ordinary static launch uses the nine-operation
+compatibility projection, so `$cortex:orchestrator` works even when the host
+does not provide per-agent audiences. Strict per-agent provisioning remains
+the higher-assurance integration check. Because
+the source command uses `--ignore-user-config`, it also deliberately does not
+load trusted Cortex hooks and therefore does not claim durable binding of a
+native child ID or model to a Cortex attempt. That higher-assurance hook and
+per-agent MCP provisioning are separate host-integration checks; neither
+source-mode command installs or changes the user's plugin.
 
 Run the read-only preflight on a local or SSH host with:
 

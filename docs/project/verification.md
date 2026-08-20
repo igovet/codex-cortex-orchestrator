@@ -9,13 +9,23 @@ python3 scripts/cortex-luna-high-eval.py
 # Uses this checkout as the MCP source; it does not install, reinstall, or update Cortex.
 # Fast source-mode transport/follow-up probe used during development.
 python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
+# Narrow real-host finding handoff: a public-API source prelude opens the review
+# finding; real corrective documentation -> fresh review -> resolved.
+# This scenario has a hard 300-second deadline; --live-timeout-seconds may only reduce it.
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+# Full C2 real-host lifecycle: real opening Review → Documentation → fresh
+# Review → Close → completed final handoff (hard 1800 s).
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
 # Full lifecycle live scenario for a release gate.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
+# Automatic C3 governance lifecycle: no governance mode is supplied by the caller.
+python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
 # Optional per-scenario timeout override (10..7200 seconds; default 1800).
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --live-timeout-seconds 900
 # Optional, explicit retention of sanitized failure metadata under /tmp.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential --retain-failure-metadata
 python3 scripts/cortex-composite-benchmark.py --workers 8 --waves 5
+python3 -B scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30
 python3 scripts/probe-fresh-cortex-plugin.py
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py
 python3 scripts/validate-cortex-marketplace.py
@@ -27,21 +37,115 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_cortex_invariants
 python3 scripts/verify-cortex-release.py --require-tracked
 ```
 
+## Focused finding-handoff regression
+
+Run this short deterministic public-transport subset while working on report,
+finding, rework, or briefing contracts. It does not require a Codex model,
+plugin install, or live host session:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -m unittest -v \
+  tests.test_finding_transitions \
+  tests.test_live_finding_rework_contract \
+  tests.test_cortex_control.ControlPlaneTests.test_closure_finding_is_canonical_across_review_close_and_resolved_rework \
+  tests.test_cortex_control.ControlPlaneTests.test_corrective_documentation_cannot_resolve_its_review_finding \
+  tests.test_cortex_control.ControlPlaneTests.test_same_gate_resolution_requires_finding_bound_correction_receipt \
+  tests.test_cortex_control.ControlPlaneTests.test_pass_gate_result_rejects_open_findings_at_report_intake
+```
+
+The first control-plane test proves `review → documentation → fresh review →
+close`, including exact immutable source/correction handoffs, stale semantic
+route rejection, and the server-bound resolved transition. The second is the
+authority negative case: Documentation may report a correction but cannot
+resolve Review's finding, including by repeating its fingerprint as open. The
+third test verifies that every route—including same-gate correction—needs a
+separate correction receipt bound to the exact fingerprint and origin report.
+The final test rejects a self-contradictory `pass` plus open finding before an
+immutable report or receipt is written.
+
+For a real-host counterpart, run the dedicated source-mode scenario below. It
+uses a minimal C1 workspace and exactly one controlled fingerprint,
+`live-documentation-finding-001`. A deterministic source-mode prelude opens
+that finding through the public report/continue APIs; the real Codex parent
+then runs only corrective Documentation and a fresh Review, which must consume
+both immutable refs before resolving it. The evaluator stops after the server
+prepares Close, verifies the persisted trace graph, and terminates the entire
+parent process group at **300 seconds**; that timeout can only be reduced. It
+neither installs nor updates the plugin, and a `SKIP` or timeout is not
+evidence of a pass.
+
+```bash
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+```
+
+`finding_rework_documentation_full` is deliberately a separate C2 live gate.
+Unlike the narrow scenario, it has no seeded opening report: the real parent
+starts exactly one task and executes the opening Review, corrective
+Documentation, fresh resolving Review, and Close. It passes only after the
+server records a completed task, a close-bound final handoff, complete current
+manifest receipts, documentation/reassessment receipts, and no active gates.
+Close reports `findings=[]`, because the fresh Review—not Close—owns the one
+canonical finding transition to `resolved`. Its hard cap is **1,800 seconds**;
+the timeout flag may reduce but not increase it. This is source-mode evidence
+only and neither installs nor updates the plugin. It proves canonical
+receipt-bound state plus the observed native worker lifecycle, not trusted
+native child-ID/model binding: `--ignore-user-config` intentionally prevents
+the installed Cortex hooks from participating. A hook-enabled isolated
+integration run is required for that higher-assurance proof.
+
+The full scenario additionally exercises host-level **per-agent MCP
+provisioning**: the parent may receive a coordinator-audience endpoint and
+each spawned child a worker-audience endpoint. The ordinary static launch uses
+the nine-operation compatibility projection and can run the lifecycle; strict
+per-agent provisioning is a higher-assurance role-separation check. Do not
+merge explicit strict projections merely to make a failed per-agent run appear
+to pass.
+
+```bash
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
+```
+
 `verify-cortex-release.py --require-tracked` runs only after a commit exists;
 it validates `git archive HEAD`, not the mutable worktree.
 
 ## Current source-tree evidence
 
-- The complete Python 3.12.3 discovery suite passed: 524 tests. The current
-  black-box cold-boot JSON-RPC smoke dynamically adds audit phases, rejects a
-  replacement that drops pending implementation without consuming a recovery
-  attempt, and then verifies passed attempts for all 11 gates through close.
-  Deterministic sequential, compact-parallel, and blocked/resume fixtures also
-  passed.
+The evidence bullets below describe the previously validated 9.2.4 source
+candidate. They do not certify the Unreleased/9.2.5 hardening draft above;
+those full-suite, live, archive, and installed-plugin result slots remain
+pending.
+
+- The complete source suite passed **550 tests** with 16 intentional native-UI
+  skips. Focused governance/migration coverage includes digest-only
+  coordinator capability storage and legacy scrubbing, exhaustive `off`
+  assessment, canonical independent-review attestation, sensitive-record
+  retention/access enforcement, project-scope promotion, approval-ordered
+  policy revision, conflicting replay rejection, and corrective-effort
+  escalation. Three repeated focused rework runs also passed.
+- The black-box cold-boot JSON-RPC smoke passed all 13 dynamically selected
+  gates through close, retained implementation across replans, and completed
+  three evidence-backed replans despite a persisted legacy limit of two. The
+  deterministic evaluator passed all three fixtures. The isolated source-mode
+  live `follow_up_partial` task also passed through a real Codex parent in 24
+  seconds: it created one linked corrective task, prepared its first dispatch,
+  used only the public follow-up management route, made no failed public calls,
+  and left source unchanged. The targeted `automatic_governance` live scenario
+  then passed through a real `gpt-5.6-luna` high parent in 1,375 seconds. The
+  caller supplied C3 complexity and implementation/documentation/close waves
+  but no governance mode or trigger fields. Cortex resolved `auto` to `full`,
+  inserted and completed `governance_activation` and `governance_close` around
+  implementation and documentation, accepted two independent code-reviewer
+  results with typed immutable verified obligation evidence, completed close,
+  cleaned manifest snapshots, and created the final handoff. All live checks
+  passed with no failed public calls and no `manage_governance` forcing.
 - Marketplace validation, the isolated fresh-plugin probe, Python and shell
-  syntax checks, `git diff --check`, and the 8-worker/5-wave call-count
-  benchmark passed. The source-mode live lifecycle, installed-plugin check,
-  and tracked archive gate were not run for this candidate.
+  syntax checks, `git diff --check`, the no-write installer dry run, and the
+  8-worker/5-wave call-count benchmark passed. Host preflight and
+  `sync-cortex.sh --check` correctly remain blocked because this source is
+  9.2.4 while the user-installed plugin is 9.2.3; the installation was not
+  changed. Matching installed-plugin verification therefore remains blocked.
+  Per the targeted test scope, the default five-scenario live release matrix
+  was not rerun; the tracked release archive gate also remains unrun.
 
 The live evaluator emits newline-delimited JSON progress records while the
 parent runs. Each record has `type: "cortex_live_progress"`, the scenario, and
@@ -61,8 +165,10 @@ count. Host stream classification may also emit `parent_completed`,
 `termination_requested`, optional `termination_escalated`, `terminated`, and a
 final `parent_finished` record.
 
-Each live scenario has a 1,800-second default timeout, overridable only from
-10 through 7,200 seconds with `--live-timeout-seconds`. The Codex parent starts
+Ordinary live scenarios have a 1,800-second default timeout, overridable only
+from 10 through 7,200 seconds with `--live-timeout-seconds`. The dedicated
+`finding_rework_documentation` smoke has a hard 300-second maximum and defaults
+to that value; its timeout flag may only reduce the limit. The Codex parent starts
 in its own process group. Timeout, interrupt, or termination cleanup sends
 `SIGTERM`, waits ten seconds, then escalates to `SIGKILL`, reaping the group and
 emitting termination records. On normal or supervised exits, the evaluator
@@ -92,11 +198,35 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest declares `9.2.1+codex.20260819110617`. These results are
-evidence for the checked-out source only; release publication and installed-plugin
-verification remain separate, explicitly requested actions.
+The source manifest now declares `9.2.5+codex.20260819205849`. Historical
+9.2.4 results above remain evidence for that prior source candidate only;
+release publication and installed-plugin verification remain separate,
+explicitly requested actions.
 
-## Current 9.2.1 source contract
+## Unreleased / 9.2.5 draft evidence status
+
+This section describes the hardening work visible in the source tree. The
+source cachebuster is `9.2.5+codex.20260819205849`.
+The following result slots remain intentionally factual placeholders until the
+candidate is committed and rerun on the exact release SHA:
+
+- Full offline regression suite: **pending**.
+- Source-mode automatic-governance live lifecycle: **pending**.
+- Tracked release archive validation: **pending**.
+- Installed-plugin verification and cachebuster parity: **pending; no install
+  or user `~/.codex` mutation is implied**.
+
+The draft scope covers governance schema v11 integrity, artifact-authoritative
+record bodies, exact scope and linear revisions, append-only status/approval
+lifecycle authority, deterministic pre-v10 v9 reconciliation, linked-task
+completion and governed-link deletion restrictions, scoped capability claims
+with coordinator-audience recovery proof and rotation/revocation, no-progress
+pauses, revision-aware steer/questions, bounded/cache-backed manifests, and
+the required 50,000-file benchmark. A
+benchmark pass or focused local check must not be read as evidence for the
+pending full-suite or live gates.
+
+## Current 9.2.5 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -120,20 +250,28 @@ verification remain separate, explicitly requested actions.
   delegation persistence, gate transitions, harvest validation, reports,
   questions, briefings, and MCP schema transport. Behavioral tests import the
   documented public surface rather than asserting function placement.
-- `cortex.db` is the only coordination-state source for new tasks. Immutable
+- The host-private `cortex.db` (default
+  `~/.codex/cortex/projects/p-<sha256>/`; private outside-workspace
+  `CORTEX_HOST_STATE_DIR` override) is the only coordination-state source for
+  new tasks. Immutable
   reports, receipts, evidence, briefings, planning artifacts, handoffs, and
   manifests are catalogued in SQLite. Markdown/JSON task files are regenerated
   audit/Desktop projections; altering, deleting, or adding a projection cannot
   restore or modify coordination state. Existing pre-SQLite files are neither
   inspected, imported, resumed, altered, nor deleted.
-- Database schema changes are numbered and checksummed through **schema v8**.
+- Database schema changes are numbered and checksummed through **schema v11**.
   First MCP access takes
   the project-ledger lock and applies only missing SQLite-to-SQLite migrations
   atomically; a failed or mismatched migration fails closed. Checksums cover
   migration version, name, and ordered normalized SQL content. Legacy
   name-only checksums are upgraded only after schema validation. The schema
   uses unbounded SQLite `TEXT`/`BLOB` values for content and indexed 32 KiB
-  immutable artifact chunks for transport. Schema v8 adds task/plan revisions,
+  immutable artifact chunks for transport. Schema v11 hardens the governance
+  ledger with an append-only status/approval-basis lifecycle chain, governed
+  link-deletion restrictions, and terminal linked-task checks. Schema v10
+  adds artifact-authoritative bodies, exact non-null scopes, linear revision
+  indexes/triggers, and idempotent submission receipts; schema v9
+  added the initial governance ledger; schema v8 added task/plan revisions,
   native worker sessions, attempt messages, trace/tool observations, and
   question-batch storage; schema v7 separates deduplicated
   content blobs, task-scoped logical artifacts, and authorized filesystem
@@ -143,8 +281,10 @@ verification remain separate, explicitly requested actions.
   digest verification, then acknowledged in a separate transaction. Required
   briefings are capability files; reports and planning outputs are optional,
   rebuildable projections. Task directories and projection parents are lazy.
-- Every gate report carries a top-level structured `gate_result` sibling. The older
-  `closure` sibling remains a review/close compatibility alias. Open P0/P1/P2
+- Review, governance activation, governance close, and close reports require a
+  canonical top-level structured `gate_result` sibling. The older `closure`
+  input remains a compatibility alias for those gates but is not retained in
+  canonical report artifacts. Open P0/P1/P2
   or blocking findings, and missing required verification, reopen the recorded
   target gate for rework; resolved or auditable non-self waivers are retained
   in SQLite rather than inferred from prose.
@@ -158,18 +298,23 @@ verification remain separate, explicitly requested actions.
   persists, then deletes the file and metadata only after commit. Legacy
   full-payload `record_report` remains compatible. Host-sandboxed read-only
   gates record ordinary shared-checkout source deltas as concurrency evidence;
-  claimed `changed_files`, arbitrary ignored output, and unrecognized artifacts
-  still fail, while recognized conventional test/build/cache residue is
-  retained in the audit receipt.
+  claimed `changed_files` still fail. Every ignored side effect is retained as
+  non-blocking digest evidence, with recognized conventional test/build/cache
+  residue and unknown framework output classified separately.
 - The server-owned `resolved_user_decisions` snapshot is carried with each
   immutable report outside the worker-authored seven-field envelope. Report
   metadata and Markdown expose its count/digest and decision sources, while
   replacement briefings receive a bounded recent projection. Choice batch
   answers preserve stable option IDs and optional custom context; localized
   custom context requires canonical English before worker resumption.
+- Report-publication regression coverage binds the only user-facing Markdown
+  link to the matching durable native-worker stop. It proves that an early
+  read is link-free, the first eligible complete coordinator read returns
+  `publication_required=true` with a completion summary and next step, and a
+  reread cannot publish the link again.
 - Worker caller/input/schema validation results are structured corrections:
   fix the named field and retry the same tool on the same attempt without
-  consuming the failed phase-attempt budget. `get_report_template` and
+  creating a failed worker outcome or changing escalation counters. `get_report_template` and
   `worker_question` return correction envelopes. Briefing, predecessor-report,
   and coordinator artifact reads clamp oversized `max_bytes` to 32768. Only
   explicit `retryable: false` integrity, storage, permission, or unavailable
@@ -178,20 +323,31 @@ verification remain separate, explicitly requested actions.
   worker sessions in place; completed-task corrections remain linked
   `follow_up` tasks. Schema v8 stores the revision, session, and atomic
   question-batch identity; `ask_batch`/`poll_batch` cover 1–32 questions with
-  canonical answers. The main-chat UI keeps one durable batch ref while
-  presenting one native question per step, checkpoints accepted answers, and
-  resumes after cancellation at the next unanswered question.
-- Required post-plan review is surfaced through native **Approve/Cancel** UI.
-  Initialized stdio transport emits `elicitation/create` with the
-  `cortex/plan-approval/v1` schema and exactly two choices; direct callers
-  receive the same schema as `plan_approval_interaction` with embedded
-  `manage_orchestration` arguments. Approve requires the current opaque request
-  ID, emits a localized plan-approved notice, and dispatches the next wave;
-  stale or replayed requests do not dispatch. Cancel is silent and leaves the
-  plan pending for the next user message, while an unsupported host leaves the
-  approval pending without inferred consent. Focused coverage includes native
-  and fallback prompting, approve continuation, cancel-pending behavior,
-  invalid/replayed button requests, stale-basis rejection, and revision.
+  canonical answers. Main chat keeps one durable batch ref, renders every
+  question with its required LLM recommendation, checkpoints accepted answers,
+  and resumes only after the next user message is recorded.
+- Revision-aware steer classifies the earliest affected gate and invalidates
+  downstream evidence. Questions carry task/plan revision and strategy
+  generation, so unresolved questions from an older revision are superseded
+  and cannot accept stale answers. Corrective work has no fixed attempt quota,
+  but a repeated materially identical no-progress signature pauses autonomous
+  retries for an explicit user strategy without producing a false pass. The
+  recovery tests require a singleton Planner-first wave and a material change
+  to pipeline, strategy, or verification, or a class-matched environment
+  remediation; reason prose is audit-only.
+- Manifest capture enforces `max_entries`, `max_hashed_bytes`, and
+  `max_seconds`; a limit produces a partial result with a reason, but a
+  partial baseline/current capture cannot authorize mutation reconciliation,
+  handoff, or terminal close. Unchanged file hashes may use a bounded
+  stat-keyed cache. CI additionally requires
+  `python3 -B scripts/cortex-manifest-benchmark.py --files 50000
+  --max-seconds 30` to report `target_met: true`.
+- Required post-plan review is surfaced through one ordinary final assistant
+  message using `cortex/chat-interaction/v1`. It includes the complete bounded
+  plan, approve/revise/cancel meanings, opaque request ID, and LLM recommendation.
+  Tests assert that no nested UI request is emitted, the turn pauses, approve
+  dispatches the next wave, revision feedback is preserved, cancel remains
+  pending, and stale or replayed responses do not dispatch.
 - Prune first commits a tombstone, removes the projection tree outside the
   state lock, and only then deletes canonical task rows in one final SQLite
   transaction. Failed filesystem removal leaves the task recoverable for a
@@ -227,11 +383,12 @@ close evidence. They also cover human-readable `Profile Module` labels and
 attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
-Public API tests require exactly eight MCP tools: coordinator lifecycle
-operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; worker `worker_question`, `get_report_template`,
-`record_report`, and
-identity/digest-scoped `read_dispatch_briefing`; plus scoped predecessor
+Public API tests require a nine-operation MCP registry projected as exactly
+five tools per explicit launch-time audience. The coordinator projection contains
+`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
+coordinator-only `manage_governance`, and scoped `read_worker_report`; the
+worker projection contains `worker_question`, `get_report_template`,
+`record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped
 `read_worker_report`. Native worker prompts carry a compact bootstrap with the
 exact immutable briefing path/digest; the worker cannot enumerate the ledger.
 
@@ -243,13 +400,14 @@ while harvest is automatic after its source-backed plan.
 
 Prompt-architecture regressions validate explicit Cortex opt-in, the
 `cortex-control` runtime-core handoff, conditional harvest overlays, and the
-Worker Briefing v2 assignment envelope. Adversarial task values are serialized
+Worker Briefing v3 budget-enforced assignment envelope. Adversarial task values are serialized
 and round-tripped as JSON, rather than interpreted as prompt structure; tests
 also reject long duplicate prompt paragraphs and enforce representative
 bootstrap/briefing budgets (1,500 bytes; ordinary 10,000/14,000 soft/hard;
 harvest 11,000/15,000 soft/hard). Retry regressions enforce
-`phase_attempt_limit=3`, `same_strategy_limit=2`, and the required
-`next_strategy` or pipeline replan before a third phase attempt.
+unbounded pipeline rework, the `high`/`xhigh`/`max` effort escalation, Terra
+routing after two unresolved attempts, and optional evidence-backed
+`next_strategy` or pipeline replanning.
 
 Predecessor regressions retain the complete Planner evidence basis while
 dispatching only the verified transitive frontier, exercise a 33-report
@@ -270,13 +428,13 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for a streamed, sanitized source-mode parent run against the workspace source tree. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
+- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, `--live --scenario finding_rework_documentation` for the narrow seeded-origin finding route, or `--live --scenario finding_rework_documentation_full` for the complete real C2 finding lifecycle through Close and handoff. The full finding route can run on the nine-operation compatibility projection; host-provisioned per-agent audiences additionally prove strict role separation (coordinator for the parent, worker for every child). It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; the narrow finding scenario is capped at 300 seconds, and the full finding scenario is capped at 1800 seconds. `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host
   diagnostic for Codex CLI, Python 3.11+/`tomllib`, plugin launcher, same-user
-  cache, exact `cortex@cortex` registration, MCP approval and elicitation
-  configuration, and lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
+  cache, exact `cortex@cortex` registration, MCP approval configuration, and
+  lifecycle-hook trust. Its JSON output includes `mcp.status` (`READY` or
   `BLOCKED`) and `mcp.blocking_checks`; `READY` requires every emitted check to
   pass. A nonzero result identifies the failed prerequisite; it never installs
   software or changes Codex configuration. See the [SSH host troubleshooting
