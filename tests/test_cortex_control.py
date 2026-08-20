@@ -3891,6 +3891,22 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "task_id": state["task_id"],
             "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
         }
+        missing_marker_report = self._report_with_briefing(
+            attempt, self.v3_report("omitted required verification marker")
+        )
+        missing_marker_report["evidence"] = [
+            item for item in missing_marker_report["evidence"]
+            if not item.startswith("Gate verification 1: PASS - ")
+        ]
+        missing_marker = control.publish_worker_report({
+            **identity, "report": missing_marker_report,
+        })
+        self.assertFalse(missing_marker["ok"])
+        self.assertIn(
+            "Add exactly: Gate verification 1: PASS - <concrete observed proof for:",
+            missing_marker["diagnostics"][0]["message"],
+        )
+
         no_change = control.publish_worker_report({
             **identity,
             "report": self._report_with_briefing(
@@ -3906,6 +3922,7 @@ class ControlPlaneTests(unittest.TestCase):
         unsupported = control.publish_worker_report({**identity, "report": unsupported_report})
         self.assertFalse(unsupported["ok"])
         self.assertIn("not changed relative to this worker attempt baseline", unsupported["diagnostics"][0]["message"])
+        self.assertIn("Remove pre-existing, concurrent, or another attempt's paths", unsupported["next_action"])
 
         changed_path = self.project / "implemented.txt"
         changed_path.write_text("observable result\n", encoding="utf-8")
@@ -8750,6 +8767,38 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(template["persisted"])
         self.assertTrue(template["draft_persisted"])
 
+        # A direct worker edit can use an editor that atomically replaces the
+        # file under the process umask.  Reject that broad caller-authored
+        # file rather than chmodding it by pathname, then allow the worker to
+        # make the explicit private-permission correction and retry.
+        draft_path.chmod(0o644)
+        broad_permissions = control.publish_worker_report({
+            **identity, "draft_ref": template["draft_ref"],
+        })
+        self.assertFalse(broad_permissions["ok"])
+        self.assertEqual(broad_permissions["outcome"], "report_draft_invalid")
+        self.assertIn("exactly private 0600", broad_permissions["diagnostics"][0]["message"])
+        self.assertEqual(draft_path.stat().st_mode & 0o777, 0o644)
+        draft_path.chmod(0o600)
+
+        # The report reader must evaluate the opened leaf, not a path checked
+        # earlier.  A substituted symlink remains rejected and its target is
+        # never read, rewritten, or chmodded.
+        symlink_target = self.base / "draft-symlink-target.json"
+        symlink_target.write_text("unrelated target", encoding="utf-8")
+        draft_path.unlink()
+        draft_path.symlink_to(symlink_target)
+        symlinked = control.publish_worker_report({
+            **identity, "draft_ref": template["draft_ref"],
+        })
+        self.assertFalse(symlinked["ok"])
+        self.assertEqual(symlinked["outcome"], "report_draft_invalid")
+        self.assertIn("private regular non-symlink", symlinked["diagnostics"][0]["message"])
+        self.assertEqual(symlink_target.read_text(encoding="utf-8"), "unrelated target")
+        draft_path.unlink()
+        control.write_json(draft_path, template_envelope)
+        self.assertEqual(draft_path.stat().st_mode & 0o777, 0o600)
+
         unfilled = control.publish_worker_report({
             **identity, "draft_ref": template["draft_ref"],
         })
@@ -8781,6 +8830,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(hidden_mode["ok"])
         self.assertEqual(hidden_mode["code"], "report_validation_failed")
         self.assertIn("unsupported record_report fields", hidden_mode["diagnostics"][0]["message"])
+
+        transport_fields = control.publish_worker_report({
+            **identity,
+            "report": self._report_with_briefing(attempt, self.v3_report("transport fields are not worker identity")),
+            "task_ref": "task-not-a-worker-identity",
+            "submission_id": "coordinator-retry-id",
+        })
+        self.assertFalse(transport_fields["ok"])
+        self.assertEqual(transport_fields["code"], "report_validation_failed")
+        self.assertIn("unsupported record_report fields: submission_id, task_ref", transport_fields["diagnostics"][0]["message"])
+        self.assertIn("Remove coordinator transport field(s) submission_id, task_ref", transport_fields["diagnostics"][0]["message"])
 
         invalid_reports = []
         for index in range(4):
@@ -9924,7 +9984,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.10")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.11")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

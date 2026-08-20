@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `9.2.10`. This
+The current source manifest and server are intended for plugin version `9.2.11`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -43,6 +43,13 @@ records the failure signatures and same-user recovery sequence; it does not
 install software or mutate Codex configuration.
 
 The validator requires one root marketplace plugin entry, a canonical regular plugin directory, a version-aligned manifest/server, an executable launcher, 21 registered profile files with structured playbooks, scope/plan-aware validated gate briefings, and the ten expected skills. For every profile it validates exact TOML identity, description, sandbox parity, and the machine-validated execution contract. The tracked-release archive validator is blocking in CI and rejects runtime state and unsafe archive entries. It validates only committed `HEAD`; the package contract requires the nine-operation v5 registry and its strict five-tool `coordinator` and `worker` projections. An unspecified transport audience uses the compatibility projection exposing all nine operations so the ordinary `$cortex:orchestrator` route works. Briefings and reports are returned only in scoped, server-bounded cursor pages; oversized `max_bytes` requests are clamped to 32768. Worker caller/schema validation errors are structured same-attempt corrections and do not consume recovery attempts; only explicit non-retryable integrity/storage blockers terminate the worker. Optional public manifest metadata remains unchanged until its exact installed Codex schema is verified.
+
+The worker `record_report` schema deliberately excludes coordinator transport
+fields (`task_ref`, `dispatch_ref`, and `submission_id`), so packaging tests
+must keep the MCP schema, runtime rejection, and generated briefings aligned.
+The bundled hook must also resolve the bundled `scripts` runtime when a host
+uses `importlib` rather than direct script execution; the hook-specific
+regression protects that packaging/runtime boundary.
 
 The current start contract requires `start_orchestration.task.user_request` and
 preserves the exact user-authored text. If `task.objective` is supplied, request

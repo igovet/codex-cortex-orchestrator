@@ -4847,10 +4847,13 @@ def _validate_gate_result_report(
     missing_markers: list[str] = []
     invalid_markers: list[str] = []
     weak_detail = ("<specific", "todo", "tbd", "unverified", "not run", "not tested", "unknown")
-    for prefix, _criterion in _result_contract_markers(attempt, task):
+    for prefix, criterion in _result_contract_markers(attempt, task):
         matching = [item for item in evidence_items if item.startswith(prefix)]
         if not matching:
-            missing_markers.append(prefix.rstrip())
+            missing_markers.append(
+                "Add exactly: " + prefix
+                + "<concrete observed proof for: " + redact(criterion, 500) + ">"
+            )
             continue
         detail = matching[0][len(prefix):].strip()
         if not detail or any(marker in detail.lower() for marker in weak_detail):
