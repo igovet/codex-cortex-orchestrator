@@ -704,10 +704,11 @@ are referenced by governance records. Pre-v10 upgrades deterministically
 reconcile safe v9 duplicate revisions/sibling successors and fail closed on
 ambiguous scope or predecessor graphs. Coordinator capabilities are
 short-lived scoped claims carrying principal, thread, generation, expiry, and
-allowed actions. A lost bearer can be rotated only on the explicit
-coordinator audience with the same active identity and the non-durable
-recovery proof returned by authorization; old generations are revoked and
-plaintext is never stored.
+allowed actions. A lost bearer can be rotated on the normal compatibility or
+explicit coordinator audience with the same active identity and the
+non-durable recovery proof returned by authorization; old generations are
+revoked and plaintext is never stored. An explicit worker audience cannot call
+the recovery surface.
 
 Corrective work remains open-ended while acceptance or findings require work,
 but a repeated materially identical no-progress signature pauses autonomous
@@ -817,15 +818,16 @@ unsafe, non-database, or cross-filesystem legacy state fails closed.
 New tasks use pipeline contract v2; active v1 tasks without that field resume
 their persisted pipeline unchanged.
 
-The v5 registry contains nine MCP operations, but each stdio process exposes
-exactly five through its launch-time MCP audience. The unspecified transport
-audience is the least-privilege worker projection:
-`worker_question`, `get_report_template`, `record_report`,
-`read_dispatch_briefing`, and scoped `read_worker_report`. Only a
-host-provisioned explicit `coordinator` audience exposes the five-operation
-coordinator projection: `start_orchestration`, `continue_orchestration`,
-`manage_orchestration`, `manage_governance`, and scoped `read_worker_report`.
-The audience is fixed for the stdio process and cannot be selected through
+The v5 registry contains nine MCP operations. An unspecified or unknown
+transport audience uses a compatibility projection exposing all nine, so an
+ordinary Desktop launch makes `$cortex:orchestrator` operational. Explicit
+`worker` and `coordinator` audiences remain strict five-operation projections:
+the worker projection contains `worker_question`, `get_report_template`,
+`record_report`, `read_dispatch_briefing`, and scoped `read_worker_report`; the
+coordinator projection contains `start_orchestration`,
+`continue_orchestration`, `manage_orchestration`, `manage_governance`, and
+scoped `read_worker_report`. The audience is fixed for the stdio process and
+cannot be selected through
 JSON-RPC initialization or tool arguments. Coordinators also use the server-owned `manage_governance` surface for initiatives, dependencies,
 immutable governance records, active snapshots, constrained exceptions, and
 coordinator-approved policy promotion. Workers build from
@@ -868,11 +870,12 @@ records and caps the file at 10 MiB by dropping oldest records first.
 Governance authorization is returned once by the original successful start;
 the project ledger stores only its SHA-256 digest and a separate digest for a
 non-durable coordinator recovery proof. An idempotent start retry does not
-recover or reissue either value. Capability recovery is available only through
-the explicit coordinator MCP audience and requires the exact task, principal,
-thread, and original recovery proof; the proof rotates with the bearer and is
-never durable. Legacy plaintext capabilities are removed and invalidated on
-first registry access. Explicit
+recover or reissue either value. Capability recovery is available through the
+compatibility or explicit coordinator MCP audience and requires the exact task,
+principal, thread, and original recovery proof; the proof rotates with the
+bearer and is never durable. An explicit worker audience cannot call this
+surface. Legacy plaintext capabilities are removed and invalidated on first
+registry access. Explicit
 `governance_mode=off` is accepted only for C1 after an exhaustive boolean
 assessment of every documented hard and topology trigger; prose detection may
 raise the floor but can never authorize `off`. Sensitive governance records
@@ -1069,12 +1072,12 @@ python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_docume
 ```
 
 The full source-mode scenario is a release-gate candidate only on a host that
-can provision MCP access **per native process**: the parent must receive an
-explicit `coordinator` endpoint, while every spawned child must receive the
-`worker` endpoint. A single static coordinator-audience launch can prove that
-the parent starts a task, but it leaves children without briefing/report tools
-and is therefore a failed integration attempt—not evidence for this gate. The
-plugin does not merge the two surfaces as a compatibility fallback. Because
+can provision strict MCP access **per native process**: the parent may receive
+an explicit `coordinator` endpoint, while every spawned child may receive the
+`worker` endpoint. An ordinary static launch uses the nine-operation
+compatibility projection, so `$cortex:orchestrator` works even when the host
+does not provide per-agent audiences. Strict per-agent provisioning remains
+the higher-assurance integration check. Because
 the source command uses `--ignore-user-config`, it also deliberately does not
 load trusted Cortex hooks and therefore does not claim durable binding of a
 native child ID or model to a Cortex attempt. That higher-assurance hook and

@@ -77,11 +77,12 @@ server-owned claims: exact task/initiative scope, principal, thread, allowed
 actions, generation, expiry, and revocation history. It also persists only a
 verifier for a separate, non-durable coordinator recovery proof. It never
 persists either reusable plaintext value or reissues them on an idempotent
-retry. If the response is lost, recovery is available only through a
-host-provisioned explicit `coordinator` MCP audience and requires the exact
-same principal/thread/task plus the original recovery proof; it rotates a new
-bearer and proof, revokes the old generation, and records a non-secret audit
-event. It cannot recover a bearer for another task or identity. Any legacy
+retry. If the response is lost, recovery is available through the normal
+compatibility projection or an explicit `coordinator` MCP audience, and
+requires the exact same principal/thread/task plus the original recovery
+proof; it rotates a new bearer and proof, revokes the old generation, and
+records a non-secret audit event. An explicit `worker` audience cannot call the
+surface. It cannot recover a bearer for another task or identity. Any legacy
 plaintext bearer or proof is deleted and invalidated on first registry access;
 the affected task fails closed instead of preserving a possibly compromised
 credential. Workers must never receive or persist this coordinator-only bearer

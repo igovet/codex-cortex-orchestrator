@@ -93,13 +93,13 @@ native child-ID/model binding: `--ignore-user-config` intentionally prevents
 the installed Cortex hooks from participating. A hook-enabled isolated
 integration run is required for that higher-assurance proof.
 
-The full scenario additionally requires host-level **per-agent MCP
-provisioning**: the parent must receive a coordinator-audience endpoint and
-each spawned child a worker-audience endpoint. A single static coordinator
-launch may make `start_orchestration` succeed, but children then lack
-worker-only briefing/report tools; that run is a failed integration attempt,
-not a passing full gate. Do not merge the tool surfaces to make such a run
-appear to pass.
+The full scenario additionally exercises host-level **per-agent MCP
+provisioning**: the parent may receive a coordinator-audience endpoint and
+each spawned child a worker-audience endpoint. The ordinary static launch uses
+the nine-operation compatibility projection and can run the lifecycle; strict
+per-agent provisioning is a higher-assurance role-separation check. Do not
+merge explicit strict projections merely to make a failed per-agent run appear
+to pass.
 
 ```bash
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
@@ -384,7 +384,7 @@ attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
 Public API tests require a nine-operation MCP registry projected as exactly
-five tools per launch-time audience. The coordinator projection contains
+five tools per explicit launch-time audience. The coordinator projection contains
 `start_orchestration`, `continue_orchestration`, `manage_orchestration`,
 coordinator-only `manage_governance`, and scoped `read_worker_report`; the
 worker projection contains `worker_question`, `get_report_template`,
@@ -428,7 +428,7 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, `--live --scenario finding_rework_documentation` for the narrow seeded-origin finding route, or `--live --scenario finding_rework_documentation_full` for the complete real C2 finding lifecycle through Close and handoff. The full finding route is passing evidence only with host-provisioned per-agent MCP audiences (coordinator for the parent, worker for every child); a single static coordinator launch is an expected failed integration. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; the narrow finding scenario is capped at 300 seconds, and the full finding scenario is capped at 1800 seconds. `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
+- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, `--live --scenario finding_rework_documentation` for the narrow seeded-origin finding route, or `--live --scenario finding_rework_documentation_full` for the complete real C2 finding lifecycle through Close and handoff. The full finding route can run on the nine-operation compatibility projection; host-provisioned per-agent audiences additionally prove strict role separation (coordinator for the parent, worker for every child). It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; the narrow finding scenario is capped at 300 seconds, and the full finding scenario is capped at 1800 seconds. `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host

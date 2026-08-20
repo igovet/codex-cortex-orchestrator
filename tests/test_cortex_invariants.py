@@ -1442,12 +1442,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("The v5 registry contains nine MCP operations, while each launch-time audience", skill)
-        self.assertIn("exposes exactly five", skill)
+        self.assertIn("The conventional compatibility projection exposes all nine", skill)
+        self.assertIn("ordinary Desktop launch", skill)
         self.assertIn("The worker projection is `worker_question`", skill)
         self.assertIn("The explicit coordinator projection is", skill)
         self.assertIn("The stdio MCP process has one immutable launch-time audience", skill)
-        self.assertIn("defaults to the least-privilege worker registry", skill)
+        self.assertIn("strict `worker` or `coordinator` projection", skill)
         self.assertIn("Coordinators use\n`start_orchestration`", skill)
         self.assertIn("`start_orchestration` and `continue_orchestration` for normal work", skill)
         self.assertIn("Invoke every returned dispatch", skill)

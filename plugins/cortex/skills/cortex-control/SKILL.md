@@ -5,12 +5,12 @@ description: Internal Cortex runtime protocol. Load only after cortex:orchestrat
 
 # Cortex Control
 
-The v5 registry contains nine MCP operations, while each launch-time audience
-exposes exactly five. The worker projection is `worker_question`,
-`get_report_template`, `record_report`, `read_dispatch_briefing`, and scoped
-`read_worker_report`. The explicit coordinator projection is
-`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
-`manage_governance`, and scoped `read_worker_report`. Coordinators use
+The v5 registry contains nine MCP operations. The conventional compatibility projection exposes all nine, so an ordinary Desktop launch can activate
+`$cortex:orchestrator` and call its lifecycle operations. The worker projection is `worker_question`, `get_report_template`, `record_report`,
+`read_dispatch_briefing`, and scoped `read_worker_report`. The explicit coordinator projection is
+`start_orchestration`, `continue_orchestration`,
+`manage_orchestration`, `manage_governance`, and scoped
+`read_worker_report`. Coordinators use
 `start_orchestration` and `continue_orchestration` for normal work,
 `read_worker_report` to evaluate a persisted report, and
 `manage_orchestration` only for recovery or rare subsystems. A worker whose
@@ -27,16 +27,18 @@ operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
 opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
 
-The stdio MCP process has one immutable launch-time audience. The unspecified
-or unknown transport audience defaults to the least-privilege worker registry,
-which cannot list or call coordinator lifecycle/governance tools. Only a
-host-provisioned explicit `coordinator` audience receives the coordinator
-registry. JSON-RPC initialization and tool arguments cannot select or elevate
-the audience. Coordinator capability recovery is accepted only on that
-explicit coordinator audience and requires the exact active task, principal,
-thread, and non-durable recovery proof returned with the original successful
-authorization response. The proof rotates with the bearer; only SHA-256
-verifiers are durable, and workers never receive either secret.
+The stdio MCP process has one immutable launch-time audience. An unspecified
+or unknown transport audience uses the compatibility projection containing all
+nine public operations, so an ordinary Desktop launch can activate
+`$cortex:orchestrator`. Explicit `worker` and `coordinator` audiences remain
+strict five-tool projections; JSON-RPC initialization and tool arguments cannot
+select or elevate the audience. Coordinator capability recovery is accepted on
+the compatibility or explicit `coordinator` projection, and requires the exact
+active task, principal, thread, and non-durable recovery proof returned with
+the original successful authorization response. The proof rotates with the
+bearer; only SHA-256 verifiers are durable, and workers never receive either
+secret. The worker prompt/profile remains worker-only in compatibility mode;
+hosts that require transport-enforced separation must use a strict `worker` or `coordinator` projection at process launch.
 
 ## Coordinator state machine
 

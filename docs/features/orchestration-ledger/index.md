@@ -115,9 +115,10 @@ fails closed rather than being copied or resumed in place.
 ## Behavior and status
 
 The stdio MCP process has one immutable launch-time audience. An unspecified
-or unknown audience defaults to the least-privilege worker projection; only a
-host-provisioned explicit `coordinator` audience exposes lifecycle and
-governance tools. JSON-RPC initialization and tool arguments cannot change the
+or unknown audience uses the compatibility projection exposing all nine public
+operations, so `$cortex:orchestrator` works in an ordinary Desktop launch.
+Explicit `worker` and `coordinator` audiences remain strict five-tool
+projections. JSON-RPC initialization and tool arguments cannot change the
 audience or elevate a worker process.
 
 `start_orchestration` accepts an absolute `project_root` and requires the
@@ -185,9 +186,10 @@ The coordinator governance capability appears only in the original successful
 start response. Its SHA-256 digest and a separate recovery-proof digest are the
 only durable verifiers; idempotent replay cannot recover or reissue either
 value, and legacy plaintext values are scrubbed and invalidated. Recovery is
-accepted only on the explicit coordinator audience with the exact active
-principal, thread, task, and original non-durable recovery proof; rotation
-returns a new bearer and proof and revokes the previous generation.
+accepted on the normal compatibility or explicit coordinator audience with the
+exact active principal, thread, task, and original non-durable recovery proof;
+an explicit worker audience cannot invoke it. Rotation returns a new bearer
+and proof and revokes the previous generation.
 `governance_mode=off` is accepted only for C1 with a complete boolean
 assessment of every documented hard and topology trigger, which is included in
 the policy snapshot. Text classification can only raise the governance floor.

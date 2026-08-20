@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -33,12 +34,18 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         command = [sys.executable, str(self.server)]
         if audience is not None:
             command.append(f"--mcp-audience={audience}")
+        environment = os.environ.copy()
+        # ``None`` models the documented ordinary Desktop launch, whose
+        # audience must not be influenced by the test runner's environment.
+        if audience is None:
+            environment.pop("CORTEX_MCP_AUDIENCE", None)
         completed = subprocess.run(
             command,
             input=json.dumps(request) + "\n",
             text=True,
             capture_output=True,
             check=True,
+            env=environment,
         )
         return json.loads(completed.stdout)
 
@@ -75,7 +82,18 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         start = next(iter(registry["tasks"].values()))["start"]
         return result, authorization, start
 
-    def test_default_and_worker_registries_expose_no_coordinator_operations(self) -> None:
+    def test_default_registry_is_compatible_while_explicit_audiences_remain_strict(self) -> None:
+        expected_compatibility = {
+            "start_orchestration",
+            "continue_orchestration",
+            "manage_orchestration",
+            "manage_governance",
+            "worker_question",
+            "get_report_template",
+            "record_report",
+            "read_dispatch_briefing",
+            "read_worker_report",
+        }
         expected_worker = {
             "worker_question",
             "get_report_template",
@@ -83,15 +101,22 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             "read_dispatch_briefing",
             "read_worker_report",
         }
-        for audience in (None, "worker"):
+        for audience in (None, "compat"):
             response = self._rpc(
                 audience,
                 {"jsonrpc": "2.0", "id": f"{audience or 'default'}-list", "method": "tools/list", "params": {}},
             )
             names = {item["name"] for item in response["result"]["tools"]}
-            self.assertEqual(names, expected_worker)
-            self.assertNotIn("manage_governance", names)
-            self.assertNotIn("start_orchestration", names)
+            self.assertEqual(names, expected_compatibility)
+
+        worker = self._rpc(
+            "worker",
+            {"jsonrpc": "2.0", "id": "worker-list", "method": "tools/list", "params": {}},
+        )
+        worker_names = {item["name"] for item in worker["result"]["tools"]}
+        self.assertEqual(worker_names, expected_worker)
+        self.assertNotIn("manage_governance", worker_names)
+        self.assertNotIn("start_orchestration", worker_names)
 
         coordinator = self._rpc(
             "coordinator",
@@ -109,7 +134,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             },
         )
 
-    def test_worker_recovery_call_is_denied_and_identifiers_cannot_rotate_generation(self) -> None:
+    def test_compatibility_recovery_requires_non_durable_proof_and_worker_is_denied(self) -> None:
         started, authorization, durable_start = self._start_coordinator_task()
         task_ref = str(started["task_ref"])
         principal = str(durable_start["principal"])
@@ -117,38 +142,51 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         initial_generation = int(durable_start["coordinator_capability_claims"]["generation"])
         original_capability_digest = str(durable_start["coordinator_capability_digest"])
 
-        for audience, request_id in ((None, "default-recovery"), ("worker", "worker-recovery")):
-            worker_response = self._rpc(
-                audience,
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "manage_governance",
-                        "arguments": {
-                            "project_root": str(self.project),
-                            "action": "recover_coordinator_capability",
-                            "task_ref": task_ref,
-                            "principal": principal,
-                            "thread_id": thread_id,
-                            "capability_generation": initial_generation,
-                        },
-                    },
-                },
-            )
-            self.assertEqual(worker_response["error"]["code"], -32602)
-            self.assertEqual(
-                worker_response["error"]["message"],
-                "tool_not_available_for_worker_mcp_audience",
-            )
-            serialized_worker_response = json.dumps(worker_response, sort_keys=True)
-            self.assertNotIn(str(authorization["coordinator_capability"]), serialized_worker_response)
-            self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_worker_response)
+        recovery_arguments = {
+            "project_root": str(self.project),
+            "action": "recover_coordinator_capability",
+            "task_ref": task_ref,
+            "principal": principal,
+            "thread_id": thread_id,
+            "capability_generation": initial_generation,
+        }
+        compatibility_response = self._rpc(
+            None,
+            {
+                "jsonrpc": "2.0",
+                "id": "default-recovery-with-identifiers-only",
+                "method": "tools/call",
+                "params": {"name": "manage_governance", "arguments": recovery_arguments},
+            },
+        )["result"]["structuredContent"]
+        self.assertFalse(compatibility_response["ok"])
+        self.assertEqual(compatibility_response["code"], "coordinator_recovery_proof_required")
+        serialized_compatibility_response = json.dumps(compatibility_response, sort_keys=True)
+        self.assertNotIn(str(authorization["coordinator_capability"]), serialized_compatibility_response)
+        self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_compatibility_response)
 
-        # A direct call is the remaining shared-transport fallback.  Even if a
-        # worker has learned every durable identifier, absence of the raw
-        # recovery proof must fail before any generation mutation.
+        worker_response = self._rpc(
+            "worker",
+            {
+                "jsonrpc": "2.0",
+                "id": "worker-recovery",
+                "method": "tools/call",
+                "params": {"name": "manage_governance", "arguments": recovery_arguments},
+            },
+        )
+        self.assertEqual(worker_response["error"]["code"], -32602)
+        self.assertEqual(
+            worker_response["error"]["message"],
+            "tool_not_available_for_worker_mcp_audience",
+        )
+        serialized_worker_response = json.dumps(worker_response, sort_keys=True)
+        self.assertNotIn(str(authorization["coordinator_capability"]), serialized_worker_response)
+        self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_worker_response)
+
+        # Handler-level proof validation is also authoritative for an
+        # in-process call. Even if a caller has learned every durable
+        # identifier, absence of the raw recovery proof must fail before any
+        # generation mutation.
         direct = cortex.manage_governance(
             {
                 "project_root": str(self.project),

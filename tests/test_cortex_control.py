@@ -9257,7 +9257,17 @@ class ControlPlaneTests(unittest.TestCase):
         for name in ("start_orchestration", "continue_orchestration"):
             self.assertFalse(forbidden & set(by_name[name]["inputSchema"]["properties"]))
 
-        worker_proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        compat_proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        compat_by_name = {item["name"]: item for item in json.loads(compat_proc.stdout)["result"]["tools"]}
+        self.assertEqual(
+            set(compat_by_name),
+            {
+                "start_orchestration", "continue_orchestration", "manage_orchestration",
+                "manage_governance", "worker_question", "get_report_template",
+                "record_report", "read_dispatch_briefing", "read_worker_report",
+            },
+        )
+        worker_proc = subprocess.run([sys.executable, str(script), "--mcp-audience=worker"], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         worker_by_name = {item["name"]: item for item in json.loads(worker_proc.stdout)["result"]["tools"]}
         self.assertEqual(set(worker_by_name), {"worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"})
         self.assertEqual(worker_by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])

@@ -1689,7 +1689,11 @@ def _live_eval(
             "--dangerously-bypass-approvals-and-sandbox", "-C", str(project),
             "-m", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"',
             "-c", f'mcp_servers.cortex.command="{sys.executable}"',
-            "-c", f'mcp_servers.cortex.args=["{SERVER}", "--mcp-audience=coordinator"]',
+            # Desktop gives the root and spawned native workers this same MCP
+            # definition.  Leave its audience unspecified so both can use the
+            # compatibility registry; explicit trusted hosts still select a
+            # strict coordinator or worker projection themselves.
+            "-c", f'mcp_servers.cortex.args=["{SERVER}"]',
             live_prompt(scenario, project, source_task_ref),
         ]
         with isolated_codex_runtime(base, host_store=host_store) as isolated_environment:

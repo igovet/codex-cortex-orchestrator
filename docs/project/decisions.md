@@ -11,8 +11,10 @@ implicit reinterpretation of the current state model.
 
 ## Audience-projected nine-operation public facade
 
-The v5 registry exposes nine operations, but the launch-time process audience
-projects exactly five tools. Coordinators receive
+The v5 registry exposes nine operations. An unspecified or unknown launch-time
+audience uses a compatibility projection exposing all nine, so the ordinary
+Desktop route `$cortex:orchestrator` can start orchestration. Explicit
+`worker` and `coordinator` audiences project exactly five tools. Coordinators receive
 `start_orchestration`, `continue_orchestration`, `manage_orchestration`,
 coordinator-only `manage_governance`, and scoped `read_worker_report`; workers
 receive `worker_question`, `get_report_template`, `record_report`,
@@ -85,9 +87,10 @@ duplicate revisions/sibling successors and fails closed on ambiguous graphs.
 Promotion and its proposal transition must share one SQLite transaction. A
 coordinator capability carries task/initiative scope, principal, thread,
 generation, expiry, allowed actions, and revocation metadata; recovery is
-available only on the explicit coordinator audience and requires the same
-active identity plus a non-durable recovery proof, while plaintext values are
-never stored.
+available on the normal compatibility or explicit coordinator audience and
+requires the same active identity plus a non-durable recovery proof, while an
+explicit worker audience cannot invoke it and plaintext values are never
+stored.
 
 ## Chunked immutable artifact transport
 

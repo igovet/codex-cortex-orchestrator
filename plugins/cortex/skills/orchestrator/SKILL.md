@@ -26,15 +26,20 @@ without asking for another activation.
 | `help` | `help` | Explain Cortex without writes. |
 | `harvest` | `harvest` | Incrementally synchronize knowledge docs. |
 | `harvest-refresh` | `harvest-refresh` | Fully re-audit knowledge docs. |
-| `prune` | `prune` | Remove only completed project-local Cortex task state stale for at least seven days. |
+| `prune` | `prune` | Remove only completed host-private Cortex task state stale for at least seven days. |
 | `normal` | `normal` | Exit the active Cortex session. |
 
 Do not guess unknown arguments. Show help and ask the user to choose.
 
-The help route explains invocation, opt-in behavior, the project-local
-`.codex/cortex` ledger, the nine public v5 lifecycle/governance/report tools, internal workers, and that
-source/tests outrank generated docs. Help performs no activation, dispatch, or
-write.
+The help route explains invocation, opt-in behavior, the host-private Cortex
+ledger, and the nine public v5 lifecycle/governance/report tools. An ordinary
+Desktop MCP launch uses the conventional compatibility projection containing
+all nine, so `$cortex:orchestrator` can start and run orchestration. Worker
+briefings and profiles still require worker-only behavior. A host may instead
+opt into an explicit strict `worker` or `coordinator` five-tool projection;
+that is optional hardening, not a prerequisite for normal orchestrator use.
+Help performs no activation, dispatch, or write. Source/tests outrank generated
+docs.
 
 The empty, `harvest`, and `harvest-refresh` routes explicitly authorize durable
 orchestration; `prune` authorizes only the bounded maintenance call below.
@@ -63,8 +68,8 @@ The `prune` route is maintenance, not a coding pipeline. After explicit user
 selection, call `manage_orchestration` once with exact absolute `project_root`,
 intent `prune`, no `task_ref`, and
 `payload: {"confirmation":"PRUNE","older_than_days":7}`. It removes only
-completed task-scoped `.codex/cortex` state last updated at least seven days
-ago, and reconciles task indexes, public starts,
+completed task-scoped host-private Cortex state last updated at least seven
+days ago, and reconciles task indexes, public starts,
 activations, operation receipts, classification receipts, task resource
 claims, and lane bindings. It preserves every active or blocked task regardless
 of age and never removes a classification receipt referenced by a retained
@@ -74,7 +79,7 @@ period is supplied, the route presents the stable choices `keep_1d`, `keep_7d`,
 `keep_30d`, and `full_reset`. The first three map to bounded retention
 windows. `full_reset` is separately destructive: it requires the exact second
 confirmation `RESET CORTEX`, refuses to run while any task is active, and
-removes only `.codex/cortex` state while preserving project source and docs.
+removes only host-private Cortex state while preserving project source and docs.
 
 ## Harvest route contract
 

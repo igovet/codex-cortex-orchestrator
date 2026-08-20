@@ -97,10 +97,11 @@ brief, context files, and at most eight validated domains.
 ## Public v5 coordinator contract
 
 - The stdio MCP process has one immutable launch-time audience. Missing or
-  unspecified audience defaults to the worker projection, which exposes only
-  worker question/report/briefing tools. Only a host-provisioned explicit
-  `coordinator` audience exposes lifecycle and governance tools; JSON-RPC
-  initialization and tool arguments cannot elevate the process.
+  unspecified audience uses the compatibility projection exposing all nine
+  public operations, so `$cortex:orchestrator` works in an ordinary Desktop
+  launch. Explicit `worker` and `coordinator` audiences remain strict
+  five-tool projections; JSON-RPC initialization and tool arguments cannot
+  change or elevate the process.
 - Normal flow is `start_orchestration` once, then
   `continue_orchestration` once per completed relative `step`.
   `manage_orchestration` is only for inspect/resume/deactivate and rare
@@ -109,8 +110,9 @@ brief, context files, and at most eight validated domains.
   `worker_question`, `get_report_template`, and `record_report`,
   identity/digest-scoped
   `read_dispatch_briefing`, and predecessor-only `read_worker_report`, the
-  registry contains nine operations, while each launch-time audience exposes
-  exactly five: the worker projection has `worker_question`,
+  registry contains nine operations. The unspecified audience is a
+  compatibility projection exposing all nine; explicit launch-time audiences
+  expose exactly five: the worker projection has `worker_question`,
   `get_report_template`, `record_report`, `read_dispatch_briefing`, and scoped
   `read_worker_report`; the coordinator projection has
   `start_orchestration`, `continue_orchestration`, `manage_orchestration`,
@@ -213,10 +215,10 @@ brief, context files, and at most eight validated domains.
   contains no dispatches, and cannot authorize a duplicate wave. A genuinely
   lost first response is recovered once through management inspect.
 - Coordinator capability recovery is not a worker operation or an identifier-
-  only fallback. It requires the explicit coordinator audience, exact active
-  principal/thread/task identity, and the non-durable recovery proof returned
-  with the original authorization response. The proof rotates with the bearer;
-  only verifiers are durable.
+  only fallback. It is available on the normal compatibility or explicit
+  coordinator audience and requires exact active principal/thread/task identity
+  plus the non-durable recovery proof returned with the original authorization
+  response. The proof rotates with the bearer; only verifiers are durable.
 - Active corrections use `manage_orchestration(intent="steer")` with the
   original `user_message` and canonical English `message_en` when needed.
   Cortex records a task revision and resumes only addressable native workers
@@ -283,12 +285,12 @@ brief, context files, and at most eight validated domains.
   `finding_rework_documentation_full` C2 scenario does not seed the
   opening finding: real Review, Documentation, fresh Review, and Close workers
   must reach the close-bound server handoff. Its independent hard cap is 1,800
-  seconds; the timeout flag may only reduce that cap. This full route requires
-  host-level per-agent MCP provisioning: its parent has the coordinator
-  endpoint, while each spawned worker has the worker endpoint. A static
-  coordinator-audience source launch makes the parent start but prevents child
-  briefing/report calls; it is an expected failed integration, never a reason
-  to merge the two tool surfaces. The scenario proves the canonical
+  seconds; the timeout flag may only reduce that cap. This full route also
+  exercises host-level per-agent MCP provisioning: its parent may have the coordinator
+  endpoint, while each spawned worker may have the worker endpoint. An ordinary
+  static launch uses the nine-operation compatibility projection; strict
+  per-agent provisioning is the role-separation assurance check, never a reason
+  to merge the strict tool surfaces. The scenario proves the canonical
   receipt-bound route and observed native lifecycle, but source mode's
   `--ignore-user-config` deliberately excludes trusted Cortex hooks, so it does
   not prove durable native child-ID/model binding to an attempt. A separate

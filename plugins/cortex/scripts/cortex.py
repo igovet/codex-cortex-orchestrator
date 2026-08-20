@@ -11088,16 +11088,17 @@ def main() -> None:
     if len(arguments) == 1 and arguments[0].startswith("--mcp-audience="):
         audience = arguments[0].split("=", 1)[1].strip().lower()
     elif arguments:
-        raise SystemExit("usage: cortex.py [--mcp-audience=coordinator|worker]")
+        raise SystemExit("usage: cortex.py [--mcp-audience=compat|coordinator|worker]")
     # The launch environment is host-controlled, unlike JSON-RPC request
-    # data.  It supports hosts that cannot add command arguments, but an
-    # invalid value must not silently widen the default worker surface.
+    # data.  It supports hosts that cannot add command arguments.  The
+    # compatibility default keeps the documented Desktop orchestration route
+    # usable; hosts that need strict audience separation opt in explicitly.
     if not arguments:
         configured_audience = str(os.environ.get("CORTEX_MCP_AUDIENCE") or "").strip().lower()
         if configured_audience:
             audience = configured_audience
     if audience not in MCP_AUDIENCES:
-        raise SystemExit("CORTEX MCP audience must be coordinator or worker")
+        raise SystemExit("CORTEX MCP audience must be compat, coordinator, or worker")
     # Load the complete runtime package before accepting requests. Installed
     # cache directories may be renamed during plugin replacement while this
     # already-running process still serves a host session.

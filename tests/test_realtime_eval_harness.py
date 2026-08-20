@@ -536,7 +536,8 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertEqual(self.harness.SERVER.resolve(), expected_server)
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('mcp_servers.cortex.command="{sys.executable}"', source)
-        self.assertIn('mcp_servers.cortex.args=["{SERVER}", "--mcp-audience=coordinator"]', source)
+        self.assertIn('mcp_servers.cortex.args=["{SERVER}"]', source)
+        self.assertNotIn('mcp_servers.cortex.args=["{SERVER}", "--mcp-audience=coordinator"]', source)
         self.assertNotRegex(source, r"codex\s+(?:plugin\s+)?(?:install|add|update|remove)\b")
 
     def fake_codex(self) -> Path:
@@ -656,10 +657,8 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertEqual((global_codex_target / "registry.json").read_text(encoding="utf-8"), "global-registry-sentinel")
         command = " ".join(str(item) for item in probe["argv"])
         self.assertIn(f'mcp_servers.cortex.command="{sys.executable}"', command)
-        self.assertIn(
-            f'mcp_servers.cortex.args=["{self.harness.SERVER}", "--mcp-audience=coordinator"]',
-            command,
-        )
+        self.assertIn(f'mcp_servers.cortex.args=["{self.harness.SERVER}"]', command)
+        self.assertNotIn("--mcp-audience=coordinator", command)
 
     def test_live_eval_uses_private_codex_home_and_cleans_normal_run(self) -> None:
         results, probe, global_home, global_codex_target = self.run_isolated_probe()

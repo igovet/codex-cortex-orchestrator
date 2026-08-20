@@ -2,8 +2,10 @@
 
 The stdio protocol does not carry a trustworthy per-call actor identity.  A
 server process therefore receives one immutable audience at launch time.  The
-untrusted/default audience is the worker surface; a host that has established
-a coordinator channel must opt in explicitly to the coordinator surface.
+ordinary Desktop launch uses the compatibility surface so an explicit
+``$cortex:orchestrator`` can start its lifecycle.  A host that can establish
+separate trusted channels may opt into the strict coordinator and worker
+projections.
 """
 from __future__ import annotations
 
@@ -14,8 +16,8 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 
-MCP_AUDIENCES = frozenset({"coordinator", "worker"})
-DEFAULT_MCP_AUDIENCE = "worker"
+MCP_AUDIENCES = frozenset({"compat", "coordinator", "worker"})
+DEFAULT_MCP_AUDIENCE = "compat"
 
 # ``read_worker_report`` is intentionally shared: the coordinator reads a
 # completed report, while a successor worker may read only refs granted in its
@@ -34,6 +36,24 @@ WORKER_PUBLIC_TOOL_NAMES = (
     "read_dispatch_briefing",
     "read_worker_report",
 )
+# Compatibility is deliberately the conventional nine-operation registry.
+# Codex Desktop presently launches one static MCP definition for the root and
+# every native child; defaulting that process to either strict five-tool
+# projection makes the documented `$cortex:orchestrator` route unusable.  The
+# capability/recovery proof and handler scope checks remain authoritative on
+# this surface.  Hosts that can provision role-specific processes use the
+# strict projections above.
+COMPAT_PUBLIC_TOOL_NAMES = (
+    "start_orchestration",
+    "continue_orchestration",
+    "manage_orchestration",
+    "manage_governance",
+    "worker_question",
+    "get_report_template",
+    "record_report",
+    "read_dispatch_briefing",
+    "read_worker_report",
+)
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
@@ -45,7 +65,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref and the exact task_ref from the successful lifecycle response. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
-    "manage_governance": "Coordinator-only: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If the one-response bearer was lost, recover_coordinator_capability rotates it only on an explicitly coordinator-scoped transport with the same active principal, thread, task_ref, and the non-durable recovery proof returned in the original authorization response. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
+    "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If the one-response bearer was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and the non-durable recovery proof returned in the original authorization response. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
 
@@ -1117,10 +1137,18 @@ def public_tools_for_audience(
     ``audience`` is intentionally not accepted from JSON-RPC initialization or
     individual tool arguments: those values are controlled by the caller and
     cannot establish a privilege boundary.  The host selects it before the
-    process starts.  Unknown/missing audiences must use the worker projection.
+    process starts.  Unknown/missing audiences use the compatibility
+    projection so ordinary Desktop skill activation remains operable; hosts
+    that need strict role separation must select ``worker`` or
+    ``coordinator`` explicitly.
     """
     selected = str(audience or "").strip().lower()
-    names = COORDINATOR_PUBLIC_TOOL_NAMES if selected == "coordinator" else WORKER_PUBLIC_TOOL_NAMES
+    if selected == "coordinator":
+        names = COORDINATOR_PUBLIC_TOOL_NAMES
+    elif selected == "worker":
+        names = WORKER_PUBLIC_TOOL_NAMES
+    else:
+        names = COMPAT_PUBLIC_TOOL_NAMES
     return {
         name: all_public_tools[name]
         for name in names
