@@ -214,12 +214,17 @@ brief, context files, and at most eight validated domains.
 - A successful start response includes `replayed`. Once start returns
   dispatches, never call it again for that `task_ref`; a replay is a receipt,
   contains no dispatches, and cannot authorize a duplicate wave. A genuinely
-  lost first response is recovered once through management inspect.
+  lost first response is deliberately **not** recovered by an idempotent start
+  replay: absent a host-attested delivery identity, doing so would turn public
+  task identifiers into coordinator authority.
 - Coordinator capability recovery is not a worker operation or an identifier-
   only fallback. It is available on the normal compatibility or explicit
   coordinator audience and requires exact active principal/thread/task identity
   plus the non-durable recovery proof returned with the original authorization
-  response. The proof rotates with the bearer; only verifiers are durable.
+  response. A lost recovery response is safe to retry: Cortex redelivers the
+  same HMAC-derived replacement pair until acknowledgement supplies the prior
+  proof and both replacements; only then does the proof rotate. Only opaque
+  delivery metadata and verifiers are durable.
 - Active corrections use `manage_orchestration(intent="steer")` with the
   original `user_message` and canonical English `message_en` when needed.
   Cortex records a task revision and resumes only addressable native workers

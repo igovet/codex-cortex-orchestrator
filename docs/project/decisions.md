@@ -88,9 +88,12 @@ Promotion and its proposal transition must share one SQLite transaction. A
 coordinator capability carries task/initiative scope, principal, thread,
 generation, expiry, allowed actions, and revocation metadata; recovery is
 available on the normal compatibility or explicit coordinator audience and
-requires the same active identity plus a non-durable recovery proof, while an
-explicit worker audience cannot invoke it and plaintext values are never
-stored.
+requires the same active identity plus a non-durable recovery proof. It stages
+one HMAC-derived replacement pair that can be redelivered after a lost recovery
+response; acknowledgement requires the prior proof and both replacements before
+the old generation is revoked. A lost initial start response remains
+fail-closed without a host-attested delivery identity. An explicit worker
+audience cannot invoke either phase and plaintext values are never stored.
 
 ## Chunked immutable artifact transport
 

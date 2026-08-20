@@ -240,6 +240,29 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertRegex(renewed_proof, r"^[0-9a-f]{64}$")
         self.assertNotEqual(renewed_capability, original_capability)
         self.assertNotEqual(renewed_proof, original_proof)
+        acknowledged = self._rpc(
+            "coordinator",
+            {
+                "jsonrpc": "2.0",
+                "id": "coordinator-recovery-acknowledgement",
+                "method": "tools/call",
+                "params": {
+                    "name": "manage_governance",
+                    "arguments": {
+                        "project_root": str(self.project),
+                        "action": "acknowledge_coordinator_recovery",
+                        "task_ref": str(started["task_ref"]),
+                        "principal": str(durable_start["principal"]),
+                        "thread_id": str(durable_start["thread_id"]),
+                        "capability_generation": initial_generation + 1,
+                        "coordinator_capability": renewed_capability,
+                        "coordinator_recovery_proof": renewed_proof,
+                        "previous_coordinator_recovery_proof": original_proof,
+                    },
+                },
+            },
+        )["result"]["structuredContent"]
+        self.assertTrue(acknowledged["ok"], acknowledged)
         stale_proof = self._rpc(
             "coordinator",
             {

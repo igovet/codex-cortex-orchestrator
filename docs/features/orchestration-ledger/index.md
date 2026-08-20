@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.6 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.7 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -186,11 +186,16 @@ so every public lifecycle response retains an integer relative step.
 The coordinator governance capability appears only in the original successful
 start response. Its SHA-256 digest and a separate recovery-proof digest are the
 only durable verifiers; idempotent replay cannot recover or reissue either
-value, and legacy plaintext values are scrubbed and invalidated. Recovery is
-accepted on the normal compatibility or explicit coordinator audience with the
-exact active principal, thread, task, and original non-durable recovery proof;
-an explicit worker audience cannot invoke it. Rotation returns a new bearer
-and proof and revokes the previous generation.
+value, and legacy plaintext values are scrubbed and invalidated. A lost initial
+start response remains fail-closed until a host-attested delivery identity is
+available—public task/principal/thread identifiers never substitute for a
+proof. Recovery is accepted on the normal compatibility or explicit coordinator
+audience with the exact active principal, thread, task, and original
+non-durable recovery proof. It stages a single HMAC-derived replacement pair;
+the same proof safely redelivers that pair after a lost response, while the old
+generation remains active. `acknowledge_coordinator_recovery` must return the
+prior proof and both replacements before it atomically commits the new
+generation. An explicit worker audience cannot invoke either phase.
 `governance_mode=off` is accepted only for C1 with a complete boolean
 assessment of every documented hard and topology trigger, which is included in
 the policy snapshot. Text classification can only raise the governance floor.
@@ -864,7 +869,7 @@ during retirement.
 
 The focused plan-approval, replan, recovery, and read-only artifact regressions
 described here are historical 9.2.4 source evidence; they do not certify the
-The 9.2.6 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
+The 9.2.7 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
 implementation loss, apply three dynamic pipeline changes beyond the persisted
 legacy replan limit, and verify every resulting gate through close. Complete
 discovery validation remains a separate governance-v10 workstream and is not

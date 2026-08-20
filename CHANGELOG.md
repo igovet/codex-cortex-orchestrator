@@ -1,5 +1,19 @@
 # Changelog
 
+## [9.2.7] - 2026-08-20
+
+This source-tree release extends the 9.2.6 hardening line with the P1.1
+coordinator recovery delivery work. The source cachebuster is
+`9.2.7+codex.20260820104507`; publication and installed-plugin parity remain
+separate release gates.
+
+- Preserve an idempotent pending recovery delivery across a lost transport
+  response, with explicit acknowledgement before capability rotation becomes
+  final.
+- Keep recovery replay bound to the active coordinator identity and existing
+  proof, so response redelivery cannot become an identifier-only capability
+  lookup.
+
 ## [9.2.6] - 2026-08-20
 
 This source-tree hardening candidate is not a publication or installation
