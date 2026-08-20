@@ -13,6 +13,9 @@ python3 scripts/cortex-luna-high-eval.py --live --scenario follow_up_partial
 # finding; real corrective documentation -> fresh review -> resolved.
 # This scenario has a hard 300-second deadline; --live-timeout-seconds may only reduce it.
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+# Full C2 real-host lifecycle: real opening Review → Documentation → fresh
+# Review → Close → completed final handoff (hard 1800 s).
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
 # Full lifecycle live scenario for a release gate.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Automatic C3 governance lifecycle: no governance mode is supplied by the caller.
@@ -73,6 +76,33 @@ evidence of a pass.
 
 ```bash
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+```
+
+`finding_rework_documentation_full` is deliberately a separate C2 live gate.
+Unlike the narrow scenario, it has no seeded opening report: the real parent
+starts exactly one task and executes the opening Review, corrective
+Documentation, fresh resolving Review, and Close. It passes only after the
+server records a completed task, a close-bound final handoff, complete current
+manifest receipts, documentation/reassessment receipts, and no active gates.
+Close reports `findings=[]`, because the fresh Review—not Close—owns the one
+canonical finding transition to `resolved`. Its hard cap is **1,800 seconds**;
+the timeout flag may reduce but not increase it. This is source-mode evidence
+only and neither installs nor updates the plugin. It proves canonical
+receipt-bound state plus the observed native worker lifecycle, not trusted
+native child-ID/model binding: `--ignore-user-config` intentionally prevents
+the installed Cortex hooks from participating. A hook-enabled isolated
+integration run is required for that higher-assurance proof.
+
+The full scenario additionally requires host-level **per-agent MCP
+provisioning**: the parent must receive a coordinator-audience endpoint and
+each spawned child a worker-audience endpoint. A single static coordinator
+launch may make `start_orchestration` succeed, but children then lack
+worker-only briefing/report tools; that run is a failed integration attempt,
+not a passing full gate. Do not merge the tool surfaces to make such a run
+appear to pass.
+
+```bash
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
 ```
 
 `verify-cortex-release.py --require-tracked` runs only after a commit exists;
@@ -186,10 +216,13 @@ candidate is committed and rerun on the exact release SHA:
 - Installed-plugin verification and cachebuster parity: **pending; no install
   or user `~/.codex` mutation is implied**.
 
-The draft scope covers governance schema v10 integrity, artifact-authoritative
-record bodies, exact scope and linear revisions, scoped capability claims with
-rotation/revocation, no-progress pauses, revision-aware steer/questions,
-bounded/cache-backed manifests, and the required 50,000-file benchmark. A
+The draft scope covers governance schema v11 integrity, artifact-authoritative
+record bodies, exact scope and linear revisions, append-only status/approval
+lifecycle authority, deterministic pre-v10 v9 reconciliation, linked-task
+completion and governed-link deletion restrictions, scoped capability claims
+with coordinator-audience recovery proof and rotation/revocation, no-progress
+pauses, revision-aware steer/questions, bounded/cache-backed manifests, and
+the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
@@ -217,22 +250,27 @@ pending full-suite or live gates.
   delegation persistence, gate transitions, harvest validation, reports,
   questions, briefings, and MCP schema transport. Behavioral tests import the
   documented public surface rather than asserting function placement.
-- `cortex.db` is the only coordination-state source for new tasks. Immutable
+- The host-private `cortex.db` (default
+  `~/.codex/cortex/projects/p-<sha256>/`; private outside-workspace
+  `CORTEX_HOST_STATE_DIR` override) is the only coordination-state source for
+  new tasks. Immutable
   reports, receipts, evidence, briefings, planning artifacts, handoffs, and
   manifests are catalogued in SQLite. Markdown/JSON task files are regenerated
   audit/Desktop projections; altering, deleting, or adding a projection cannot
   restore or modify coordination state. Existing pre-SQLite files are neither
   inspected, imported, resumed, altered, nor deleted.
-- Database schema changes are numbered and checksummed through **schema v10**.
+- Database schema changes are numbered and checksummed through **schema v11**.
   First MCP access takes
   the project-ledger lock and applies only missing SQLite-to-SQLite migrations
   atomically; a failed or mismatched migration fails closed. Checksums cover
   migration version, name, and ordered normalized SQL content. Legacy
   name-only checksums are upgraded only after schema validation. The schema
   uses unbounded SQLite `TEXT`/`BLOB` values for content and indexed 32 KiB
-  immutable artifact chunks for transport. Schema v10 hardens the governance
-  ledger with artifact-authoritative bodies, exact non-null scopes, linear
-  revision indexes/triggers, and idempotent submission receipts; schema v9
+  immutable artifact chunks for transport. Schema v11 hardens the governance
+  ledger with an append-only status/approval-basis lifecycle chain, governed
+  link-deletion restrictions, and terminal linked-task checks. Schema v10
+  adds artifact-authoritative bodies, exact non-null scopes, linear revision
+  indexes/triggers, and idempotent submission receipts; schema v9
   added the initial governance ledger; schema v8 added task/plan revisions,
   native worker sessions, attempt messages, trace/tool observations, and
   question-batch storage; schema v7 separates deduplicated
@@ -293,10 +331,15 @@ pending full-suite or live gates.
   generation, so unresolved questions from an older revision are superseded
   and cannot accept stale answers. Corrective work has no fixed attempt quota,
   but a repeated materially identical no-progress signature pauses autonomous
-  retries for an explicit user strategy without producing a false pass.
+  retries for an explicit user strategy without producing a false pass. The
+  recovery tests require a singleton Planner-first wave and a material change
+  to pipeline, strategy, or verification, or a class-matched environment
+  remediation; reason prose is audit-only.
 - Manifest capture enforces `max_entries`, `max_hashed_bytes`, and
-  `max_seconds`; a limit produces a partial result with a reason. Unchanged
-  file hashes may use a bounded stat-keyed cache. CI additionally requires
+  `max_seconds`; a limit produces a partial result with a reason, but a
+  partial baseline/current capture cannot authorize mutation reconciliation,
+  handoff, or terminal close. Unchanged file hashes may use a bounded
+  stat-keyed cache. CI additionally requires
   `python3 -B scripts/cortex-manifest-benchmark.py --files 50000
   --max-seconds 30` to report `target_met: true`.
 - Required post-plan review is surfaced through one ordinary final assistant
@@ -340,11 +383,12 @@ close evidence. They also cover human-readable `Profile Module` labels and
 attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
-Public API tests require exactly nine MCP tools: coordinator lifecycle
-operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`; coordinator-only `manage_governance`; worker `worker_question`, `get_report_template`,
-`record_report`, and
-identity/digest-scoped `read_dispatch_briefing`; plus scoped predecessor
+Public API tests require a nine-operation MCP registry projected as exactly
+five tools per launch-time audience. The coordinator projection contains
+`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
+coordinator-only `manage_governance`, and scoped `read_worker_report`; the
+worker projection contains `worker_question`, `get_report_template`,
+`record_report`, identity/digest-scoped `read_dispatch_briefing`, and scoped
 `read_worker_report`. Native worker prompts carry a compact bootstrap with the
 exact immutable briefing path/digest; the worker cannot enumerate the ledger.
 
@@ -384,7 +428,7 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
-- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, or `--live --scenario finding_rework_documentation` for the narrow finding route. The latter opens its controlled Review finding through a deterministic public-API prelude, then runs real Documentation and fresh Review workers through resolution. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800, except the finding scenario which is capped at and defaults to 300 seconds; `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
+- `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, `--live --scenario finding_rework_documentation` for the narrow seeded-origin finding route, or `--live --scenario finding_rework_documentation_full` for the complete real C2 finding lifecycle through Close and handoff. The full finding route is passing evidence only with host-provisioned per-agent MCP audiences (coordinator for the parent, worker for every child); a single static coordinator launch is an expected failed integration. It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; the narrow finding scenario is capped at 300 seconds, and the full finding scenario is capped at 1800 seconds. `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.
 - `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-host-preflight.py` — read-only host

@@ -9,14 +9,16 @@ produce linked evidence before the wave advances. Dependent work belongs in a
 later wave. A general DAG would be a separate schema decision rather than an
 implicit reinterpretation of the current state model.
 
-## Relative nine-tool public facade
+## Audience-projected nine-operation public facade
 
-The public API exposes exactly nine tools. Coordinators use the three lifecycle
-operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration` plus coordinator-only `manage_governance`; workers use `worker_question`, `get_report_template`,
-and `record_report`, may
-recover only their exact immutable briefing through `read_dispatch_briefing`, and may
-read only explicitly supplied predecessor refs with scoped `read_worker_report`.
+The v5 registry exposes nine operations, but the launch-time process audience
+projects exactly five tools. Coordinators receive
+`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
+coordinator-only `manage_governance`, and scoped `read_worker_report`; workers
+receive `worker_question`, `get_report_template`, `record_report`,
+`read_dispatch_briefing`, and scoped `read_worker_report`. The shared report
+reader remains handler-scoped: coordinators read completed reports, while
+successor workers may read only explicitly supplied predecessor refs.
 A coordinator starts a task with
 the compact task contract, then continues once per completed wave.
 The active-wave cursor is a relative `step`; parallel results use only
@@ -68,17 +70,24 @@ review is bound to canonical reviewer attempts and sessions. Full governance
 adds `governance_activation` and `governance_close` review waves owned by
 `code_reviewer`; the resolver never invents a numeric scope trigger.
 
-Governance schema v10 makes the integrity boundary explicit. A record is read
+Governance schema v11 makes the integrity boundary explicit. A record is read
 from and verified against its immutable content artifact; the legacy
 `content_json` column is only a checked cache. Every record has a normalized,
 non-null scope key, task/initiative links are checked exactly, and a partial
 unique index permits at most one successor for a predecessor. Immutable-field
 triggers reject direct SQL mutation, strict JSON rejects non-finite values, and
-`submission_id` plus a command digest makes retries conflict-safe. Promotion
-and its proposal transition must share one SQLite transaction. A coordinator
-capability carries task/initiative scope, principal, thread, generation,
-expiry, allowed actions, and revocation metadata; recovery rotates a lost
-bearer only for the same active identity and never stores plaintext.
+`submission_id` plus a command digest makes retries conflict-safe. Schema v11
+adds an append-only cryptographic lifecycle chain for status and approval
+basis, prevents deletion of governance-scoped initiative-task links, and
+requires terminal success for linked milestone/deliverable tasks before an
+initiative completes. A pre-v10 upgrade reconciles only deterministic v9
+duplicate revisions/sibling successors and fails closed on ambiguous graphs.
+Promotion and its proposal transition must share one SQLite transaction. A
+coordinator capability carries task/initiative scope, principal, thread,
+generation, expiry, allowed actions, and revocation metadata; recovery is
+available only on the explicit coordinator audience and requires the same
+active identity plus a non-durable recovery proof, while plaintext values are
+never stored.
 
 ## Chunked immutable artifact transport
 
@@ -167,9 +176,12 @@ relative steps never move backward or collide.
 The open-ended correction policy has a liveness boundary rather than a fixed
 attempt quota. Cortex computes a no-progress signature from the finding
 fingerprint, affected paths, dispatch/manifest digest, verification result,
-and failure class. Repeated materially identical signatures pause autonomous
-work in a user-decision state, preserving the failed gate and evidence instead
-of producing a false pass. A new strategy generation is required to resume.
+and failure class; free-text reason prose is audit-only. Repeated materially
+identical signatures pause autonomous work in a user-decision state, preserving
+the failed gate and evidence instead of producing a false pass. A new
+Planner-first recovery generation must materially change the pipeline,
+strategy, or verification contract, unless the Planner wave names a
+class-matched infrastructure/environment remediation.
 
 A final close report may itself reveal bounded work that invalidates terminal
 proof. When the coordinator supplies an explicit rework `future_waves`
@@ -238,7 +250,7 @@ MCP schema/transport adapter. The record-report vertical slice is separated
 into domain policy, ports, a SQLite unit-of-work adapter, projection port, and
 use case; `core/runtime_bindings.py` is the explicit composition binding, not a
 bidirectional facade import. The public adapter owns the declarative
-nine-tool contract and JSON-RPC stdio loop; the facade passes the current
+nine-operation registry and JSON-RPC stdio loop; the facade passes the current
 business handlers into it. Gate transitions are further separated into active-
 gate resolution, evidence/C2-C3 validation, durable state mutation, and
 terminal manifest cleanup, so routing changes cannot accidentally weaken
@@ -450,7 +462,8 @@ file, including additions, deletions, modifications, and recognized renames.
 This makes touched-file reporting checkable without relying on a worker's
 summary.
 The initial and each per-attempt capture are stored as immutable,
-content-addressed records in `cortex.db`. State and attempt records carry
+content-addressed records in the host-private `cortex.db` at
+`~/.codex/cortex/projects/p-<sha256>/` by default. State and attempt records carry
 compact `manifest-<sha256>` references; repeated captures of the same project
 state deduplicate to the same record, while a fresh capture at every dispatch
 preserves detection of external changes. Once terminal completion is persisted,
@@ -461,8 +474,9 @@ initial baseline before replacement dispatches.
 
 ### SQLite migration contract
 
-`cortex.db` is the sole mutable source of truth for new tasks. The plugin keeps
-numbered, content-checked migrations through v10 in `ledger_db.py`; the first
+`cortex.db` is the sole mutable source of truth for new tasks and is host-private
+by default below `~/.codex/cortex/projects/p-<sha256>/`. The plugin keeps
+numbered, content-checked migrations through v11 in `ledger_db.py`; the first
 MCP call with a new migration takes the project-ledger lock, applies every
 missing migration in order inside one SQLite transaction, and records each
 version in `schema_migrations`. Repeated calls verify history and schema.
@@ -483,7 +497,8 @@ caches.
 
 Manifest capture also has explicit `max_entries`, `max_hashed_bytes`, and
 `max_seconds` budgets. A budget breach produces a partial manifest with a
-reason and never masquerades as a complete baseline. A bounded in-process
+reason and never masquerades as a complete baseline, mutation-audit basis,
+handoff, or terminal-close proof. A bounded in-process
 digest cache reuses unchanged file hashes only when the full stat identity
 matches. The release workflow runs the 50,000-file benchmark and requires its
 `target_met` result before the CI job can pass.
@@ -574,13 +589,14 @@ request `worktree` for concurrent or write-heavy work. The coordinator maps
 the value to the native `target.environment.type`; local sharing is a
 deliberate trade-off and requires serializing writers.
 
-## Project-local runtime state
+## Host-private runtime state
 
 Production orchestration is fail-closed for each supplied absolute
-`project_root`; one MCP server process can serve multiple roots. The v5 public
-tools validate the selected root before preparing work, and an unavailable server
-or failed, unwritable, or mismatched root ends that task's workflow with a
-blocker. Ordinary/unledgered subagent work is not a substitute.
+`project_root`; one MCP server process can serve multiple roots while storing
+coordination state below the host-private project hash root. The v5 public tools
+validate the selected root before preparing work, and an unavailable server or
+failed, unwritable, or mismatched root ends that task's workflow with a blocker.
+Ordinary/unledgered subagent work is not a substitute.
 
 ## Skill-level Cortex routes
 

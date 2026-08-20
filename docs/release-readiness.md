@@ -11,12 +11,15 @@ cachebuster is `9.2.5+codex.20260819205849`. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
-The draft scope is governance schema v10 integrity (artifact-authoritative
+The draft scope is governance schema v11 integrity (artifact-authoritative
 bodies, exact scope, linear revisions, strict JSON, immutable-field triggers,
-and idempotent submissions), scoped capability claims with same-identity
-recovery and revocation, no-progress pause semantics, revision-aware steer and
-questions, bounded/cache-backed manifest capture, the 50,000-file benchmark,
-and CI/CODEOWNERS release evidence.
+idempotent submissions, append-only status/approval-basis lifecycle authority,
+deterministic pre-v10 v9 reconciliation, linked milestone/deliverable success,
+and governed-link deletion restrictions), scoped capability claims with
+coordinator-audience same-identity recovery proof and revocation,
+no-progress pause semantics, revision-aware steer and questions,
+bounded/cache-backed manifest capture, the 50,000-file benchmark, and
+CI/CODEOWNERS release evidence.
 
 ## Package contract
 
@@ -45,23 +48,39 @@ retired nested marketplace, `.codex` state, bytecode, secret-prone filenames
 and credential-store paths, missing public policy documents, private local
 home paths in public files, and explicit release placeholders.
 
+Runtime coordination state is host-private and defaults to
+`~/.codex/cortex/projects/p-<sha256>/`; a private, outside-workspace
+`CORTEX_HOST_STATE_DIR` is the only host override. Legacy project-local
+`.codex/cortex` databases move only through validated same-filesystem atomic
+rename, and unsafe, split, non-database, or cross-filesystem legacy state fails
+closed.
+
 The installer validates `HOME` and `CODEX_HOME` ancestry, preserves the user
 MCP approval override, and creates a collision-safe private backup only before
 changing a configured global default-subagent model. It never inspects or
 removes previous orchestration state or unrelated plugin files.
 
-Governance schema v10 makes immutable content artifacts authoritative, enforces
+Governance schema v11 makes immutable content artifacts authoritative, enforces
 exact normalized scope and linear revisions, and fails closed on strict-JSON or
-immutable-field violations. Coordinator capabilities are short-lived claims
-bound to task/initiative, principal, thread, generation, expiry, and allowed
-actions; same-identity recovery rotates and revokes generations without
-storing plaintext bearers. Corrective work has no fixed attempt quota, but a
-materially identical no-progress signature pauses autonomous retries for an
-explicit user strategy. Material steer classifies the earliest affected gate;
+immutable-field violations. Its append-only lifecycle chain authorizes status
+and approval basis; deterministic v9 conflicts are reconciled before v10
+indexes, while ambiguous graphs fail closed. Linked milestone/deliverable
+tasks must be terminally successful for initiative completion, and governed
+initiative-task links cannot be deleted. Coordinator capabilities are
+short-lived claims bound to task/initiative, principal, thread, generation,
+expiry, and allowed actions; same-identity recovery is available only on the
+explicit coordinator audience and requires the non-durable proof returned with
+authorization, rotating and revoking generations without storing plaintext
+bearers or proofs. Corrective work has no fixed attempt quota, but a materially
+identical no-progress signature pauses autonomous retries for an explicit user
+strategy. Recovery is Planner-first and must materially change pipeline,
+strategy, or verification, or name a matching environment remediation; reason
+prose is audit-only. Material steer classifies the earliest affected gate;
 questions are bound to task/plan revision and strategy generation.
 
 Manifest capture is bounded by entries, hashed bytes, and elapsed time, with a
-bounded digest cache. CI requires the 50,000-file manifest benchmark to report
+bounded digest cache. Partial captures remain diagnostic only and cannot
+authorize mutation reconciliation, handoff, or terminal close. CI requires the 50,000-file manifest benchmark to report
 `target_met: true`; the workflow keeps Python 3.11/3.12, a 30-minute timeout,
 per-ref cancellation, and the existing release gates.
 

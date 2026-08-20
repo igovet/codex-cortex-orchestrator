@@ -312,10 +312,22 @@ def _validate_handoff_and_close(
     if not manifest or not manifest.get("complete"):
         raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
     baseline_manifest = task_manifest_baseline(task_dir, state)
+    baseline_partial = baseline_manifest.get("partial_manifest")
+    if isinstance(baseline_partial, dict) and baseline_partial.get("partial"):
+        raise ValueError(
+            "C2/C3 close requires a complete baseline manifest; "
+            f"capture stopped at {baseline_partial.get('reason') or 'a configured limit'}"
+        )
     current_manifest = capture_project_manifest(
         Path(load_task_definition(task_dir, state)["project_root"]),
         policy=baseline_manifest.get("policy"),
     )
+    current_partial = current_manifest.get("partial_manifest")
+    if isinstance(current_partial, dict) and current_partial.get("partial"):
+        raise ValueError(
+            "C2/C3 close requires a complete final manifest; "
+            f"capture stopped at {current_partial.get('reason') or 'a configured limit'}"
+        )
     if current_manifest["digest"] != manifest.get("current_digest"):
         raise ValueError("project files changed after the final handoff; create a new complete handoff")
 
@@ -398,6 +410,15 @@ def _persist_transition(
 ) -> None:
     if completed:
         closed_receipt, _ = reconcile_manifest(task_dir, state, [])
+        if not (closed_receipt.get("comparison") or {}).get("complete", False):
+            # A bounded/partial final capture cannot prove that the terminal
+            # file set is accounted for.  Keep the task out of completed
+            # state; the receipt remains available to the caller as bounded
+            # diagnostic evidence through the reconciliation path.
+            raise ValueError(
+                "cannot complete task with an incomplete final manifest; "
+                "recapture the project after the manifest limit is resolved"
+            )
         closed_paths = list(closed_receipt["comparison"]["changed_paths"])
         closed_receipt["reported_paths"] = closed_paths
         closed_receipt["unaccounted_paths"] = []

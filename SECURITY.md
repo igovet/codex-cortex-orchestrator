@@ -8,7 +8,7 @@ SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.5 source candidate adds governance schema v10 integrity checks. Its
+The 9.2.5 source candidate adds governance schema v11 integrity checks. Its
 exact source cachebuster is `9.2.5+codex.20260819205849`; tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
 a publication or installation claim.
@@ -35,10 +35,15 @@ an existing public tag.
 
 ## Security boundaries
 
-Cortex writes its durable ledger only below the selected project's
-`.codex/cortex` directory. The release excludes runtime state, bytecode,
-symlinks, and secret-prone paths. The installer backs up only authenticated
-legacy targets and refuses unexpected paths or symlink ancestry.
+Cortex writes its durable ledger below the host-private state root, which
+defaults to `~/.codex/cortex/projects/p-<sha256>/`. The host-only
+`CORTEX_HOST_STATE_DIR` override must be private and outside the workspace.
+The release excludes runtime state, bytecode, symlinks, and secret-prone
+paths. A legacy project-local `.codex/cortex` database is moved only by a
+same-filesystem atomic rename after secure ancestry, database, and split-state
+checks; unsafe, non-database, or cross-filesystem state fails closed. The
+installer backs up only authenticated legacy targets and refuses unexpected
+paths or symlink ancestry.
 
 Worker prompts are immutable, read-only briefing artifacts addressed by an
 exact path and SHA-256 digest. Native dispatch carries only the compact
@@ -67,16 +72,30 @@ Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
 The governance bearer is returned only with the original successful start
-response. Governance schema v10 persists only a SHA-256 verifier plus
+response. Governance schema v11 persists only SHA-256 verifiers plus
 server-owned claims: exact task/initiative scope, principal, thread, allowed
-actions, generation, expiry, and revocation history. It never persists the
-reusable plaintext or reissues it on an idempotent retry. If the response is
-lost, same-principal/thread recovery rotates a new bearer, revokes the old
-generation, and records a non-secret audit event; it cannot recover a bearer
-for another task or identity. Any legacy plaintext bearer is deleted and
-invalidated on first registry access; the affected task fails closed instead
-of preserving a possibly compromised credential. Workers must never receive or
-persist this coordinator-only bearer.
+actions, generation, expiry, and revocation history. It also persists only a
+verifier for a separate, non-durable coordinator recovery proof. It never
+persists either reusable plaintext value or reissues them on an idempotent
+retry. If the response is lost, recovery is available only through a
+host-provisioned explicit `coordinator` MCP audience and requires the exact
+same principal/thread/task plus the original recovery proof; it rotates a new
+bearer and proof, revokes the old generation, and records a non-secret audit
+event. It cannot recover a bearer for another task or identity. Any legacy
+plaintext bearer or proof is deleted and invalidated on first registry access;
+the affected task fails closed instead of preserving a possibly compromised
+credential. Workers must never receive or persist this coordinator-only bearer
+or recovery proof.
+
+Schema v11 also appends every governance record status and approval-basis
+transition to an immutable, cryptographically linked lifecycle chain. The
+mutable current projection is accepted only when it matches that chain. A
+pre-v10 upgrade deterministically reconciles safe v9 duplicate scope revisions
+and sibling successors before v10 uniqueness constraints; missing scope links,
+cross-scope predecessors, cycles, and other ambiguous graphs fail closed. A
+governance-linked initiative task link cannot be deleted, and an initiative
+cannot become completed or closed until every linked milestone/deliverable
+task has ledger status `completed`.
 
 `governance_mode=off` is fail-closed: C1 callers must submit an exhaustive
 boolean assessment of all documented hard and topology triggers. Keyword
@@ -106,7 +125,11 @@ pipeline rework has no fixed attempt or same-strategy quota while acceptance,
 verification, or canonical findings remain unresolved. A materially identical
 no-progress signature is a separate liveness boundary: autonomous retries
 pause for an explicit new strategy, preserving the failed gate and evidence
-instead of synthesizing a pass. Repeated failures automatically raise
+instead of synthesizing a pass. Recovery must begin with a singleton Planner
+wave and materially change the failed pipeline, strategy, or verification
+contract; infrastructure/environment pauses may instead name a class-matched
+remediation in that Planner wave. Free-text completion/resume reason prose is
+audit-only and cannot release the pause. Repeated failures automatically raise
 reasoning effort and, for eligible workers, escalate routing to Terra instead
 of silently closing the task.
 Only explicit non-retryable integrity, storage, permission, or unavailable
@@ -115,9 +138,10 @@ coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
 
 Manifest capture is fail-closed and bounded by maximum entries, hashed bytes,
 and elapsed time. Budget exhaustion returns a partial result with a reason and
-cannot authorize a complete handoff. A bounded stat-keyed digest cache is an
-optimization only. The release workflow requires the 50,000-file benchmark to
-report `target_met: true`; benchmark output is temporary and must not contain
+cannot authorize read-only mutation reconciliation, a complete handoff, or
+terminal close. A bounded stat-keyed digest cache is an optimization only.
+The release workflow requires the 50,000-file benchmark to report
+`target_met: true`; benchmark output is temporary and must not contain
 credentials or enter the release archive.
 
 Required plan approval is bound to a specific plan revision, planner report,

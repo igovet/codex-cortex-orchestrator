@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
 import sys
 
@@ -14,9 +17,10 @@ import cortex
 from cortex_runtime import governance, ledger_db
 
 
-class GovernanceCapabilitySecurityTests(unittest.TestCase):
+class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
+        self.set_up_host_private_control_store()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
         self.ledger = cortex.ledger_root({"project_root": str(self.project)})
@@ -36,6 +40,7 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
     @staticmethod
@@ -140,6 +145,10 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
         task_ref = str(started["task_ref"])
         principal = str(start["principal"])
         thread_id = str(start["thread_id"])
+        recovery_proof = str(
+            (started.get("authorization") or {}).get("coordinator_recovery_proof") or ""
+        )
+        self.assertRegex(recovery_proof, r"^[0-9a-f]{64}$")
         rotated = cortex.manage_governance(
             {
                 "project_root": str(self.project),
@@ -147,13 +156,19 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
                 "task_ref": task_ref,
                 "principal": principal,
                 "thread_id": thread_id,
+                "coordinator_recovery_proof": recovery_proof,
                 "capability_generation": 1,
             }
         )
         self.assertTrue(rotated["ok"], rotated)
         renewed = str((rotated.get("authorization_update") or {}).get("coordinator_capability") or "")
+        renewed_recovery_proof = str(
+            (rotated.get("authorization_update") or {}).get("coordinator_recovery_proof") or ""
+        )
         self.assertRegex(renewed, r"^[0-9a-f]{64}$")
+        self.assertRegex(renewed_recovery_proof, r"^[0-9a-f]{64}$")
         self.assertNotEqual(renewed, bearer)
+        self.assertNotEqual(renewed_recovery_proof, recovery_proof)
 
         old_generation = self._governance("inspect", bearer, initiative_ref="initiative-bound")
         self.assertFalse(old_generation["ok"])
@@ -165,6 +180,7 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
                 "task_ref": task_ref,
                 "principal": principal,
                 "thread_id": thread_id,
+                "coordinator_recovery_proof": renewed_recovery_proof,
                 "capability_generation": 1,
             }
         )
@@ -196,6 +212,10 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
 
     def test_lost_response_recovery_never_persists_plaintext_bearer(self) -> None:
         started, original, start = self._start("Recover a lost coordinator response.")
+        recovery_proof = str(
+            (started.get("authorization") or {}).get("coordinator_recovery_proof") or ""
+        )
+        self.assertRegex(recovery_proof, r"^[0-9a-f]{64}$")
         recovered = cortex.manage_governance(
             {
                 "project_root": str(self.project),
@@ -203,6 +223,7 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
                 "task_ref": str(started["task_ref"]),
                 "principal": str(start["principal"]),
                 "thread_id": str(start["thread_id"]),
+                "coordinator_recovery_proof": recovery_proof,
             }
         )
         self.assertTrue(recovered["ok"], recovered)
@@ -211,11 +232,42 @@ class GovernanceCapabilitySecurityTests(unittest.TestCase):
         registry_text = json.dumps(cortex._operation_registry(self.ledger), sort_keys=True)
         self.assertNotIn(original, registry_text)
         self.assertNotIn(replacement, registry_text)
+        self.assertNotIn(recovery_proof, registry_text)
         self.assertNotIn('"coordinator_capability"', registry_text)
+        self.assertNotIn('"coordinator_recovery_proof"', registry_text)
         self.assertIn('"coordinator_capability_digest"', registry_text)
+        self.assertIn('"coordinator_recovery_proof_digest"', registry_text)
         self.assertIn('"rotation_audit"', registry_text)
         self.assertTrue(
             self._governance("inspect", replacement, initiative_ref="initiative-bound")["ok"]
+        )
+
+    def test_failed_start_clears_staged_authorization_and_revokes_its_verifiers(self) -> None:
+        """A failed response must not leave an in-memory retry/recovery secret."""
+        payload = {
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Create a bounded C1 lifecycle fixture.",
+                "complexity": "C1",
+                "governance_mode": "off",
+                "risk_triggers": self._risk_assessment(),
+                "acceptance_criteria": ["The bounded fixture is handled safely."],
+                "verification": ["Inspect the durable state after the forced failure."],
+            },
+            "waves": [{"workers": [{"phase": "discover"}]}],
+        }
+        with mock.patch.object(cortex, "orchestrate", side_effect=RuntimeError("forced start failure")):
+            failed = cortex.start_orchestration(payload)
+        self.assertFalse(failed["ok"])
+        registry = cortex._operation_registry(self.ledger)
+        durable_start = next(iter(registry["tasks"].values()))["start"]
+        task_id = str(durable_start["task_id"])
+        self.assertNotIn("coordinator_capability_digest", durable_start)
+        self.assertNotIn("coordinator_recovery_proof_digest", durable_start)
+        self.assertTrue(durable_start["coordinator_capability_claims"].get("revoked_at"))
+        self.assertNotIn(
+            cortex._pending_coordinator_capability_key(self.ledger, task_id),
+            cortex._PENDING_COORDINATOR_CAPABILITIES,
         )
 
     def test_deactivation_revokes_the_durable_verifier_and_claim(self) -> None:

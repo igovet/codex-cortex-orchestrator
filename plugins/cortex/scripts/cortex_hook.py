@@ -16,11 +16,13 @@ try:
     from cortex import (
         bind_host_session_from_hook,
         bind_host_worker_from_hook,
+        ledger_root_path,
         finalize_host_worker_stop_from_hook,
     )
 except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open.
     bind_host_session_from_hook = None
     bind_host_worker_from_hook = None
+    ledger_root_path = None
     finalize_host_worker_stop_from_hook = None
 
 try:
@@ -96,7 +98,7 @@ WORKER_CONTEXT = (
     "Never call Cortex lifecycle, pipeline, gate, delegation, or management operations. For a Cortex-managed "
     "dispatch, follow the exact worker identity supplied in that dispatch. Before project work, read only the exact "
     "immutable briefing path supplied by the native bootstrap, verify its read-only mode and SHA-256, and never list "
-    "or directly read any other .codex/cortex path except the exact report draft_path later returned by "
+    "or directly read any other Cortex host-control path except the exact report draft_path later returned by "
     "get_report_template. Include the bootstrap's exact Dispatch briefing reviewed digest "
     "marker in report evidence. If and only if the host filesystem read cannot open that exact path, call public "
     "read_dispatch_briefing with the complete identity/digest tuple from the bootstrap; if its bounded response is incomplete, continue only with its exact next_cursor. You may call public read_worker_report "
@@ -149,14 +151,25 @@ def project_directory(event: dict) -> Path:
         if not candidate.is_dir():
             continue
         for parent in (candidate, *candidate.parents):
-            ledger = reject_symlink_ancestry(parent / ".codex" / "cortex", "Cortex root")
-            if ledger.is_dir():
+            if ledger_root_path is None:
+                break
+            try:
+                ledger = ledger_root_path({"project_root": str(parent)})
+                database = ledger / "cortex.db"
+                info = database.lstat()
+            except (OSError, ValueError):
+                continue
+            if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
                 return parent
     raise ValueError("Cortex project root is unavailable")
 
 
 def root(event: dict) -> Path:
-    return reject_symlink_ancestry(project_directory(event) / ".codex" / "cortex", "Cortex root")
+    if ledger_root_path is None:
+        raise ValueError("Cortex host ledger resolver is unavailable")
+    project = project_directory(event)
+    ledger = ledger_root_path({"project_root": str(project)})
+    return reject_symlink_ancestry(ledger, "Cortex host ledger")
 
 
 def valid_task_id(value: object) -> str | None:

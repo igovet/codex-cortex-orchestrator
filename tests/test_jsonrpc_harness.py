@@ -21,7 +21,10 @@ class JsonRpcHarnessLifecycleTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 project = Path(directory) / "project"
                 project.mkdir()
-                harness = JsonRpcHarness(SERVER, project, project / ".codex/cortex")
+                host_state_dir = Path(directory) / "host-private-store"
+                host_state_dir.mkdir(mode=0o700)
+                host_state_dir.chmod(0o700)
+                harness = JsonRpcHarness(SERVER, project, host_state_dir)
                 process = harness.process
                 harness.close()
                 harness.close()
@@ -50,9 +53,12 @@ class JsonRpcHarnessLifecycleTests(unittest.TestCase):
             base = Path(directory)
             project = base / "project"
             project.mkdir()
+            host_state_dir = base / "host-private-store"
+            host_state_dir.mkdir(mode=0o700)
+            host_state_dir.chmod(0o700)
             server = base / "failing_server.py"
             server.write_text(source, encoding="utf-8")
-            harness = JsonRpcHarness(server, project, project / ".codex/cortex")
+            harness = JsonRpcHarness(server, project, host_state_dir)
             process = harness.process
             with self.assertRaisesRegex(RuntimeError, r"exited 7: deliberate server diagnostic"):
                 harness.close()

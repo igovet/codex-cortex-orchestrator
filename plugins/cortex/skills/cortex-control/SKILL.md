@@ -5,12 +5,15 @@ description: Internal Cortex runtime protocol. Load only after cortex:orchestrat
 
 # Cortex Control
 
-The public Cortex API exposes exactly nine tools: four coordinator lifecycle
-operations plus scoped worker question/report transport. Coordinators use `start_orchestration` and
-`continue_orchestration` for normal work, `read_worker_report` to evaluate a
-persisted report, and `manage_orchestration` only for recovery or rare
-subsystems. Workers use `worker_question`, `get_report_template`,
-`record_report`; a worker whose
+The v5 registry contains nine MCP operations, while each launch-time audience
+exposes exactly five. The worker projection is `worker_question`,
+`get_report_template`, `record_report`, `read_dispatch_briefing`, and scoped
+`read_worker_report`. The explicit coordinator projection is
+`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
+`manage_governance`, and scoped `read_worker_report`. Coordinators use
+`start_orchestration` and `continue_orchestration` for normal work,
+`read_worker_report` to evaluate a persisted report, and
+`manage_orchestration` only for recovery or rare subsystems. A worker whose
 host filesystem read cannot open its exact briefing may call
 `read_dispatch_briefing` with the complete identity/digest tuple from its
 bootstrap. If a bounded response is incomplete, it may continue only with the
@@ -23,6 +26,17 @@ for predecessor refs explicitly supplied in its dispatch. Workers must not call 
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
 opt-in through a non-help, non-`normal` `cortex:orchestrator` route.
+
+The stdio MCP process has one immutable launch-time audience. The unspecified
+or unknown transport audience defaults to the least-privilege worker registry,
+which cannot list or call coordinator lifecycle/governance tools. Only a
+host-provisioned explicit `coordinator` audience receives the coordinator
+registry. JSON-RPC initialization and tool arguments cannot select or elevate
+the audience. Coordinator capability recovery is accepted only on that
+explicit coordinator audience and requires the exact active task, principal,
+thread, and non-durable recovery proof returned with the original successful
+authorization response. The proof rotates with the bearer; only SHA-256
+verifiers are durable, and workers never receive either secret.
 
 ## Coordinator state machine
 
@@ -124,7 +138,7 @@ paths forbidden above.
    exact briefing path, confirms the file is
    read-only and its SHA-256 equals `briefing_digest`, and stops on any
    mismatch. That path is the sole direct-read exception below
-   `.codex/cortex`: never list or inspect the directory, mutable state,
+   the host-private Cortex state root: never list or inspect the directory, mutable state,
    baselines, delegation packages, another briefing, or report files. If the
    host filesystem read says this exact path is missing or unreadable, the
    worker may call `read_dispatch_briefing` with the exact project root,
@@ -355,7 +369,7 @@ Cortex requires microtask IDs to be globally unique across the plan, allows
 references, and validates the combined microtask dependency graph as acyclic.
 It enforces 32 packages, 32 microtasks per package, and 128 total microtasks.
 The Planner remains read-only; Cortex materializes immutable, revision-scoped
-`.codex/cortex/tasks/<task>/planning/revisions/plan-<report-ref>/overview.md`
+host-private `tasks/<task>/planning/revisions/plan-<report-ref>/overview.md`
 and `packages/<id>.json` artifacts. The SQLite task document
 `planning_current` is the sole current-plan pointer; there are no
 `planning/manifest.json` or `planning/overview.md` latest aliases.
@@ -405,7 +419,7 @@ derived path for recovery and approval review.
 
 Normal requests never carry caller-generated submission, task, wave, attempt,
 principal, thread, host-tool, host-model, or host-effort fields. Internal IDs
-and receipts remain durable below `.codex/cortex`.
+and receipts remain durable below the host-private Cortex state root.
 
 ## Idempotency and relative references
 
@@ -435,7 +449,8 @@ recovery. A failed start without a `task_ref` created no recoverable task.
 The returned `pipeline.waves` snapshot is the current coordinator-owned plan.
 Follow it by default. Pass compact `future_waves` only when the coordinator
 decides that verified evidence materially changes work that has not started;
-include a concise `reason`. Planner and explorer ownership recommendations are
+include a concise `reason`; reason prose is audit-only and cannot authorize a
+recovery or release a liveness pause. Planner and explorer ownership recommendations are
 advisory routing evidence, not an automatic rewrite command. Prefer the
 narrowest supported profile and replace a stale route only after that explicit
 decision. `general` is a conservative fallback, not the preferred universal
@@ -461,6 +476,14 @@ rejected while any worker is still addressable. Use
 `manage_orchestration` for `inspect`, `resume`, `deactivate`, `lane`,
 `resource`, or `question`; these intents do not belong in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
+
+A materially identical no-progress signature pauses autonomous correction only
+after the configured repeat limit. Recovery must begin with one singleton
+Planner wave and materially change the failed pipeline, strategy, or
+verification contract. An infrastructure/environment pause may instead name a
+class-matched remediation in the Planner wave. A partial baseline or current
+manifest is diagnostic evidence only and cannot authorize read-only mutation
+reconciliation, a handoff, or terminal close.
 
 The question intent accepts only the worker's exact `question_ref` on the
 normal path and resolves all durable identity internally. It returns a
@@ -529,8 +552,8 @@ run weekly; do not use an unbounded clear operation. When no retention period
 is supplied, the route presents `keep_1d`, `keep_7d`, `keep_30d`, and
 `full_reset`. The first three are bounded retention selections. `full_reset`
 is separately destructive and requires the exact confirmation `RESET CORTEX`;
-it fails closed while active workers exist and removes only project-scoped
-`.codex/cortex` state, never project source or documentation.
+it fails closed while active workers exist and removes only host-private Cortex
+state, never project source or documentation.
 
 ## Dispatch and evidence policy
 
@@ -619,8 +642,12 @@ report; narrow the dependency set with `depends_on`.
 ## Durable artifacts
 
 Every call supplies its exact absolute `project_root`. Runtime state stays in
-`${project_root}/.codex/cortex` using the canonical `cortex/v8` ledger.
-`CORTEX_ROOT`, `/tmp` fallback, and symlink traversal remain forbidden.
+the host-private default `~/.codex/cortex/projects/p-<sha256>/` root (or a
+private, outside-workspace `CORTEX_HOST_STATE_DIR` override) using the
+canonical `cortex/v8` ledger. `CORTEX_ROOT`, `/tmp` fallback, and symlink
+traversal remain forbidden. A legacy project-local `.codex/cortex` database is
+moved only by same-filesystem atomic rename after secure database/split-state
+validation; unsafe or cross-filesystem legacy state fails closed.
 Initial and per-attempt project manifests are immutable, content-addressed
 SQLite records referenced from state by compact
 `manifest-<sha256>` refs. Identical state deduplicates, but every dispatch

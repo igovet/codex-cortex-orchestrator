@@ -28,7 +28,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.project = self.base / "project"
         self.project.mkdir()
-        self.ledger = self.project / ".codex" / "cortex"
+        self.host_store = self.base / "host-private-store"
+        self.host_store.mkdir(mode=0o700)
+        self.host_store.chmod(0o700)
+        self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
+        os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
+        self.ledger = control.ledger_root_path({"project_root": str(self.project)})
         os.environ["CORTEX_PROJECT_ROOT"] = str(self.project)
         self._handlers = {}
         for handler, _ in control.TOOLS.values():
@@ -44,6 +49,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         for name, handler in self._handlers.items():
             setattr(control, name, handler)
         os.environ.pop("CORTEX_PROJECT_ROOT", None)
+        if self._previous_host_store is None:
+            os.environ.pop(control.HOST_CONTROL_STORE_ENV, None)
+        else:
+            os.environ[control.HOST_CONTROL_STORE_ENV] = self._previous_host_store
         self.temp.cleanup()
 
     def init(self, task_id="task", complexity="C1", requirements=None):
@@ -261,6 +270,117 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(len(handed["file_manifest_receipt"]["reported_paths"]), len(complete_paths))
         self.assertNotIn("manifest_file", handed)
         self.assertFalse(any((task_dir / "handoffs").glob("*-manifest.json")))
+
+    def test_partial_baseline_blocks_reconciliation_and_handoff(self):
+        (self.project / "baseline-a.txt").write_text("a\n", encoding="utf-8")
+        (self.project / "baseline-b.txt").write_text("b\n", encoding="utf-8")
+        state = self.init()["state"]
+        task_dir = self.ledger / "tasks" / "0001-task"
+        policy = dict(control.TRACKER_POLICY)
+        policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
+        partial_baseline = control.capture_project_manifest(self.project, policy=policy)
+        self.assertTrue(partial_baseline["partial_manifest"]["partial"])
+        reference = control.store_manifest_snapshot(task_dir, partial_baseline)
+        state["initial_manifest_ref"] = reference
+        state["initial_manifest_digest"] = partial_baseline["digest"]
+        self.write_task_state(state)
+
+        receipt, _ = control.reconcile_manifest(task_dir, state, [])
+        self.assertFalse(receipt["complete"])
+        self.assertFalse(receipt["comparison"]["complete"])
+        self.assertTrue(receipt["partial_manifest"]["baseline"]["partial"])
+        blocked = control.handoff({
+            "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
+            "completed": ["baseline review"], "files": [], "next_action": "resolve capture cutoff",
+        })
+        self.assertFalse(blocked["recorded"])
+        self.assertFalse(blocked["file_manifest_receipt"]["complete"])
+
+    def test_partial_final_manifest_blocks_reconciliation_and_handoff(self):
+        state = self.init()["state"]
+        task_dir = self.ledger / "tasks" / "0001-task"
+        policy = dict(control.TRACKER_POLICY)
+        policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
+        complete_baseline = control.capture_project_manifest(self.project, policy=policy)
+        self.assertFalse(complete_baseline["partial_manifest"]["partial"])
+        reference = control.store_manifest_snapshot(task_dir, complete_baseline)
+        state["initial_manifest_ref"] = reference
+        state["initial_manifest_digest"] = complete_baseline["digest"]
+        self.write_task_state(state)
+        (self.project / "final-a.txt").write_text("a\n", encoding="utf-8")
+        (self.project / "final-b.txt").write_text("b\n", encoding="utf-8")
+
+        receipt, current = control.reconcile_manifest(task_dir, state, [])
+        self.assertTrue(current["partial_manifest"]["partial"])
+        self.assertFalse(receipt["complete"])
+        self.assertFalse(receipt["comparison"]["complete"])
+        self.assertTrue(receipt["partial_manifest"]["current"]["partial"])
+        blocked = control.handoff({
+            "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
+            "completed": ["final review"], "files": [], "next_action": "resolve capture cutoff",
+        })
+        self.assertFalse(blocked["recorded"])
+        self.assertFalse(blocked["file_manifest_receipt"]["complete"])
+
+    def test_partial_final_manifest_blocks_terminal_close(self):
+        created = self.init()
+        task_dir = self.ledger / "tasks" / created["task_directory"]
+        state = self.task_state(task_dir)
+        state.update({
+            "current_pipeline": ["close"],
+            "parallel_groups": [["close"]],
+            "current_gates": ["close"],
+            "require_delegation": False,
+            "require_handoff": False,
+        })
+        policy = dict(control.TRACKER_POLICY)
+        policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
+        complete_baseline = control.capture_project_manifest(self.project, policy=policy)
+        state["initial_manifest_ref"] = control.store_manifest_snapshot(task_dir, complete_baseline)
+        state["initial_manifest_digest"] = complete_baseline["digest"]
+        self.write_task_state(state)
+        (self.project / "close-a.txt").write_text("a\n", encoding="utf-8")
+        (self.project / "close-b.txt").write_text("b\n", encoding="utf-8")
+        evidence = control.record_evidence({
+            "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
+            "gate": "close", "summary": "close evidence before bounded capture cutoff",
+        })
+        with self.assertRaisesRegex(ValueError, "incomplete final manifest"):
+            control.record_gate({
+                "task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"],
+                "gate": "close", "outcome": "passed", "summary": "must not close on partial capture",
+            })
+        persisted = self.task_state(task_dir)
+        self.assertNotEqual(persisted["status"], "completed")
+
+    def test_partial_baseline_cannot_authorize_read_only_mutation_audit(self):
+        (self.project / "audit-a.txt").write_text("a\n", encoding="utf-8")
+        (self.project / "audit-b.txt").write_text("b\n", encoding="utf-8")
+        state = self.init()["state"]
+        task_dir = self.ledger / "tasks" / "0001-task"
+        policy = dict(control.TRACKER_POLICY)
+        policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
+        partial_baseline = control.capture_project_manifest(self.project, policy=policy)
+        self.assertTrue(partial_baseline["partial_manifest"]["partial"])
+        attempt = {
+            "attempt_id": "read-only-audit",
+            "gate": "discover",
+            "profile": "explorer",
+            "allowed_paths": ["."],
+            "result_baseline_ref": control.store_manifest_snapshot(task_dir, partial_baseline),
+        }
+        with self.assertRaisesRegex(ValueError, "manifest capture incomplete.*baseline"):
+            control._validate_result_artifacts(task_dir, attempt, {"changed_files": []})
+
+        # The same guard applies when only the final/current capture reaches
+        # its cutoff after a complete attempt baseline was stored.
+        (self.project / "audit-b.txt").unlink()
+        complete_baseline = control.capture_project_manifest(self.project, policy=policy)
+        self.assertFalse(complete_baseline["partial_manifest"]["partial"])
+        attempt["result_baseline_ref"] = control.store_manifest_snapshot(task_dir, complete_baseline)
+        (self.project / "audit-unscanned.txt").write_text("new\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "manifest capture incomplete.*current"):
+            control._validate_result_artifacts(task_dir, attempt, {"changed_files": []})
 
     def test_manifest_snapshots_are_deduplicated_for_unchanged_attempts(self):
         state = self.init()["state"]
@@ -1322,10 +1442,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("The public Cortex API exposes exactly nine tools: four coordinator lifecycle", skill)
-        self.assertIn("operations plus scoped worker question/report transport", skill)
-        self.assertIn("Coordinators use `start_orchestration`", skill)
-        self.assertIn("`continue_orchestration` for normal work", skill)
+        self.assertIn("The v5 registry contains nine MCP operations, while each launch-time audience", skill)
+        self.assertIn("exposes exactly five", skill)
+        self.assertIn("The worker projection is `worker_question`", skill)
+        self.assertIn("The explicit coordinator projection is", skill)
+        self.assertIn("The stdio MCP process has one immutable launch-time audience", skill)
+        self.assertIn("defaults to the least-privilege worker registry", skill)
+        self.assertIn("Coordinators use\n`start_orchestration`", skill)
+        self.assertIn("`start_orchestration` and `continue_orchestration` for normal work", skill)
         self.assertIn("Invoke every returned dispatch", skill)
         self.assertIn("Expected routes are metadata, not proof", skill)
         self.assertIn("Workers do not call lifecycle operations", skill)
@@ -1559,7 +1683,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 )
                 self.assertIn(package["dispatch_ref"], bootstrap)
                 self.assertIn(digest, bootstrap)
-                self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
+                self.assertIn("only direct-read exception is exactly paths supplied", bootstrap)
                 self.assertIn("read_dispatch_briefing", bootstrap)
                 self.assertIn("caller/schema errors", bootstrap)
                 self.assertIn("retryable=false or blocked", bootstrap)
@@ -1743,8 +1867,12 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_default_cortex_ledger_is_excluded_from_manifest(self):
         ledger = control.ledger_root({"project_root": str(self.project)})
         (ledger / "generated.txt").write_text("runtime\n", encoding="utf-8")
+        legacy_projection = self.project / ".codex" / "cortex"
+        legacy_projection.mkdir(parents=True)
+        (legacy_projection / "generated.txt").write_text("projection\n", encoding="utf-8")
         manifest = control.capture_project_manifest(self.project)
-        self.assertEqual(ledger, self.project / ".codex" / "cortex")
+        self.assertEqual(ledger, self.ledger)
+        self.assertFalse((self.project / ".codex" / "cortex" / "cortex.db").exists())
         self.assertNotIn(".codex/cortex/generated.txt", manifest["entries"])
         self.assertIn(".codex/cortex", manifest["policy"]["effective_ignored_roots"])
 

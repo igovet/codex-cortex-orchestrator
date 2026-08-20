@@ -14,19 +14,23 @@ class JsonRpcHarness:
         self,
         server: Path,
         project_root: Path,
-        ledger_root: Path,
+        host_state_dir: Path,
         *,
+        audience: str | None = None,
         elicitation_responder: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         environment = os.environ.copy()
         environment.pop("CORTEX_ROOT", None)
         environment.pop("CORTEX_PROJECT_ROOT", None)
         self.project_root = project_root
-        expected_ledger = project_root / ".codex" / "cortex"
-        if ledger_root != expected_ledger:
-            raise ValueError(f"ledger_root must be {expected_ledger}")
+        # The black-box server must use its host-private per-project mapping,
+        # never a test/workspace-local ``.codex/cortex`` path.
+        environment["CORTEX_HOST_STATE_DIR"] = str(host_state_dir)
+        command = [sys.executable, str(server)]
+        if audience is not None:
+            command.append(f"--mcp-audience={audience}")
         self.process = subprocess.Popen(
-            [sys.executable, str(server)],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

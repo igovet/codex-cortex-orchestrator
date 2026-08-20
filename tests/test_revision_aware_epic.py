@@ -29,8 +29,17 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
+        self.host_store = Path(self.temp.name) / "host-private-store"
+        self.host_store.mkdir(mode=0o700)
+        self.host_store.chmod(0o700)
+        self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
+        os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
 
     def tearDown(self) -> None:
+        if self._previous_host_store is None:
+            os.environ.pop(control.HOST_CONTROL_STORE_ENV, None)
+        else:
+            os.environ[control.HOST_CONTROL_STORE_ENV] = self._previous_host_store
         self.temp.cleanup()
 
     def start(self, *, waves=None, objective="revision-aware acceptance") -> dict:
@@ -48,7 +57,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         )
 
     def task_dir_and_state(self, started: dict) -> tuple[Path, dict]:
-        ledger = self.project / ".codex" / "cortex"
+        ledger = control.ledger_root_path({"project_root": str(self.project)})
         task_dir = next((ledger / "tasks").iterdir())
         return task_dir, control.load_task_state_for_artifact(task_dir)
 
@@ -98,19 +107,20 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         return task_dir, control.load_task_state_for_artifact(task_dir), attempt
 
     def test_schema_v8_migration_creates_revision_session_question_trace_and_observation_tables(self) -> None:
-        root = self.project / ".codex" / "cortex"
-        ledger_db.ensure_database(root)
+        root = control.ledger_root({"project_root": str(self.project)})
         with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
             connection.row_factory = sqlite3.Row
             migrations = connection.execute(
                 "SELECT version, name FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual(migrations[-3]["version"], 8)
-            self.assertEqual(migrations[-3]["name"], "revision-aware-orchestration")
-            self.assertEqual(migrations[-2]["version"], 9)
-            self.assertEqual(migrations[-2]["name"], "governance-ledger")
-            self.assertEqual(migrations[-1]["version"], 10)
-            self.assertEqual(migrations[-1]["name"], "governance-integrity-hardening")
+            self.assertEqual(migrations[-4]["version"], 8)
+            self.assertEqual(migrations[-4]["name"], "revision-aware-orchestration")
+            self.assertEqual(migrations[-3]["version"], 9)
+            self.assertEqual(migrations[-3]["name"], "governance-ledger")
+            self.assertEqual(migrations[-2]["version"], 10)
+            self.assertEqual(migrations[-2]["name"], "governance-integrity-hardening")
+            self.assertEqual(migrations[-1]["version"], 11)
+            self.assertEqual(migrations[-1]["name"], "governance-lifecycle-authority")
             tables = {
                 row["name"]
                 for row in connection.execute(
@@ -185,7 +195,8 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
     def test_active_steer_preserves_task_ref_and_resumes_same_native_worker(self) -> None:
         started = self.start()
         _, state, attempt = self.confirm_running(started, host_agent_id="native.steer:01")
-        task_count_before = len(list((self.project / ".codex" / "cortex" / "tasks").iterdir()))
+        ledger = control.ledger_root_path({"project_root": str(self.project)})
+        task_count_before = len(list((ledger / "tasks").iterdir()))
         steered = control.manage_orchestration(
             {
                 "project_root": str(self.project),
@@ -196,7 +207,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         )
         self.assertTrue(steered["ok"], steered)
         self.assertEqual(steered["task_ref"], started["task_ref"])
-        self.assertEqual(len(list((self.project / ".codex" / "cortex" / "tasks").iterdir())), task_count_before)
+        self.assertEqual(len(list((ledger / "tasks").iterdir())), task_count_before)
         self.assertEqual(len(steered["dispatches"]), 1)
         dispatch = steered["dispatches"][0]
         self.assertEqual(dispatch["call"], "followup_task")
@@ -351,6 +362,83 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             if item.get("report_id") and item.get("report_receipt") and not item.get("invalidated")
         }
         self.assertTrue(passed_attempt_ids.issubset(receipt_bound_attempt_ids))
+
+    def test_active_gate_steer_persists_and_applies_governance_replacement(self) -> None:
+        """An escalation cannot disappear merely because it affects the live gate."""
+        started = self.start(
+            objective="Refine a focused C1 architecture before implementation.",
+            waves=[
+                {"workers": [{"phase": "architecture"}]},
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        self.assertTrue(started["ok"], started)
+        task_dir, state, attempt = self.confirm_running(
+            started, host_agent_id="native.active-governance-steer:01"
+        )
+        self.assertEqual(attempt["gate"], "architecture")
+
+        steered = control.manage_orchestration(
+            {
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "intent": "steer",
+                "payload": {
+                    "user_message": "Add authorization controls to the architecture.",
+                    "user_language": "en",
+                },
+            }
+        )
+        self.assertTrue(steered["ok"], steered)
+        persisted = control.load_task_state_for_artifact(task_dir)
+        pending = persisted["pending_revision_impact"]
+        self.assertEqual(pending["active_gate_at_revision"], "architecture")
+        self.assertEqual(pending["earliest_affected_gate"], "architecture")
+        self.assertEqual(pending["governance_escalation"]["to"], "full")
+        self.assertEqual(
+            [
+                delegation["gate"]
+                for wave in pending["replacement_waves"]
+                for delegation in wave["delegations"]
+            ][0],
+            "governance_activation",
+        )
+
+        report = self.report_for(attempt, self.project)
+        report["evidence"].append("Task revision reviewed: 2")
+        published = control.publish_worker_report(
+            {
+                "project_root": str(self.project),
+                "task_id": persisted["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": attempt["profile"],
+                "report": report,
+            }
+        )
+        self.assertTrue(published["ok"], published)
+        advanced = control.continue_orchestration(
+            {
+                "project_root": str(self.project),
+                "task_ref": started["task_ref"],
+                "step": started["step"],
+                "results": [{"report_ref": published["report_ref"]}],
+            }
+        )
+        self.assertTrue(advanced["ok"], advanced)
+        self.assertEqual(advanced["outcome"], "ready_to_spawn")
+        self.assertEqual([dispatch["phase"] for dispatch in advanced["dispatches"]], ["governance_activation"])
+
+        applied = control.load_task_state_for_artifact(task_dir)
+        self.assertNotIn("pending_revision_impact", applied)
+        self.assertEqual(applied["governance"]["effective_mode"], "full")
+        self.assertTrue(
+            any(
+                item.get("gate") == "architecture" and item.get("invalidated")
+                for item in applied["attempts"]
+            )
+        )
 
     def test_full_governance_reportless_documentation_worker_retries_once_then_advances(self) -> None:
         """A documented native stop is one retry, not a self-sustaining docs rework loop."""
@@ -837,7 +925,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(stopped_attempt["status"], "failed")
         self.assertFalse(stopped_attempt["host_resumable"])
         self.assertEqual(stopped_attempt["finalization_reason"], "native_worker_stopped_without_report")
-        with sqlite3.connect(self.project / ".codex" / "cortex" / "cortex.db") as connection:
+        with sqlite3.connect(control.ledger_root_path({"project_root": str(self.project)}) / "cortex.db") as connection:
             session = connection.execute(
                 "SELECT status, resumable, host_agent_id FROM worker_sessions WHERE attempt_id = ?",
                 (attempt["attempt_id"],),
@@ -895,7 +983,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             objective="recover the durable parent binding for a stopped worker",
         )
         _, state, _ = self.confirm_running(started, host_agent_id="native.binding-recovery:01")
-        root = self.project / ".codex" / "cortex"
+        root = control.ledger_root_path({"project_root": str(self.project)})
         with control.state_lock(root):
             bindings = control._host_session_bindings(root)
             bindings["tasks"].pop(state["task_id"], None)
@@ -1113,8 +1201,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(confirmation["confirmation_required"], "RESET CORTEX")
 
     def test_full_reset_removes_only_cortex_root_after_exact_confirmation(self) -> None:
-        cortex_root = self.project / ".codex" / "cortex"
-        cortex_root.mkdir(parents=True)
+        cortex_root = control.ledger_root({"project_root": str(self.project)})
         (cortex_root / "sentinel").write_text("cortex state", encoding="utf-8")
         keep = self.project / "project-data.txt"
         keep.write_text("retain", encoding="utf-8")
@@ -1128,6 +1215,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertTrue(removed["ok"], removed)
         self.assertEqual(removed["outcome"], "full_reset")
         self.assertFalse(cortex_root.exists())
+        self.assertFalse((self.project / ".codex" / "cortex" / "cortex.db").exists())
         self.assertTrue(keep.is_file())
 
     def test_full_reset_refuses_symlinked_cortex_root_without_touching_target(self) -> None:

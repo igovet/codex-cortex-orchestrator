@@ -25,6 +25,25 @@ class ManifestBudgetTests(unittest.TestCase):
         self.assertEqual(manifest["partial_manifest"]["reason"], "entry_limit")
         self.assertEqual(manifest["entry_count"], 2)
 
+    def test_cutoff_with_changed_unscanned_path_never_completes_comparison(self) -> None:
+        """A path beyond a capture cutoff must remain an integrity blocker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (root / "a.txt").write_text("stable\n", encoding="utf-8")
+            (root / "b.txt").write_text("baseline\n", encoding="utf-8")
+            policy = dict(cortex.TRACKER_POLICY)
+            policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
+            baseline = cortex.capture_project_manifest(root, policy=policy)
+            (root / "z-unscanned.txt").write_text("changed after cutoff\n", encoding="utf-8")
+            current = cortex.capture_project_manifest(root, policy=policy)
+
+        comparison = cortex.compare_manifests(baseline, current)
+        self.assertTrue(baseline["partial_manifest"]["partial"])
+        self.assertTrue(current["partial_manifest"]["partial"])
+        self.assertFalse(comparison["complete"])
+        self.assertNotIn("z-unscanned.txt", comparison["changed_paths"])
+
     def test_unchanged_file_digest_is_reused_from_bounded_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "project"

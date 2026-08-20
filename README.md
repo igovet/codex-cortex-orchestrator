@@ -16,7 +16,7 @@
         <img src="https://img.shields.io/badge/Cortex-9.2.5-7c3aed" alt="Cortex 9.2.5" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
-        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v10-0f766e" alt="task schema v8 and governance schema v10" />
+        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v11-0f766e" alt="task schema v8 and governance schema v11" />
       </p>
     </td>
   </tr>
@@ -583,25 +583,54 @@ transitions.
 ```mermaid
 flowchart LR
     U["User goal"] --> R["Root coordinator"]
-    R --> S["Scope (C3 / harvest)"]
-    S --> D["Discover"]
-    R --> D
-    D --> A["Design gates"]
-    A --> P["Final Planner"]
-    P --> W1["Specialist 1"]
-    P --> W2["Specialist 2"]
-    P --> W3["Specialist N"]
-    W1 --> B["Reports and evidence"]
-    W2 --> B
-    W3 --> B
-    B --> G{"Gate passed?"}
-    G -- "no" --> P
-    G -- "decision needed" --> Q["Question for the user"]
-    Q --> W1
-    G -- "yes" --> N["Next wave"]
-    N --> C["Verified completion"]
-    R <--> L[("Local SQLite ledger")]
+    R --> M{"Governance resolver<br/>mode, complexity, and qualified triggers"}
+
+    M -- "minimal or light" --> P["Resolved task pipeline"]
+    M -- "full" --> GA["governance_activation<br/>code_reviewer"]
+    GA --> P
+
+    P --> W["Ordered worker waves"]
+    W --> B["Immutable reports and evidence"]
+    B --> G{"Gate result"}
+    G -- "rework" --> P
+    G -- "user decision" --> Q["Ordinary-chat user question"]
+    Q --> P
+    G -- "passed: minimal / light" --> C["Final close and handoff"]
+    G -- "passed: full" --> GC["governance_close<br/>code_reviewer"]
+    GC --> C
+
+    R <--> L[("Host-private SQLite ledger<br/>task v8 + governance v11")]
 ```
+
+### Governance resolution
+
+Before dispatching the resolved pipeline, Cortex evaluates the requested
+governance mode, task complexity, and qualified risk or topology signals. The
+requested mode is `auto`, `required`, or `off`; the effective mode is
+`minimal`, `light`, or `full`.
+
+| Request and context | Effective mode | Result |
+| --- | --- | --- |
+| `auto`, C1, and no qualified signal | `minimal` | Runs the resolved task pipeline with verification evidence and an audit receipt. |
+| `auto`, C2, and no qualified signal | `light` | Retains the resolved task pipeline and adds policy, decision/assumption/risk, process-reflection, and verification obligations at close. |
+| `auto` with C3 or a qualified signal | `full` | The server inserts independent governance review before ordinary work and immediately before final close. |
+| `required` at any complexity | `full` | The server applies the same full-governance lifecycle. |
+| `off` | `minimal` only for C1 with a complete Boolean assessment of every documented trigger; C2/C3 or any triggered risk is rejected. |
+
+Qualified signals include security, privacy, credentials or sensitive data,
+destructive work, migrations, external actions, public-contract,
+authorization, or integrity work, and explicit multi-repository, linked-task,
+long-lived-lane, conflicting-resource, or multi-session topology. Counts
+alone do not raise the governance mode.
+
+In `full` mode, the server owns the two additional read-only review gates:
+`governance_activation` runs first, and `governance_close` runs immediately
+before final `close`. Both are assigned to `code_reviewer`; the server binds
+their evidence to immutable artifacts and report receipts. The close review
+also requires the matching linked task, report, and completed independent
+native reviewer session. The coordinator cannot omit either gate from a
+full-governance pipeline. For the record model, capability boundary, and
+integrity rules, see the [orchestration ledger documentation](docs/features/orchestration-ledger/index.md).
 
 ### The orchestration cycle
 
@@ -621,9 +650,8 @@ flowchart LR
    discover → architecture → plan → documentation → review → close`.
    Architecture, database architecture, and UX gates precede plan; security,
    performance, and accessibility remain post-implementation audits before
-   review. When automatic governance resolves to `full`, the server wraps the
-   resolved task pipeline with `governance_activation` first and
-   `governance_close` immediately before final close.
+   review. These are base routes: the governance resolver may wrap any route
+   with the full-mode review gates described above.
 4. **Precise dispatch.** Every worker receives a profile, model, reasoning
    effort, allowed paths, ownership, acceptance criteria, and verification
    responsibilities.
@@ -664,25 +692,38 @@ flowchart LR
 
 ### Unreleased / 9.2.5 hardening draft
 
-The current source-tree hardening draft extends governance with schema v10
+The current source-tree hardening draft extends governance with schema v11
 integrity guarantees. Governance record bodies are read from verified
 immutable content artifacts; exact normalized scope, task/initiative links,
 linear revisions, strict JSON, immutable-field triggers, and idempotent
-submission receipts fail closed on corruption or replay conflict. Coordinator
-capabilities are short-lived scoped claims carrying principal, thread,
-generation, expiry, and allowed actions. A lost bearer can be rotated only for
-the same active identity; old generations are revoked and plaintext is never
-stored.
+submission receipts fail closed on corruption or replay conflict. Schema v11
+adds an append-only lifecycle chain for status and approval-basis authority,
+requires terminal success for linked milestone/deliverable tasks before an
+initiative can complete, and prevents deletion of initiative-task links that
+are referenced by governance records. Pre-v10 upgrades deterministically
+reconcile safe v9 duplicate revisions/sibling successors and fail closed on
+ambiguous scope or predecessor graphs. Coordinator capabilities are
+short-lived scoped claims carrying principal, thread, generation, expiry, and
+allowed actions. A lost bearer can be rotated only on the explicit
+coordinator audience with the same active identity and the non-durable
+recovery proof returned by authorization; old generations are revoked and
+plaintext is never stored.
 
 Corrective work remains open-ended while acceptance or findings require work,
 but a repeated materially identical no-progress signature pauses autonomous
-retries for an explicit user strategy without producing a false pass. Material
-steer classifies the earliest affected gate and invalidates downstream proof;
+retries for an explicit user strategy without producing a false pass. The
+pause can be released only by a Planner-first recovery whose downstream
+pipeline, strategy, or verification contract materially changes, or whose
+Planner wave names a class-matched infrastructure/environment remediation;
+free-text reason prose is retained only as audit evidence. Material steer
+classifies the earliest affected gate and invalidates downstream proof;
 worker questions are bound to task/plan revision and strategy generation.
 Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
-reuse a bounded digest cache. CI runs the 50,000-file manifest benchmark and
-requires `target_met: true`. The exact 9.2.5 cachebuster and full release/live
-results remain pending until the candidate is committed and validated. The
+reuse a bounded digest cache. A partial capture remains diagnostic evidence
+only: it cannot authorize read-only mutation reconciliation, a handoff, or
+terminal close. CI runs the 50,000-file manifest benchmark and requires
+`target_met: true`. The exact 9.2.5 cachebuster and full release/live results
+remain pending until the candidate is committed and validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
 
@@ -726,9 +767,11 @@ plugins/cortex/
 
 The public MCP surface is deliberately small. The coordinator uses
 `start_orchestration`, `continue_orchestration`, `manage_orchestration`, and
-reads predecessor reports with `read_worker_report`. Workers use
+the coordinator-only `manage_governance` surface; it reads predecessor reports
+with `read_worker_report`. Workers use
 `read_dispatch_briefing`, `worker_question`, `get_report_template`,
-and `record_report`.
+`record_report`, and scoped `read_worker_report` for explicitly granted
+predecessor refs.
 
 Worker briefings carry the verified transitive predecessor frontier, not inline
 report bodies or the entire task history. A passed report covers only the exact
@@ -763,13 +806,27 @@ the surrounding authority, bounded role contract, optional mode overlay,
 evidence rules, and worker protocol remain fixed instructions. Its byte budget
 is enforced before dispatch. Ordinary profiles do not carry
 harvest specialization; exact harvest routes add a conditional mode overlay.
-A worker never browses
-unrelated `.codex/cortex` coordination data. Canonical state is stored in the
-local SQLite `cortex/v8` ledger. New tasks use pipeline contract v2; active v1
-tasks without that field resume their persisted pipeline unchanged.
+A worker never browses unrelated Cortex coordination data. Canonical state is
+stored in the host-private SQLite `cortex/v8` task ledger plus its additive v11
+governance ledger. By default the ledger lives below
+`~/.codex/cortex/projects/p-<sha256>/`; `CORTEX_HOST_STATE_DIR` is a host-only
+override and must resolve to a private directory outside the workspace. A
+legacy project-local `.codex/cortex` database is eligible only for a
+same-filesystem atomic rename after ancestry, database, and split-state checks;
+unsafe, non-database, or cross-filesystem legacy state fails closed.
+New tasks use pipeline contract v2; active v1 tasks without that field resume
+their persisted pipeline unchanged.
 
-The nine public MCP tools are the v5 surface. Coordinators also use the
-server-owned `manage_governance` surface for initiatives, dependencies,
+The v5 registry contains nine MCP operations, but each stdio process exposes
+exactly five through its launch-time MCP audience. The unspecified transport
+audience is the least-privilege worker projection:
+`worker_question`, `get_report_template`, `record_report`,
+`read_dispatch_briefing`, and scoped `read_worker_report`. Only a
+host-provisioned explicit `coordinator` audience exposes the five-operation
+coordinator projection: `start_orchestration`, `continue_orchestration`,
+`manage_orchestration`, `manage_governance`, and scoped `read_worker_report`.
+The audience is fixed for the stdio process and cannot be selected through
+JSON-RPC initialization or tool arguments. Coordinators also use the server-owned `manage_governance` surface for initiatives, dependencies,
 immutable governance records, active snapshots, constrained exceptions, and
 coordinator-approved policy promotion. Workers build from
 `get_report_template`, which creates a private fully structured JSON file and
@@ -809,9 +866,13 @@ Sensitive MCP exceptions are appended to
 records and caps the file at 10 MiB by dropping oldest records first.
 
 Governance authorization is returned once by the original successful start;
-the project ledger stores only its SHA-256 digest and an idempotent start retry
-does not recover or reissue the bearer. Legacy plaintext capabilities are
-removed and invalidated on first registry access. Explicit
+the project ledger stores only its SHA-256 digest and a separate digest for a
+non-durable coordinator recovery proof. An idempotent start retry does not
+recover or reissue either value. Capability recovery is available only through
+the explicit coordinator MCP audience and requires the exact task, principal,
+thread, and original recovery proof; the proof rotates with the bearer and is
+never durable. Legacy plaintext capabilities are removed and invalidated on
+first registry access. Explicit
 `governance_mode=off` is accepted only for C1 after an exhaustive boolean
 assessment of every documented hard and topology trigger; prose detection may
 raise the floor but can never authorize `off`. Sensitive governance records
@@ -1002,7 +1063,23 @@ python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
 # the finding; real Documentation and fresh Review workers must resolve it
 # through the exact handoff route (hard 300 s).
 python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
+# Full C2 real-host lifecycle: opening Review → corrective Documentation →
+# fresh Review → Close → completed server-owned handoff (hard 1800 s).
+python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
 ```
+
+The full source-mode scenario is a release-gate candidate only on a host that
+can provision MCP access **per native process**: the parent must receive an
+explicit `coordinator` endpoint, while every spawned child must receive the
+`worker` endpoint. A single static coordinator-audience launch can prove that
+the parent starts a task, but it leaves children without briefing/report tools
+and is therefore a failed integration attempt—not evidence for this gate. The
+plugin does not merge the two surfaces as a compatibility fallback. Because
+the source command uses `--ignore-user-config`, it also deliberately does not
+load trusted Cortex hooks and therefore does not claim durable binding of a
+native child ID or model to a Cortex attempt. That higher-assurance hook and
+per-agent MCP provisioning are separate host-integration checks; neither
+source-mode command installs or changes the user's plugin.
 
 Run the read-only preflight on a local or SSH host with:
 

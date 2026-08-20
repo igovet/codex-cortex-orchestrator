@@ -18,6 +18,8 @@ import time
 import unittest
 from unittest import mock
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/cortex-luna-high-eval.py"
@@ -117,12 +119,13 @@ print(json.dumps({"final": result}, sort_keys=True), flush=True)
 '''
 
 
-class RealtimeEvalHarnessTests(unittest.TestCase):
+class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.harness = load_harness()
 
     def setUp(self) -> None:
+        self.set_up_host_private_control_store()
         self.tempdir = tempfile.TemporaryDirectory(prefix="cortex-realtime-test-")
         self.root = Path(self.tempdir.name)
         self.project = self.root / "project"
@@ -132,6 +135,7 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+        self.tear_down_host_private_control_store()
 
     def run_wrapper(
         self,
@@ -433,8 +437,11 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGINT), previous_int)
 
     def test_ledger_progress_exposes_only_bounded_lifecycle_metadata(self) -> None:
-        database_dir = self.project / ".codex" / "cortex"
-        database_dir.mkdir(parents=True)
+        database_dir = self.harness.cortex.ledger_root_path(
+            {"project_root": str(self.project)}, create=True,
+        )
+        database_dir.mkdir(mode=0o700)
+        database_dir.chmod(0o700)
         database = database_dir / "cortex.db"
         connection = sqlite3.connect(database)
         connection.executescript(
@@ -454,6 +461,7 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         connection.execute("INSERT INTO ledger_events VALUES (1, 'worker_report')")
         connection.commit()
         connection.close()
+        database.chmod(0o600)
 
         progress = self.harness.safe_ledger_progress(self.project)
         self.assertIsNotNone(progress)
@@ -528,7 +536,7 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         self.assertEqual(self.harness.SERVER.resolve(), expected_server)
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('mcp_servers.cortex.command="{sys.executable}"', source)
-        self.assertIn('mcp_servers.cortex.args=["{SERVER}"]', source)
+        self.assertIn('mcp_servers.cortex.args=["{SERVER}", "--mcp-audience=coordinator"]', source)
         self.assertNotRegex(source, r"codex\s+(?:plugin\s+)?(?:install|add|update|remove)\b")
 
     def fake_codex(self) -> Path:
@@ -648,7 +656,10 @@ class RealtimeEvalHarnessTests(unittest.TestCase):
         self.assertEqual((global_codex_target / "registry.json").read_text(encoding="utf-8"), "global-registry-sentinel")
         command = " ".join(str(item) for item in probe["argv"])
         self.assertIn(f'mcp_servers.cortex.command="{sys.executable}"', command)
-        self.assertIn(f'mcp_servers.cortex.args=["{self.harness.SERVER}"]', command)
+        self.assertIn(
+            f'mcp_servers.cortex.args=["{self.harness.SERVER}", "--mcp-audience=coordinator"]',
+            command,
+        )
 
     def test_live_eval_uses_private_codex_home_and_cleans_normal_run(self) -> None:
         results, probe, global_home, global_codex_target = self.run_isolated_probe()

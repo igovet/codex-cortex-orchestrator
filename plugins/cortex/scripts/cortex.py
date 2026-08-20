@@ -3,6 +3,7 @@
 from __future__ import annotations
 import contextlib
 import difflib
+import errno
 import fnmatch
 import html
 import hashlib
@@ -60,10 +61,13 @@ from cortex_runtime.identity import (
     worker_module_label,
 )
 from cortex_runtime.mcp_api import (
+    DEFAULT_MCP_AUDIENCE,
+    MCP_AUDIENCES,
     PUBLIC_TOOL_DESCRIPTIONS,
     build_public_schemas,
     configure_internal_schemas,
     public_tools as build_public_tools,
+    public_tools_for_audience,
     serve_stdio,
     v3_response as render_v3_response,
 )
@@ -161,6 +165,11 @@ DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE = re.compile(
 )
 CODEX_SESSION_ENV_KEYS = ("CODEX_SESSION_ID", "CODEX_THREAD_ID")
 HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
+# This is intentionally a host process setting, not a public Cortex tool
+# argument.  It selects the parent directory for per-project private stores;
+# it never receives a workspace-controlled ``project_root/.codex`` value.
+HOST_CONTROL_STORE_ENV = "CORTEX_HOST_STATE_DIR"
+HOST_CONTROL_STORE_SCHEMA = "cortex/host-control-store/v1"
 PLUGIN_ROOT = PROFILE_CONTRACT_PATH.parent
 PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 # Cortex captures a complete content-addressed manifest before it creates a
@@ -846,10 +855,11 @@ VERIFICATION_COMMANDS = {
     "benign_success": {"argv": ["/usr/bin/true"], "cwd": "."},
     "benign_failure": {"argv": ["/usr/bin/false"], "cwd": "."},
 }
-SENSITIVE_KEY_RE = re.compile(r"(?i)(?:^|[_ -])(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|token|password|passwd|secret|private[_ -]?key|authorization)(?:$|[_ -])")
+SENSITIVE_KEY_RE = re.compile(r"(?i)(?:^|[_ -])(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|token|password|passwd|secret|private[_ -]?key|authorization|coordinator[_ -]?capability|coordinator[_ -]?recovery[_ -]?proof)(?:$|[_ -])")
 SENSITIVE_LOG_KEY_NAMES = {
     "apikey", "accesstoken", "refreshtoken", "clientsecret", "token",
     "password", "passwd", "secret", "privatekey", "authorization",
+    "coordinatorcapability", "coordinatorrecoveryproof",
 }
 INTERNAL_NON_ENGLISH_SCRIPT_RE = re.compile(
     r"[\u0370-\u052f\u0530-\u058f\u0590-\u08ff\u0900-\u0fff"
@@ -985,7 +995,10 @@ def _contained_path(base: Path, child: Path, label: str) -> Path:
 def select_project_root(params: dict[str, Any] | None = None) -> Path:
     """Resolve one explicit absolute workspace supplied by the current tool call."""
     if os.environ.get("CORTEX_ROOT"):
-        raise ValueError("CORTEX_ROOT is not supported; Cortex writes only below project_root/.codex/cortex")
+        raise ValueError(
+            "CORTEX_ROOT is not supported; Cortex control state is derived from project_root "
+            "and stored in the host-private control store"
+        )
     requested = str((params or {}).get("project_root") or "").strip()
     if not requested:
         raise ValueError("project_root is required for every Cortex tool call")
@@ -1007,6 +1020,378 @@ def select_project_root(params: dict[str, Any] | None = None) -> Path:
 
 def project_root(params: dict[str, Any] | None = None) -> Path:
     return select_project_root(params)
+
+
+def _lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _assert_owned_by_current_user(info: os.stat_result, label: str) -> None:
+    """Reject host-store paths owned by another local account when available."""
+    if os.name == "nt" or not hasattr(os, "getuid"):
+        return
+    if int(info.st_uid) != int(os.getuid()):
+        raise ValueError(f"{label} must be owned by the current host user")
+
+
+def _assert_private_directory(path: Path, label: str) -> Path:
+    """Validate one existing non-symlink directory used for private state."""
+    candidate = _reject_symlink_ancestry(path, label, allow_missing_leaf=True)
+    info = _lstat_or_none(candidate)
+    if info is None:
+        raise ValueError(f"{label} is unavailable")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{label} must be a real non-symlink directory")
+    _assert_owned_by_current_user(info, label)
+    if info.st_mode & 0o077:
+        raise ValueError(f"{label} has unsafe permissions; require mode 0700")
+    return candidate
+
+
+def _assert_host_store_parent(path: Path, label: str) -> Path:
+    """Validate a parent that names a host-private directory.
+
+    The parent does not need to be unreadable (a home directory is commonly
+    searchable by a primary group), but another user/group must not be able to
+    replace the child ledger entry beneath it.  The child itself is always
+    required to be mode 0700.
+    """
+    candidate = _reject_symlink_ancestry(path, label, allow_missing_leaf=False)
+    info = _lstat_or_none(candidate)
+    if info is None or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{label} must be a real existing directory")
+    _assert_owned_by_current_user(info, label)
+    if info.st_mode & 0o022:
+        raise ValueError(
+            f"{label} is writable by group or other users; configure a mode-0700 host-private "
+            f"directory through {HOST_CONTROL_STORE_ENV}"
+        )
+    return candidate
+
+
+def _ensure_private_directory(path: Path, label: str) -> Path:
+    """Create one leaf private directory after validating its host parent."""
+    candidate = _reject_symlink_ancestry(path, label, allow_missing_leaf=True)
+    existing = _lstat_or_none(candidate)
+    if existing is not None:
+        return _assert_private_directory(candidate, label)
+    _assert_host_store_parent(candidate.parent, f"{label} parent")
+    try:
+        os.mkdir(candidate, 0o700)
+    except FileExistsError:
+        # A concurrent host process may have created the same project store.
+        # Revalidate it rather than inheriting its permissions or type.
+        return _assert_private_directory(candidate, label)
+    try:
+        os.chmod(candidate, 0o700)
+    except OSError:
+        # Do not continue with a control root whose privacy could not be
+        # established.  The caller receives a recoverable storage diagnostic.
+        raise
+    return _assert_private_directory(candidate, label)
+
+
+def _project_path_is_within(path: Path, candidate_parent: Path) -> bool:
+    try:
+        path.absolute().relative_to(candidate_parent.absolute())
+    except ValueError:
+        return False
+    return True
+
+
+def _host_control_store_base(project: Path, *, create: bool) -> Path:
+    """Resolve the trusted host-side parent for opaque project ledgers.
+
+    ``CORTEX_HOST_STATE_DIR`` is an operator/process configuration only.  It
+    is intentionally absent from every public schema and is rejected when it
+    points into the caller-selected workspace.  ``CORTEX_ROOT`` remains
+    unsupported, so a tool caller cannot redirect storage through an argument
+    or the legacy environment override.
+    """
+    configured = str(os.environ.get(HOST_CONTROL_STORE_ENV) or "").strip()
+    if configured:
+        requested = Path(os.path.normpath(str(Path(configured).expanduser())))
+        if not requested.is_absolute():
+            raise ValueError(f"{HOST_CONTROL_STORE_ENV} must be an absolute host-private directory")
+        base = _reject_symlink_ancestry(requested, "host control-store root", allow_missing_leaf=True)
+        if _project_path_is_within(base, project) or _project_path_is_within(project, base):
+            raise ValueError(
+                f"{HOST_CONTROL_STORE_ENV} must be outside project_root; Cortex refuses workspace-controlled state"
+            )
+        if create:
+            return _ensure_private_directory(base, "host control-store root")
+        if _lstat_or_none(base) is not None:
+            return _assert_private_directory(base, "host control-store root")
+        return base
+
+    home = _reject_symlink_ancestry(Path.home().absolute(), "host home", allow_missing_leaf=False)
+    codex_home = home / ".codex"
+    if create:
+        if _lstat_or_none(codex_home) is None:
+            _ensure_private_directory(codex_home, "Codex host directory")
+        else:
+            _assert_private_directory(codex_home, "Codex host directory")
+        return _ensure_private_directory(codex_home / "cortex", "Cortex host control-store root")
+    if _lstat_or_none(codex_home) is None:
+        return codex_home / "cortex"
+    _assert_private_directory(codex_home, "Codex host directory")
+    base = codex_home / "cortex"
+    if _lstat_or_none(base) is not None:
+        return _assert_private_directory(base, "Cortex host control-store root")
+    return base
+
+
+def stable_project_id(project: Path) -> str:
+    """Return an opaque, stable-per-worktree host-store namespace identifier."""
+    info = project.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("project root is not a directory")
+    identity = {
+        "schema": HOST_CONTROL_STORE_SCHEMA,
+        # Preserve stable mapping for the same directory while making a fresh
+        # checkout at a reused spelling a different private control plane.
+        "path": str(project.absolute()),
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+    }
+    return "p-" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def ledger_root_path(params: dict[str, Any] | None = None, *, create: bool = False) -> Path:
+    """Return the host-private ledger path for one workspace without opening SQLite.
+
+    This helper is intentionally deterministic and side-effect free when
+    ``create`` is false.  It lets hooks and maintenance inspect only the
+    selected project mapping without falling back to a workspace-local
+    ``.codex/cortex`` directory.
+    """
+    project = select_project_root(params)
+    base = _host_control_store_base(project, create=create)
+    projects = base / "projects"
+    if create:
+        _ensure_private_directory(projects, "Cortex host projects directory")
+    elif _lstat_or_none(projects) is not None:
+        _assert_private_directory(projects, "Cortex host projects directory")
+    return _reject_symlink_ancestry(
+        projects / stable_project_id(project), "Cortex host project ledger", allow_missing_leaf=True
+    )
+
+
+def _legacy_ledger_root(project: Path) -> Path:
+    """Return the pre-P2.2 workspace-local ledger location for migration only."""
+    return _contained_path(project, project / ".codex" / "cortex", "legacy project-local Cortex root")
+
+
+def _legacy_entries_are_only_lock(root: Path) -> bool:
+    try:
+        with os.scandir(root) as entries:
+            return all(entry.name == ".state.lock" for entry in entries)
+    except OSError as exc:
+        raise ValueError("legacy project-local Cortex root cannot be inspected") from exc
+
+
+def _assert_migratable_legacy_ledger(root: Path) -> None:
+    """Reject unsafe legacy trees before moving them into host-private state."""
+    _assert_host_store_parent(root.parent, "legacy project-local Cortex root parent")
+    info = _lstat_or_none(root)
+    if info is None or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError("legacy project-local Cortex root must be a real directory")
+    _assert_owned_by_current_user(info, "legacy project-local Cortex root")
+    if info.st_mode & 0o077:
+        raise ValueError("legacy project-local Cortex root has unsafe permissions; refuse migration")
+
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = list(os.scandir(directory))
+        except OSError as exc:
+            raise ValueError("legacy project-local Cortex root cannot be scanned safely") from exc
+        for child in children:
+            try:
+                child_info = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("legacy project-local Cortex root changed during validation") from exc
+            if stat.S_ISLNK(child_info.st_mode):
+                raise ValueError("legacy project-local Cortex root contains a symlink; refuse migration")
+            if stat.S_ISDIR(child_info.st_mode):
+                _assert_owned_by_current_user(child_info, "legacy Cortex directory")
+                if child_info.st_mode & 0o077:
+                    raise ValueError("legacy Cortex directory has unsafe permissions; refuse migration")
+                pending.append(Path(child.path))
+                continue
+            if not stat.S_ISREG(child_info.st_mode):
+                raise ValueError("legacy project-local Cortex root contains an unsafe entry; refuse migration")
+            _assert_owned_by_current_user(child_info, "legacy Cortex file")
+            if child_info.st_mode & 0o077:
+                raise ValueError("legacy Cortex file has unsafe permissions; refuse migration")
+
+    database = root / "cortex.db"
+    database_info = _lstat_or_none(database)
+    if database_info is None or not stat.S_ISREG(database_info.st_mode) or stat.S_ISLNK(database_info.st_mode):
+        raise ValueError("legacy project-local Cortex root has no regular cortex.db; refuse migration")
+
+
+@contextlib.contextmanager
+def _legacy_migration_lock(root: Path) -> Iterator[bool]:
+    """Serialize one legacy-root rename across compatible local processes."""
+    lock_path = root / ".state.lock"
+    lock_info = _lstat_or_none(lock_path)
+    if lock_info is not None and (stat.S_ISLNK(lock_info.st_mode) or not stat.S_ISREG(lock_info.st_mode)):
+        raise ValueError("legacy project-local Cortex migration lock is unsafe")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except FileNotFoundError:
+        # Another compatible process completed the atomic rename before this
+        # process opened the lock.  The caller rechecks the target.
+        yield False
+        return
+    try:
+        os.chmod(lock_path, 0o600)
+        stream = os.fdopen(descriptor, "a+", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            if fcntl is not None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield True
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    except BaseException:
+        # ``fdopen`` owns descriptor after success; only close here if it did
+        # not.  Keeping this narrow avoids leaking a private lock descriptor.
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _maybe_migrate_legacy_ledger(project: Path, target: Path) -> None:
+    """Atomically relocate an existing local SQLite ledger or fail closed.
+
+    A cross-filesystem copy cannot preserve the single authoritative ledger
+    atomically.  Rather than copy a database and artifact tree while the old
+    source remains live, require the operator to select a private store on the
+    same filesystem (or explicitly archive/reset the legacy state).
+    """
+    source = _legacy_ledger_root(project)
+    initial = _lstat_or_none(source)
+    if initial is None:
+        return
+    if stat.S_ISLNK(initial.st_mode) or not stat.S_ISDIR(initial.st_mode):
+        raise ValueError("legacy project-local Cortex root is unsafe; refuse host-private migration")
+
+    # Do not create even a migration-lock file under a workspace-controlled
+    # legacy root until its complete tree has passed the ownership, mode, and
+    # symlink checks.  This keeps an unsafe legacy path fail-closed and
+    # non-mutating.
+    initial_database = _lstat_or_none(source / "cortex.db")
+    if initial_database is None:
+        if not _legacy_entries_are_only_lock(source):
+            raise ValueError(
+                "legacy project-local Cortex directory has no regular cortex.db; refuse to mix unsupported "
+                "filesystem state with a new host-private ledger"
+            )
+        return
+    if stat.S_ISLNK(initial_database.st_mode) or not stat.S_ISREG(initial_database.st_mode):
+        raise ValueError("legacy project-local Cortex database is unsafe; refuse migration")
+    _assert_migratable_legacy_ledger(source)
+
+    with _legacy_migration_lock(source) as locked:
+        if not locked:
+            return
+        current = _lstat_or_none(source)
+        if current is None:
+            return
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+            raise ValueError("legacy project-local Cortex root changed during migration")
+        database = source / "cortex.db"
+        database_info = _lstat_or_none(database)
+        has_database = database_info is not None
+        if has_database and (stat.S_ISLNK(database_info.st_mode) or not stat.S_ISREG(database_info.st_mode)):
+            raise ValueError("legacy project-local Cortex database is unsafe; refuse migration")
+
+        target_info = _lstat_or_none(target)
+        if target_info is not None:
+            if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISDIR(target_info.st_mode):
+                raise ValueError("host-private Cortex project ledger is unsafe")
+            if has_database:
+                raise ValueError(
+                    "both legacy project-local and host-private Cortex ledgers exist; refuse to split or choose state. "
+                    "Archive one verified copy, then retry migration."
+                )
+            return
+        if not has_database:
+            if not _legacy_entries_are_only_lock(source):
+                raise ValueError(
+                    "legacy project-local Cortex directory has no regular cortex.db; refuse to mix unsupported "
+                    "filesystem state with a new host-private ledger"
+                )
+            return
+
+        _assert_migratable_legacy_ledger(source)
+        _assert_host_store_parent(target.parent, "Cortex host projects directory")
+        source_device = int(source.stat(follow_symlinks=False).st_dev)
+        target_parent_device = int(target.parent.stat(follow_symlinks=False).st_dev)
+        if source_device != target_parent_device:
+            raise ValueError(
+                "legacy project-local Cortex ledger cannot be migrated atomically because the host-private store "
+                f"is on a different filesystem; configure {HOST_CONTROL_STORE_ENV} as a private same-filesystem "
+                "directory or archive/reset the legacy ledger before retrying"
+            )
+        try:
+            os.replace(source, target)
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                raise ValueError(
+                    "legacy project-local Cortex ledger cannot be migrated atomically across filesystems; configure "
+                    f"{HOST_CONTROL_STORE_ENV} as a private same-filesystem directory"
+                ) from exc
+            raise ValueError("legacy project-local Cortex ledger rename failed; no new ledger was created") from exc
+        try:
+            _fsync_directory(source.parent)
+            _fsync_directory(target.parent)
+        except OSError as exc:
+            raise ValueError(
+                "legacy Cortex ledger was moved to the host-private store but directory durability could not be confirmed; "
+                "stop and verify the moved ledger before continuing"
+            ) from exc
+
+
+def existing_ledger_root(params: dict[str, Any] | None = None) -> Path:
+    """Resolve current state for inspection/reset without creating a database.
+
+    A real legacy SQLite ledger is migrated through the normal atomic path.
+    Missing state remains missing so read-only maintenance never initializes a
+    new project control plane merely by checking it.
+    """
+    project = select_project_root(params)
+    target = ledger_root_path({"project_root": str(project)}, create=False)
+    legacy = _legacy_ledger_root(project)
+    legacy_info = _lstat_or_none(legacy)
+    if legacy_info is not None:
+        if stat.S_ISLNK(legacy_info.st_mode) or not stat.S_ISDIR(legacy_info.st_mode):
+            raise ValueError("legacy project-local Cortex root is unsafe")
+        database_info = _lstat_or_none(legacy / "cortex.db")
+        if database_info is not None:
+            return ledger_root({"project_root": str(project)})
+        if not _legacy_entries_are_only_lock(legacy):
+            raise ValueError(
+                "legacy project-local Cortex directory has no regular cortex.db; explicit legacy maintenance is required"
+            )
+    target_info = _lstat_or_none(target)
+    if target_info is not None:
+        _assert_private_directory(target, "Cortex host project ledger")
+    return target
 
 
 _MANIFEST_DIGEST_CACHE: dict[tuple[str, int, int, int, int, int, int], dict[str, Any]] = {}
@@ -1392,7 +1777,26 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
     }
 
 
+def _manifest_partial_descriptor(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded capture status used by integrity-critical callers.
+
+    Partial manifests remain valid diagnostic artifacts.  They must not be
+    treated as a complete baseline or final view, however, because entries
+    beyond the cutoff were never observed and may contain unreported changes.
+    """
+    raw = manifest.get("partial_manifest")
+    if not isinstance(raw, dict):
+        return {"partial": False, "reason": None, "at": None}
+    return {
+        "partial": bool(raw.get("partial")),
+        "reason": raw.get("reason"),
+        "at": raw.get("at"),
+    }
+
+
 def compare_manifests(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_partial = _manifest_partial_descriptor(before)
+    after_partial = _manifest_partial_descriptor(after)
     old, new = before.get("entries", {}), after.get("entries", {})
     deleted = sorted(set(old) - set(new))
     added = sorted(set(new) - set(old))
@@ -1411,7 +1815,23 @@ def compare_manifests(before: dict[str, Any], after: dict[str, Any]) -> dict[str
             remaining_added.remove(match)
             remaining_deleted.remove(old_path)
     changed_paths = sorted(set(modified) | remaining_added | remaining_deleted | {item for rename in renamed for item in rename.values()})
-    return {"added": sorted(remaining_added), "modified": modified, "deleted": sorted(remaining_deleted), "renamed": renamed, "changed_paths": changed_paths, "change_count": len(modified) + len(remaining_added) + len(remaining_deleted) + len(renamed)}
+    return {
+        "added": sorted(remaining_added),
+        "modified": modified,
+        "deleted": sorted(remaining_deleted),
+        "renamed": renamed,
+        "changed_paths": changed_paths,
+        "change_count": len(modified) + len(remaining_added) + len(remaining_deleted) + len(renamed),
+        # A bounded capture is useful diagnostic evidence, but it is not a
+        # complete view of either side of an integrity comparison.  Keep both
+        # descriptors in the comparison so receipts explain why a seemingly
+        # unchanged/unscanned path cannot authorize reconciliation.
+        "complete": not before_partial["partial"] and not after_partial["partial"],
+        "partial_manifest": {
+            "baseline": before_partial,
+            "current": after_partial,
+        },
+    }
 
 
 def manifest_snapshot_ref(manifest: dict[str, Any]) -> str:
@@ -1449,7 +1869,22 @@ def _manifest_snapshot_path(task_dir: Path, reference: object, label: str) -> Pa
 def _ledger_root_for_artifact(task_dir: Path) -> Path:
     """Resolve the one database ledger that owns a task artifact directory."""
     for candidate in (task_dir, *task_dir.parents):
-        if candidate.name == "cortex" and (candidate / "cortex.db").is_file():
+        database = candidate / "cortex.db"
+        info = _lstat_or_none(database)
+        # Pre-P2.2 ledgers were named ``cortex`` below a workspace.  New
+        # host-private ledgers use an opaque per-project id below the trusted
+        # ``projects`` parent.  Do not accept an arbitrary nested SQLite file
+        # as an artifact owner.
+        private_project_ledger = (
+            candidate.parent.name == "projects"
+            and re.fullmatch(r"p-[0-9a-f]{64}", candidate.name) is not None
+        )
+        if (
+            (candidate.name == "cortex" or private_project_ledger)
+            and info is not None
+            and stat.S_ISREG(info.st_mode)
+            and not stat.S_ISLNK(info.st_mode)
+        ):
             return candidate
     raise ValueError("task artifact directory is not owned by a Cortex SQLite ledger")
 
@@ -1547,11 +1982,30 @@ def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: li
         supplied = {Path(str(item)).as_posix().removeprefix("./") for item in reported_paths}
         changed_paths = list((checkpoint.get("comparison") or {}).get("changed_paths") or [])
         missing = sorted(set(changed_paths) - supplied)
+        current_partial = _manifest_partial_descriptor(current)
+        checkpoint_partial = (checkpoint.get("comparison") or {}).get("partial_manifest")
+        if not isinstance(checkpoint_partial, dict):
+            checkpoint_partial = {}
+        checkpoint_baseline_partial = checkpoint_partial.get("baseline")
+        checkpoint_current_partial = checkpoint_partial.get("current")
+        checkpoint_has_partial = any(
+            isinstance(item, dict) and item.get("partial")
+            for item in (checkpoint_baseline_partial, checkpoint_current_partial)
+        )
+        checkpoint_complete = (
+            bool(checkpoint.get("complete"))
+            and not checkpoint_has_partial
+            and not current_partial["partial"]
+        )
         return {
             **checkpoint,
             "reported_paths": sorted(supplied),
             "unaccounted_paths": missing,
-            "complete": not missing,
+            "complete": checkpoint_complete and not missing,
+            "partial_manifest": {
+                "baseline": checkpoint_partial.get("baseline"),
+                "current": current_partial,
+            },
             "created_at": now(),
         }, current
     baseline = task_manifest_baseline(task_dir, state)
@@ -1567,7 +2021,11 @@ def reconcile_manifest(task_dir: Path, state: dict[str, Any], reported_paths: li
         "comparison": comparison,
         "reported_paths": sorted(supplied),
         "unaccounted_paths": missing,
-        "complete": not missing,
+        # A path list can be exhaustive only when both captures were complete.
+        # Keep the partial descriptors in the receipt for diagnostics, while
+        # making the integrity decision fail closed.
+        "complete": bool(comparison.get("complete")) and not missing,
+        "partial_manifest": comparison.get("partial_manifest"),
         "created_at": now(),
     }
     return receipt, current
@@ -1673,17 +2131,24 @@ def authorize_principal(state: dict[str, Any], params: dict[str, Any]) -> None:
 
 
 def ledger_root(params: dict[str, Any] | None = None) -> Path:
-    base = select_project_root(params)
-    path = _contained_path(base, base / ".codex" / "cortex", "Cortex root")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.chmod(0o700)
+    """Open the one private control-plane ledger for an explicit workspace.
+
+    No caller-controlled workspace path is used as the durable ledger root.
+    The only compatibility read is the exact historic
+    ``project_root/.codex/cortex`` location, which either moves atomically to
+    the private mapping or prevents this call from proceeding.
+    """
+    project = select_project_root(params)
+    path = ledger_root_path({"project_root": str(project)}, create=True)
+    _maybe_migrate_legacy_ledger(project, path)
+    _ensure_private_directory(path, "Cortex host project ledger")
     ensure_ledger_database(path)
-    # The remaining filesystem tree contains only worker-facing artifacts.
-    # Mutable task/lane state is exclusively in cortex.db.
-    (path / "tasks").mkdir(exist_ok=True, mode=0o700)
-    (path / "tasks").chmod(0o700)
-    (path / "lanes").mkdir(exist_ok=True, mode=0o700)
-    (path / "lanes").chmod(0o700)
+    # Task capability files and optional exports remain beneath the same
+    # private host store.  A worker receives only an exact capability path or
+    # the scoped public artifact fallback; it never receives a browsable
+    # workspace-local control directory.
+    _ensure_private_directory(path / "tasks", "Cortex host task-artifact directory")
+    _ensure_private_directory(path / "lanes", "Cortex host lane directory")
     return path
 
 
@@ -4069,6 +4534,24 @@ def _validate_result_artifacts(
 
     baseline = attempt_manifest_baseline(task_dir, attempt)
     current = capture_project_manifest(Path(baseline["project_root"]), policy=baseline.get("policy"))
+    baseline_partial = _manifest_partial_descriptor(baseline)
+    current_partial = _manifest_partial_descriptor(current)
+    if baseline_partial["partial"] or current_partial["partial"]:
+        # Do not attribute a filesystem delta to a read-only worker when one
+        # side of the comparison stopped at an entry, byte, or time cutoff.
+        # The partial capture is retained in the diagnostic receipt returned by
+        # capture_project_manifest, but it cannot authorize mutation audit (or
+        # any writable result reconciliation) because unscanned paths remain
+        # possible.
+        blocked = []
+        if baseline_partial["partial"]:
+            blocked.append(f"baseline ({baseline_partial['reason'] or 'capture limit'})")
+        if current_partial["partial"]:
+            blocked.append(f"current ({current_partial['reason'] or 'capture limit'})")
+        raise ValueError(
+            "manifest capture incomplete; refusing integrity-critical result artifact reconciliation: "
+            + ", ".join(blocked)
+        )
     comparison = compare_manifests(baseline, current)
     changed = set(comparison["changed_paths"])
     observed_in_scope = sorted(
@@ -7201,6 +7684,7 @@ PROJECT_ADMIN_CAPABILITY_ACTIONS = frozenset({"*"})
 CAPABILITY_RECOVERY_ACTIONS = frozenset({
     "recover_coordinator_capability", "rotate_coordinator_capability",
 })
+COORDINATOR_RECOVERY_PROOF_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _operation_registry_path(root: Path) -> Path:
@@ -7224,16 +7708,26 @@ def _operation_registry(root: Path) -> dict[str, Any]:
     # require a fresh start to receive a new one-response capability.
     scrubbed_legacy_capability = False
     for reservation in registry["starts"].values():
-        if isinstance(reservation, dict) and "coordinator_capability" in reservation:
-            reservation.pop("coordinator_capability", None)
-            reservation.pop("coordinator_capability_digest", None)
-            scrubbed_legacy_capability = True
+        if isinstance(reservation, dict):
+            if "coordinator_capability" in reservation:
+                reservation.pop("coordinator_capability", None)
+                reservation.pop("coordinator_capability_digest", None)
+                scrubbed_legacy_capability = True
+            if "coordinator_recovery_proof" in reservation:
+                reservation.pop("coordinator_recovery_proof", None)
+                reservation.pop("coordinator_recovery_proof_digest", None)
+                scrubbed_legacy_capability = True
     for record in registry["tasks"].values():
         start = record.get("start") if isinstance(record, dict) else None
-        if isinstance(start, dict) and "coordinator_capability" in start:
-            start.pop("coordinator_capability", None)
-            start.pop("coordinator_capability_digest", None)
-            scrubbed_legacy_capability = True
+        if isinstance(start, dict):
+            if "coordinator_capability" in start:
+                start.pop("coordinator_capability", None)
+                start.pop("coordinator_capability_digest", None)
+                scrubbed_legacy_capability = True
+            if "coordinator_recovery_proof" in start:
+                start.pop("coordinator_recovery_proof", None)
+                start.pop("coordinator_recovery_proof_digest", None)
+                scrubbed_legacy_capability = True
     if scrubbed_legacy_capability:
         registry["updated_at"] = now()
         db_put_global(root, "operation_registry", registry)
@@ -7252,12 +7746,17 @@ def _write_operation_registry(root: Path, registry: dict[str, Any]) -> None:
     db_put_global(root, "operation_registry", registry)
 
 
-_PENDING_COORDINATOR_CAPABILITIES: dict[tuple[str, str], str] = {}
+_PENDING_COORDINATOR_CAPABILITIES: dict[tuple[str, str], tuple[str, str]] = {}
 _PENDING_COORDINATOR_CAPABILITIES_LOCK = threading.Lock()
 
 
 def _coordinator_capability_digest(capability: str) -> str:
     return hashlib.sha256(str(capability).encode("ascii")).hexdigest()
+
+
+def _coordinator_recovery_proof_digest(proof: str) -> str:
+    """Return the durable verifier for the coordinator-only recovery proof."""
+    return hashlib.sha256(str(proof).encode("ascii")).hexdigest()
 
 
 def _pending_coordinator_capability_key(root: Path, task_id: str) -> tuple[str, str]:
@@ -7311,22 +7810,27 @@ def _capability_claims(
     }
 
 
-def _stage_coordinator_capability(root: Path, task_id: str) -> tuple[str, str]:
-    """Create a one-response bearer and return it with its durable digest.
+def _stage_coordinator_capability(root: Path, task_id: str) -> tuple[str, str, str]:
+    """Create a one-response bearer and recovery proof with durable verifiers.
 
-    Only the digest enters the project ledger. The raw bearer lives in this
-    process just long enough for the successful start response; a lost or
-    cross-process response fails closed instead of making a reusable secret
-    recoverable from the worker-readable project database.
+    Only digests enter the project ledger. The raw bearer and separate proof
+    live in this process just long enough for the successful start response;
+    a lost or cross-process response fails closed instead of making a reusable
+    secret recoverable from the worker-readable project database.
     """
     capability = secrets.token_hex(32)
+    recovery_proof = secrets.token_hex(32)
     digest = _coordinator_capability_digest(capability)
+    recovery_proof_digest = _coordinator_recovery_proof_digest(recovery_proof)
     with _PENDING_COORDINATOR_CAPABILITIES_LOCK:
-        _PENDING_COORDINATOR_CAPABILITIES[_pending_coordinator_capability_key(root, task_id)] = capability
-    return capability, digest
+        _PENDING_COORDINATOR_CAPABILITIES[_pending_coordinator_capability_key(root, task_id)] = (
+            capability,
+            recovery_proof,
+        )
+    return capability, digest, recovery_proof_digest
 
 
-def _take_coordinator_capability(root: Path, task_id: str) -> str | None:
+def _take_coordinator_capability(root: Path, task_id: str) -> tuple[str, str] | None:
     with _PENDING_COORDINATOR_CAPABILITIES_LOCK:
         return _PENDING_COORDINATOR_CAPABILITIES.pop(
             _pending_coordinator_capability_key(root, task_id),
@@ -7422,9 +7926,10 @@ def _rotate_coordinator_capability(
     task_id: str,
     principal: str,
     thread_id: str,
+    recovery_proof: str,
     expected_generation: int | None = None,
     reason: str = "lost_response_recovery",
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, str, dict[str, Any]]:
     """Rotate a task bearer after a lost response without persisting plaintext.
 
     The caller must already have proven the same active principal/thread/task
@@ -7444,13 +7949,32 @@ def _rotate_coordinator_capability(
             raise GovernanceError("coordinator capability cannot be recovered for this task", code="coordinator_capability_invalid")
         if str(claims.get("principal")) != principal or str(claims.get("thread_id")) != thread_id:
             raise GovernanceError("capability recovery identity does not match its active task", code="coordinator_authorization_required")
+        supplied_recovery_proof = str(recovery_proof or "").strip().lower()
+        expected_recovery_proof_digest = str(
+            start.get("coordinator_recovery_proof_digest") if isinstance(start, dict) else ""
+        ).strip().lower()
+        if (
+            not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(supplied_recovery_proof)
+            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_recovery_proof_digest)
+            or not hmac.compare_digest(
+                _coordinator_recovery_proof_digest(supplied_recovery_proof),
+                expected_recovery_proof_digest,
+            )
+        ):
+            raise GovernanceError(
+                "coordinator capability recovery requires the original non-durable recovery proof",
+                code="coordinator_recovery_proof_required",
+            )
         generation = int(claims["generation"])
         if expected_generation is not None and int(expected_generation) != generation:
             raise GovernanceError("capability recovery generation is stale", code="coordinator_capability_stale")
         new_bearer = secrets.token_hex(32)
+        new_recovery_proof = secrets.token_hex(32)
         new_digest = _coordinator_capability_digest(new_bearer)
+        new_recovery_proof_digest = _coordinator_recovery_proof_digest(new_recovery_proof)
         rotated_claims = _record_capability_rotation(dict(claims), reason=reason)
         start["coordinator_capability_digest"] = new_digest
+        start["coordinator_recovery_proof_digest"] = new_recovery_proof_digest
         start["coordinator_capability_claims"] = rotated_claims
         record["start"] = start
         registry["tasks"][str(task_id)] = record
@@ -7460,9 +7984,10 @@ def _rotate_coordinator_capability(
         for reservation in registry.get("starts", {}).values():
             if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
                 reservation["coordinator_capability_digest"] = new_digest
+                reservation["coordinator_recovery_proof_digest"] = new_recovery_proof_digest
                 reservation["coordinator_capability_claims"] = dict(rotated_claims)
         _write_operation_registry(root, registry)
-        return new_bearer, dict(rotated_claims)
+        return new_bearer, new_recovery_proof, dict(rotated_claims)
 
 
 def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> None:
@@ -7485,6 +8010,7 @@ def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> 
             rotations.append({"event": "capability_revoked", "reason": reason, "at": now()})
             claims["rotation_audit"] = rotations
             start.pop("coordinator_capability_digest", None)
+            start.pop("coordinator_recovery_proof_digest", None)
             start["coordinator_capability_claims"] = claims
             record["start"] = start
             changed = True
@@ -7499,6 +8025,7 @@ def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> 
                 claims["rotation_audit"] = rotations
                 reservation["coordinator_capability_claims"] = claims
             reservation.pop("coordinator_capability_digest", None)
+            reservation.pop("coordinator_recovery_proof_digest", None)
             changed = True
         if changed:
             _write_operation_registry(root, registry)
@@ -7551,12 +8078,18 @@ def _issue_project_admin_coordinator_capability(
             "at": now(),
         }]
         start["coordinator_capability_digest"] = digest
+        # A project-admin grant is issued only by a trusted server integration.
+        # It intentionally does not inherit a task-level lost-response proof.
+        # Retaining it could let an old task-session recovery credential rotate
+        # the newly elevated bearer.
+        start.pop("coordinator_recovery_proof_digest", None)
         start["coordinator_capability_claims"] = admin_claims
         record["start"] = start
         registry["tasks"][str(task_id)] = record
         for reservation in registry.get("starts", {}).values():
             if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
                 reservation["coordinator_capability_digest"] = digest
+                reservation.pop("coordinator_recovery_proof_digest", None)
                 reservation["coordinator_capability_claims"] = dict(admin_claims)
         _write_operation_registry(root, registry)
         return bearer
@@ -7667,17 +8200,25 @@ def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> di
     """Recover from a lost one-response bearer by rotating, never revealing it.
 
     Recovery has a deliberately narrower identity contract than ordinary
-    governance calls: the exact task_ref, principal, and thread_id are all
-    required and must still identify the active activation.  Callers cannot
-    request a project-admin elevation through this route.
+    governance calls: the exact task_ref, principal, thread_id, and a
+    coordinator-only recovery proof are all required and must still identify
+    the active activation.  Public identifiers alone are never recovery
+    authority.  Callers cannot request a project-admin elevation through this
+    route.
     """
     principal = str(params.get("principal") or "").strip()
     thread_id = str(params.get("thread_id") or "").strip()
     task_ref = str(params.get("task_ref") or "").strip()
+    recovery_proof = str(params.get("coordinator_recovery_proof") or "").strip().lower()
     if not principal or not thread_id or not task_ref:
         raise GovernanceError(
             "capability recovery requires the exact task_ref, principal, and thread_id",
             code="coordinator_authorization_required",
+        )
+    if not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(recovery_proof):
+        raise GovernanceError(
+            "capability recovery requires the original non-durable coordinator recovery proof",
+            code="coordinator_recovery_proof_required",
         )
     root = ledger_root({"project_root": str(project)})
     registry = _operation_registry(root)
@@ -7701,11 +8242,12 @@ def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> di
     generation_raw = params.get("capability_generation")
     if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
         raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
-    bearer, claims = _rotate_coordinator_capability(
+    bearer, replacement_recovery_proof, claims = _rotate_coordinator_capability(
         root,
         task_id=task_id,
         principal=principal,
         thread_id=thread_id,
+        recovery_proof=recovery_proof,
         expected_generation=generation_raw,
     )
     return {
@@ -7722,9 +8264,14 @@ def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> di
             "capability_kind": claims["kind"],
             "generation": claims["generation"],
         },
-        # This is intentionally the only response path that contains the raw
-        # bearer.  Neither registry nor rotation audit receives this value.
-        "authorization_update": {"coordinator_capability": bearer},
+        # This is intentionally the only non-start response path that
+        # contains raw coordinator authorization material.  Neither registry
+        # nor rotation audit receives either value, and worker transport never
+        # exposes this operation.
+        "authorization_update": {
+            "coordinator_capability": bearer,
+            "coordinator_recovery_proof": replacement_recovery_proof,
+        },
     }
 
 
@@ -7843,11 +8390,19 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
             if str(params.get("task_ref") or "").strip():
                 raise ValueError("full reset is project-scoped and must omit task_ref")
             project = select_project_root(params)
-            root = _contained_path(project, project / ".codex" / "cortex", "Cortex root")
-            if root.is_symlink() or (root.exists() and not root.is_dir()):
-                raise ValueError("full reset refuses a symlinked or non-directory Cortex root")
+            # Resolve an existing private store without creating a fresh
+            # database merely because the user asked to reset.  A legacy
+            # SQLite ledger is first moved through the same atomic migration
+            # path; an unsafe legacy path remains a fail-closed blocker.
+            root = existing_ledger_root({"project_root": str(project)})
+            root_info = _lstat_or_none(root)
+            if root_info is not None and (stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode)):
+                raise ValueError("full reset refuses a symlinked or non-directory Cortex host ledger")
+            database_info = _lstat_or_none(root / "cortex.db") if root_info is not None else None
+            if database_info is not None and (stat.S_ISLNK(database_info.st_mode) or not stat.S_ISREG(database_info.st_mode)):
+                raise ValueError("full reset refuses an unsafe Cortex host database")
             active = []
-            if root.exists():
+            if database_info is not None:
                 for task_id in read_task_index(root):
                     loaded = db_load_task(root, task_id)
                     if loaded is not None and loaded[1].get("status") in {"active", "blocked"}:
@@ -7860,7 +8415,7 @@ def prune_orchestration_state(params: dict[str, Any]) -> dict[str, Any]:
                     "active_task_refs": active,
                     "next_action": "Complete or explicitly cancel every active task before retrying full reset.",
                 }
-            operation_id = digest_text(str(project) + ":full-reset")[:16]
+            operation_id = digest_text(str(root) + ":full-reset")[:16]
             journal = root.parent / f".cortex-reset-{operation_id}.json"
             quarantine = root.parent / f".cortex-quarantine-{operation_id}"
             if journal.is_symlink() or quarantine.is_symlink():
@@ -8593,7 +9148,7 @@ def _v3_start_reservation(
         principal = safe_id("orchestration-" + task_ref)
         thread_id = _codex_host_session_id() or principal
         submission_id = safe_id("orchestration-start-" + secrets.token_hex(8))
-        _, capability_digest = _stage_coordinator_capability(root, task_id)
+        _, capability_digest, recovery_proof_digest = _stage_coordinator_capability(root, task_id)
         capability_claims = _capability_claims(
             task_id=task_id,
             principal=principal,
@@ -8607,17 +9162,26 @@ def _v3_start_reservation(
             "thread_id": thread_id,
             "submission_id": submission_id,
             "coordinator_capability_digest": capability_digest,
+            "coordinator_recovery_proof_digest": recovery_proof_digest,
             "coordinator_capability_claims": capability_claims,
             "created_at": now(),
         }
         registry["starts"][start_digest] = reservation
         registry["tasks"].setdefault(task_id, {})["start"] = {"digest": start_digest, **reservation}
-        _write_operation_registry(root, registry)
+        try:
+            _write_operation_registry(root, registry)
+        except Exception:
+            # The durable reservation did not become a usable start receipt.
+            # Drop the in-memory pair as well, so a later retry cannot turn a
+            # failed persistence path into raw-authorization delivery.
+            _take_coordinator_capability(root, task_id)
+            raise
         return task_id, task_ref, principal, thread_id, submission_id, False
 
 
 def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Start public Cortex orchestration without caller-managed lifecycle identifiers."""
+    staged_authorization_task_id: str | None = None
     try:
         selected_project_root = select_project_root(params)
         if set(params) - {"project_root", "task", "waves", "_follow_up"}:
@@ -8691,6 +9255,8 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             if params.get("waves") is not None else _v3_auto_waves(task)
         )
         task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
+        if not replayed:
+            staged_authorization_task_id = task_id
         if replayed:
             # A linked corrective task may be replayed after the coordinator
             # intentionally deactivated its prior session while recovering a
@@ -8726,11 +9292,11 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     "thread_id": thread_id,
                     "task_id": task_id,
                 })
-            response = _v3_response(old, task_ref, start_replayed=True)
-            capability = _take_coordinator_capability(ledger_root(params), task_id)
-            if capability and response.get("ok"):
-                response["authorization"] = {"coordinator_capability": capability}
-            return response
+            # An idempotent start is a status replay, never a credential
+            # delivery channel.  In particular, a worker that knows the user
+            # request cannot race or retry a start to obtain coordinator-only
+            # material staged for the original coordinator response.
+            return _v3_response(old, task_ref, start_replayed=True)
         old = orchestrate({
             "operation": "start",
             "submission_id": submission_id,
@@ -8744,13 +9310,37 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         if isinstance(old, dict):
             old["governance"] = governance
         response = _v3_response(old, task_ref, start_replayed=replayed)
-        capability = _take_coordinator_capability(ledger_root(params), task_id)
-        if capability and response.get("ok"):
-            response["authorization"] = {"coordinator_capability": capability}
+        authorization = _take_coordinator_capability(ledger_root(params), task_id)
+        staged_authorization_task_id = None
+        if authorization and response.get("ok"):
+            capability, recovery_proof = authorization
+            response["authorization"] = {
+                "coordinator_capability": capability,
+                "coordinator_recovery_proof": recovery_proof,
+            }
+        elif authorization:
+            # The one response that could have safely delivered both raw
+            # secrets did not succeed.  Do not leave an idempotent retry as a
+            # bearer/recovery oracle; invalidate the staged claims instead.
+            _revoke_coordinator_capability(
+                ledger_root(params), task_id, reason="start_authorization_response_unavailable"
+            )
         return response
     except OperationRegistryError as exc:
+        if staged_authorization_task_id:
+            _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
+            _revoke_coordinator_capability(
+                ledger_root(params), staged_authorization_task_id,
+                reason="start_authorization_response_unavailable",
+            )
         return _v3_start_state_blocked_error(exc)
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        if staged_authorization_task_id:
+            _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
+            _revoke_coordinator_capability(
+                ledger_root(params), staged_authorization_task_id,
+                reason="start_authorization_response_unavailable",
+            )
         return _v3_error("start_validation_failed", exc)
 
 
@@ -9775,10 +10365,18 @@ def _v3_active_steer(
             )
         earliest_affected = str(impact.get("earliest_affected_gate") or "")
         active_gate = current_gates[0] if current_gates else ""
-        if earliest_affected and earliest_affected != active_gate:
+        if earliest_affected and (
+            earliest_affected != active_gate
+            or governance_escalated
+            or impact.get("replacement_waves")
+        ):
             # Preserve the same live worker for the user's steer.  The engine
             # consumes this receipt after that worker reports and reopens the
-            # earliest affected gate before any downstream dispatch.
+            # earliest affected gate before any downstream dispatch.  A
+            # governance escalation (or any server-built replacement) must
+            # remain durable even when the earliest affected gate is the
+            # active gate: that worker can finish before the boundary, but
+            # the replacement still has to insert its required waves.
             state["pending_revision_impact"] = {
                 **impact,
                 "task_revision": revision_number,
@@ -9886,8 +10484,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             # Health inspection must not initialize or migrate a missing
             # ledger. The controlled module validates the existing root and
             # permits writes only through explicit, confirmed actions.
-            project = select_project_root(params)
-            root = _contained_path(project, project / ".codex" / "cortex", "Cortex root")
+            root = existing_ledger_root(params)
             return manage_health_maintenance(root, params.get("payload"))
         # Models frequently keep source identity beside the corrective request
         # in the rare-operation payload. Accept that equivalent compact form
@@ -10053,11 +10650,11 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
-    """Expose the additive v10 governance ledger without widening lifecycle calls."""
+    """Expose the additive v11 governance ledger without widening lifecycle calls."""
     try:
         project = select_project_root(params)
         allowed = {
-            "project_root", "action", "principal", "thread_id", "coordinator_capability", "entity", "initiative_ref", "parent_ref", "title", "goal",
+            "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof", "entity", "initiative_ref", "parent_ref", "title", "goal",
             "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone",
             "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref",
             "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content",
@@ -10372,7 +10969,7 @@ ORCHESTRATE_TOOL_SCHEMA = {
     "properties": {
         "operation": {"type": "string", "enum": sorted(ORCHESTRATE_OPERATIONS)},
         "submission_id": {"type": "string", "description": "Required for every mutating operation; identical retries are replayed exactly."},
-        "project_root": {"type": "string", "minLength": 1, "description": "Absolute project workspace. Cortex state remains below project_root/.codex/cortex."},
+        "project_root": {"type": "string", "minLength": 1, "description": "Absolute project workspace. Cortex derives its opaque host-private control state from this path; callers cannot select a ledger directory."},
         "principal": {"type": "string", "minLength": 1},
         "thread_id": {"type": "string"},
         "task_id": {"type": "string"},
@@ -10486,17 +11083,33 @@ PUBLIC_TOOLS = build_public_tools(
 
 def main() -> None:
     """Keep the executable facade thin; transport lives in cortex_runtime.mcp_api."""
+    audience = DEFAULT_MCP_AUDIENCE
+    arguments = sys.argv[1:]
+    if len(arguments) == 1 and arguments[0].startswith("--mcp-audience="):
+        audience = arguments[0].split("=", 1)[1].strip().lower()
+    elif arguments:
+        raise SystemExit("usage: cortex.py [--mcp-audience=coordinator|worker]")
+    # The launch environment is host-controlled, unlike JSON-RPC request
+    # data.  It supports hosts that cannot add command arguments, but an
+    # invalid value must not silently widen the default worker surface.
+    if not arguments:
+        configured_audience = str(os.environ.get("CORTEX_MCP_AUDIENCE") or "").strip().lower()
+        if configured_audience:
+            audience = configured_audience
+    if audience not in MCP_AUDIENCES:
+        raise SystemExit("CORTEX MCP audience must be coordinator or worker")
     # Load the complete runtime package before accepting requests. Installed
     # cache directories may be renamed during plugin replacement while this
     # already-running process still serves a host session.
     import cortex_runtime.orchestration_engine  # noqa: F401
 
     serve_stdio(
-        public_tools=PUBLIC_TOOLS,
+        public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),
         internal_handlers=TOOLS,
         server_version=SERVER_VERSION,
         instructions=MCP_SERVER_INSTRUCTIONS,
         log_tool_error=log_tool_error,
+        audience=audience,
     )
 
 

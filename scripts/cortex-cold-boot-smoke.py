@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,8 +26,10 @@ def git(project: Path, *args: str) -> None:
 
 def fixture(base: Path) -> tuple[Path, Path]:
     project = base / "project"
-    ledger = project / ".codex" / "cortex"
+    host_state_dir = base / "host-private-store"
     project.mkdir()
+    host_state_dir.mkdir(mode=0o700)
+    host_state_dir.chmod(0o700)
     git(project, "init", "-q")
     git(project, "config", "user.email", "codex@example.invalid")
     git(project, "config", "user.name", "Codex Smoke")
@@ -34,7 +38,26 @@ def fixture(base: Path) -> tuple[Path, Path]:
     (project / "old.txt").write_text("rename me\n", encoding="utf-8")
     git(project, "add", ".")
     git(project, "commit", "-qm", "fixture baseline")
-    return project, ledger
+    return project, host_state_dir
+
+
+@contextlib.contextmanager
+def host_private_control_store(host_state_dir: Path):
+    """Run the deterministic smoke against a private, non-workspace ledger."""
+    previous = {
+        "CORTEX_HOST_STATE_DIR": os.environ.get("CORTEX_HOST_STATE_DIR"),
+        "CORTEX_ROOT": os.environ.get("CORTEX_ROOT"),
+    }
+    os.environ["CORTEX_HOST_STATE_DIR"] = str(host_state_dir)
+    os.environ.pop("CORTEX_ROOT", None)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def waves() -> list[dict[str, object]]:
@@ -182,7 +205,13 @@ def planning(worker: int, step: int) -> dict[str, object]:
 
 
 def run(base: Path, server: Path = SERVER) -> dict[str, object]:
-    project, ledger = fixture(base)
+    project, host_state_dir = fixture(base)
+    with host_private_control_store(host_state_dir):
+        return _run(base, project, host_state_dir, server)
+
+
+def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[str, object]:
+    ledger = cortex.ledger_root_path({"project_root": str(project)})
     start_request = {
         "task": {
             "user_request": "prove a fresh JSON-RPC process can complete public Cortex orchestration by relative waves",
@@ -194,11 +223,16 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         },
         "waves": waves(),
     }
-    with JsonRpcHarness(server, project, ledger) as rpc:
+    with JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc:
         listed = rpc.request("tools/list", {})["tools"]
         names = [item["name"] for item in listed]
-        lifecycle_names = [name for name in names if name != "manage_governance"]
-        if lifecycle_names != ["start_orchestration", "continue_orchestration", "manage_orchestration", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"]:
+        if names != [
+            "start_orchestration",
+            "continue_orchestration",
+            "manage_orchestration",
+            "manage_governance",
+            "read_worker_report",
+        ]:
             raise AssertionError(f"unexpected Cortex public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
         replay = rpc.tool("start_orchestration", start_request)
@@ -215,7 +249,10 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
         task_directory = next((ledger / "tasks").iterdir()).name
 
     # A fresh process must reconstruct the active relative step read-only.
-    with JsonRpcHarness(server, project, ledger) as rpc:
+    with (
+        JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc,
+        JsonRpcHarness(server, project, host_state_dir, audience="worker") as worker_rpc,
+    ):
         task_definition = cortex.load_task_definition(ledger / "tasks" / task_directory)
         current = rpc.tool("manage_orchestration", {"intent": "inspect", "task_ref": task_ref})
         continue_calls = 0
@@ -282,7 +319,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                         "attempt_id": attempt["attempt_id"],
                         "profile": dispatch["profile"],
                     }
-                    asked = rpc.tool("worker_question", {
+                    asked = worker_rpc.tool("worker_question", {
                         **identity,
                         "action": "ask",
                         "header": "Cold-boot rollout decision",
@@ -344,7 +381,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                             },
                         },
                     })
-                    polled = rpc.tool("worker_question", {
+                    polled = worker_rpc.tool("worker_question", {
                         **identity,
                         "action": "poll",
                         "question_ref": question_ref,
@@ -389,7 +426,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                     publication["gate_result"] = passing_gate_result(project, str(attempt["gate"]))
                 if dispatch.get("phase") == "plan":
                     publication["planning"] = planning(index, int(current["step"]))
-                template = rpc.tool("get_report_template", {
+                template = worker_rpc.tool("get_report_template", {
                     "task_id": state["task_id"],
                     "attempt_id": attempt["attempt_id"],
                     "profile": dispatch["profile"],
@@ -399,7 +436,7 @@ def run(base: Path, server: Path = SERVER) -> dict[str, object]:
                 draft_path = Path(str(template["draft_path"]))
                 if not draft_path.is_file():
                     raise AssertionError(f"get_report_template did not create its draft file: {template}")
-                published = rpc.tool("record_report", {
+                published = worker_rpc.tool("record_report", {
                     **publication,
                     "draft_ref": template["draft_ref"],
                 })

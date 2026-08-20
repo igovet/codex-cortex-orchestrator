@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
@@ -13,12 +15,13 @@ import cortex as control  # noqa: E402
 from cortex_runtime import delegation_service, ledger_db  # noqa: E402
 
 
-class RequiredBriefingProjectionTests(unittest.TestCase):
+class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
+        self.set_up_host_private_control_store()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
-        self.root = self.project / ".codex" / "cortex"
+        self.root = control.ledger_root_path({"project_root": str(self.project)})
         control.activate_orchestration({
             "user_command": "/cortex",
             "principal": "projection-test",
@@ -42,6 +45,7 @@ class RequiredBriefingProjectionTests(unittest.TestCase):
         self.state = initialized["state"]
 
     def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
     def _params(self) -> dict[str, object]:

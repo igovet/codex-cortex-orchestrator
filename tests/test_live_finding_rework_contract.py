@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import importlib.util
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
+
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
 
 ROOT = Path(__file__).parents[1]
@@ -19,7 +23,13 @@ EVALUATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EVALUATOR)
 
 
-class LiveFindingReworkContractTests(unittest.TestCase):
+class LiveFindingReworkContractTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.set_up_host_private_control_store()
+
+    def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
+
     def test_trace_checks_require_exact_directional_handoff(self) -> None:
         fingerprint = EVALUATOR.FINDING_REWORK_FINGERPRINT
         opening_ref = "report-0001"
@@ -88,6 +98,134 @@ class LiveFindingReworkContractTests(unittest.TestCase):
         self.assertNotIn("Call start_orchestration exactly once", prompt)
         self.assertEqual(EVALUATOR.FINDING_REWORK_LIVE_TIMEOUT_SECONDS, 300)
 
+    def test_full_live_prompt_uses_a_real_c2_opening_and_close(self) -> None:
+        prompt = EVALUATOR.live_prompt(
+            "finding_rework_documentation_full", Path("/tmp/cortex-finding-full"),
+        )
+        self.assertIn('"complexity":"C2"', prompt)
+        self.assertIn("Your FIRST action MUST be one Cortex MCP tool call: start_orchestration", prompt)
+        self.assertIn("project_root=/tmp/cortex-finding-full; task=<cortex_task_contract>; waves=<cortex_initial_waves>", prompt)
+        self.assertIn("Only after start_orchestration returns ready_to_spawn", prompt)
+        self.assertIn("Call start_orchestration exactly once", prompt)
+        self.assertIn("Open exactly one P2 finding", prompt)
+        self.assertIn("decision=rework (never fail or blocked)", prompt)
+        self.assertIn("spawn_agent -> wait -> read_worker_report -> close_agent", prompt)
+        self.assertIn("trusted host binding is intentionally unavailable", prompt)
+        self.assertNotIn("confirm_host_spawn", prompt)
+        self.assertIn("required_missing=[]", prompt)
+        self.assertIn("workspace has exactly modified/untracked/staged/committed", prompt)
+        self.assertIn("Close must publish canonical gate_result decision=pass with findings=[]", prompt)
+        self.assertIn("outcome=completed", prompt)
+        self.assertNotIn("already-created", prompt)
+        self.assertEqual(EVALUATOR.FINDING_REWORK_FULL_LIVE_TIMEOUT_SECONDS, 1800)
+
+    def test_full_live_timeout_is_hard_and_does_not_widen_narrow_smoke(self) -> None:
+        rejected = subprocess.run(
+            [
+                sys.executable, "-B", str(EVALUATOR_PATH), "--live",
+                "--scenario", "finding_rework_documentation_full",
+                "--live-timeout-seconds", "1801",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("hard 1800-second limit", rejected.stderr)
+        self.assertIn("finding_rework_documentation_full", EVALUATOR.FINDING_REWORK_LIVE_SCENARIOS)
+        self.assertIn("finding_rework_documentation", EVALUATOR.FINDING_REWORK_LIVE_SCENARIOS)
+
+    def test_full_gate_result_contract_rejects_extra_open_or_missing_check(self) -> None:
+        fingerprint = EVALUATOR.FINDING_REWORK_FINGERPRINT
+        opening = {
+            "gate": "review",
+            "gate_result": {
+                "decision": "rework", "failure_class": "product",
+                "findings": [{
+                    "fingerprint": fingerprint, "severity": "P2", "status": "open",
+                    "blocking": True,
+                }],
+                "verification": {
+                    "executed": [], "not_executed": [], "required_missing": [], "limitations": [],
+                },
+                "workspace": {
+                    "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+                },
+            },
+        }
+        fresh_review = {
+            "gate": "review",
+            "gate_result": {
+                "decision": "pass", "failure_class": "product",
+                "findings": [{
+                    "fingerprint": fingerprint, "severity": "P2", "status": "resolved",
+                    "blocking": False,
+                }],
+                "verification": {
+                    "executed": [], "not_executed": [], "required_missing": [], "limitations": [],
+                },
+                "workspace": {
+                    "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+                },
+            },
+        }
+        close = {
+            "gate": "close",
+            "gate_result": {
+                "decision": "pass", "failure_class": "product", "findings": [],
+                "verification": {
+                    "executed": [], "not_executed": [], "required_missing": [], "limitations": [],
+                },
+                "workspace": {
+                    "modified": [], "untracked": [], "staged": [], "committed": "not_required",
+                },
+            },
+        }
+        records = [opening, fresh_review, close]
+        self.assertTrue(EVALUATOR.full_finding_rework_gate_results_valid(records))
+
+        extra_finding = copy.deepcopy(records)
+        extra_finding[0]["gate_result"]["findings"].append({
+            "fingerprint": "verification-required-missing", "severity": "P1",
+            "status": "open", "blocking": True,
+        })
+        self.assertFalse(EVALUATOR.full_finding_rework_gate_results_valid(extra_finding))
+
+        missing_check = copy.deepcopy(records)
+        missing_check[0]["gate_result"]["verification"]["required_missing"] = ["fixture check"]
+        self.assertFalse(EVALUATOR.full_finding_rework_gate_results_valid(missing_check))
+
+    def test_source_mode_native_lifecycle_requires_ordered_recorded_cycles(self) -> None:
+        one_cycle = [
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "report_recorded"},
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+        ]
+        duplicated = [item.copy() for item in one_cycle for _ in range(2)]
+        self.assertTrue(EVALUATOR.observed_native_lifecycle(duplicated * 4))
+
+        wrong = [item.copy() for item in duplicated * 4]
+        wrong[2]["outcome"] = "question_recorded"
+        self.assertFalse(EVALUATOR.observed_native_lifecycle(wrong))
+
+    def test_live_eval_returns_fail_without_task_state(self) -> None:
+        streamed = {
+            "events": [], "returncode": 0, "elapsed_seconds": 1,
+            "termination": None, "dropped_stream_events": 0,
+        }
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(EVALUATOR.shutil, "which", return_value="/usr/bin/codex"), \
+             mock.patch.object(EVALUATOR, "isolated_codex_runtime", return_value=contextlib.nullcontext({})), \
+             mock.patch.object(EVALUATOR, "run_live_command", return_value=streamed):
+            result = EVALUATOR.live_eval(
+                Path(directory), ("finding_rework_documentation_full",), timeout_seconds=10,
+            )
+
+        self.assertEqual(result[0]["status"], "FAIL")
+        self.assertFalse(result[0]["checks"]["task_state_available"])
+        self.assertEqual(result[0]["state_diagnostics"]["status"], "unavailable")
+
     def test_source_prelude_prepares_corrective_documentation_without_a_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
@@ -96,7 +234,7 @@ class LiveFindingReworkContractTests(unittest.TestCase):
 
             seeded = EVALUATOR.seed_finding_rework_documentation(project)
 
-            task_dirs = list((project / ".codex" / "cortex" / "tasks").glob("*"))
+            task_dirs = EVALUATOR.canonical_task_directories(project)
             self.assertEqual(len(task_dirs), 1)
             state = EVALUATOR.cortex.load_task_state_for_artifact(task_dirs[0])
             documentation = next(

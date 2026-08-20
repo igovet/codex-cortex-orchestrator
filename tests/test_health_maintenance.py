@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
@@ -97,15 +99,27 @@ class HealthMaintenanceTests(unittest.TestCase):
             self.assertFalse(root.exists())
 
     def test_public_maintenance_intent_routes_to_health_without_task_selection(self) -> None:
-        directory, root = self.make_root()
-        self.addCleanup(directory.cleanup)
-        result = cortex.manage_orchestration({
-            "project_root": str(root.parents[1]),
-            "intent": "maintenance",
-            "payload": {"action": "health"},
-        })
-        self.assertEqual(result["operation"], "health")
-        self.assertTrue(result["quick_check"]["ok"])
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            project = base / "project"
+            project.mkdir()
+            host_store = base / "host-private-store"
+            host_store.mkdir(mode=0o700)
+            host_store.chmod(0o700)
+            with mock.patch.dict(
+                os.environ,
+                {cortex.HOST_CONTROL_STORE_ENV: str(host_store), "CORTEX_ROOT": ""},
+                clear=False,
+            ):
+                root = cortex.ledger_root({"project_root": str(project)})
+                result = cortex.manage_orchestration({
+                    "project_root": str(project),
+                    "intent": "maintenance",
+                    "payload": {"action": "health"},
+                })
+                self.assertEqual(result["operation"], "health")
+                self.assertTrue(result["quick_check"]["ok"])
+                self.assertTrue((root / "cortex.db").is_file())
 
 
 if __name__ == "__main__":

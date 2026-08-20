@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 SCRIPTS = Path(__file__).parents[1] / "plugins" / "cortex" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -15,13 +17,15 @@ import cortex as control
 from cortex_runtime import questions
 
 
-class QuestionRevisionTests(unittest.TestCase):
+class QuestionRevisionTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
+        self.set_up_host_private_control_store()
         self.project = Path(self.temp.name) / "project"
         self.project.mkdir()
 
     def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
     def _start(self) -> tuple[dict, dict, dict]:
@@ -35,7 +39,8 @@ class QuestionRevisionTests(unittest.TestCase):
             },
             "waves": [{"workers": [{"phase": "discover"}]}],
         })
-        task_dir = next((self.project / ".codex" / "cortex" / "tasks").iterdir())
+        ledger = control.ledger_root_path({"project_root": str(self.project)})
+        task_dir = next((ledger / "tasks").iterdir())
         state = control.load_task_state_for_artifact(task_dir)
         return started, state, state["attempts"][0]
 

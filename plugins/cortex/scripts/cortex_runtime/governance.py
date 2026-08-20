@@ -1,4 +1,4 @@
-"""Server-owned governance primitives for the v10 Cortex ledger.
+"""Server-owned governance primitives for the v11 Cortex ledger.
 
 The orchestration engine remains responsible for sequencing workers.  This
 module owns the durable governance contract that sits beside that pipeline:
@@ -427,6 +427,106 @@ def _validated_artifact_payload(connection: sqlite3.Connection, metadata: dict[s
         raise GovernanceError("governance evidence artifact must contain canonical JSON", code="artifact_schema_invalid") from exc
 
 
+def _validate_record_lifecycle(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Fail closed unless the indexed lifecycle projection has an exact chain.
+
+    The record row is intentionally convenient for snapshot indexes, but it
+    is not the authority for its mutable status or approval basis.  Every
+    value must be reproduced by the append-only lifecycle history and every
+    event binds to its predecessor.  This detects raw SQL changes even when a
+    writer bypassed the database transition trigger.
+    """
+    try:
+        record_ref = str(row["record_ref"])
+        sequence = int(row["lifecycle_sequence"])
+        binding = str(row["lifecycle_binding"] or "")
+        if sequence < 0 or not re.fullmatch(r"[0-9a-f]{64}", binding):
+            raise ValueError("record lifecycle projection is malformed")
+        events = connection.execute(
+            "SELECT lifecycle_sequence,previous_binding,status,approval_basis_json,binding "
+            "FROM governance_record_lifecycle WHERE record_ref=? ORDER BY lifecycle_sequence",
+            (record_ref,),
+        ).fetchall()
+        if len(events) != sequence + 1:
+            raise ValueError("record lifecycle event count is inconsistent")
+        previous: str | None = None
+        for expected_sequence, event in enumerate(events):
+            event_sequence = int(event["lifecycle_sequence"])
+            event_previous = str(event["previous_binding"] or "") or None
+            event_status = str(event["status"])
+            event_basis = str(event["approval_basis_json"]) if event["approval_basis_json"] is not None else None
+            event_binding = str(event["binding"] or "")
+            expected_binding = ledger_db.governance_lifecycle_binding(
+                record_ref=record_ref,
+                sequence=expected_sequence,
+                previous_binding=previous,
+                status=event_status,
+                approval_basis_json=event_basis,
+            )
+            if (
+                event_sequence != expected_sequence
+                or event_previous != previous
+                or event_binding != expected_binding
+            ):
+                raise ValueError("record lifecycle event binding is inconsistent")
+            previous = event_binding
+        latest = events[-1]
+        row_basis = str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None
+        latest_basis = str(latest["approval_basis_json"]) if latest["approval_basis_json"] is not None else None
+        if (
+            previous != binding
+            or str(latest["status"]) != str(row["status"])
+            or latest_basis != row_basis
+        ):
+            raise ValueError("record lifecycle projection does not match authority")
+    except (KeyError, TypeError, ValueError, sqlite3.DatabaseError) as exc:
+        raise GovernanceError("governance record lifecycle authority is invalid", code="ledger_corrupt") from exc
+
+
+def _append_record_lifecycle_transition(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    status: str,
+    approval_basis_json: str | None,
+    actor_role: str,
+) -> sqlite3.Row:
+    """Append and apply one authorized governance status/basis transition."""
+    _validate_record_lifecycle(connection, row)
+    record_ref = str(row["record_ref"])
+    current_status = str(row["status"])
+    current_basis = str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None
+    target_status = str(status)
+    if target_status not in RECORD_STATUSES:
+        raise GovernanceError("record status is invalid", code="invalid_record_status")
+    if current_status == target_status and current_basis == approval_basis_json:
+        return row
+    sequence = int(row["lifecycle_sequence"]) + 1
+    previous_binding = str(row["lifecycle_binding"])
+    binding = ledger_db.governance_lifecycle_binding(
+        record_ref=record_ref,
+        sequence=sequence,
+        previous_binding=previous_binding,
+        status=target_status,
+        approval_basis_json=approval_basis_json,
+    )
+    lifecycle_ref = "lifecycle-" + hashlib.sha256(
+        f"{record_ref}:{sequence}:{binding}".encode("utf-8")
+    ).hexdigest()[:32]
+    connection.execute(
+        "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (lifecycle_ref, record_ref, sequence, previous_binding, target_status, approval_basis_json, binding, "transition", actor_role, _now()),
+    )
+    connection.execute(
+        "UPDATE governance_records SET status=?,approval_basis_json=?,lifecycle_sequence=?,lifecycle_binding=? WHERE record_ref=?",
+        (target_status, approval_basis_json, sequence, binding, record_ref),
+    )
+    updated = connection.execute("SELECT * FROM governance_records WHERE record_ref=?", (record_ref,)).fetchone()
+    if updated is None:
+        raise GovernanceError("governance record disappeared during lifecycle transition", code="ledger_corrupt")
+    return updated
+
+
 def _record_from_storage(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     """Read a record from its immutable artifact and verify the cache.
 
@@ -434,6 +534,7 @@ def _record_from_storage(connection: sqlite3.Connection, row: sqlite3.Row) -> di
     compatibility.  It is never authoritative after v10: any disagreement
     between that cache and the immutable artifact is ledger corruption.
     """
+    _validate_record_lifecycle(connection, row)
     record = _record_row(row)
     artifact_ref = str(row["content_artifact_ref"] or "").strip()
     if not artifact_ref:
@@ -753,10 +854,11 @@ def link_task(
     if relation not in LINK_RELATIONSHIPS:
         raise GovernanceError("initiative task relationship must be milestone, deliverable, or corrective", code="invalid_link")
     with _connection(root, write=True) as connection:
-        initiative = connection.execute("SELECT revision FROM initiatives WHERE initiative_ref = ?", (ref,)).fetchone()
+        initiative = connection.execute("SELECT revision,status FROM initiatives WHERE initiative_ref = ?", (ref,)).fetchone()
         if initiative is None:
             raise GovernanceError("initiative does not exist", code="initiative_not_found")
-        if connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task,)).fetchone() is None:
+        task_row = connection.execute("SELECT status FROM tasks WHERE task_id = ?", (task,)).fetchone()
+        if task_row is None:
             raise GovernanceError("task does not exist", code="task_not_found")
         current_revision = int(initiative["revision"])
         existing = connection.execute(
@@ -767,6 +869,15 @@ def link_task(
             if str(existing["milestone"] or "") == str(milestone or "") and str(existing["deliverable"] or "") == str(deliverable or "") and bool(existing["corrective"]) == bool(corrective):
                 return dict(existing)
             raise GovernanceError("initiative task link replay conflicts with existing link", code="link_replay_conflict")
+        if (
+            str(initiative["status"]) in {"completed", "closed"}
+            and relation in {"milestone", "deliverable"}
+            and str(task_row["status"]) != "completed"
+        ):
+            raise GovernanceError(
+                "terminal initiative requires linked milestone/deliverable task terminal success",
+                code="linked_task_unresolved",
+            )
         if expected_revision is not None and int(expected_revision) != current_revision:
             raise GovernanceError("initiative revision is stale", code="stale_revision")
         now = _now()
@@ -873,6 +984,28 @@ def _unresolved_completion_dependencies(connection: sqlite3.Connection, initiati
         if target is None or str(target["status"]) not in {"completed", "closed"}:
             unresolved.append(str(dependency["dependency_ref"]))
     return unresolved
+
+
+def _unresolved_linked_task_completions(connection: sqlite3.Connection, initiative_ref: str) -> list[str]:
+    """Return milestone/deliverable tasks that have not durably succeeded.
+
+    A task's ``completed`` ledger status is the lifecycle's terminal success
+    state.  `blocked`, `cancelled`, and an absent task row must never be
+    interpreted as delivery merely because an initiative has its own status
+    transition or independent governance-close evidence.
+    """
+    rows = connection.execute(
+        "SELECT links.task_id,links.relationship,tasks.status FROM initiative_task_links AS links "
+        "LEFT JOIN tasks ON tasks.task_id=links.task_id "
+        "WHERE links.initiative_ref=? AND links.relationship IN ('milestone','deliverable') "
+        "ORDER BY links.task_id,links.relationship",
+        (initiative_ref,),
+    ).fetchall()
+    return [
+        f"{row['relationship']}:{row['task_id']}"
+        for row in rows
+        if row["status"] is None or str(row["status"]) != "completed"
+    ]
 
 
 _CLOSE_EVIDENCE_KEYS = (
@@ -1148,6 +1281,13 @@ def transition_initiative(
                     "initiative has unresolved blocks/requires dependencies: " + ", ".join(unresolved),
                     code="dependency_unresolved",
                 )
+            incomplete_tasks = _unresolved_linked_task_completions(connection, ref)
+            if incomplete_tasks:
+                raise GovernanceError(
+                    "initiative completion requires terminal success for linked milestone/deliverable tasks: "
+                    + ", ".join(incomplete_tasks),
+                    code="linked_task_unresolved",
+                )
         if target == "closed":
             _validate_close_evidence(connection, row, evidence_value)
         now = _now()
@@ -1355,14 +1495,19 @@ def create_record(
                 while current_ref and current_ref not in visited:
                     visited.add(current_ref)
                     current = connection.execute(
-                        "SELECT supersedes FROM governance_records WHERE record_ref=?",
+                        "SELECT * FROM governance_records WHERE record_ref=?",
                         (current_ref,),
                     ).fetchone()
-                    connection.execute(
-                        "UPDATE governance_records SET status='superseded' "
-                        "WHERE record_ref=? AND status NOT IN ('superseded','expired','rejected')",
-                        (current_ref,),
-                    )
+                    if current is None:
+                        raise GovernanceError("governance revision chain is missing a predecessor", code="ledger_corrupt")
+                    if str(current["status"]) not in {"superseded", "expired", "rejected"}:
+                        _append_record_lifecycle_transition(
+                            connection,
+                            current,
+                            status="superseded",
+                            approval_basis_json=(str(current["approval_basis_json"]) if current["approval_basis_json"] is not None else None),
+                            actor_role="system",
+                        )
                     current_ref = str(current["supersedes"] or "").strip() if current is not None else None
         else:
             supersedes_ref = None
@@ -1377,9 +1522,23 @@ def create_record(
             initiative_ref=initiative,
             task_id=task,
         )
+        lifecycle_binding = ledger_db.governance_lifecycle_binding(
+            record_ref=ref,
+            sequence=0,
+            previous_binding=None,
+            status=status_value,
+            approval_basis_json=approval_json,
+        )
+        lifecycle_ref = "lifecycle-" + hashlib.sha256(
+            f"{ref}:0:{lifecycle_binding}".encode("utf-8")
+        ).hexdigest()[:32]
         connection.execute(
-            "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at,scope_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, str(created_by or "coordinator"), created, record_expires_at, scope),
+            "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at,scope_key,lifecycle_sequence,lifecycle_binding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, str(created_by or "coordinator"), created, record_expires_at, scope, 0, lifecycle_binding),
+        )
+        connection.execute(
+            "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (lifecycle_ref, ref, 0, None, status_value, approval_json, lifecycle_binding, "created", role, created),
         )
         if submission:
             connection.execute(
@@ -1391,7 +1550,24 @@ def create_record(
     return result
 
 
-def revise_record(root: Path, *, record_ref: str, content: Any, created_by: str = "coordinator", status: str | None = None, approval_basis: Any = None, actor_role: str | None = None) -> dict[str, Any]:
+def revise_record(
+    root: Path,
+    *,
+    record_ref: str,
+    content: Any,
+    created_by: str = "coordinator",
+    status: str | None = None,
+    approval_basis: Any = None,
+    actor_role: str | None = None,
+    submission_id: str | None = None,
+) -> dict[str, Any]:
+    """Append a revision, with durable replay handling for a lost response.
+
+    The original revision remains the named predecessor on a retry.  Passing
+    the same submission id therefore reaches ``create_record``'s durable
+    receipt before the one-successor check and returns the already-committed
+    successor instead of treating a network retry as a sibling revision.
+    """
     ledger_db.ensure_database(root)
     ref = _safe_ref(record_ref, "record_ref", prefix="record-")
     with _connection(root) as connection:
@@ -1409,6 +1585,7 @@ def revise_record(root: Path, *, record_ref: str, content: Any, created_by: str 
         supersedes=ref,
         approval_basis=approval_basis,
         actor_role=actor_role,
+        submission_id=submission_id,
     )
 
 
@@ -1900,8 +2077,13 @@ def approve_promotion(root: Path, *, proposal_ref: str, actor_role: str, approva
             if proposal.get("status") != "pending":
                 raise GovernanceError("promotion proposal is no longer pending", code="proposal_not_pending")
             policy = create_record(root, record_type="policy", content={"promoted_from": proposal_id, "finding": body}, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), created_by=created_by, status="approved", approval_basis=approval_basis or {"proposal_ref": proposal_id, "actor_role": "coordinator"}, record_ref=policy_ref, actor_role="coordinator")
-            connection.execute("UPDATE governance_records SET status='approved', approval_basis_json=? WHERE record_ref=?", (_canonical(approval_basis or {"policy_ref": policy["record_ref"], "actor_role": "coordinator"}), proposal_id))
-            updated = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (proposal_id,)).fetchone()
+            updated = _append_record_lifecycle_transition(
+                connection,
+                row,
+                status="approved",
+                approval_basis_json=_canonical(approval_basis or {"policy_ref": policy["record_ref"], "actor_role": "coordinator"}),
+                actor_role="coordinator",
+            )
             updated_proposal = _record_from_storage(connection, updated) if updated else proposal
             snapshot = active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))
     return {"proposal": updated_proposal, "policy": policy, "policy_snapshot": snapshot}
@@ -1956,7 +2138,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
     if action in {"create_record", "record_create"} or (action == "create" and payload.get("entity") in {"record", "governance_record"}):
         return {"record": create_record(root, record_type=payload.get("record_type", ""), content=payload.get("content"), initiative_ref=payload.get("initiative_ref"), task_id=payload.get("task_id"), created_by=payload.get("created_by", actor_role), status=payload.get("status"), supersedes=payload.get("supersedes"), expires_at=payload.get("expires_at"), approval_basis=payload.get("approval_basis"), content_artifact_ref=payload.get("content_artifact_ref"), record_ref=payload.get("record_ref"), actor_role=role, submission_id=payload.get("submission_id"))}
     if action in {"revise_record", "record_revise", "revise"}:
-        return {"record": revise_record(root, record_ref=payload.get("record_ref", ""), content=payload.get("content"), created_by=payload.get("created_by", role), status=payload.get("status"), approval_basis=payload.get("approval_basis"), actor_role=role)}
+        return {"record": revise_record(root, record_ref=payload.get("record_ref", ""), content=payload.get("content"), created_by=payload.get("created_by", role), status=payload.get("status"), approval_basis=payload.get("approval_basis"), actor_role=role, submission_id=payload.get("submission_id"))}
     if action in {"inspect_record", "record_inspect", "history", "list_records", "snapshot", "snapshot_inspect"}:
         if action in {"snapshot", "snapshot_inspect"}:
             return {
@@ -1995,9 +2177,16 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
     if action in {"reject_promotion", "promotion_reject", "reject"}:
         proposal_ref = _safe_ref(payload.get("proposal_ref") or payload.get("record_ref"), "proposal_ref", prefix="record-")
         with _connection(root, write=True) as connection:
-            cursor = connection.execute("UPDATE governance_records SET status='rejected' WHERE record_ref=? AND record_type='promotion' AND status='pending'", (proposal_ref,))
-        if not cursor.rowcount:
-            raise GovernanceError("promotion proposal is not pending", code="proposal_not_pending")
+            proposal = connection.execute("SELECT * FROM governance_records WHERE record_ref=? AND record_type='promotion'", (proposal_ref,)).fetchone()
+            if proposal is None or str(proposal["status"]) != "pending":
+                raise GovernanceError("promotion proposal is not pending", code="proposal_not_pending")
+            _append_record_lifecycle_transition(
+                connection,
+                proposal,
+                status="rejected",
+                approval_basis_json=(str(proposal["approval_basis_json"]) if proposal["approval_basis_json"] is not None else None),
+                actor_role=role,
+            )
         return {"proposal_ref": proposal_ref, "status": "rejected"}
     raise GovernanceError("governance action is not recognized", code="unknown_action")
 

@@ -27,7 +27,12 @@ class ControlPlaneTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.project = self.base / "project"
         self.project.mkdir()
-        self.ledger = self.project / ".codex" / "cortex"
+        self.host_store = self.base / "host-private-store"
+        self.host_store.mkdir(mode=0o700)
+        self.host_store.chmod(0o700)
+        self._previous_host_store = os.environ.get(control.HOST_CONTROL_STORE_ENV)
+        os.environ[control.HOST_CONTROL_STORE_ENV] = str(self.host_store)
+        self.ledger = control.ledger_root_path({"project_root": str(self.project)})
         self._handlers = {}
         def with_project(name, original, params):
             prepared = {**params, "project_root": str(self.project)}
@@ -71,6 +76,10 @@ class ControlPlaneTests(unittest.TestCase):
     def tearDown(self):
         for name, handler in self._handlers.items():
             setattr(control, name, handler)
+        if self._previous_host_store is None:
+            os.environ.pop(control.HOST_CONTROL_STORE_ENV, None)
+        else:
+            os.environ[control.HOST_CONTROL_STORE_ENV] = self._previous_host_store
         self.temp.cleanup()
 
     def activate(self, principal="thread-a"):
@@ -1200,7 +1209,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("cortex:orchestrator", result["next_action"])
         self.assertNotIn("/cortex", result["next_action"])
 
-    def test_default_ledger_is_project_local(self):
+    def test_default_ledger_is_host_private_and_project_bound(self):
         with self.assertRaisesRegex(ValueError, "project_root is required"):
             control.ledger_root()
         root = control.ledger_root({"project_root": str(self.project)})
@@ -1236,15 +1245,17 @@ class ControlPlaneTests(unittest.TestCase):
                 arguments = {"project_root": project}
                 activated = self._handlers["activate_orchestration"]({"user_command": "/cortex", "principal": "thread-a", "thread_id": "thread-a", **arguments})
                 self.assertTrue(activated["active"])
-                self.assertEqual(activated["ledger_root"], str(root / ".codex/cortex"))
+                private_ledger = control.ledger_root_path(arguments)
+                self.assertEqual(activated["ledger_root"], str(private_ledger))
                 classified = self._handlers["classify_task"]({"complexity": "C1", "requirements": [], "principal": "thread-a", **arguments})
                 created = self._handlers["init_task"]({"task_id": "plugin-cwd", "objective": "workspace binding", "complexity": "C1", "classification_id": classified["classification_id"], "principal": "thread-a", **arguments})
-                self.assertEqual(created["ledger_root"], str(root / ".codex/cortex"))
-                self.assertTrue((root / ".codex/cortex/cortex.db").is_file())
-                self.assertFalse((root / ".codex/cortex/tasks" / created["task_directory"]).exists())
+                self.assertEqual(created["ledger_root"], str(private_ledger))
+                self.assertTrue((private_ledger / "cortex.db").is_file())
+                self.assertFalse((private_ledger / "tasks" / created["task_directory"]).exists())
+                self.assertFalse((root / ".codex/cortex/cortex.db").exists())
                 observed = self._handlers["status"]({"task_id": "plugin-cwd", "principal": "thread-a", **arguments})
                 self.assertEqual(observed["task"]["project_root"], project)
-                self.assertEqual(observed["ledger_root"], str(root / ".codex/cortex"))
+                self.assertEqual(observed["ledger_root"], str(private_ledger))
         finally:
             os.chdir(previous_cwd)
 
@@ -3283,7 +3294,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(started["dispatches"][0]["sandbox"], "read-only")
         self.assertIn("canonical automatic owner", started["dispatches"][0]["selection_reason"])
         self.assertIn("COORDINATOR LOCK", started["next_action"])
-        self.assertIn("remain idle", started["next_action"])
+        self.assertIn("Until every returned dispatch has been invoked", started["next_action"])
         self.assertIn("All project operations belong to workers", started["next_action"])
         self.assertEqual(started["dispatches"][0]["arguments"].get("model"), None)
         self.assertEqual(started["dispatches"][0]["arguments"]["reasoning_effort"], "medium")
@@ -4549,7 +4560,7 @@ class ControlPlaneTests(unittest.TestCase):
                 }
                 barrier.wait()
                 completed = subprocess.run(
-                    [sys.executable, str(script)],
+                    [sys.executable, str(script), "--mcp-audience=coordinator"],
                     input=json.dumps(request) + "\n",
                     text=True,
                     capture_output=True,
@@ -4665,7 +4676,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertRegex(assignment["user_intent"]["digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(prompt.count(request), 0)
         self.assertNotIn(request, serialized)
-        self.assertIn("only direct-read exception under .codex/cortex", bootstrap)
+        self.assertIn("only direct-read exception is exactly paths supplied", bootstrap)
         self.assertIn("Dispatch briefing reviewed:", bootstrap)
         self.assertRegex(started["dispatches"][0]["dispatch_ref"], r"^dispatch-[0-9a-f]{24}$")
         self.assertRegex(started["dispatches"][0]["briefing_digest"], r"^[0-9a-f]{64}$")
@@ -6101,7 +6112,7 @@ class ControlPlaneTests(unittest.TestCase):
             "results": self.v3_results(started, self.v3_report("nested native cancellation is pending")),
         })
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             def call(payload):
                 proc.stdin.write(json.dumps(payload) + "\n")
@@ -7497,10 +7508,21 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_v3_automatic_qa_rework_is_unbounded_and_escalates_model_effort(self):
         current = self.v3_start("unbounded QA correction", waves=[{"workers": [{"phase": "qa"}]}])
-        for failure_number in range(1, 6):
+        # Repeated equivalent failures correctly trigger the no-progress
+        # circuit breaker.  These intentionally distinct observed failure
+        # classes prove that genuine corrective progress still remains
+        # unbounded and receives the expected escalation.
+        failures = [
+            "worker process stopped before it could run the QA checks",
+            "network timeout prevented the QA dependency download",
+            "missing dependency blocked the QA toolchain",
+            "governance policy validation rejected the QA evidence",
+            "product assertion failure remains in the QA result",
+        ]
+        for failure_number, failure_reason in enumerate(failures, start=1):
             result = {
                 "status": "failed",
-                "reason": f"worker failure {failure_number}",
+                "reason": failure_reason,
                 "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
             }
             current = control.continue_orchestration({
@@ -7534,14 +7556,19 @@ class ControlPlaneTests(unittest.TestCase):
             "user model survives rework escalation",
             waves=[{"workers": [{"phase": "qa", "user_requested_model": "luna"}]}],
         )
-        for failure_number in range(1, 4):
+        failures = [
+            "worker process stopped before it could run the QA checks",
+            "network timeout prevented the QA dependency download",
+            "missing dependency blocked the QA toolchain",
+        ]
+        for failure_number, failure_reason in enumerate(failures, start=1):
             current = control.continue_orchestration({
                 "project_root": str(self.project),
                 "task_ref": current["task_ref"],
                 "step": current["step"],
                 "results": [{
                     "status": "failed",
-                    "reason": f"user-model worker failure {failure_number}",
+                    "reason": failure_reason,
                     "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
                 }],
             })
@@ -8564,7 +8591,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_mcp_process_completes_facade_question_after_host_response(self):
         started = self.v3_start("nested question", waves=[{"workers": [{"phase": "discover"}]}])
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             def call(payload):
                 proc.stdin.write(json.dumps(payload) + "\n")
@@ -8607,7 +8634,7 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(held["outcome"], "awaiting_plan_approval")
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc = subprocess.Popen([sys.executable, str(script), "--mcp-audience=coordinator"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
             def call(payload):
                 proc.stdin.write(json.dumps(payload) + "\n")
@@ -9215,33 +9242,37 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_mcp_smoke_exposes_v3_lifecycle_and_scoped_report_tools(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
-        proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        proc = subprocess.run([sys.executable, str(script), "--mcp-audience=coordinator"], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
         tools = json.loads(proc.stdout)["result"]["tools"]
         names = {item["name"] for item in tools}
-        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"})
+        self.assertEqual(names, {"start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "read_worker_report"})
         self.assertNotIn("orchestrate", names)
-        self.assertEqual(len(tools), 9)
+        self.assertEqual(len(tools), 5)
         self.assertTrue(all("project_root" in item["inputSchema"]["properties"] for item in tools))
         by_name = {item["name"]: item for item in tools}
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["required"], ["project_root", "task"])
         self.assertEqual(by_name["start_orchestration"]["inputSchema"]["properties"]["task"]["required"], ["user_request"])
         self.assertEqual(by_name["continue_orchestration"]["inputSchema"]["required"], ["project_root", "step", "results"])
-        self.assertEqual(by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
-        self.assertEqual(by_name["get_report_template"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile"])
-        self.assertEqual(
-            by_name["record_report"]["inputSchema"]["required"],
-            ["project_root", "task_id", "attempt_id", "profile"],
-        )
-        self.assertEqual(
-            by_name["record_report"]["inputSchema"]["anyOf"],
-            [{"required": ["draft_ref"]}, {"required": ["report"]}],
-        )
-        self.assertIn("draft_ref", by_name["record_report"]["inputSchema"]["properties"])
-        self.assertIn("patch", by_name["record_report"]["inputSchema"]["properties"])
-        self.assertNotIn("validation_digest", by_name["record_report"]["inputSchema"]["properties"])
         forbidden = {"operation", "submission_id", "task_id", "wave_id", "attempt_id", "host_tool", "host_model", "host_reasoning_effort"}
         for name in ("start_orchestration", "continue_orchestration"):
             self.assertFalse(forbidden & set(by_name[name]["inputSchema"]["properties"]))
+
+        worker_proc = subprocess.run([sys.executable, str(script)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n', text=True, capture_output=True, check=True)
+        worker_by_name = {item["name"]: item for item in json.loads(worker_proc.stdout)["result"]["tools"]}
+        self.assertEqual(set(worker_by_name), {"worker_question", "get_report_template", "record_report", "read_dispatch_briefing", "read_worker_report"})
+        self.assertEqual(worker_by_name["worker_question"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile", "action"])
+        self.assertEqual(worker_by_name["get_report_template"]["inputSchema"]["required"], ["project_root", "task_id", "attempt_id", "profile"])
+        self.assertEqual(
+            worker_by_name["record_report"]["inputSchema"]["required"],
+            ["project_root", "task_id", "attempt_id", "profile"],
+        )
+        self.assertEqual(
+            worker_by_name["record_report"]["inputSchema"]["anyOf"],
+            [{"required": ["draft_ref"]}, {"required": ["report"]}],
+        )
+        self.assertIn("draft_ref", worker_by_name["record_report"]["inputSchema"]["properties"])
+        self.assertIn("patch", worker_by_name["record_report"]["inputSchema"]["properties"])
+        self.assertNotIn("validation_digest", worker_by_name["record_report"]["inputSchema"]["properties"])
 
     def test_mcp_logs_invalid_tool_input_with_session_and_call_ids(self):
         script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
@@ -9266,7 +9297,7 @@ class ControlPlaneTests(unittest.TestCase):
                 },
             }
             completed = subprocess.run(
-                [sys.executable, str(script)],
+                [sys.executable, str(script), "--mcp-audience=coordinator"],
                 input=json.dumps(request) + "\n",
                 text=True,
                 capture_output=True,
@@ -9345,7 +9376,7 @@ class ControlPlaneTests(unittest.TestCase):
                 },
             }
             completed = subprocess.run(
-                [sys.executable, str(script)],
+                [sys.executable, str(script), "--mcp-audience=coordinator"],
                 input=json.dumps(request) + "\n",
                 text=True,
                 capture_output=True,
@@ -9425,7 +9456,7 @@ class ControlPlaneTests(unittest.TestCase):
 
         def call(arguments, environment=None):
             request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": arguments}}
-            completed = subprocess.run([sys.executable, str(script)], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
+            completed = subprocess.run([sys.executable, str(script), "--mcp-audience=coordinator"], input=json.dumps(request) + "\n", text=True, capture_output=True, env=environment, check=True)
             return json.loads(completed.stdout)
 
         common = {"task": {
@@ -9459,12 +9490,14 @@ class ControlPlaneTests(unittest.TestCase):
         def start(root, task_id, submission_id):
             return {"jsonrpc": "2.0", "id": submission_id, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": {"project_root": str(root), "task": {"user_request": task_id, "complexity": "C1", "acceptance_criteria": ["The requested outcome is observed."], "verification": ["Run an authoritative outcome check."]}}}}
         requests = [start(self.project, "first-root", "first-root-start"), start(other, "second-root", "second-root-start")]
-        completed = subprocess.run([sys.executable, str(script)], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
+        completed = subprocess.run([sys.executable, str(script), "--mcp-audience=coordinator"], input="".join(json.dumps(item) + "\n" for item in requests), text=True, capture_output=True, check=True)
         first, second = [json.loads(line) for line in completed.stdout.splitlines()]
         self.assertTrue(first["result"]["structuredContent"]["ok"])
         self.assertTrue(second["result"]["structuredContent"]["ok"])
-        self.assertTrue((self.project / ".codex/cortex").is_dir())
-        self.assertTrue((other / ".codex/cortex").is_dir())
+        self.assertTrue(control.ledger_root_path({"project_root": str(self.project)}).is_dir())
+        self.assertTrue(control.ledger_root_path({"project_root": str(other)}).is_dir())
+        self.assertFalse((self.project / ".codex/cortex/cortex.db").exists())
+        self.assertFalse((other / ".codex/cortex/cortex.db").exists())
 
     def test_mcp_profile_cache_survives_source_directory_rename(self):
         source = Path(__file__).parents[1] / "plugins/cortex"
@@ -9473,7 +9506,7 @@ class ControlPlaneTests(unittest.TestCase):
         shutil.copytree(source, cached, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         script = cached / "scripts/cortex.py"
         proc = subprocess.Popen(
-            [sys.executable, str(script)], cwd=self.project,
+            [sys.executable, str(script), "--mcp-audience=coordinator"], cwd=self.project,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         try:

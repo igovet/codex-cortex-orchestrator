@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from unittest import mock
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
@@ -16,13 +18,18 @@ import cortex
 from cortex_runtime import governance, ledger_db
 
 
-class GovernanceAcceptanceTests(unittest.TestCase):
+class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name) / ".codex" / "cortex"
+        self.set_up_host_private_control_store()
+        # This direct ledger-db fixture is intentionally not a legacy
+        # workspace location: public runtime calls in this suite must use the
+        # private host mapping instead of triggering an incidental migration.
+        self.root = Path(self.temp.name) / "governance-ledger"
         ledger_db.ensure_database(self.root)
 
     def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
     def add_task(self, task_id: str) -> None:
@@ -896,6 +903,11 @@ class GovernanceAcceptanceTests(unittest.TestCase):
             relationship="deliverable",
         )
         governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="active")
+        loaded = ledger_db.load_task(self.root, "task-203")
+        assert loaded is not None
+        completed_state = loaded[1]
+        completed_state["status"] = "completed"
+        ledger_db.update_task_state(self.root, completed_state)
         governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="completed")
         current_initiative = governance.inspect_initiative(self.root, initiative["initiative_ref"])
         artifact_by_key = {}
@@ -935,9 +947,7 @@ class GovernanceAcceptanceTests(unittest.TestCase):
                 evidence={},
             )
 
-        loaded = ledger_db.load_task(self.root, "task-203")
-        assert loaded is not None
-        state = loaded[1]
+        state = completed_state
         state["attempts"] = [{
             "attempt_id": "governance-close-1",
             "gate": "governance_close",

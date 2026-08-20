@@ -4,15 +4,15 @@
 ## Purpose
 
 The local MCP server implements the Cortex 9.2.5 `cortex/v8` task ledger plus
-the additive v10 governance ledger and public `cortex/orchestration/v5`
+the additive v11 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
-and optional execution lanes through exactly nine public tools: coordinator
-lifecycle operations `start_orchestration`, `continue_orchestration`, and
-`manage_orchestration`, coordinator-only `manage_governance`, worker
-`worker_question`, `get_report_template`,
-`record_report`, exact identity/digest-scoped immutable
-briefing fallback `read_dispatch_briefing`, and scoped predecessor
-`read_worker_report`.
+and optional execution lanes through a nine-operation v5 registry. Each
+launch-time audience exposes exactly five tools: the coordinator projection
+contains `start_orchestration`, `continue_orchestration`,
+`manage_orchestration`, coordinator-only `manage_governance`, and scoped
+`read_worker_report`; the worker projection contains `worker_question`,
+`get_report_template`, `record_report`, exact identity/digest-scoped immutable
+briefing fallback `read_dispatch_briefing`, and scoped `read_worker_report`.
 Pre-SQLite ledgers and facades are unsupported and must be recreated. Cortex
 never imports or resumes filesystem coordination state. Future SQLite schema
 migrations run automatically and exactly once per project database in an
@@ -26,7 +26,7 @@ to the content checksum; inconsistent history fails closed.
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the stable executable and public facade for task, report, and lane tools.
 - [gate_transitions.py](../../../plugins/cortex/scripts/cortex_runtime/gate_transitions.py) owns active-gate resolution, evidence policy, C2/C3 completion requirements, durable transitions, and terminal manifest cleanup behind the `record_gate` facade.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns orchestration start/continue/inspect transitions, transaction checkpoints, waves, and native dispatch assembly.
-- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v10, governance tables, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
+- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v11, governance tables, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
 - [governance.py](../../../plugins/cortex/scripts/cortex_runtime/governance.py) owns mode resolution, initiative/dependency integrity, immutable records and snapshots, constrained exceptions, and coordinator-approved promotion.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
@@ -41,12 +41,16 @@ ownership, verification, recovery, and private diagnostics.
 
 ## Canonical artifact layout
 
-The root ledger owns private `cortex.db` (mode `0600`) and the advisory
-`.state.lock`. SQLite is the sole mutable source for tasks, state, plans,
+The root ledger owns the host-private `cortex.db` (mode `0600`) and advisory
+`.state.lock` below the default `~/.codex/cortex/projects/p-<sha256>/` root.
+`CORTEX_HOST_STATE_DIR` is a host-only override and must be private and outside
+the workspace. SQLite is the sole mutable source for tasks, state, plans,
 operations, report/delegation indexes, questions, snapshots, classifications,
 lanes, activations, resource claims, findings, projection jobs, prune
 tombstones, revisions, worker sessions, attempt messages, trace observations,
-and immutable artifact content. Schema v10 adds governance integrity indexes,
+and immutable artifact content. Schema v11 adds append-only governance lifecycle
+authority for status and approval basis, governed link-deletion restrictions,
+and terminal linked-task checks. Schema v10 adds governance integrity indexes,
 scope/revision triggers, and idempotent submission receipts; schema v9 added
 the initial governance tables and records;
 schema v8 added revision-aware task/plan
@@ -102,7 +106,19 @@ New task and attempt records instead carry compact `manifest-<sha256>` refs to
 immutable content-addressed database records. Equal project state shares one record, but each
 dispatch performs a fresh capture so external changes remain visible.
 
+The default host-private state root is created only under secure `0700` parent
+directories with no symlink ancestry. A legacy project-local `.codex/cortex`
+database is moved only by a same-filesystem atomic rename after database and
+split-state checks; unsafe, non-database, or cross-filesystem legacy state
+fails closed rather than being copied or resumed in place.
+
 ## Behavior and status
+
+The stdio MCP process has one immutable launch-time audience. An unspecified
+or unknown audience defaults to the least-privilege worker projection; only a
+host-provisioned explicit `coordinator` audience exposes lifecycle and
+governance tools. JSON-RPC initialization and tool arguments cannot change the
+audience or elevate a worker process.
 
 `start_orchestration` accepts an absolute `project_root` and requires the
 user's exact, unexpanded text in `task.user_request`. Desktop's sole
@@ -166,22 +182,27 @@ immediately before final close, then renumbers the complete resolved wave list
 so every public lifecycle response retains an integer relative step.
 
 The coordinator governance capability appears only in the original successful
-start response. Its SHA-256 digest is the sole durable verifier; idempotent
-replay cannot recover or reissue the bearer, and legacy plaintext values are
-scrubbed and invalidated. `governance_mode=off` is accepted only for C1 with a
-complete boolean assessment of every documented hard and topology trigger,
-which is included in the policy snapshot. Text classification can only raise
-the governance floor.
+start response. Its SHA-256 digest and a separate recovery-proof digest are the
+only durable verifiers; idempotent replay cannot recover or reissue either
+value, and legacy plaintext values are scrubbed and invalidated. Recovery is
+accepted only on the explicit coordinator audience with the exact active
+principal, thread, task, and original non-durable recovery proof; rotation
+returns a new bearer and proof and revokes the previous generation.
+`governance_mode=off` is accepted only for C1 with a complete boolean
+assessment of every documented hard and topology trigger, which is included in
+the policy snapshot. Text classification can only raise the governance floor.
 
-Governance v10 reads each record body from its immutable content artifact and
+Governance v11 reads each record body from its immutable content artifact and
 checks the digest and cached JSON before policy evaluation. Normalized scope
 keys, exact task/initiative links, one-successor revision chains, strict JSON,
 and immutable-field triggers reject cross-scope, sibling-revision, mutation,
-and non-finite-number corruption. `submission_id` command digests make
-retries conflict-safe. Capability claims are task/initiative-scoped and bind
-principal, thread, generation, expiry, allowed actions, and revocation;
-recovery rotates a lost bearer only for the same active identity and never
-returns an old plaintext value.
+and non-finite-number corruption. An append-only cryptographic lifecycle chain
+is authoritative for status and approval basis. Pre-v10 migration reconciles
+only deterministic v9 duplicate revisions/sibling successors and fails closed
+for ambiguous scope or predecessor graphs. `submission_id` command digests
+make record and revision retries conflict-safe. Linked milestone/deliverable
+tasks must be `completed` before initiative completion/closure, and governed
+initiative-task links cannot be deleted.
 
 Cortex keeps each new v5 task on a generated task-local authorization identity.
 The synchronous `PostToolUse` hook separately binds its returned `task_ref` to
@@ -302,8 +323,8 @@ eight domains, or incomplete criteria. Scope is read-only and evidence-
 gathering; it does not close intent questions.
 
 The read-only Planner only proposes this durable planning catalog. Cortex
-authorizes and queues immutable, revision-scoped projections under
-`.codex/cortex/tasks/<task>/planning/revisions/plan-<report-ref>/`, including
+authorizes and queues immutable, revision-scoped projections under the
+host-private state root's `tasks/<task>/planning/revisions/plan-<report-ref>/`, including
 `overview.md` and `packages/<id>.json`. The SQLite task document
 `planning_current` is the sole current-plan pointer; there are no
 `planning/manifest.json` or `planning/overview.md` latest aliases. When a
@@ -355,6 +376,11 @@ finding fingerprint, affected paths, manifest/dispatch digest, verification
 result, and failure class remain materially identical for the configured
 repeat window, autonomous work pauses for an explicit user strategy. The
 failed gate and evidence remain durable; the pause never becomes a false pass.
+Recovery must begin with one singleton Planner wave and materially change the
+failed pipeline, strategy, or verification contract. An infrastructure or
+environment pause may instead name a class-matched remediation in that Planner
+wave. Free-text `reason` prose is retained only as an audit digest and cannot
+release the pause.
 Before recording the current attempt or gate, the engine preflights pending
 implementation retention, completed-gate rework, and singleton Planner
 reapproval. If an older runtime already left an active current gate with no
@@ -668,8 +694,9 @@ content are preserved. Repeating prune is idempotent; Cortex has no implicit
 clear-all route. With no retention period, the public route instead offers
 `keep_1d`, `keep_7d`, `keep_30d`, or `full_reset`. The explicit `full_reset`
 choice requires the exact second confirmation `RESET CORTEX`, is blocked by
-active tasks, and removes only project-scoped `.codex/cortex` state; project
-source and documentation remain untouched.
+active tasks, and removes only host-private Cortex state; project source and
+documentation remain untouched. Legacy project-local state is not the current
+ledger location.
 
 Predecessor handoffs are an enforced worker contract. Omitted `depends_on`
 selects all verified predecessors, an explicit phase list selects only those
@@ -736,8 +763,10 @@ receipt remains an independent local changed-file check without treating
 recognized ephemeral outputs as source changes.
 
 Manifest capture is bounded by `max_entries`, `max_hashed_bytes`, and
-`max_seconds`; a limit produces a partial result with a reason and cannot
-authorize a complete handoff. A bounded digest cache reuses unchanged hashes
+`max_seconds`; a limit produces a partial result with a reason. If the baseline
+or current capture is partial, comparison/reconciliation is incomplete and
+cannot authorize read-only mutation auditing, a complete handoff, or terminal
+close. A bounded digest cache reuses unchanged hashes
 only when the full stat identity matches. CI runs
 `scripts/cortex-manifest-benchmark.py --files 50000 --max-seconds 30` and
 requires its JSON `target_met` field to be true.

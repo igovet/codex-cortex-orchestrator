@@ -25,6 +25,7 @@ import cortex  # noqa: E402
 
 LIVE_TIMEOUT_SECONDS = 1800
 FINDING_REWORK_LIVE_TIMEOUT_SECONDS = 300
+FINDING_REWORK_FULL_LIVE_TIMEOUT_SECONDS = 1800
 HEARTBEAT_SECONDS = 15
 TERMINATION_GRACE_SECONDS = 10
 MAX_STREAM_LINE_BYTES = 64 * 1024
@@ -64,6 +65,10 @@ SAFE_NATIVE_AGENT_STATUSES = {
 FINDING_REWORK_FINGERPRINT = "live-documentation-finding-001"
 FINDING_REWORK_DOCUMENTATION_PATH = "docs/finding-fixture.md"
 FINDING_REWORK_DOCUMENTATION_CONTENT = "Corrective documentation fixture fixed.\n"
+FINDING_REWORK_LIVE_SCENARIOS = {
+    "finding_rework_documentation",
+    "finding_rework_documentation_full",
+}
 
 RESULT_FAILURE_PATTERNS = (
     ("passed completion requires report_ref", "reportless_success"),
@@ -173,7 +178,28 @@ def remove_private_runtime_home(runtime_home: Path, base: Path) -> None:
 
 
 @contextlib.contextmanager
-def isolated_codex_runtime(base: Path):
+def isolated_cortex_host_store(base: Path):
+    """Provide one disposable, mode-0700 host control store for source checks."""
+    base_info = os.lstat(base)
+    if not stat.S_ISDIR(base_info.st_mode) or base.is_symlink():
+        raise RuntimeError("evaluator base must be a non-symlink directory")
+    host_store = Path(tempfile.mkdtemp(prefix="cortex-luna-high-host-store-", dir=base))
+    os.chmod(host_store, 0o700)
+    original = os.environ.get("CORTEX_HOST_STATE_DIR")
+    os.environ["CORTEX_HOST_STATE_DIR"] = str(host_store)
+    try:
+        yield host_store
+    finally:
+        if original is None:
+            os.environ.pop("CORTEX_HOST_STATE_DIR", None)
+        else:
+            os.environ["CORTEX_HOST_STATE_DIR"] = original
+        if host_store.exists() or host_store.is_symlink():
+            remove_private_runtime_home(host_store, base)
+
+
+@contextlib.contextmanager
+def isolated_codex_runtime(base: Path, *, host_store: Path | None = None):
     """Provide an ephemeral 0700 Codex home without loading global configuration."""
     base_info = os.lstat(base)
     if not stat.S_ISDIR(base_info.st_mode) or base.is_symlink():
@@ -200,6 +226,8 @@ def isolated_codex_runtime(base: Path):
     environment["XDG_CONFIG_HOME"] = str(runtime_config)
     environment["XDG_DATA_HOME"] = str(runtime_data)
     environment["XDG_STATE_HOME"] = str(runtime_state)
+    if host_store is not None:
+        environment["CORTEX_HOST_STATE_DIR"] = str(host_store)
     try:
         environment_auth = next(
             (name for name in AUTH_ENVIRONMENT_VARIABLES if os.environ.get(name)), None,
@@ -353,9 +381,46 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
     return safe
 
 
+def observed_native_lifecycle(events: list[dict[str, object]], *, workers: int = 4) -> bool:
+    """Prove source-mode native worker cycles without asserting trusted hook binding.
+
+    Source-mode runs deliberately use ``--ignore-user-config``.  Their native
+    spawn events are observable, but the installed trusted SubagentStart hook
+    is absent, so an attempt cannot honestly claim durable child-id/model
+    binding.  Codex may emit an adjacent duplicate completion observation for
+    a single native operation; collapse only those duplicates before checking
+    the lifecycle order.
+    """
+    operations: list[tuple[str, str | None]] = []
+    for event in events:
+        if (
+            event.get("event") != "native_tool_call"
+            or event.get("status") != "completed"
+            or event.get("tool") not in {"spawn_agent", "wait", "close_agent"}
+        ):
+            continue
+        operation = (str(event["tool"]), str(event.get("outcome") or "") or None)
+        if not operations or operation != operations[-1]:
+            operations.append(operation)
+    if len(operations) < workers * 3 or len(operations) % 3:
+        return False
+    return all(
+        operations[index:index + 3] == [
+            ("spawn_agent", None), ("wait", "report_recorded"), ("close_agent", None),
+        ]
+        for index in range(0, len(operations), 3)
+    )
+
+
 def safe_ledger_progress(project: Path) -> dict[str, object] | None:
     """Return bounded aggregate lifecycle state from a source-mode SQLite ledger."""
-    database = project / ".codex" / "cortex" / "cortex.db"
+    try:
+        # Resolve the opaque host-private mapping without opening/migrating the
+        # database.  Progress is a read-only best-effort diagnostic and must
+        # not turn a partially initialized store into a lifecycle failure.
+        database = cortex.ledger_root_path({"project_root": str(project)}) / "cortex.db"
+    except (OSError, ValueError, sqlite3.Error):
+        return None
     if not database.is_file():
         return None
     connection: sqlite3.Connection | None = None
@@ -405,6 +470,39 @@ def safe_ledger_progress(project: Path) -> dict[str, object] | None:
     finally:
         if connection is not None:
             connection.close()
+
+
+def canonical_task_directories(project: Path) -> list[Path]:
+    """Resolve task artifacts from the private SQLite ledger, never a workspace scan."""
+    try:
+        ledger = cortex.ledger_root({"project_root": str(project)})
+        directories = [
+            path
+            for task_id in cortex.db_task_index(ledger)
+            if isinstance(path := cortex.db_task_artifact_path(ledger, str(task_id)), Path)
+            and path.is_dir()
+        ]
+    except (OSError, ValueError, sqlite3.Error):
+        return []
+    return directories
+
+
+def record_failure_metadata(
+    result: dict[str, object],
+    events: list[dict[str, object]],
+    *,
+    retain: bool,
+) -> None:
+    """Retain only bounded, already-sanitized failure evidence when opted in."""
+    if retain:
+        failure_dir = Path(tempfile.mkdtemp(prefix="cortex-luna-high-failure-"))
+        (failure_dir / "progress.json").write_text(
+            json.dumps({"result": result, "events": events[-100:]}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        result["failure_artifacts"] = str(failure_dir)
+    else:
+        result["failure_metadata"] = "not_retained"
 
 
 def terminate_process_group(process: subprocess.Popen[str], scenario: str, reason: str) -> None:
@@ -841,6 +939,82 @@ def finding_rework_trace_checks(
     }
 
 
+def full_finding_rework_gate_results_valid(report_records: list[dict[str, object]]) -> bool:
+    """Validate the distinct opening/review/Close result contract for full live runs.
+
+    The opening Review is the only non-pass gate result and is deliberately
+    exact.  Keeping this check separate from the narrow source-assisted smoke
+    prevents a second open finding (including a synthesized missing-check
+    blocker) from turning an apparently successful rerun into a false proof.
+    """
+    closure_records = [
+        record for record in report_records
+        if record.get("gate") in {"review", "close"}
+    ]
+    if not closure_records or not all(
+        isinstance(record.get("gate_result"), dict)
+        for record in closure_records
+    ):
+        return False
+
+    def result_envelope(record: dict[str, object]) -> dict[str, object]:
+        return record["gate_result"]  # type: ignore[return-value]
+
+    def has_complete_verification_and_workspace(result: dict[str, object]) -> bool:
+        verification = result.get("verification")
+        workspace = result.get("workspace")
+        return (
+            isinstance(verification, dict)
+            and verification.get("required_missing") == []
+            and set(verification) == {
+                "executed", "not_executed", "required_missing", "limitations",
+            }
+            and isinstance(workspace, dict)
+            and set(workspace) == {"modified", "untracked", "staged", "committed"}
+        )
+
+    opening = [
+        record for record in closure_records
+        if record.get("gate") == "review"
+        and result_envelope(record).get("decision") == "rework"
+    ]
+    if len(opening) != 1:
+        return False
+    opening_result = result_envelope(opening[0])
+    opening_findings = opening_result.get("findings")
+    if not (
+        opening_result.get("failure_class") == "product"
+        and has_complete_verification_and_workspace(opening_result)
+        and isinstance(opening_findings, list)
+        and len(opening_findings) == 1
+        and isinstance(opening_findings[0], dict)
+        and opening_findings[0].get("fingerprint") == FINDING_REWORK_FINGERPRINT
+        and opening_findings[0].get("severity") == "P2"
+        and opening_findings[0].get("status") == "open"
+        and opening_findings[0].get("blocking") is True
+    ):
+        return False
+
+    for record in closure_records:
+        if record is opening[0]:
+            continue
+        result = result_envelope(record)
+        findings = result.get("findings")
+        if not (
+            result.get("decision") == "pass"
+            and has_complete_verification_and_workspace(result)
+            and isinstance(findings, list)
+            and not any(
+                isinstance(finding, dict) and finding.get("status") == "open"
+                for finding in findings
+            )
+        ):
+            return False
+        if record.get("gate") == "close" and findings != []:
+            return False
+    return True
+
+
 def report(label: str, project: Path, changed_files: list[str] | None = None) -> dict[str, object]:
     return {
         "summary": label, "findings": [], "questions": [], "changed_files": changed_files or [],
@@ -913,7 +1087,7 @@ def seed_finding_rework_documentation(project: Path) -> dict[str, str]:
     if not started.get("ok") or started.get("outcome") != "ready_to_spawn":
         raise AssertionError(f"finding-rework source prelude could not start: {started}")
 
-    task_dirs = list((project / ".codex" / "cortex" / "tasks").glob("*"))
+    task_dirs = canonical_task_directories(project)
     if len(task_dirs) != 1:
         raise AssertionError("finding-rework source prelude did not create exactly one task")
     task_dir = task_dirs[0]
@@ -1143,6 +1317,12 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
 
 
 def fixture_eval(base: Path) -> list[dict[str, object]]:
+    """Run source fixtures without touching the user's host control store."""
+    with isolated_cortex_host_store(base):
+        return _fixture_eval(base)
+
+
+def _fixture_eval(base: Path) -> list[dict[str, object]]:
     scenarios: list[dict[str, object]] = []
 
     sequential = base / "sequential"
@@ -1190,7 +1370,7 @@ def fixture_eval(base: Path) -> list[dict[str, object]]:
     scenarios.append({"name": "blocked_resume", "outcome": completed["outcome"]})
 
     for project in (sequential, parallel, blocked):
-        task_dir = next((project / ".codex/cortex/tasks").iterdir())
+        task_dir = canonical_task_directories(project)[0]
         state = cortex.load_task_state_for_artifact(task_dir)
         ledger = cortex.ledger_root({"project_root": str(project)})
         report_artifacts = canonical_artifacts(ledger, state["task_id"], kind="worker_report")
@@ -1264,7 +1444,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
     if scenario == "finding_rework_documentation":
         if not source_task_ref:
             raise ValueError("finding_rework_documentation requires its seeded task_ref")
-        return (
+        continuation = (
             "Continue exactly one already-created, isolated Cortex task; do not start a task. "
             f"The exact project_root is {project}; the task_ref is {source_task_ref!r}. "
             "The evaluator has already used public Cortex APIs to persist one controlled open P2 Review finding "
@@ -1282,10 +1462,46 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "status=resolved, blocking=false, and resolved_at; verification has executed/not_executed/required_missing/"
             "limitations arrays with required_missing=[]; workspace has exactly modified/untracked/staged/committed. "
             "Do not invent any finding. Read the durable fresh-review report, close that completed child, and continue "
-            "with its exact report_ref. Cortex will prepare a Close dispatch after accepting that review: STOP there. "
+            "with its exact report_ref. "
+        )
+        return continuation + (
+            "Cortex will prepare a Close dispatch after accepting that review: STOP there. "
             "Do not execute Close, do not create a handoff, and do not wait for another child. For each real child use "
             "the normal spawn_agent -> wait -> read_worker_report -> close_agent sequence; accept success only when its "
             "final response starts with REPORT_RECORDED."
+        )
+    if scenario == "finding_rework_documentation_full":
+        return (
+            "You are the live Cortex parent orchestrator for one full, isolated C2 finding lifecycle. Your FIRST "
+            "action MUST be one Cortex MCP tool call: start_orchestration. Do not send a conversational response, "
+            "inspect the filesystem, or call a native host tool before that call. This is a real opening: do not use "
+            "a seeded task, task_ref, source prelude, internal API, hook control, or private orchestrate. If "
+            "start_orchestration returns an error, stop and preserve that error; never simulate task creation. Call "
+            "start_orchestration exactly once with these named arguments: project_root="
+            f"{project}; task=<cortex_task_contract>; waves=<cortex_initial_waves>. "
+            "<cortex_task_contract>{\"user_request\":\"Create docs/finding-fixture.md with exactly one line: "
+            "Corrective documentation fixture fixed. A Review must first identify the missing line, Documentation "
+            "must correct it, a fresh Review must verify the exact correction, and Close must produce the final handoff.\","
+            "\"complexity\":\"C2\",\"acceptance_criteria\":[\"docs/finding-fixture.md contains exactly the required correction line.\","
+            "\"The original Review finding is resolved only by a fresh Review rerun after the Documentation correction.\","
+            "\"A verified final handoff is created after Close.\"],\"verification\":[\"Read docs/finding-fixture.md and verify its exact one-line content.\","
+            "\"Read the original Review, Documentation, fresh Review, and Close reports.\"],\"plan_approval\":\"auto\"}</cortex_task_contract> "
+            "</cortex_task_contract><cortex_initial_waves>[{\"workers\":[{\"phase\":\"review\",\"profile\":\"code_reviewer\",\"objective\":\"Open exactly one P2 finding with fingerprint "
+            + FINDING_REWORK_FINGERPRINT
+            + "; publish gate_result decision=rework (never fail or blocked) and failure_class=product; do not invent any other finding.\"}}]},"
+            "{\"workers\":[{\"phase\":\"documentation\",\"profile\":\"technical_writer\",\"objective\":\"Create docs/finding-fixture.md with exactly the required line and report that correction.\"}]},"
+            "{\"workers\":[{\"phase\":\"close\",\"profile\":\"build_verification\"}]}]</cortex_initial_waves>. "
+            "Only after start_orchestration returns ready_to_spawn, execute its returned Review dispatch. For every returned native dispatch use "
+            "spawn_agent -> wait -> read_worker_report -> close_agent -> continue_orchestration "
+            "with that exact report_ref. Do not invoke internal lifecycle or hook controls: source-mode trusted host binding is intentionally unavailable here. "
+            f"Every worker report has exactly {len(cortex.REPORT_FIELDS)} fields: {report_field_names}. The initial Review publishes decision=rework, failure_class=product, and only "
+            f"the open blocking P2 fingerprint {FINDING_REWORK_FINGERPRINT!r}; its verification has exactly executed/not_executed/required_missing/limitations "
+            "with required_missing=[], and its workspace has exactly modified/untracked/staged/committed. Documentation creates the exact one-line file and lists it in changed_files. "
+            "The fresh Review reads the original Review and Documentation reports and publishes canonical gate_result decision=pass with only that fingerprint "
+            "status=resolved, blocking=false, and resolved_at; verification required_missing=[] and workspace keys modified/untracked/staged/committed. "
+            "After that resolution, Close must publish canonical gate_result decision=pass with findings=[] (the finding is already canonically resolved), verification "
+            "required_missing=[], and the same four workspace keys. Never call private orchestrate, never replan or steer, never start a second task, never manually create "
+            "a handoff, and stop only after Cortex returns outcome=completed with its server-owned final handoff."
         )
     common = (
         "Use the Cortex MCP public tools to complete this isolated task. "
@@ -1434,9 +1650,9 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
     )
 
 
-def live_eval(
+def _live_eval(
     base: Path, scenarios: tuple[str, ...] | None = None, *, timeout_seconds: int = LIVE_TIMEOUT_SECONDS,
-    retain_failure_metadata: bool = False,
+    retain_failure_metadata: bool = False, host_store: Path,
 ) -> list[dict[str, object]]:
     codex = shutil.which("codex")
     if not codex:
@@ -1461,7 +1677,7 @@ def live_eval(
             if completed_source.get("outcome") != "completed":
                 raise AssertionError(completed_source)
             source_task_ref = str(source["task_ref"])
-            source_dir = next((project / ".codex/cortex/tasks").iterdir())
+            source_dir = canonical_task_directories(project)[0]
             source_snapshot = (
                 cortex.load_task_definition(source_dir),
                 cortex.load_task_state_for_artifact(source_dir),
@@ -1473,10 +1689,10 @@ def live_eval(
             "--dangerously-bypass-approvals-and-sandbox", "-C", str(project),
             "-m", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"',
             "-c", f'mcp_servers.cortex.command="{sys.executable}"',
-            "-c", f'mcp_servers.cortex.args=["{SERVER}"]',
+            "-c", f'mcp_servers.cortex.args=["{SERVER}", "--mcp-audience=coordinator"]',
             live_prompt(scenario, project, source_task_ref),
         ]
-        with isolated_codex_runtime(base) as isolated_environment:
+        with isolated_codex_runtime(base, host_store=host_store) as isolated_environment:
             streamed = run_live_command(
                 command, project, scenario, timeout_seconds=timeout_seconds,
                 environment=isolated_environment,
@@ -1505,14 +1721,53 @@ def live_eval(
                 native_tool_names.append(name)
                 if event.get("status") == "completed":
                     completed_native_tool_names.append(name)
-        task_dirs = list((project / ".codex/cortex/tasks").glob("*"))
+        task_dirs = canonical_task_directories(project)
         task_dir = task_dirs[0] if len(task_dirs) == 1 else None
         if scenario == "follow_up_partial":
             task_dir = next(
                 (path for path in task_dirs if isinstance(cortex.load_task_definition(path).get("follow_up"), dict)),
                 None,
             )
-        state = cortex.load_task_state_for_artifact(task_dir) if task_dir else {}
+        if task_dir is None:
+            failure_result = {
+                "scenario": scenario, "status": "FAIL",
+                "launch_model": "gpt-5.6-luna", "launch_reasoning_effort": "high",
+                "exit_code": streamed["returncode"], "elapsed_seconds": streamed["elapsed_seconds"],
+                "termination": streamed["termination"], "dropped_stream_events": streamed["dropped_stream_events"],
+                "tool_names": tool_names, "native_tool_names": native_tool_names,
+                "failed_public_calls": failed_public_calls,
+                "checks": {
+                    "process_ok": streamed["returncode"] == 0,
+                    "task_state_available": False,
+                    "single_task": False,
+                    "no_failed_public_calls": not failed_public_calls,
+                },
+                "state_diagnostics": {"status": "unavailable", "task_count": len(task_dirs)},
+            }
+            record_failure_metadata(failure_result, events, retain=retain_failure_metadata)
+            results.append(failure_result)
+            break
+        try:
+            state = cortex.load_task_state_for_artifact(task_dir)
+        except (OSError, ValueError, sqlite3.Error):
+            failure_result = {
+                "scenario": scenario, "status": "FAIL",
+                "launch_model": "gpt-5.6-luna", "launch_reasoning_effort": "high",
+                "exit_code": streamed["returncode"], "elapsed_seconds": streamed["elapsed_seconds"],
+                "termination": streamed["termination"], "dropped_stream_events": streamed["dropped_stream_events"],
+                "tool_names": tool_names, "native_tool_names": native_tool_names,
+                "failed_public_calls": failed_public_calls,
+                "checks": {
+                    "process_ok": streamed["returncode"] == 0,
+                    "task_state_available": False,
+                    "single_task": len(task_dirs) == 1,
+                    "no_failed_public_calls": not failed_public_calls,
+                },
+                "state_diagnostics": {"status": "unavailable", "task_count": len(task_dirs)},
+            }
+            record_failure_metadata(failure_result, events, retain=retain_failure_metadata)
+            results.append(failure_result)
+            break
         ledger = cortex.ledger_root({"project_root": str(project)})
         report_artifacts = canonical_artifacts(ledger, str(state.get("task_id") or ""), kind="worker_report") if task_dir else []
         report_records = [
@@ -1543,7 +1798,7 @@ def live_eval(
         findings = cortex.db_list_task_findings(
             ledger, str(state.get("task_id") or ""), include_resolved=True,
         ) if task_dir else []
-        if scenario == "finding_rework_documentation":
+        if scenario in FINDING_REWORK_LIVE_SCENARIOS:
             # This route intentionally starts with a review rework; it is
             # valid only when the later review passes without an open finding.
             gate_results_valid = all(
@@ -1563,6 +1818,8 @@ def live_eval(
                 for record in report_records
                 if record.get("gate") in {"review", "close"}
             )
+        if scenario == "finding_rework_documentation_full":
+            gate_results_valid = full_finding_rework_gate_results_valid(report_records)
         attempts_by_wave: dict[str, set[str]] = {}
         for attempt in state.get("attempts", []):
             if attempt.get("invalidated"):
@@ -1636,6 +1893,129 @@ def live_eval(
                 "native_dispatch_exercised": "spawn_agent" in completed_native_tool_names,
                 "native_wait_exercised": "wait" in completed_native_tool_names,
                 "native_cleanup_exercised": "close_agent" in completed_native_tool_names,
+                **finding_rework_trace_checks(
+                    state, report_records, findings=findings, project=project,
+                ),
+            }
+        if scenario == "finding_rework_documentation_full":
+            # Unlike the seeded transport smoke, this is an end-to-end C2
+            # run: the host owns the opening Review, corrective route, fresh
+            # Review, Close, and the server-owned final handoff.
+            current_route = [
+                str(item.get("gate") or "")
+                for item in state.get("attempts", [])
+                if isinstance(item, dict)
+                and not item.get("invalidated")
+                and item.get("gate") in {"documentation", "review", "close"}
+            ]
+            current_close = next(
+                (
+                    item for item in state.get("attempts", [])
+                    if isinstance(item, dict)
+                    and item.get("gate") == "close"
+                    and not item.get("invalidated")
+                ),
+                None,
+            )
+            opening_records = [
+                record for record in report_records
+                if record.get("gate") == "review"
+                and isinstance(record.get("gate_result"), dict)
+                and record["gate_result"].get("decision") == "rework"
+                and len(record["gate_result"].get("findings", [])) == 1
+                and isinstance(record["gate_result"]["findings"][0], dict)
+                and record["gate_result"]["findings"][0].get("fingerprint") == FINDING_REWORK_FINGERPRINT
+                and record["gate_result"]["findings"][0].get("severity") == "P2"
+                and record["gate_result"]["findings"][0].get("status") == "open"
+                and record["gate_result"]["findings"][0].get("blocking") is True
+            ]
+            opening_attempt = next(
+                (
+                    item for item in state.get("attempts", [])
+                    if isinstance(item, dict)
+                    and opening_records
+                    and item.get("attempt_id") == opening_records[0].get("attempt_id")
+                ),
+                None,
+            )
+            close_records = [
+                record for record in report_records
+                if record.get("gate") == "close"
+                and isinstance(record.get("gate_result"), dict)
+                and record["gate_result"].get("decision") == "pass"
+                and record["gate_result"].get("findings") == []
+            ]
+            final_manifest = state.get("final_manifest_receipt")
+            closed_manifest = state.get("closed_manifest_receipt")
+            terminal_attempts = [
+                item for item in state.get("attempts", [])
+                if isinstance(item, dict) and not item.get("invalidated")
+            ]
+            receipt_bound_attempts = {
+                str(item.get("attempt_id") or "")
+                for item in state.get("evidence", [])
+                if isinstance(item, dict)
+                and not item.get("invalidated")
+                and item.get("report_id")
+                and item.get("report_receipt")
+            }
+            checks = {
+                "process_ok": streamed["returncode"] == 0,
+                "used_one_real_start": completed_tool_names.count("start_orchestration") == 1,
+                "used_continue": "continue_orchestration" in tool_names,
+                "avoided_private_tools": "orchestrate" not in tool_names,
+                "single_task": len(task_dirs) == 1,
+                "c2_requires_handoff": (
+                    state.get("complexity") == "C2"
+                    and state.get("require_handoff") is True
+                ),
+                "completed": state.get("status") == "completed",
+                "active_gates_empty": not cortex.active_gates(state),
+                "completed_gates_include_route": {
+                    "documentation", "review", "close",
+                }.issubset({str(item) for item in state.get("completed_gates", [])}),
+                "current_route_order": current_route[-3:] == ["documentation", "review", "close"],
+                "close_report_current": bool(
+                    isinstance(current_close, dict)
+                    and current_close.get("status") == "passed"
+                    and current_close.get("report_ids")
+                ),
+                "opening_review_is_observed_and_exact": bool(
+                    len(opening_records) == 1
+                    and isinstance(opening_attempt, dict)
+                    and opening_attempt.get("status") == "passed"
+                    and opening_attempt.get("invalidated")
+                ),
+                "close_reports_no_repeated_resolution": len(close_records) == 1,
+                "close_evidence": close_evidence,
+                "final_close_handoff": (
+                    bool(state.get("handoff_created"))
+                    and state.get("handoff_gate") == "close"
+                ),
+                "final_manifest_current_and_complete": bool(
+                    isinstance(final_manifest, dict)
+                    and final_manifest.get("complete") is True
+                    and isinstance(closed_manifest, dict)
+                    and closed_manifest.get("complete") is True
+                    and final_manifest.get("current_digest") == closed_manifest.get("current_digest")
+                ),
+                "documentation_and_reassessment_receipts": bool(
+                    state.get("documentation_receipt")
+                    and state.get("reassessment_receipts")
+                ),
+                "manifest_snapshots_cleaned": checks["manifest_snapshots_cleaned"],
+                "strict_worker_reports": strict_reports,
+                "review_close_gate_results": gate_results_valid,
+                "no_failed_public_calls": not failed_public_calls,
+                "native_lifecycle_observed": observed_native_lifecycle(events),
+                "all_current_attempts_terminal_and_receipted": bool(terminal_attempts) and all(
+                    item.get("status") in cortex.TERMINAL_ATTEMPT_STATUSES
+                    and (
+                        item.get("status") != "passed"
+                        or str(item.get("attempt_id") or "") in receipt_bound_attempts
+                    )
+                    for item in terminal_attempts
+                ),
                 **finding_rework_trace_checks(
                     state, report_records, findings=findings, project=project,
                 ),
@@ -1795,22 +2175,27 @@ def live_eval(
             "native_tool_names": native_tool_names,
             "checks": checks, "failed_public_calls": failed_public_calls,
             "state_diagnostics": state_diagnostics,
+            **({
+                "evidence_scope": "source_mode_native_lifecycle_observed",
+                "host_binding": "unavailable_without_trusted_hooks",
+            } if scenario == "finding_rework_documentation_full" else {}),
         })
         if not passed:
-            if retain_failure_metadata:
-                failure_dir = Path(tempfile.mkdtemp(prefix="cortex-luna-high-failure-"))
-                # Keep only sanitized progress metadata. Copying the temporary
-                # project or raw Codex events could preserve prompts, report
-                # text, paths, or host diagnostics beyond this opt-in.
-                (failure_dir / "progress.json").write_text(
-                    json.dumps({"result": results[-1], "events": events[-100:]}, indent=2, sort_keys=True),
-                    encoding="utf-8",
-                )
-                results[-1]["failure_artifacts"] = str(failure_dir)
-            else:
-                results[-1]["failure_metadata"] = "not_retained"
+            record_failure_metadata(results[-1], events, retain=retain_failure_metadata)
             break
     return results
+
+
+def live_eval(
+    base: Path, scenarios: tuple[str, ...] | None = None, *, timeout_seconds: int = LIVE_TIMEOUT_SECONDS,
+    retain_failure_metadata: bool = False,
+) -> list[dict[str, object]]:
+    """Run live source checks against one private host control store."""
+    with isolated_cortex_host_store(base) as host_store:
+        return _live_eval(
+            base, scenarios, timeout_seconds=timeout_seconds,
+            retain_failure_metadata=retain_failure_metadata, host_store=host_store,
+        )
 
 
 def main() -> int:
@@ -1820,7 +2205,7 @@ def main() -> int:
         "--scenario", choices=(
             "automatic_sequential", "compact_parallel", "blocked_resume",
             "planner_work_breakdown", "automatic_governance", "follow_up_partial",
-            "finding_rework_documentation",
+            "finding_rework_documentation", "finding_rework_documentation_full",
         ),
         help="run one live scenario for diagnosis; the default release run still requires all five",
     )
@@ -1836,6 +2221,8 @@ def main() -> int:
     timeout_seconds = (
         FINDING_REWORK_LIVE_TIMEOUT_SECONDS
         if args.scenario == "finding_rework_documentation" and args.live_timeout_seconds is None
+        else FINDING_REWORK_FULL_LIVE_TIMEOUT_SECONDS
+        if args.scenario == "finding_rework_documentation_full" and args.live_timeout_seconds is None
         else args.live_timeout_seconds if args.live_timeout_seconds is not None else LIVE_TIMEOUT_SECONDS
     )
     if timeout_seconds < 10 or timeout_seconds > 7200:
@@ -1846,6 +2233,14 @@ def main() -> int:
     ):
         parser.error(
             "finding_rework_documentation has a hard 300-second limit; "
+            "--live-timeout-seconds may only reduce it"
+        )
+    if (
+        args.scenario == "finding_rework_documentation_full"
+        and timeout_seconds > FINDING_REWORK_FULL_LIVE_TIMEOUT_SECONDS
+    ):
+        parser.error(
+            "finding_rework_documentation_full has a hard 1800-second limit; "
             "--live-timeout-seconds may only reduce it"
         )
     with tempfile.TemporaryDirectory(prefix="cortex-luna-high-") as directory:

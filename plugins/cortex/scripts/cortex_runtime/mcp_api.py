@@ -1,4 +1,10 @@
-"""Public MCP registry and stdio transport, independent of orchestration policy."""
+"""Public MCP registry and stdio transport, independent of orchestration policy.
+
+The stdio protocol does not carry a trustworthy per-call actor identity.  A
+server process therefore receives one immutable audience at launch time.  The
+untrusted/default audience is the worker surface; a host that has established
+a coordinator channel must opt in explicitly to the coordinator surface.
+"""
 from __future__ import annotations
 
 import json
@@ -6,6 +12,28 @@ import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+
+
+MCP_AUDIENCES = frozenset({"coordinator", "worker"})
+DEFAULT_MCP_AUDIENCE = "worker"
+
+# ``read_worker_report`` is intentionally shared: the coordinator reads a
+# completed report, while a successor worker may read only refs granted in its
+# dispatch.  Handler-level scope checks remain authoritative for that tool.
+COORDINATOR_PUBLIC_TOOL_NAMES = (
+    "start_orchestration",
+    "continue_orchestration",
+    "manage_orchestration",
+    "manage_governance",
+    "read_worker_report",
+)
+WORKER_PUBLIC_TOOL_NAMES = (
+    "worker_question",
+    "get_report_template",
+    "record_report",
+    "read_dispatch_briefing",
+    "read_worker_report",
+)
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
@@ -17,7 +45,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
     "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
     "read_worker_report": "Read one persisted worker report by report_ref and the exact task_ref from the successful lifecycle response. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
-    "manage_governance": "Manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If the one-response bearer was lost, recover_coordinator_capability rotates it for the same active principal, thread, and task_ref without revealing the old bearer. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
+    "manage_governance": "Coordinator-only: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If the one-response bearer was lost, recover_coordinator_capability rotates it only on an explicitly coordinator-scoped transport with the same active principal, thread, task_ref, and the non-durable recovery proof returned in the original authorization response. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
 
@@ -226,7 +254,7 @@ def build_public_schemas(
                 "type": "array", "minItems": 1, "maxItems": max_work_packages,
                 "description": (
                     "Planner-only task-local work breakdown. Runtime requires each package to have id, title, objective, "
-                    "and non-empty microtasks, and writes the validated artifact under .codex/cortex/tasks/<task>/planning/."
+                    "and non-empty microtasks, and writes the validated artifact to the host-private task projection store."
                 ),
                 "items": PLANNING_PACKAGE_SCHEMA,
             },
@@ -604,7 +632,8 @@ def build_public_schemas(
             "principal": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator principal; when omitted, Cortex derives it from the capability."},
             "thread_id": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator thread/session identity; provide it together with principal or omit both."},
             "coordinator_capability": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque short-lived task-scoped server-issued capability returned by a successful start_orchestration or explicit recovery response. Only its SHA-256 verifier and non-secret server-owned claims are durable. Never persist it or include it in worker briefings. It is required for every action except recover_coordinator_capability."},
-            "task_ref": {"type": "string", "minLength": 1, "description": "Exact task reference. Required only for recover_coordinator_capability, together with the active server-bound principal and thread_id; recovery rotates instead of revealing a lost bearer."},
+            "coordinator_recovery_proof": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Coordinator-only non-durable proof returned with the original authorization response and replaced on capability recovery. It is required, with task_ref and the active server-bound principal/thread, to rotate a lost coordinator capability. Never persist it or include it in worker briefings."},
+            "task_ref": {"type": "string", "minLength": 1, "description": "Exact task reference. Required only for recover_coordinator_capability, together with the active server-bound principal, thread_id, and coordinator_recovery_proof; recovery rotates instead of revealing a lost bearer."},
             "capability_generation": {"type": "integer", "minimum": 1, "description": "Optional expected server-owned capability generation for recover_coordinator_capability. A mismatch fails closed rather than reviving a stale bearer."},
             "submission_id": {"type": "string", "minLength": 1, "description": "Stable caller-generated identifier for durable create_record retry after a lost response. Reuse is accepted only for the exact same immutable command."},
             "entity": {"type": "string"},
@@ -1028,7 +1057,7 @@ def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[s
         schema.setdefault("properties", {}).setdefault("project_root", {
             "type": "string",
             "minLength": 1,
-            "description": "Absolute project workspace path. Cortex writes only to project_root/.codex/cortex.",
+            "description": "Absolute project workspace path. Cortex derives an opaque host-private control ledger from this path; callers cannot choose its storage location.",
         })
     if "project_root" not in tools["activate_orchestration"][1].setdefault("required", []):
         tools["activate_orchestration"][1]["required"].append("project_root")
@@ -1079,6 +1108,26 @@ def public_tools(
     }
 
 
+def public_tools_for_audience(
+    all_public_tools: Mapping[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]],
+    audience: str,
+) -> dict[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]]:
+    """Project the public registry for one launch-time MCP audience.
+
+    ``audience`` is intentionally not accepted from JSON-RPC initialization or
+    individual tool arguments: those values are controlled by the caller and
+    cannot establish a privilege boundary.  The host selects it before the
+    process starts.  Unknown/missing audiences must use the worker projection.
+    """
+    selected = str(audience or "").strip().lower()
+    names = COORDINATOR_PUBLIC_TOOL_NAMES if selected == "coordinator" else WORKER_PUBLIC_TOOL_NAMES
+    return {
+        name: all_public_tools[name]
+        for name in names
+        if name in all_public_tools
+    }
+
+
 def serve_stdio(
     *,
     public_tools: Mapping[str, tuple[Callable[[dict[str, Any]], dict[str, Any]], dict[str, Any]]],
@@ -1086,8 +1135,22 @@ def serve_stdio(
     server_version: str,
     instructions: str,
     log_tool_error: Callable[[object, object, str, Exception], None],
+    audience: str = DEFAULT_MCP_AUDIENCE,
 ) -> None:
-    """Run the narrow JSON-RPC transport without importing orchestration internals."""
+    """Run the narrow JSON-RPC transport without importing orchestration internals.
+
+    The selected tool mapping is fixed for the process lifetime.  This is the
+    strongest boundary available to a plain stdio transport: it cannot trust a
+    role supplied by the client after the process has started.
+    """
+    normalized_audience = str(audience or "").strip().lower()
+    if normalized_audience not in MCP_AUDIENCES:
+        normalized_audience = DEFAULT_MCP_AUDIENCE
+    # ``serve_stdio`` is also imported by source-mode tests and embedding
+    # hosts.  Enforce the projection here rather than relying exclusively on
+    # the CLI entry point to pass an already-filtered mapping.
+    public_tools = public_tools_for_audience(public_tools, normalized_audience)
+    all_public_names = frozenset(PUBLIC_TOOL_DESCRIPTIONS)
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -1120,6 +1183,10 @@ def serve_stdio(
             elif method == "tools/call":
                 name = request.get("params", {}).get("name")
                 if name not in public_tools:
+                    if name in all_public_names:
+                        raise ValueError(
+                            f"tool_not_available_for_{normalized_audience}_mcp_audience"
+                        )
                     if name in internal_handlers:
                         raise ValueError("tool_is_internal_use_cortex_orchestration_v4")
                     raise ValueError(f"unknown tool '{name}'")

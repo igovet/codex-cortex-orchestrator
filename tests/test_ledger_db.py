@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex
 from cortex_runtime import ledger_db
@@ -30,7 +32,13 @@ def _first_boot_in_process(root_text: str, ready: multiprocessing.Queue, start: 
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
-class LedgerDatabaseTests(unittest.TestCase):
+class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.set_up_host_private_control_store()
+
+    def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
+
     @staticmethod
     def create_task(root: Path, task_id: str = "artifact-task") -> None:
         definition = {"schema": cortex.SCHEMA, "task_id": task_id, "created_at": "2026-01-01T00:00:00+00:00"}
@@ -42,13 +50,16 @@ class LedgerDatabaseTests(unittest.TestCase):
 
     def test_fresh_ledger_records_each_numbered_migration_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / ".codex" / "cortex"
+            project = Path(directory) / "project"
+            project.mkdir()
             # This is the first normal server path after a Marketplace update:
             # no separate administrator command may be required to migrate a
-            # developer's project ledger before the first MCP call.
-            self.assertEqual(cortex.ledger_root({"project_root": str(root.parents[1])}), root)
+            # developer's host-private project ledger before the first MCP
+            # call.
+            root = cortex.ledger_root({"project_root": str(project)})
+            self.assertEqual(root, cortex.ledger_root_path({"project_root": str(project)}))
             first = ledger_db.migration_history(root)
-            self.assertEqual(cortex.ledger_root({"project_root": str(root.parents[1])}), root)
+            self.assertEqual(cortex.ledger_root({"project_root": str(project)}), root)
             second = ledger_db.migration_history(root)
 
             self.assertEqual(first, second)
@@ -57,6 +68,7 @@ class LedgerDatabaseTests(unittest.TestCase):
                 list(range(1, ledger_db.DATABASE_SCHEMA_VERSION + 1)),
             )
             self.assertTrue((root / "cortex.db").is_file())
+            self.assertFalse((project / ".codex" / "cortex" / "cortex.db").exists())
             self.assertFalse((root / "task-index.json").exists())
 
     def test_pre_database_files_are_never_imported_or_deleted(self) -> None:

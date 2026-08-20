@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.cortex_test_support import HostPrivateControlStoreTestMixin
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -30,7 +32,13 @@ COLD_BOOT = load_script("cortex_cold_boot_smoke_fixture", "cortex-cold-boot-smok
 LUNA_EVAL = load_script("cortex_luna_high_eval_fixture", "cortex-luna-high-eval.py")
 
 
-class VerificationFixtureContractTests(unittest.TestCase):
+class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
+    def setUp(self) -> None:
+        self.set_up_host_private_control_store()
+
+    def tearDown(self) -> None:
+        self.tear_down_host_private_control_store()
+
     def test_fixture_closures_are_valid_and_have_no_open_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary) / "project"

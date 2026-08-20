@@ -1270,6 +1270,151 @@ def _semantic_pipeline_gates(pipeline: list[dict[str, Any]]) -> set[str]:
     }
 
 
+def _is_singleton_recovery_planner(wave: object) -> bool:
+    """Return whether a wave is the explicit Planner-first recovery boundary."""
+    if not isinstance(wave, dict):
+        return False
+    delegations = wave.get("delegations")
+    return (
+        wave.get("gates") == ["plan"]
+        and isinstance(delegations, list)
+        and len(delegations) == 1
+        and isinstance(delegations[0], dict)
+        and str(delegations[0].get("agent") or "") == "planner"
+    )
+
+
+def _recovery_contract(waves: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Project the recovery-relevant plan semantics without opaque metadata.
+
+    This deliberately excludes generated wave/dispatch identifiers and default
+    presentation text.  The circuit breaker must compare the actual route,
+    strategy, and verification contract—not regenerated IDs or paraphrased
+    failure prose.
+    """
+    pipeline: list[dict[str, Any]] = []
+    strategy: list[dict[str, Any]] = []
+    verification: list[dict[str, Any]] = []
+    for wave in waves:
+        if not isinstance(wave, dict):
+            continue
+        workers = [item for item in wave.get("delegations", []) if isinstance(item, dict)]
+        if not workers:
+            continue
+        pipeline_workers: list[dict[str, Any]] = []
+        for worker in workers:
+            gate = str(worker.get("gate") or "")
+            agent = str(worker.get("agent") or "")
+            pipeline_workers.append({
+                "gate": gate,
+                "agent": agent,
+                "allowed_paths": list(worker.get("allowed_paths") or []),
+                "context_gates": list(worker.get("context_gates") or []),
+                "context_files": list(worker.get("context_files") or []),
+            })
+            strategy.append({
+                "gate": gate,
+                "agent": agent,
+                "objective": str(worker.get("objective") or ""),
+                "strategy": str(worker.get("strategy") or ""),
+                "requested_model": str(worker.get("requested_model") or ""),
+                "requested_reasoning_effort": str(worker.get("requested_reasoning_effort") or ""),
+            })
+            verification.append({
+                "gate": gate,
+                "acceptance_criteria": list(worker.get("acceptance_criteria") or []),
+                "verification": list(worker.get("verification") or []),
+            })
+        pipeline.append({"gates": list(wave.get("gates") or []), "workers": pipeline_workers})
+    return {
+        "pipeline": pipeline,
+        "strategy": strategy,
+        "verification": verification,
+    }
+
+
+def _recovery_baseline_from_gate(plan: dict[str, Any], gate: str) -> list[dict[str, Any]]:
+    """Return the persisted route from the failed gate onward for comparison."""
+    waves = [wave for wave in plan.get("waves", []) if isinstance(wave, dict)]
+    for index, wave in enumerate(waves):
+        if gate in {str(item) for item in wave.get("gates", [])}:
+            return waves[index:]
+    return waves
+
+
+_RECOVERY_REMEDIATION_MARKERS = {
+    "infrastructure": (
+        "network", "transport", "connection", "service", "host", "mcp", "timeout", "rate limit",
+    ),
+    "environment": (
+        "dependency", "permission", "binary", "configuration", "sandbox", "disk", "toolchain",
+    ),
+}
+_RECOVERY_REMEDIATION_ACTIONS = (
+    "repair", "remediate", "restore", "configure", "provision", "install", "grant", "restart", "resolve",
+)
+
+
+def _has_matching_environment_remediation(
+    pause: dict[str, Any],
+    planner_wave: dict[str, Any],
+) -> bool:
+    """Accept an explicit, class-matched environment remediation in Planner.
+
+    A generic "retry" is intentionally insufficient.  The plan must name an
+    action and a condition that matches the paused infrastructure/environment
+    class, so a coordinator cannot evade the circuit breaker with only new
+    prose in its resume reason.
+    """
+    failure_class = str(pause.get("failure_class") or "").strip()
+    markers = _RECOVERY_REMEDIATION_MARKERS.get(failure_class)
+    if not markers:
+        return False
+    delegations = planner_wave.get("delegations") if isinstance(planner_wave, dict) else []
+    planner = delegations[0] if isinstance(delegations, list) and delegations else {}
+    if not isinstance(planner, dict):
+        return False
+    text = " ".join(
+        str(value or "")
+        for value in (
+            planner.get("objective"),
+            planner.get("strategy"),
+            *(planner.get("acceptance_criteria") or []),
+            *(planner.get("verification") or []),
+        )
+    ).casefold()
+    return any(marker in text for marker in markers) and any(action in text for action in _RECOVERY_REMEDIATION_ACTIONS)
+
+
+def _validate_no_progress_recovery_plan(
+    state: dict[str, Any],
+    plan: dict[str, Any],
+    future_waves: object,
+) -> None:
+    """Require a real recovery decision before releasing a paused retry loop."""
+    pause = state.get("rework_pause") if isinstance(state.get("rework_pause"), dict) else None
+    if not pause or pause.get("status") != "needs_user_decision":
+        return
+    if not isinstance(future_waves, list) or not future_waves or not _is_singleton_recovery_planner(future_waves[0]):
+        raise ValueError(
+            "a no-progress recovery must begin with a singleton Planner plan wave"
+        )
+    prior = _recovery_contract(
+        _recovery_baseline_from_gate(plan, str(pause.get("gate") or ""))
+    )
+    proposed = _recovery_contract(future_waves[1:])
+    materially_changed = any(
+        proposed[field] != prior[field]
+        for field in ("pipeline", "strategy", "verification")
+    )
+    if materially_changed or _has_matching_environment_remediation(pause, future_waves[0]):
+        return
+    raise ValueError(
+        "no-progress recovery must materially change the failed strategy, pipeline, or verification contract; "
+        "infrastructure/environment pauses may instead name a matching remediation in the Planner wave"
+    )
+
+
 def _validate_pending_implementation_retained(
     state: dict[str, Any],
     old_semantic_pipeline: list[dict[str, Any]],
@@ -1916,6 +2061,19 @@ def _corrective_evidence(
     })
     if not failure_classes and finding_fingerprints:
         failure_classes = ["product"]
+    failure_observations = [
+        {"status": status_value, "failure_class": failure_class}
+        for status_value, failure_class in sorted({
+            (
+                str(item.get("status") or "").strip().lower(),
+                _failure_class_from_completion(item),
+            )
+            for item in completions
+            if str(item.get("status") or "").lower() != "passed"
+        })
+    ]
+    if not failure_observations and finding_fingerprints:
+        failure_observations = [{"status": "canonical_rework", "failure_class": "product"}]
     strategy_values = sorted({
         str(item.get("next_strategy") or item.get("strategy") or "default").strip()
         for item in relevant_attempts + completions
@@ -1925,12 +2083,20 @@ def _corrective_evidence(
         "gate": gate,
         "finding_fingerprints": sorted(finding_fingerprints),
         "manifest_digests": manifest_digests,
-        "result_digest": digest_text(json.dumps(raw_reasons, ensure_ascii=False, sort_keys=True)),
+        # Free-text host reasons are audit evidence, not stable state-machine
+        # identity. Equivalent failures frequently differ only in agent or
+        # transport phrasing; grouping them by outcome/failure class prevents
+        # that prose churn from bypassing the no-progress circuit breaker.
+        "result_digest": digest_text(json.dumps(failure_observations, ensure_ascii=False, sort_keys=True)),
         "verification_digest": digest_text(json.dumps(verification_contract, ensure_ascii=False, sort_keys=True)),
         "failure_classes": failure_classes or ["product"],
         "strategy_digest": digest_text(json.dumps(strategy_values, ensure_ascii=False, sort_keys=True)),
     }
     evidence["signature"] = digest_text(json.dumps(evidence, ensure_ascii=False, sort_keys=True))
+    # Keep a privacy-preserving audit trail that can explain why two attempts
+    # were grouped, but do not let mutable prose participate in the liveness
+    # identity calculated immediately above.
+    evidence["reason_audit_digest"] = digest_text(json.dumps(raw_reasons, ensure_ascii=False, sort_keys=True))
     return evidence
 
 
@@ -2428,13 +2594,34 @@ def _replace_future_orchestrate_waves(
     if rework_gates and not params.get("allow_rework", False):
         raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
     if rework_gates:
+        # A material steer can promote a C1 task to full governance while its
+        # earliest affected gate is the gate that just completed.  Reworking
+        # that gate against the old pipeline would validate the now-full
+        # governance invariant before its activation/close waves are present.
+        # Construct the replacement pipeline atomically with the rework so the
+        # promotion, invalidation, and mandatory governance waves cannot be
+        # separated by a failed transition.
+        reworked = set(rework_gates)
+        retained_completed = completed_set - reworked
+        replacement_pipeline = [
+            gate for gate in state["current_pipeline"] if gate in retained_completed
+        ]
+        for gate in classification["pipeline"]:
+            if gate not in replacement_pipeline:
+                replacement_pipeline.append(gate)
+        replacement_groups = (
+            [[gate] for gate in state["current_pipeline"] if gate in retained_completed]
+            + [wave["gates"] for wave in future]
+        )
         revised = update_pipeline({
             **params,
             "task_id": state["task_id"],
             "expected_revision": state["revision"],
+            "pipeline": replacement_pipeline,
+            "parallel_groups": replacement_groups,
             "operations": [{"op": "rework", "gate": gate} for gate in rework_gates],
             "allow_rework": True,
-            "reason": "Unified facade explicitly reintroduced completed gates in future_waves.",
+            "reason": "Unified facade atomically applied completed-gate rework with its replacement pipeline.",
         })
         state = revised["state"]
         completed_set = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
@@ -3117,6 +3304,13 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             "invariant_recovery": True,
             "reason": params.get("reason") or str(no_progress_pause.get("required_recovery") or "Recover a paused corrective strategy."),
         }
+        normalized_recovery, _ = _normalize_orchestrate_waves(
+            params.get("future_waves"),
+            task,
+            plan.get("host_capabilities") or {},
+            str(params["project_root"]),
+        )
+        _validate_no_progress_recovery_plan(state, plan, normalized_recovery)
     if params.get("future_waves") is not None:
         state, plan = _replace_future_orchestrate_waves(
             params, task_dir, state, plan, params["future_waves"]
