@@ -515,10 +515,10 @@ def _activate_closure_rework(
 
     The current review/close attempt is deliberately not allowed to complete.
     Reordering the canonical pipeline places the corrective target ahead of a
-    fresh review and close, while ``rework`` invalidates all stale evidence and
-    attempts from that target onward.  The orchestration engine subsequently
-    sees the target as the active wave and reuses its canonical wave contract
-    to prepare a new delegation.
+    fresh originating verifier and every later close verifier, while ``rework``
+    invalidates all stale evidence and attempts from that target onward.  The
+    orchestration engine subsequently sees the target as the active wave and
+    reuses its canonical wave contract to prepare a new delegation.
     """
     target_gate = _closure_rework_target(state, gate, findings)
     pipeline = list(state.get("current_pipeline", []))
@@ -537,10 +537,19 @@ def _activate_closure_rework(
         )
         pipeline.insert(pipeline.index(later) if later else len(pipeline), target_gate)
     # Preserve the corrective target's position so the rework operation makes
-    # it the first incomplete gate. Move only the final review/close checks to
-    # the tail; moving the target itself behind QA or documentation would leave
-    # the just-failed gate active and produce a false ``needs_input`` state.
-    final_checks = [item for item in ("review", "close") if item in pipeline]
+    # it the first incomplete gate. Move the originating closure gate and
+    # every later closure verifier to the tail; moving the target itself behind
+    # QA or documentation would leave the just-failed gate active and produce
+    # a false ``needs_input`` state.  The previous review/close-only list
+    # omitted governance_activation and governance_close, leaving a finding
+    # raised by one of those gates without the fresh origin rerun required for
+    # a server-bound resolution receipt.
+    closure_gates = {"review", "governance_activation", "governance_close", "close"}
+    origin_index = pipeline.index(gate) if gate in pipeline else len(pipeline)
+    final_checks = [
+        item for index, item in enumerate(pipeline)
+        if index >= origin_index and item in closure_gates
+    ]
     reordered = [item for item in pipeline if item not in final_checks] + final_checks
     change = apply_pipeline_operations(
         state,
@@ -572,7 +581,7 @@ def _activate_closure_rework(
         rework[gate] = {
             "status": "rework_required",
             "target_gate": target_gate,
-            "rerun_gates": [item for item in ("review", "close") if item in reordered],
+            "rerun_gates": list(final_checks),
             "finding_fingerprints": fingerprints,
             # Rework invalidates the review/close receipt that raised the
             # finding.  Keep its immutable report reference in durable state

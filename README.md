@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.11-7c3aed" alt="Cortex 9.2.11" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.13-7c3aed" alt="Cortex 9.2.13" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,11 +691,11 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.11 report and hook hardening release
+### 9.2.13 report, hook, and governance-rework hardening release
 
 The current source-tree hardening draft retains the 9.2.10 stopped-report and
-plan-approval recovery guarantees, and additionally hardens worker reporting
-and lifecycle-hook loading. `record_report` accepts only the worker identity
+plan-approval recovery guarantees, and additionally hardens worker reporting,
+lifecycle-hook loading, and multi-hop corrective handoff. `record_report` accepts only the worker identity
 from its briefing/template plus `draft_ref` and an optional patch or report
 payload; `task_ref`, `dispatch_ref`, and `submission_id` are coordinator
 transport fields. A direct draft must remain a current-user regular
@@ -704,7 +704,16 @@ rather than being path-repaired after an untrusted replacement. Evidence
 marker diagnostics now state the exact required marker and criterion, and
 `changed_files` must describe only paths changed since that exact attempt's
 baseline. The lifecycle hook resolves its bundled runtime when a host loads it
-through `importlib`.
+through `importlib`. While a closure rework is active, the exact
+server-bound corrective report remains in later QA/security and final-verifier
+handoffs even when normal transitive frontier compaction would otherwise cover
+it; the originating verifier therefore has the receipt evidence required to
+resolve the finding. An empty `required_missing` list is scoped to the current
+gate: it cannot silently resolve a server-created verification blocker from a
+different gate or charge that worker with a provenance transition it never
+submitted. The controller keeps that blocker open and, for governance-origin
+findings, places the fresh originating governance gate and all later closure
+verifiers after corrective work before any resolution can be recorded.
 
 Governance record bodies are read from verified
 immutable content artifacts; exact normalized scope, task/initiative links,
@@ -744,7 +753,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.11 cachebuster and full release/live results
+exact 9.2.13 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
