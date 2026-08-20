@@ -4,10 +4,10 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.9 release candidate
+## 9.2.11 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.9 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.11 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
@@ -27,6 +27,15 @@ completion-pending state, not a live child. A coordinator selects one
 receipt-attested report; a stale Planner report cannot mutate the plan, and no
 eligible report transitions the task only to a fresh Planner-first recovery.
 
+The candidate also keeps the worker/coordinator report boundary strict:
+`task_ref`, `dispatch_ref`, and `submission_id` are coordinator transport
+fields, never `record_report` identity. Worker drafts are verified on the
+opened descriptor as current-user regular non-symlink files with exact `0600`
+mode; a rejected direct edit is not path-repaired. Evidence-marker diagnostics
+name the exact required marker and criterion, while `changed_files` remains
+bound to the immutable baseline of that exact worker attempt. Lifecycle hooks
+resolve their bundled runtime when a host loads them through `importlib`.
+
 Worker Briefing v3 budgets are enforced when the immutable briefing is saved:
 the compact native bootstrap is capped at 1.5 KiB, ordinary briefings use a
 16 KiB soft target and 24 KiB hard ceiling, and harvest briefings use an
@@ -41,7 +50,7 @@ just to fit transport limits.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.9` (the current source candidate carries a cachebuster; installed builds
+  `9.2.11` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -107,7 +116,10 @@ replacement through `record_report`. Invalid `record_report` calls leave the
 same file in place and consume no attempt. A new template
 supersedes an old or expired draft. `record_report` rereads/revalidates and
 deletes the file and metadata only after commit. Normal callers send only
-identity and ref; legacy full-payload recording remains compatible.
+worker identity and ref/payload; `task_ref`, `dispatch_ref`, and
+`submission_id` are rejected. The current-user regular non-symlink draft must
+remain exact `0600`; rejection leaves a caller-authored replacement untouched.
+Legacy full-payload recording remains compatible.
 The server-owned `resolved_user_decisions` projection is attached outside the
 worker-authored seven-field report, with bounded recent copies in replacement
 briefings; localized choice custom context is retained and translated to
@@ -178,7 +190,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.9 release commit only with explicit authorization.
+- Create the Cortex 9.2.11 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

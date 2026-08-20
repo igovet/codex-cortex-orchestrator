@@ -111,7 +111,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.9 hardening release candidate above;
+candidate. They do not certify the 9.2.11 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -198,15 +198,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.9 source cachebuster. Historical
+The source manifest now declares the 9.2.11 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.9 release-candidate evidence status
+## 9.2.11 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.9 base version.
+source cachebuster is generated from the 9.2.11 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -227,7 +227,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.9 source contract
+## Current 9.2.11 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -246,6 +246,9 @@ pending full-suite or live gates.
   launcher-based MCP and five-hook configuration, marketplace validation, and
   fresh-plugin probing. A release candidate must pass the full regression,
   cold-boot, fresh-plugin, and tracked-archive checks before publication.
+- Hook regressions additionally load `cortex_hook.py` through `importlib` with
+  its scripts directory absent from the caller path and require resolution of
+  the same host-private ledger.
 - The public executable is a composition and stdio entrypoint; focused runtime modules own the
   orchestration engine, SQLite ledger/migrations, artifact transport,
   delegation persistence, gate transitions, harvest validation, reports,
@@ -294,13 +297,19 @@ pending full-suite or live gates.
   structured JSON file with mode `0600` and returns `draft_ref`, `draft_path`,
   and expiry without returning the body. Writers edit that exact file;
   read-only workers may send a small RFC 7396 merge patch or complete
-  replacement through `record_report`. Invalid records leave the same file in
+  replacement through `record_report`. Direct drafts must remain current-user
+  regular non-symlink files with exact `0600` mode; the server validates the
+  opened descriptor and never path-repairs an unsafe replacement. Public
+  workers send only `project_root`, `task_id`, `attempt_id`, `profile`,
+  `draft_ref`, and optional patch/report data; `task_ref`, `dispatch_ref`, and
+  `submission_id` are rejected coordinator transport fields. Invalid records leave the same file in
   place and consume no worker attempt; a new template supersedes an old or
   expired draft. `record_report` rereads/revalidates current state, atomically
   persists, then deletes the file and metadata only after commit. Legacy
   full-payload `record_report` remains compatible. Host-sandboxed read-only
   gates record ordinary shared-checkout source deltas as concurrency evidence;
-  claimed `changed_files` still fail. Every ignored side effect is retained as
+  `changed_files` must match the exact worker attempt baseline, so pre-existing,
+  concurrent, or another-attempt paths still fail. Every ignored side effect is retained as
   non-blocking digest evidence, with recognized conventional test/build/cache
   residue and unknown framework output classified separately.
 - The server-owned `resolved_user_decisions` snapshot is carried with each

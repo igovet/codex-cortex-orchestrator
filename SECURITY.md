@@ -2,16 +2,16 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.9` source line. The public
+Security fixes are prepared for the current `9.2.11` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.9 source candidate adds stopped-report recovery integrity to the
-disaster-recovery backup, coordinator recovery delivery, and governance schema
-v12 checks already present in this source line. Its exact source cachebuster is
-generated from the 9.2.9 base version;
+The 9.2.11 source candidate retains stopped-report recovery integrity and adds
+private report-draft descriptor validation plus importlib-safe lifecycle-hook
+runtime resolution. Its exact source cachebuster is generated from the 9.2.11
+base version;
 tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
 a publication or installation claim.
@@ -61,8 +61,12 @@ other ledger artifacts except the exact report `draft_path` returned to that
 worker. `get_report_template` creates this task- and attempt-scoped JSON file
 with mode `0600`; the server stores only its exact path, identity, expiry, and
 draft metadata in SQLite. Public tools accept the opaque `draft_ref`, not
-an arbitrary caller path, and reject path escape, symlinks, broad permissions,
-identity mismatch, or expiry. Invalid `record_report` keeps the
+an arbitrary caller path, and reject path escape, symlinks, non-regular or
+non-owner files, every mode other than exact `0600`, identity mismatch, or
+expiry. Draft reads recheck the opened descriptor rather than repairing an
+untrusted path after lookup. `record_report` accepts only worker identity,
+`draft_ref`, and report payload fields; coordinator `task_ref`, `dispatch_ref`,
+and `submission_id` are rejected. Invalid `record_report` keeps the
 same file for correction; successful `record_report` deletes it and its
 metadata only after the durable report commit. A new template supersedes the
 prior attempt draft.

@@ -98,6 +98,7 @@ bind_symbols(
         "get_worker_question_updates",
         "handoff",
         "init_task",
+        "invalidate_plan_approval_for_reopened_plan",
         "invalidate_reworked_report_receipts",
         "lane_status",
         "ledger_root",
@@ -1920,7 +1921,30 @@ def _hold_for_plan_approval(task_dir: Path, state: dict[str, Any], plan: dict[st
     ):
         return None
     if approval.get("status") == "approved":
-        return None
+        # Older ledgers can retain an approved basis while a replacement
+        # planner report has already become ``planning_current``.  This is
+        # most visible when that replacement report is completion-pending:
+        # consuming it used to reach _assert_approved_plan_fresh and fail on
+        # the old report ref.  Recover inside this state transaction by
+        # retiring the old approval and immediately producing a review for the
+        # current immutable planner revision.
+        manifest = current_planning_manifest(task_dir)
+        approved_report_ref = safe_id(str(approval.get("plan_report_ref") or ""))
+        current_report_ref = safe_id(
+            str(manifest.get("source_report_ref") or "")
+        ) if isinstance(manifest, dict) else ""
+        if current_report_ref and current_report_ref != approved_report_ref:
+            invalidate_plan_approval_for_reopened_plan(
+                state,
+                reason=(
+                    "Recovered a stale approved plan after a replacement planner report "
+                    "became the current planning revision."
+                ),
+                event="stale_approved_recovery",
+            )
+            approval = _plan_approval(state)
+        else:
+            return None
     if approval.get("status") == "awaiting_user":
         if not str(approval.get("request_id") or "").strip():
             approval["request_id"] = _plan_approval_request_id(state, approval)

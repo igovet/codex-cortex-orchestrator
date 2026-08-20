@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-
-import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins" / "cortex" / "scripts"))
 
@@ -80,6 +81,37 @@ class HostPrivateControlStoreTests(unittest.TestCase):
             self.assertEqual(resolved, first)
             self.assertFalse((self.project / ".codex" / "cortex" / "cortex.db").exists())
             self.assertFalse((self.other_project / ".codex" / "cortex" / "cortex.db").exists())
+
+    def test_importlib_loaded_hook_resolves_the_private_mapping(self) -> None:
+        """The host can load hooks without adding their scripts directory."""
+        with self._environment():
+            expected = control.ledger_root({"project_root": str(self.project)})
+            hook = Path(__file__).parents[1] / "plugins" / "cortex" / "scripts" / "cortex_hook.py"
+            loader = (
+                "import importlib.util, json, pathlib, sys\n"
+                "hook_path, project = map(pathlib.Path, sys.argv[1:])\n"
+                "scripts_root = hook_path.parent.resolve()\n"
+                "sys.path[:] = [item for item in sys.path if pathlib.Path(item or '.').resolve() != scripts_root]\n"
+                "sys.modules.pop('cortex', None)\n"
+                "spec = importlib.util.spec_from_file_location('isolated_cortex_hook', hook_path)\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "assert spec.loader is not None\n"
+                "spec.loader.exec_module(module)\n"
+                "print(json.dumps({'resolver_loaded': module.ledger_root_path is not None, "
+                "'root': str(module.root({'tool_input': {'project_root': str(project)}}))}))\n"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", loader, str(hook), str(self.project)],
+                cwd=self.base,
+                env=os.environ.copy(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertTrue(result["resolver_loaded"])
+            self.assertEqual(Path(result["root"]), expected)
 
     def test_legacy_sqlite_ledger_moves_as_one_private_same_filesystem_tree(self) -> None:
         legacy = self._legacy_root()

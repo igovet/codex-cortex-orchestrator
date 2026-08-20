@@ -4847,10 +4847,13 @@ def _validate_gate_result_report(
     missing_markers: list[str] = []
     invalid_markers: list[str] = []
     weak_detail = ("<specific", "todo", "tbd", "unverified", "not run", "not tested", "unknown")
-    for prefix, _criterion in _result_contract_markers(attempt, task):
+    for prefix, criterion in _result_contract_markers(attempt, task):
         matching = [item for item in evidence_items if item.startswith(prefix)]
         if not matching:
-            missing_markers.append(prefix.rstrip())
+            missing_markers.append(
+                "Add exactly: " + prefix
+                + "<concrete observed proof for: " + redact(criterion, 500) + ">"
+            )
             continue
         detail = matching[0][len(prefix):].strip()
         if not detail or any(marker in detail.lower() for marker in weak_detail):
@@ -5562,6 +5565,58 @@ def append_pipeline_change(state: dict[str, Any], change: dict[str, Any], reason
         for attempt in state.get("attempts", []):
             if attempt.get("gate") == gate:
                 attempt["invalidated"] = True
+    if "plan" in reset_gates:
+        invalidate_plan_approval_for_reopened_plan(
+            state,
+            reason=reason,
+            reset_gates=sorted(reset_gates),
+        )
+
+
+def invalidate_plan_approval_for_reopened_plan(
+    state: dict[str, Any],
+    *,
+    reason: str,
+    reset_gates: list[str] | None = None,
+    event: str = "plan_reopened",
+) -> bool:
+    """Retire a required approval when pipeline work reopens ``plan``.
+
+    Pipeline mutations and their approval invalidation must share the caller's
+    durable state transaction.  Keeping this state-only helper beside
+    ``append_pipeline_change`` makes every generic and internal rework path
+    use one rule, while callers still emit their ordinary single state event.
+    Historical approval evidence is retained under ``history`` only; none of
+    its request or basis fields remain eligible for the replacement plan.
+    """
+    approval = _plan_approval(state)
+    if approval.get("policy") != "required":
+        return False
+
+    previous = {
+        key: json.loads(json.dumps(approval[key]))
+        for key in (
+            "status", "review", "plan_report_ref", "pending_basis",
+            "approved_basis", "request_id", "requested_at", "approved_at",
+            "feedback",
+        )
+        if key in approval
+    }
+    approval.setdefault("history", []).append({
+        "event": event,
+        "at": now(),
+        "reason": redact(reason, 2000),
+        "reset_gates": list(reset_gates or ["plan"]),
+        "previous": previous,
+    })
+    for key in (
+        "review", "plan_report_ref", "pending_basis", "approved_basis",
+        "request_id", "requested_at", "approved_at",
+    ):
+        approval.pop(key, None)
+    approval.update({"policy": "required", "status": "pending_plan", "feedback": None})
+    state["plan_approval"] = approval
+    return True
 
 
 def invalidate_reworked_report_receipts(task_dir: Path, state: dict[str, Any]) -> None:

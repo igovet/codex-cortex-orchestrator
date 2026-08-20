@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.9-7c3aed" alt="Cortex 9.2.9" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.11-7c3aed" alt="Cortex 9.2.11" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -672,7 +672,8 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 7. **Fresh approvals and adaptive replanning.** Required approval is available
    only after the final plan. The review records the plan revision, planner
    report reference, verified-predecessor digest, and semantic future-pipeline
-   digest. A material future-wave change or plan rework preserves history,
+   digest. A material future-wave change or any pipeline operation that reopens
+   `plan` preserves history,
    resets approval to `pending_plan`, and requires a replacement Planner plus a
    new approval. No-op and transport-only changes do not invalidate approval;
    stale basis digests block dispatch with recoverable reapproval guidance. The
@@ -690,10 +691,22 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.9 stopped-report recovery and disaster-recovery hardening release
+### 9.2.11 report and hook hardening release
 
-The current source-tree hardening draft extends governance with schema v12
-integrity guarantees. Governance record bodies are read from verified
+The current source-tree hardening draft retains the 9.2.10 stopped-report and
+plan-approval recovery guarantees, and additionally hardens worker reporting
+and lifecycle-hook loading. `record_report` accepts only the worker identity
+from its briefing/template plus `draft_ref` and an optional patch or report
+payload; `task_ref`, `dispatch_ref`, and `submission_id` are coordinator
+transport fields. A direct draft must remain a current-user regular
+non-symlink file with exact `0600` permissions; it is rejected for correction
+rather than being path-repaired after an untrusted replacement. Evidence
+marker diagnostics now state the exact required marker and criterion, and
+`changed_files` must describe only paths changed since that exact attempt's
+baseline. The lifecycle hook resolves its bundled runtime when a host loads it
+through `importlib`.
+
+Governance record bodies are read from verified
 immutable content artifacts; exact normalized scope, task/initiative links,
 linear revisions, strict JSON, immutable-field triggers, and idempotent
 submission receipts fail closed on corruption or replay conflict. Schema v11
@@ -731,7 +744,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.9 cachebuster and full release/live results
+exact 9.2.11 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
@@ -849,7 +862,12 @@ returns its short `draft_ref` and absolute `draft_path` without echoing the
 body. A worker fills that file and calls `record_report` with the same
 `draft_ref`; read-only workers can provide a small JSON Merge Patch or a
 complete replacement through `record_report` when their sandbox cannot edit
-the file. Invalid records keep the draft and consume no worker attempt. Caller/input/schema validation
+the file. A draft must be a current-user regular non-symlink file with exact
+`0600` mode; the server rejects an unsafe direct edit rather than repairing it
+by path. `record_report` uses only `project_root`, `task_id`, `attempt_id`,
+`profile`, `draft_ref`, and optional patch/report fields—never coordinator
+`task_ref`, `dispatch_ref`, or `submission_id`. Invalid records keep the draft
+and consume no worker attempt. Caller/input/schema validation
 from any allowed worker tool is also corrected and retried on the same attempt
 without consuming recovery budget; only explicit `retryable: false` integrity
 or storage blockers are terminal. Successful finalization revalidates the

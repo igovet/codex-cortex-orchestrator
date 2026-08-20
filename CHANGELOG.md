@@ -1,5 +1,34 @@
 # Changelog
 
+## [9.2.11] - 2026-08-20
+
+This source-tree patch hardens the public worker-report boundary and hook
+runtime loading without weakening report evidence or write-attribution checks.
+
+- Keep `task_ref`, `dispatch_ref`, and `submission_id` coordinator-only, and
+  return a precise same-attempt correction when a worker sends them to
+  `record_report`.
+- Create and read report drafts through private descriptors: a draft must be a
+  current-user, regular non-symlink file with exact `0600` mode, and a failed
+  validation never repairs an arbitrary worker-authored path.
+- Make missing evidence-marker and `changed_files`-baseline diagnostics
+  directly actionable while retaining the exact evidence and attempt-delta
+  integrity contract.
+- Make lifecycle hooks resolve their bundled Python runtime when a host loads
+  the hook with `importlib` instead of executing it from the scripts directory.
+
+## [9.2.10] - 2026-08-20
+
+This source-tree patch fixes the approval-state inconsistency that could occur
+when generic or internal pipeline rework reopened the final `plan` gate.
+
+- Retire the active required-plan approval atomically whenever a pipeline reset
+  includes `plan`, while preserving the prior approval basis and request data
+  in audit history.
+- Recover legacy completion-pending replacement planners whose current report
+  differs from a stale approved basis by opening a fresh, request-bound approval
+  hold instead of preparing a successor or failing on the obsolete manifest.
+
 ## [9.2.9] - 2026-08-20
 
 This source-tree patch fixes recovery after a native worker stops after it has
