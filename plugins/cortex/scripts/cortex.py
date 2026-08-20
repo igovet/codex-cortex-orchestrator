@@ -7790,8 +7790,10 @@ TASK_COORDINATOR_CAPABILITY_ACTIONS = frozenset({
 PROJECT_ADMIN_CAPABILITY_ACTIONS = frozenset({"*"})
 CAPABILITY_RECOVERY_ACTIONS = frozenset({
     "recover_coordinator_capability", "rotate_coordinator_capability",
+    "acknowledge_coordinator_recovery",
 })
 COORDINATOR_RECOVERY_PROOF_RE = re.compile(r"^[0-9a-f]{64}$")
+COORDINATOR_RECOVERY_DELIVERY_SCHEMA = "cortex/coordinator-recovery-delivery/v1"
 
 
 def _operation_registry_path(root: Path) -> Path:
@@ -7868,6 +7870,79 @@ def _coordinator_recovery_proof_digest(proof: str) -> str:
 
 def _pending_coordinator_capability_key(root: Path, task_id: str) -> tuple[str, str]:
     return str(root.resolve()), str(task_id)
+
+
+def _pending_recovery_delivery_metadata(
+    task_id: str,
+    *,
+    source_generation: int,
+    recovery_proof: str,
+) -> dict[str, Any]:
+    """Derive a redeliverable pair and retain only non-secret metadata.
+
+    The current recovery proof is the HMAC key.  Cortex does not persist a
+    replacement bearer/proof: a retry that carries the same valid old proof
+    deterministically recomputes the same pair after a crash.  The ledger
+    retains only an opaque nonce and SHA-256 verifiers.
+    """
+    delivery_id = secrets.token_hex(32)
+    context = json.dumps({
+        "schema": COORDINATOR_RECOVERY_DELIVERY_SCHEMA,
+        "task_id": str(task_id),
+        "source_generation": int(source_generation),
+        "target_generation": int(source_generation) + 1,
+        "delivery_id": delivery_id,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    key = bytes.fromhex(recovery_proof)
+    capability = hmac.new(key, b"cortex/recovery-capability/v1\x00" + context, hashlib.sha256).hexdigest()
+    next_proof = hmac.new(key, b"cortex/recovery-proof/v1\x00" + context, hashlib.sha256).hexdigest()
+    return {
+        "schema": COORDINATOR_RECOVERY_DELIVERY_SCHEMA,
+        "delivery_id": delivery_id,
+        "source_generation": int(source_generation),
+        "target_generation": int(source_generation) + 1,
+        "coordinator_capability_digest": _coordinator_capability_digest(capability),
+        "coordinator_recovery_proof_digest": _coordinator_recovery_proof_digest(next_proof),
+        "created_at": now(),
+    }
+
+
+def _pending_recovery_delivery_credentials(
+    task_id: str,
+    pending: object,
+    *,
+    recovery_proof: str,
+) -> dict[str, Any]:
+    """Recompute and verify a pending pair from a valid old recovery proof."""
+    if not isinstance(pending, dict) or pending.get("schema") != COORDINATOR_RECOVERY_DELIVERY_SCHEMA:
+        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
+    source_generation = pending.get("source_generation")
+    target_generation = pending.get("target_generation")
+    if not isinstance(source_generation, int) or not isinstance(target_generation, int) or target_generation != source_generation + 1:
+        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
+    delivery_id = str(pending.get("delivery_id") or "").lower()
+    if not COORDINATOR_CAPABILITY_RE.fullmatch(delivery_id):
+        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
+    context = json.dumps({
+        "schema": COORDINATOR_RECOVERY_DELIVERY_SCHEMA,
+        "task_id": str(task_id),
+        "source_generation": source_generation,
+        "target_generation": target_generation,
+        "delivery_id": delivery_id,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    key = bytes.fromhex(recovery_proof)
+    capability = hmac.new(key, b"cortex/recovery-capability/v1\x00" + context, hashlib.sha256).hexdigest()
+    next_proof = hmac.new(key, b"cortex/recovery-proof/v1\x00" + context, hashlib.sha256).hexdigest()
+    expected_capability_digest = str(pending.get("coordinator_capability_digest") or "").lower()
+    expected_proof_digest = str(pending.get("coordinator_recovery_proof_digest") or "").lower()
+    if (
+        not COORDINATOR_CAPABILITY_RE.fullmatch(expected_capability_digest)
+        or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_proof_digest)
+        or not hmac.compare_digest(_coordinator_capability_digest(capability), expected_capability_digest)
+        or not hmac.compare_digest(_coordinator_recovery_proof_digest(next_proof), expected_proof_digest)
+    ):
+        raise GovernanceError("coordinator recovery delivery is invalid", code="coordinator_recovery_delivery_unavailable")
+    return {"coordinator_capability": capability, "coordinator_recovery_proof": next_proof}
 
 
 def _coordinator_capability_expiry() -> str:
@@ -8027,7 +8102,7 @@ def _record_capability_rotation(
     return claims
 
 
-def _rotate_coordinator_capability(
+def _begin_coordinator_capability_recovery(
     root: Path,
     *,
     task_id: str,
@@ -8035,38 +8110,30 @@ def _rotate_coordinator_capability(
     thread_id: str,
     recovery_proof: str,
     expected_generation: int | None = None,
-    reason: str = "lost_response_recovery",
-) -> tuple[str, str, dict[str, Any]]:
-    """Rotate a task bearer after a lost response without persisting plaintext.
+) -> tuple[dict[str, str], dict[str, Any], bool]:
+    """Create or redeliver a pending replacement without retiring old access.
 
-    The caller must already have proven the same active principal/thread/task
-    binding.  This function checks the durable generation again under the
-    state lock, so a stale recovery cannot resurrect a revoked bearer.
+    This is intentionally not a rotation yet.  A response can be lost after
+    this durable operation; repeating it with the *same old proof* derives
+    precisely the same new pair.  The active bearer/proof remain authoritative
+    until :func:`_acknowledge_coordinator_capability_recovery` receives both
+    delivered replacement values.
     """
     with state_lock(root):
         registry = _operation_registry(root)
         record = registry.get("tasks", {}).get(str(task_id))
         start = record.get("start") if isinstance(record, dict) else None
         claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
-        if not _valid_coordinator_capability_claims(
-            claims,
-            task_id=str(task_id),
-            require_unexpired=False,
-        ):
+        if not _valid_coordinator_capability_claims(claims, task_id=str(task_id), require_unexpired=False):
             raise GovernanceError("coordinator capability cannot be recovered for this task", code="coordinator_capability_invalid")
         if str(claims.get("principal")) != principal or str(claims.get("thread_id")) != thread_id:
             raise GovernanceError("capability recovery identity does not match its active task", code="coordinator_authorization_required")
-        supplied_recovery_proof = str(recovery_proof or "").strip().lower()
-        expected_recovery_proof_digest = str(
-            start.get("coordinator_recovery_proof_digest") if isinstance(start, dict) else ""
-        ).strip().lower()
+        supplied_proof = str(recovery_proof or "").strip().lower()
+        expected_proof_digest = str(start.get("coordinator_recovery_proof_digest") if isinstance(start, dict) else "").strip().lower()
         if (
-            not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(supplied_recovery_proof)
-            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_recovery_proof_digest)
-            or not hmac.compare_digest(
-                _coordinator_recovery_proof_digest(supplied_recovery_proof),
-                expected_recovery_proof_digest,
-            )
+            not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(supplied_proof)
+            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_proof_digest)
+            or not hmac.compare_digest(_coordinator_recovery_proof_digest(supplied_proof), expected_proof_digest)
         ):
             raise GovernanceError(
                 "coordinator capability recovery requires the original non-durable recovery proof",
@@ -8075,26 +8142,96 @@ def _rotate_coordinator_capability(
         generation = int(claims["generation"])
         if expected_generation is not None and int(expected_generation) != generation:
             raise GovernanceError("capability recovery generation is stale", code="coordinator_capability_stale")
-        new_bearer = secrets.token_hex(32)
-        new_recovery_proof = secrets.token_hex(32)
-        new_digest = _coordinator_capability_digest(new_bearer)
-        new_recovery_proof_digest = _coordinator_recovery_proof_digest(new_recovery_proof)
-        rotated_claims = _record_capability_rotation(dict(claims), reason=reason)
-        start["coordinator_capability_digest"] = new_digest
-        start["coordinator_recovery_proof_digest"] = new_recovery_proof_digest
+        pending = start.get("pending_coordinator_recovery") if isinstance(start, dict) else None
+        redelivered = isinstance(pending, dict)
+        if redelivered:
+            if pending.get("source_generation") != generation:
+                raise GovernanceError("coordinator recovery delivery is stale", code="coordinator_capability_stale")
+        else:
+            pending = _pending_recovery_delivery_metadata(
+                task_id,
+                source_generation=generation,
+                recovery_proof=supplied_proof,
+            )
+            start["pending_coordinator_recovery"] = pending
+            record["start"] = start
+            registry["tasks"][str(task_id)] = record
+            for reservation in registry.get("starts", {}).values():
+                if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
+                    reservation["pending_coordinator_recovery"] = dict(pending)
+            _write_operation_registry(root, registry)
+        credentials = _pending_recovery_delivery_credentials(
+            task_id, pending, recovery_proof=supplied_proof,
+        )
+        return credentials, dict(claims), redelivered
+
+
+def _acknowledge_coordinator_capability_recovery(
+    root: Path,
+    *,
+    task_id: str,
+    principal: str,
+    thread_id: str,
+    replacement_capability: str,
+    replacement_recovery_proof: str,
+    previous_recovery_proof: str,
+    expected_generation: int | None = None,
+) -> dict[str, Any]:
+    """Activate a delivered pair and retire the old generation atomically."""
+    with state_lock(root):
+        registry = _operation_registry(root)
+        record = registry.get("tasks", {}).get(str(task_id))
+        start = record.get("start") if isinstance(record, dict) else None
+        claims = start.get("coordinator_capability_claims") if isinstance(start, dict) else None
+        if not _valid_coordinator_capability_claims(claims, task_id=str(task_id), require_unexpired=False):
+            raise GovernanceError("coordinator capability cannot be acknowledged for this task", code="coordinator_capability_invalid")
+        if str(claims.get("principal")) != principal or str(claims.get("thread_id")) != thread_id:
+            raise GovernanceError("capability recovery identity does not match its active task", code="coordinator_authorization_required")
+        generation = int(claims["generation"])
+        if expected_generation is not None and int(expected_generation) != generation + 1:
+            raise GovernanceError("capability recovery generation is stale", code="coordinator_capability_stale")
+        pending = start.get("pending_coordinator_recovery") if isinstance(start, dict) else None
+        if not isinstance(pending, dict) or pending.get("source_generation") != generation or pending.get("target_generation") != generation + 1:
+            raise GovernanceError("coordinator recovery delivery is unavailable", code="coordinator_recovery_delivery_unavailable")
+        capability = str(replacement_capability or "").strip().lower()
+        proof = str(replacement_recovery_proof or "").strip().lower()
+        old_proof = str(previous_recovery_proof or "").strip().lower()
+        active_old_proof_digest = str(start.get("coordinator_recovery_proof_digest") or "").strip().lower()
+        expected_capability_digest = str(pending.get("coordinator_capability_digest") or "").strip().lower()
+        expected_proof_digest = str(pending.get("coordinator_recovery_proof_digest") or "").strip().lower()
+        if (
+            not COORDINATOR_CAPABILITY_RE.fullmatch(capability)
+            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(proof)
+            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(old_proof)
+            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(active_old_proof_digest)
+            or not COORDINATOR_CAPABILITY_RE.fullmatch(expected_capability_digest)
+            or not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(expected_proof_digest)
+            or not hmac.compare_digest(_coordinator_recovery_proof_digest(old_proof), active_old_proof_digest)
+            or not hmac.compare_digest(_coordinator_capability_digest(capability), expected_capability_digest)
+            or not hmac.compare_digest(_coordinator_recovery_proof_digest(proof), expected_proof_digest)
+        ):
+            raise GovernanceError("coordinator recovery acknowledgement requires the delivered replacement pair", code="coordinator_recovery_acknowledgement_required")
+        derived = _pending_recovery_delivery_credentials(task_id, pending, recovery_proof=old_proof)
+        if (
+            not hmac.compare_digest(capability, derived["coordinator_capability"])
+            or not hmac.compare_digest(proof, derived["coordinator_recovery_proof"])
+        ):
+            raise GovernanceError("coordinator recovery acknowledgement is invalid", code="coordinator_recovery_acknowledgement_required")
+        rotated_claims = _record_capability_rotation(dict(claims), reason="lost_response_recovery_acknowledged")
+        start["coordinator_capability_digest"] = expected_capability_digest
+        start["coordinator_recovery_proof_digest"] = expected_proof_digest
         start["coordinator_capability_claims"] = rotated_claims
+        start.pop("pending_coordinator_recovery", None)
         record["start"] = start
         registry["tasks"][str(task_id)] = record
-        # Start reservations are a replay receipt, not an alternative
-        # credential authority.  Keep their non-secret verifier metadata in
-        # sync so an old generation cannot survive in another registry branch.
         for reservation in registry.get("starts", {}).values():
             if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
-                reservation["coordinator_capability_digest"] = new_digest
-                reservation["coordinator_recovery_proof_digest"] = new_recovery_proof_digest
+                reservation["coordinator_capability_digest"] = expected_capability_digest
+                reservation["coordinator_recovery_proof_digest"] = expected_proof_digest
                 reservation["coordinator_capability_claims"] = dict(rotated_claims)
+                reservation.pop("pending_coordinator_recovery", None)
         _write_operation_registry(root, registry)
-        return new_bearer, new_recovery_proof, dict(rotated_claims)
+        return dict(rotated_claims)
 
 
 def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> None:
@@ -8118,6 +8255,7 @@ def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> 
             claims["rotation_audit"] = rotations
             start.pop("coordinator_capability_digest", None)
             start.pop("coordinator_recovery_proof_digest", None)
+            start.pop("pending_coordinator_recovery", None)
             start["coordinator_capability_claims"] = claims
             record["start"] = start
             changed = True
@@ -8133,6 +8271,7 @@ def _revoke_coordinator_capability(root: Path, task_id: str, *, reason: str) -> 
                 reservation["coordinator_capability_claims"] = claims
             reservation.pop("coordinator_capability_digest", None)
             reservation.pop("coordinator_recovery_proof_digest", None)
+            reservation.pop("pending_coordinator_recovery", None)
             changed = True
         if changed:
             _write_operation_registry(root, registry)
@@ -8190,6 +8329,7 @@ def _issue_project_admin_coordinator_capability(
         # Retaining it could let an old task-session recovery credential rotate
         # the newly elevated bearer.
         start.pop("coordinator_recovery_proof_digest", None)
+        start.pop("pending_coordinator_recovery", None)
         start["coordinator_capability_claims"] = admin_claims
         record["start"] = start
         registry["tasks"][str(task_id)] = record
@@ -8197,6 +8337,7 @@ def _issue_project_admin_coordinator_capability(
             if isinstance(reservation, dict) and str(reservation.get("task_id") or "") == str(task_id):
                 reservation["coordinator_capability_digest"] = digest
                 reservation.pop("coordinator_recovery_proof_digest", None)
+                reservation.pop("pending_coordinator_recovery", None)
                 reservation["coordinator_capability_claims"] = dict(admin_claims)
         _write_operation_registry(root, registry)
         return bearer
@@ -8303,29 +8444,15 @@ def _authorize_governance_capability_claim(
             )
 
 
-def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> dict[str, Any]:
-    """Recover from a lost one-response bearer by rotating, never revealing it.
-
-    Recovery has a deliberately narrower identity contract than ordinary
-    governance calls: the exact task_ref, principal, thread_id, and a
-    coordinator-only recovery proof are all required and must still identify
-    the active activation.  Public identifiers alone are never recovery
-    authority.  Callers cannot request a project-admin elevation through this
-    route.
-    """
+def _recovery_task_identity(params: dict[str, Any], project: Path) -> tuple[Path, str, str, str, str]:
+    """Resolve the active task identity for either phase of recovery."""
     principal = str(params.get("principal") or "").strip()
     thread_id = str(params.get("thread_id") or "").strip()
     task_ref = str(params.get("task_ref") or "").strip()
-    recovery_proof = str(params.get("coordinator_recovery_proof") or "").strip().lower()
     if not principal or not thread_id or not task_ref:
         raise GovernanceError(
             "capability recovery requires the exact task_ref, principal, and thread_id",
             code="coordinator_authorization_required",
-        )
-    if not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(recovery_proof):
-        raise GovernanceError(
-            "capability recovery requires the original non-durable coordinator recovery proof",
-            code="coordinator_recovery_proof_required",
         )
     root = ledger_root({"project_root": str(project)})
     registry = _operation_registry(root)
@@ -8339,17 +8466,36 @@ def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> di
     task_id = matching[0]
     try:
         activation = require_activation(
-            {"project_root": str(project), "principal": principal, "thread_id": thread_id},
-            task_id,
+            {"project_root": str(project), "principal": principal, "thread_id": thread_id}, task_id,
         )
     except ValueError as exc:
         raise GovernanceError(str(exc), code="coordinator_authorization_required") from exc
     if str(activation.get("task_id") or "") != task_id:
         raise GovernanceError("capability recovery task is not the active coordinator task", code="coordinator_authorization_required")
+    return root, task_id, task_ref, principal, thread_id
+
+
+def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> dict[str, Any]:
+    """Stage or redeliver a replacement pair without rotating active access.
+
+    Recovery has a deliberately narrower identity contract than ordinary
+    governance calls: the exact task_ref, principal, thread_id, and a
+    coordinator-only recovery proof are all required and must still identify
+    the active activation.  Public identifiers alone are never recovery
+    authority.  Callers cannot request a project-admin elevation through this
+    route.
+    """
+    recovery_proof = str(params.get("coordinator_recovery_proof") or "").strip().lower()
+    if not COORDINATOR_RECOVERY_PROOF_RE.fullmatch(recovery_proof):
+        raise GovernanceError(
+            "capability recovery requires the original non-durable coordinator recovery proof",
+            code="coordinator_recovery_proof_required",
+        )
+    root, task_id, task_ref, principal, thread_id = _recovery_task_identity(params, project)
     generation_raw = params.get("capability_generation")
     if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
         raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
-    bearer, replacement_recovery_proof, claims = _rotate_coordinator_capability(
+    authorization_update, claims, redelivered = _begin_coordinator_capability_recovery(
         root,
         task_id=task_id,
         principal=principal,
@@ -8360,24 +8506,60 @@ def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> di
     return {
         "schema": "cortex/governance/v1",
         "ok": True,
-        "outcome": "coordinator_capability_rotated",
+        "outcome": "coordinator_capability_recovery_redelivered" if redelivered else "coordinator_capability_recovery_pending",
         "action": "recover_coordinator_capability",
         "task_ref": task_ref,
         "authorization": {
             "actor": "coordinator",
-            "source": "server_activation_capability_rotation",
+            "source": "server_activation_capability_recovery_pending",
             "principal": principal,
             "thread_id": thread_id,
             "capability_kind": claims["kind"],
-            "generation": claims["generation"],
+            "generation": int(claims["generation"]) + 1,
         },
         # This is intentionally the only non-start response path that
         # contains raw coordinator authorization material.  Neither registry
         # nor rotation audit receives either value, and worker transport never
         # exposes this operation.
         "authorization_update": {
-            "coordinator_capability": bearer,
-            "coordinator_recovery_proof": replacement_recovery_proof,
+            **authorization_update,
+        },
+        "next_action": (
+            "Call manage_governance once with action=acknowledge_coordinator_recovery, the exact task_ref/principal/thread_id, "
+            "both authorization_update values, and previous_coordinator_recovery_proof set to the old proof. Until acknowledgement, retain and use the old capability/proof."
+        ),
+    }
+
+
+def _acknowledge_coordinator_recovery(params: dict[str, Any], project: Path) -> dict[str, Any]:
+    """Commit a pending recovery only after its delivered replacement pair returns."""
+    root, task_id, task_ref, principal, thread_id = _recovery_task_identity(params, project)
+    generation_raw = params.get("capability_generation")
+    if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
+        raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
+    claims = _acknowledge_coordinator_capability_recovery(
+        root,
+        task_id=task_id,
+        principal=principal,
+        thread_id=thread_id,
+        replacement_capability=str(params.get("coordinator_capability") or ""),
+        replacement_recovery_proof=str(params.get("coordinator_recovery_proof") or ""),
+        previous_recovery_proof=str(params.get("previous_coordinator_recovery_proof") or ""),
+        expected_generation=generation_raw,
+    )
+    return {
+        "schema": "cortex/governance/v1",
+        "ok": True,
+        "outcome": "coordinator_capability_recovery_acknowledged",
+        "action": "acknowledge_coordinator_recovery",
+        "task_ref": task_ref,
+        "authorization": {
+            "actor": "coordinator",
+            "source": "server_activation_capability_recovery_acknowledgement",
+            "principal": principal,
+            "thread_id": thread_id,
+            "capability_kind": claims["kind"],
+            "generation": claims["generation"],
         },
     }
 
@@ -10761,7 +10943,7 @@ def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
     try:
         project = select_project_root(params)
         allowed = {
-            "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof", "entity", "initiative_ref", "parent_ref", "title", "goal",
+            "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof", "previous_coordinator_recovery_proof", "entity", "initiative_ref", "parent_ref", "title", "goal",
             "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone",
             "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref",
             "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content",
@@ -10774,6 +10956,8 @@ def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
             raise GovernanceError("unsupported governance fields: " + ", ".join(unknown), code="unsupported_fields")
         requested_action = _capability_action(params.get("action"))
         if requested_action in CAPABILITY_RECOVERY_ACTIONS:
+            if requested_action == "acknowledge_coordinator_recovery":
+                return _acknowledge_coordinator_recovery(params, project)
             return _recover_coordinator_capability(params, project)
         principal = str(params.get("principal") or "").strip()
         thread_id = str(params.get("thread_id") or "").strip()

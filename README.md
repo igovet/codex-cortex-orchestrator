@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.6-7c3aed" alt="Cortex 9.2.6" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.7-7c3aed" alt="Cortex 9.2.7" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -690,7 +690,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.6 hardening release
+### 9.2.7 recovery hardening release
 
 The current source-tree hardening draft extends governance with schema v12
 integrity guarantees. Governance record bodies are read from verified
@@ -705,11 +705,14 @@ are referenced by governance records. Pre-v10 upgrades deterministically
 reconcile safe v9 duplicate revisions/sibling successors and fail closed on
 ambiguous scope or predecessor graphs. Coordinator capabilities are
 short-lived scoped claims carrying principal, thread, generation, expiry, and
-allowed actions. A lost bearer can be rotated on the normal compatibility or
-explicit coordinator audience with the same active identity and the
-non-durable recovery proof returned by authorization; old generations are
-revoked and plaintext is never stored. An explicit worker audience cannot call
-the recovery surface.
+allowed actions. A lost bearer enters two-phase recovery on the normal
+compatibility or explicit coordinator audience with the same active identity
+and non-durable recovery proof returned by authorization. Cortex redelivers
+the same derived replacement pair until acknowledgement presents both
+replacements and the prior proof; only then is the old generation revoked.
+Plaintext is never stored. A lost *initial start* response remains fail-closed
+until a host-attested delivery channel exists. An explicit worker audience
+cannot call either recovery phase.
 
 Corrective work remains open-ended while acceptance or findings require work,
 but a repeated materially identical no-progress signature pauses autonomous
@@ -724,7 +727,7 @@ Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
 reuse a bounded digest cache. A partial capture remains diagnostic evidence
 only: it cannot authorize read-only mutation reconciliation, a handoff, or
 terminal close. CI runs the 50,000-file manifest benchmark and requires
-`target_met: true`. The exact 9.2.6 cachebuster and full release/live results
+`target_met: true`. The exact 9.2.7 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
@@ -878,10 +881,13 @@ the project ledger stores only its SHA-256 digest and a separate digest for a
 non-durable coordinator recovery proof. An idempotent start retry does not
 recover or reissue either value. Capability recovery is available through the
 compatibility or explicit coordinator MCP audience and requires the exact task,
-principal, thread, and original recovery proof; the proof rotates with the
-bearer and is never durable. An explicit worker audience cannot call this
-surface. Legacy plaintext capabilities are removed and invalidated on first
-registry access. Explicit
+principal, thread, and original recovery proof. It stages/redelivers one
+deterministically derived replacement pair until acknowledgement returns the
+prior proof plus both replacement values; only acknowledgement rotates the
+generation. Neither raw value is durable. A lost initial start response stays
+fail-closed rather than treating public identifiers as recovery authority. An
+explicit worker audience cannot call this surface. Legacy plaintext
+capabilities are removed and invalidated on first registry access. Explicit
 `governance_mode=off` is accepted only for C1 after an exhaustive boolean
 assessment of every documented hard and topology trigger; prose detection may
 raise the floor but can never authorize `off`. Sensitive governance records

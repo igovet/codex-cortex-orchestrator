@@ -2,14 +2,15 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.6` source line. The public
+Security fixes are prepared for the current `9.2.7` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.6 source candidate adds governance schema v12 integrity checks. Its
-exact source cachebuster is `9.2.6+codex.20260820093505`; tracked-release and
+The 9.2.7 source candidate adds coordinator recovery delivery guarantees on top
+of the 9.2.6 governance schema v12 integrity checks. Its exact source
+cachebuster is `9.2.7+codex.20260820104507`; tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
 a publication or installation claim.
 
@@ -77,16 +78,19 @@ server-owned claims: exact task/initiative scope, principal, thread, allowed
 actions, generation, expiry, and revocation history. It also persists only a
 verifier for a separate, non-durable coordinator recovery proof. It never
 persists either reusable plaintext value or reissues them on an idempotent
-retry. If the response is lost, recovery is available through the normal
-compatibility projection or an explicit `coordinator` MCP audience, and
-requires the exact same principal/thread/task plus the original recovery
-proof; it rotates a new bearer and proof, revokes the old generation, and
-records a non-secret audit event. An explicit `worker` audience cannot call the
-surface. It cannot recover a bearer for another task or identity. Any legacy
-plaintext bearer or proof is deleted and invalidated on first registry access;
-the affected task fails closed instead of preserving a possibly compromised
-credential. Workers must never receive or persist this coordinator-only bearer
-or recovery proof.
+retry. If a recovery response is lost, recovery is available through the normal
+compatibility projection or an explicit `coordinator` MCP audience and requires
+the exact same principal/thread/task plus the original recovery proof. It
+stages a derived replacement pair, safely redelivers that exact pair while the
+old proof remains valid, and commits rotation only when acknowledgement presents
+the old proof together with both replacement values. The registry retains only
+an opaque delivery reference and verifiers, never raw secrets. A lost initial
+start response remains fail-closed: public identifiers are not a recovery
+credential. An explicit `worker` audience cannot call either phase. It cannot
+recover a bearer for another task or identity. Any legacy plaintext bearer or
+proof is deleted and invalidated on first registry access; the affected task
+fails closed instead of preserving a possibly compromised credential. Workers
+must never receive or persist this coordinator-only bearer or recovery proof.
 
 Schema v11 appends every governance record status and approval-basis
 transition to an immutable, cryptographically linked lifecycle chain. Schema
@@ -191,4 +195,4 @@ authorized initial commit exists and the check passes against it.
 This repository is a source candidate only. The prior
 9.2.4+codex.20260819182839 build was not installed from this checkout and is
 not published or tagged here. The current source cachebuster is
-`9.2.6+codex.20260820093505`; installation and publication remain pending.
+`9.2.7+codex.20260820104507`; installation and publication remain pending.

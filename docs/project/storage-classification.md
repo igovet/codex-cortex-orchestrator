@@ -124,9 +124,13 @@ duplicate revisions/sibling successors; ambiguous scope or predecessor graphs
 fail closed before applying v10 indexes. Linked milestone/deliverable tasks
 must be completed before initiative completion, and governance-scoped links
 cannot be deleted. A lost coordinator capability is recovered only on the
-explicit coordinator audience with same-principal/thread/task identity and a
-non-durable recovery proof; the old generation is revoked and no plaintext
-bearer or proof is persisted.
+compatibility or explicit coordinator audience with same-principal/thread/task
+identity and a non-durable recovery proof. The server persists only an opaque
+delivery reference and verifiers, then redelivers one HMAC-derived replacement
+until acknowledgement supplies the prior proof and both replacements; the old
+generation is revoked only then. A lost initial start response remains
+fail-closed without host attestation, and no plaintext bearer or proof is
+persisted.
 
 Prune similarly records a tombstone before any filesystem operation. It never
 deletes WAL/SHM independently; after safe projection removal, it finalizes the

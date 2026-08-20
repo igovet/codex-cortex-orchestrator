@@ -35,8 +35,12 @@ strict five-tool projections; JSON-RPC initialization and tool arguments cannot
 select or elevate the audience. Coordinator capability recovery is accepted on
 the compatibility or explicit `coordinator` projection, and requires the exact
 active task, principal, thread, and non-durable recovery proof returned with
-the original successful authorization response. The proof rotates with the
-bearer; only SHA-256 verifiers are durable, and workers never receive either
+the original successful authorization response. A lost recovery response is
+retried with that proof; Cortex redelivers one HMAC-derived replacement pair.
+Call `acknowledge_coordinator_recovery` with the prior proof and both returned
+replacement values before the old pair is retired. Only opaque delivery
+metadata and SHA-256 verifiers are durable. A lost initial start response
+remains fail-closed without host attestation, and workers never receive either
 secret. The worker prompt/profile remains worker-only in compatibility mode;
 hosts that require transport-enforced separation must use a strict `worker` or `coordinator` projection at process launch.
 
