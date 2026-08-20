@@ -399,7 +399,12 @@ def observed_native_lifecycle(events: list[dict[str, object]], *, workers: int =
             or event.get("tool") not in {"spawn_agent", "wait", "close_agent"}
         ):
             continue
-        operation = (str(event["tool"]), str(event.get("outcome") or "") or None)
+        tool = str(event["tool"])
+        # ``wait`` is the only lifecycle operation whose terminal outcome is
+        # semantically relevant.  Hosts commonly echo that same outcome when
+        # closing an already-completed child; treating it as a distinct close
+        # operation made a successful source-mode cycle look malformed.
+        operation = (tool, str(event.get("outcome") or "") or None if tool == "wait" else None)
         if not operations or operation != operations[-1]:
             operations.append(operation)
     if len(operations) < workers * 3 or len(operations) % 3:
@@ -882,9 +887,12 @@ def finding_rework_trace_checks(
         }
     )
     try:
+        # The contract is one logical line, not a platform-specific trailing
+        # newline.  Accept either text-file spelling while rejecting a blank
+        # second line, whitespace mutation, or any other content.
         correction_content_matches = (
-            (project / FINDING_REWORK_DOCUMENTATION_PATH).read_text(encoding="utf-8")
-            == FINDING_REWORK_DOCUMENTATION_CONTENT
+            (project / FINDING_REWORK_DOCUMENTATION_PATH).read_text(encoding="utf-8").splitlines()
+            == [FINDING_REWORK_DOCUMENTATION_CONTENT.rstrip("\n")]
         )
     except OSError:
         correction_content_matches = False
@@ -1482,14 +1490,12 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "<cortex_task_contract>{\"user_request\":\"Create docs/finding-fixture.md with exactly one line: "
             "Corrective documentation fixture fixed. A Review must first identify the missing line, Documentation "
             "must correct it, a fresh Review must verify the exact correction, and Close must produce the final handoff.\","
-            "\"complexity\":\"C2\",\"acceptance_criteria\":[\"docs/finding-fixture.md contains exactly the required correction line.\","
-            "\"The original Review finding is resolved only by a fresh Review rerun after the Documentation correction.\","
-            "\"A verified final handoff is created after Close.\"],\"verification\":[\"Read docs/finding-fixture.md and verify its exact one-line content.\","
-            "\"Read the original Review, Documentation, fresh Review, and Close reports.\"],\"plan_approval\":\"auto\"}</cortex_task_contract> "
+            "\"complexity\":\"C2\",\"acceptance_criteria\":[\"docs/finding-fixture.md contains exactly the required correction line.\"],"
+            "\"verification\":[\"Read docs/finding-fixture.md and verify its exact one-line content.\"],\"plan_approval\":\"auto\"}</cortex_task_contract> "
             "</cortex_task_contract><cortex_initial_waves>[{\"workers\":[{\"phase\":\"review\",\"profile\":\"code_reviewer\",\"objective\":\"Open exactly one P2 finding with fingerprint "
             + FINDING_REWORK_FINGERPRINT
-            + "; publish gate_result decision=rework (never fail or blocked) and failure_class=product; do not invent any other finding.\"}}]},"
-            "{\"workers\":[{\"phase\":\"documentation\",\"profile\":\"technical_writer\",\"objective\":\"Create docs/finding-fixture.md with exactly the required line and report that correction.\"}]},"
+            + " only when docs/finding-fixture.md is absent or its content is not the required exact line and no corrective Documentation report is present in your briefing/context. This is a CLOSED-WORLD fixture: review only that file's exact one-line content; do not assess the task plan, handoff, process, tests, broader repository, or any other acceptance criterion. Publish gate_result decision=rework (never fail or blocked) and failure_class=product with a findings array containing exactly that one fingerprint; do not invent any other finding. If your briefing/context includes the opening Review and a corrective Documentation report, read both reports and docs/finding-fixture.md: publish gate_result decision=pass with that exact fingerprint status=resolved, blocking=false, and resolved_at; never reopen or add a finding after the correction.\",\"allowed_paths\":[\"docs/finding-fixture.md\"]}}]},"
+            "{\"workers\":[{\"phase\":\"documentation\",\"profile\":\"technical_writer\",\"objective\":\"Create only docs/finding-fixture.md using printf 'Corrective documentation fixture fixed.\\\\n' > docs/finding-fixture.md. Its one logical line must have no other bytes; report that correction.\",\"allowed_paths\":[\"docs/finding-fixture.md\"]}]},"
             "{\"workers\":[{\"phase\":\"close\",\"profile\":\"build_verification\"}]}]</cortex_initial_waves>. "
             "Only after start_orchestration returns ready_to_spawn, execute its returned Review dispatch. For every returned native dispatch use "
             "spawn_agent -> wait -> read_worker_report -> close_agent -> continue_orchestration "
@@ -1689,6 +1695,12 @@ def _live_eval(
             "--dangerously-bypass-approvals-and-sandbox", "-C", str(project),
             "-m", "gpt-5.6-luna", "-c", 'model_reasoning_effort="high"',
             "-c", f'mcp_servers.cortex.command="{sys.executable}"',
+            # Codex starts stdio MCP servers with their declared server
+            # environment, rather than inheriting every evaluator variable.
+            # Make the disposable host store an explicit *launch* setting so
+            # the subprocess and this read-only verifier resolve the same
+            # opaque project ledger.  This is not a JSON-RPC/MCP tool input.
+            "-c", f'mcp_servers.cortex.env.CORTEX_HOST_STATE_DIR="{host_store}"',
             # Desktop gives the root and spawned native workers this same MCP
             # definition.  Leave its audience unspecified so both can use the
             # compatibility registry; explicit trusted hosts still select a

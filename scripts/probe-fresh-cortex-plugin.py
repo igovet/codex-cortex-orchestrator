@@ -60,15 +60,31 @@ def main() -> int:
         base = Path(directory)
         home = base / "home"
         checkout = base / "checkout"
+        host_store = base / "host-private-cortex"
         home.mkdir()
-        (home / ".codex").mkdir()
+        (home / ".codex").mkdir(mode=0o700)
+        host_store.mkdir(mode=0o700)
+        host_store.chmod(0o700)
         shutil.copytree(ROOT, checkout, ignore=shutil.ignore_patterns(".git", ".codex", "__pycache__", "*.pyc", "*.pyo"))
         if not (checkout / ".agents/plugins/marketplace.json").is_file():
             raise SystemExit("fresh plugin probe: root marketplace manifest is missing from the checkout")
         if (checkout / "marketplace").exists() or (checkout / "marketplace").is_symlink():
             raise SystemExit("fresh plugin probe: retired nested marketplace artifact is present")
         environment = os.environ.copy()
-        environment.update({"HOME": str(home), "CODEX_HOME": str(home / ".codex")})
+        environment.update({
+            "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
+            # The fresh plugin must prove the production host-private
+            # control-store contract. This value is host configuration, never
+            # an MCP argument, and remains outside the temporary workspace.
+            "CORTEX_HOST_STATE_DIR": str(host_store),
+        })
+        environment.pop("CORTEX_ROOT", None)
+        # This verifier imports the source control helpers only to derive the
+        # opaque host mapping. Keep that local calculation on the exact same
+        # temporary host store as the installed MCP subprocess.
+        os.environ["CORTEX_HOST_STATE_DIR"] = str(host_store)
+        os.environ.pop("CORTEX_ROOT", None)
         added_marketplace = command([codex, "plugin", "marketplace", "add", str(checkout), "--json"], environment)
         if added_marketplace.returncode != 0:
             raise SystemExit("fresh plugin probe: marketplace registration failed: " + added_marketplace.stderr.strip())
@@ -172,14 +188,15 @@ def main() -> int:
             "task": {
                 "user_request": "verify the installed MCP pricing feature workspace binding",
                 "complexity": "C1", "requirements": [],
-                "acceptance_criteria": ["The installed MCP creates one canonical project-local task ledger."],
+                "acceptance_criteria": ["The installed MCP creates one canonical host-private task ledger bound to the workspace."],
                 "verification": ["Inspect the generated task and orchestration schemas and dispatch identity."],
             },
             "waves": [{"workers": [{"phase": "discover", "profile": "explorer"}]}],
         })
-        task_dirs = list((workspace / ".codex/cortex/tasks").iterdir())
+        ledger = cortex.ledger_root_path({"project_root": str(workspace)}, create=False)
+        task_dirs = list((ledger / "tasks").iterdir())
         if not created.get("ok") or created.get("outcome") != "ready_to_spawn" or len(task_dirs) != 1:
-            raise SystemExit("fresh plugin probe: installed MCP did not create a project-local task ledger")
+            raise SystemExit("fresh plugin probe: installed MCP did not create one host-private task ledger")
         expected_task = task_dirs[0]
         dispatch = created["dispatches"][0]
         if dispatch.get("display_name") != "Explorer Pricing":
@@ -200,9 +217,9 @@ def main() -> int:
         )
         task = cortex.load_task_definition(expected_task)
         state = cortex.load_task_state_for_artifact(expected_task)
-        loaded = cortex.db_load_task(workspace / ".codex/cortex", str(state["task_id"]))
+        loaded = cortex.db_load_task(ledger, str(state["task_id"]))
         plan = loaded[2] if loaded is not None else None
-        files = [path.relative_to(workspace / ".codex/cortex").as_posix() for path in (workspace / ".codex/cortex").rglob("*") if path.is_file()]
+        files = [path.relative_to(ledger).as_posix() for path in ledger.rglob("*") if path.is_file()]
         banned = ("v3-operations", "active-tasks", "status-receipts", "reports/grants", "metrics.json", "task.json", "current.json", "task-index.json", "host-sessions.json")
         retired_snapshot = any(path.endswith("-snapshot.json") for path in files)
         retired_handoff_manifest = any(
@@ -214,7 +231,9 @@ def main() -> int:
             or task.get("project_root") != str(workspace)
             or task.get("schema") != "cortex/v8"
             or state.get("schema") != "cortex/v8"
-            or not (workspace / ".codex/cortex/cortex.db").is_file()
+            or not ledger.is_relative_to(host_store / "projects")
+            or not (ledger / "cortex.db").is_file()
+            or (workspace / ".codex/cortex/cortex.db").exists()
             or "current_gate" in state
             or not isinstance(plan, dict)
             or plan.get("schema") != "cortex/orchestration-plan/v1"

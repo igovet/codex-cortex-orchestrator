@@ -2986,6 +2986,12 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             if recorded.get("recorded") is False:
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
             state = recorded["state"]
+            # The gate-result projection is durable only after record_gate.
+            # Re-evaluate then, rather than only before it, so a fresh Review
+            # that just resolved an inherited finding also retires the active
+            # corrective route before Close/handoff is prepared.
+            if outcome == "passed":
+                _unresolved_rework_findings(root, state, gate)
             # A steer is material new evidence, so it must first reopen the
             # affected pipeline.  Do not let the liveness detector classify
             # the just-completed pre-steer work as a repeated corrective loop.

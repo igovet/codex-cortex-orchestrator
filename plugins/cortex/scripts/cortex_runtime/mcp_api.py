@@ -488,7 +488,7 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": f"Worker report request. Normal finalization sends draft_ref after editing the private file returned by get_report_template. A complete {len(report_fields)}-field replacement or a small JSON Merge Patch may accompany draft_ref when the worker cannot edit draft_path. Cortex validates and persists in one atomic operation; invalid drafts remain editable.",
+        "description": f"Worker report request. Normal finalization sends draft_ref after editing the private file returned by get_report_template. A complete {len(report_fields)}-field replacement belongs in `report`; a small JSON Merge Patch belongs in `patch`. Cortex validates and persists in one atomic operation; invalid drafts remain editable.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},

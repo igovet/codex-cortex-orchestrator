@@ -4,3 +4,5 @@
 # Local Python bytecode from the bundled plugin.
 __pycache__/
 *.py[cod]
+
+docs/implementation
