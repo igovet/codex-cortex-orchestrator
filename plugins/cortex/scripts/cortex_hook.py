@@ -474,7 +474,12 @@ def context_epoch_for_tool_observation(ledger: Path, task_id: str, event: dict) 
 def apply_tool_deduplication(
     event: dict, project: Path, ledger: Path, task_id: str, state: dict,
 ) -> dict | None:
-    """Persist observations and deny only proven duplicate small full reads."""
+    """Persist observations and return an advisory for duplicate full reads.
+
+    A duplicate is useful telemetry and a cache hint, but it is not an
+    authorization failure: the host may still need to perform the read when a
+    prior result was lost or the caller intentionally retries it.
+    """
     if db_record_tool_observation is None:
         return None
     attempt_id = attempt_for_tool_observation(event, state)
@@ -512,6 +517,21 @@ def apply_tool_deduplication(
         except (OSError, ValueError, TypeError):
             return None
     return None
+
+
+def duplicate_read_advisory() -> dict[str, object]:
+    """Return a non-blocking PreToolUse hint for an already observed Read."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": (
+                "CORTEX TOOL DEDUPLICATION ADVISORY: an unchanged small full-file read "
+                "already succeeded in this context epoch. Reusing the prior result may "
+                "be faster, but this read remains allowed if the result is unavailable "
+                "or the caller intentionally retries it."
+            ),
+        }
+    }
 
 
 def structured_tool_result(event: dict) -> dict | None:
@@ -1001,16 +1021,7 @@ def main() -> None:
         append_lifecycle_event(task_dir, safe)
         dedupe = apply_tool_deduplication(event, project, ledger, task_id, state)
         if dedupe and dedupe.get("duplicate") and safe["hook"] == "PreToolUse":
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        "CORTEX TOOL DEDUPLICATION: an unchanged small full-file read already succeeded in this "
-                        "context epoch. Reuse the prior result; do not retry this read."
-                    ),
-                }
-            }, ensure_ascii=False))
+            print(json.dumps(duplicate_read_advisory(), ensure_ascii=False))
             return
         stop_context = stopped_worker_after_wait_context(event, state, task_ref(ledger, task_id))
         if stop_context:

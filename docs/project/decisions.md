@@ -129,10 +129,11 @@ only in capability semantics: the exact private export/digest must exist before
 the native worker starts, while the canonical content remains SQLite-owned.
 
 Review and close decisions derive from canonical structured findings and
-server-observed verification. Open P0/P1/P2 or blocking findings, and missing
-required verification, reopen the recorded gate for rework. Resolved findings
-and non-self auditable waivers remain durable records; prose cannot silently
-close them.
+server-observed verification. Open P0/P1 findings, explicitly blocking open
+findings, and missing required verification reopen the recorded gate for
+rework. P2 is advisory unless its authoritative finding sets `blocking=true`.
+Resolved findings and non-self auditable waivers remain durable records; prose
+cannot silently close them.
 
 The separate worker question operation exists because a native parent-channel
 message alone cannot enforce a pause. Every profile may persist a material

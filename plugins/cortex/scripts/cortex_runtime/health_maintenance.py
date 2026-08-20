@@ -22,6 +22,11 @@ from typing import Any
 from cortex_runtime import ledger_db
 from cortex_runtime.ledger_db import DATABASE_NAME, DATABASE_SCHEMA_VERSION
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None
+
 
 # A backup is deliberately a directory rather than a bare SQLite file: v12
 # governance authenticity also depends on a host-private key which SQLite
@@ -103,6 +108,40 @@ def _wal_status(path: Path) -> dict[str, Any]:
     return {"path": wal_path.name, "present": True, "bytes": int(info.st_size)}
 
 
+def _state_lock_status(root: Path) -> dict[str, Any]:
+    """Probe the project lock without waiting, creating, or mutating it.
+
+    This is deliberately separate from the normal mutation boundary.  It only
+    tells callers whether the project-wide coordination lock is currently
+    observable as held; it does not identify a holder and does not infer a
+    logical task blocker from a busy lock.
+    """
+    lock_path = root / ".state.lock"
+    base = {"path": lock_path.name, "scope": "project", "probe": "nonblocking"}
+    try:
+        info = lock_path.lstat()
+    except FileNotFoundError:
+        return {**base, "state": "not_present", "held": False}
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return {**base, "state": "invalid", "held": None}
+    if fcntl is None:
+        return {**base, "state": "unsupported", "held": None}
+    try:
+        with lock_path.open("r", encoding="utf-8") as stream:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {**base, "state": "busy", "held": True}
+            finally:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+    except OSError as exc:
+        return {**base, "state": "unavailable", "held": None, "error": type(exc).__name__}
+    return {**base, "state": "free", "held": False}
+
+
 def _schema_status(connection: sqlite3.Connection) -> dict[str, Any]:
     user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     try:
@@ -154,6 +193,10 @@ def inspect_health(root: Path) -> dict[str, Any]:
         projections = _projection_status(connection)
     return {
         "operation": "health",
+        "availability": {
+            "lock": _state_lock_status(root),
+            "meaning": "Physical project lock state only; task/gate blockers are reported by orchestration inspection.",
+        },
         "database": {"name": db_path.name, "bytes": int(db_path.stat().st_size), "journal_mode": journal_mode},
         "quick_check": {"ok": quick_check == ["ok"], "rows": quick_check},
         "foreign_key_check": {"ok": not foreign_key_violations, "violations": foreign_key_violations},

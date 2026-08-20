@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.15 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.16 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -21,11 +21,26 @@ SHA-256 checksum over its version, name, and ordered normalized SQL. Legacy
 name-only checksums are accepted only after schema validation and are upgraded
 to the content checksum; inconsistent history fails closed.
 
+After an authoritative migration validation in one server process, ordinary
+ledger opens use a bounded process-local readiness entry with a short
+read-only SQLite probe rather than acquiring the migration advisory lock and
+`BEGIN IMMEDIATE` again. The probe rechecks database device/inode identity,
+SQLite `user_version` and `schema_version`, and the ordered migration-history
+fingerprint. A file replacement or any of those authority changes invalidates
+the entry and runs the existing full, fail-closed migration/schema validator;
+first boot and real migrations remain serialized atomic writes.
+
 Malformed public report JSON is handled as a bounded validation correction,
 never as an unhandled interpreter error. A narrow external lifecycle-only task
 that explicitly continues a `codex://threads/...` task without requesting a
 project mutation omits write-required implementation and QA gates; ordinary
 repository changes retain those gates and their change-evidence contract.
+`record_gate` never silently substitutes an inactive requested gate with the
+current active gate: it returns a retryable, non-mutating `gate_mismatch` with
+the requested and active gates, preserving the caller's transition authority.
+Open P0/P1 findings are intrinsic rework blockers. Open P2 findings are
+advisory unless their server-validated finding explicitly sets
+`blocking=true`; every explicitly blocking open finding remains a blocker.
 
 ## Key files and dependencies
 
@@ -99,7 +114,8 @@ chunk and full digest is verified.
 Hook/tool observations are deduplicated by task, attempt, context epoch, and
 normalized fingerprint in the v8 ledger. A successful full-coverage
 observation is reusable for the same workspace generation; repeats increment
-the duplicate count without replacing the successful observation. A later
+the duplicate count without replacing the successful observation and emit only
+a non-blocking cache advisory. A later
 success may supersede a failed observation, while partial coverage never
 authorizes reuse.
 
@@ -496,7 +512,12 @@ Compact native dispatch responses carry `dispatch_ref`, one immutable scoped
 adds `Dispatch briefing reviewed: <sha256>` as a report evidence marker, and
 must not directly read any other Cortex ledger path. The complete prompt is
 never persisted in mutable coordination state; predecessor
-reports remain available only through scoped `read_worker_report` reads.
+reports remain available only through scoped `read_worker_report` reads. A
+compiled Planner unit is likewise kept as a separate immutable artifact: the
+briefing contains only its exact path, artifact ref, SHA-256, byte size, and
+compact counts/digests. Its full microtask body is never copied into Assignment
+data or silently shortened to fit the briefing; the worker reads that one
+bootstrap-authorized, digest-verified artifact before implementation.
 
 The machine-validated profile contract also records required inputs, the
 project artifact each profile owns, and its completion deliverable. The attempt
@@ -611,7 +632,9 @@ bare link is forbidden. Early reads and rereads return
 `publication_required: false` and no link. The path must never be guessed, substituted, or used to browse
 unrelated files. If the worker is interrupted after persistence but before its
 acknowledgement, `manage_orchestration` inspect returns the compact entry in
-`available_reports`, including the same path, for recovery.
+`available_reports` for recovery. It includes a Desktop path only when that
+optional projection already exists; use the exact report ref with
+`read_worker_report` when a publication-eligible link is required.
 
 Review, governance activation, governance close, and final close reports
 require a separate canonical top-level `gate_result` envelope with `decision`,
@@ -659,11 +682,21 @@ callers can correct one validation failure without guessing the schema.
 `manage_orchestration(intent="inspect")` returns a bounded
 `cortex/context-handoff/v1` snapshot for a resumed or compacted coordinator.
 It is rebuilt from the durable task definition, state, pipeline, evidence, and
-report index and carries the goal, acceptance criteria, verified report refs
-and exact links, decisions, changed files, decisive checks, blockers, and
-next action. Preserve the opaque `task_ref`, inspect once after compaction,
-and continue the existing relative step. Cortex explicitly forbids restarting
-the task or replaying completed dispatches during this recovery.
+report index and carries the goal, acceptance criteria, verified report refs,
+existing Desktop links when already materialized, decisions, changed files,
+decisive checks, blockers, and next action. Preserve the opaque `task_ref`,
+inspect once after compaction, and continue the existing relative step. Cortex
+explicitly forbids restarting the task or replaying completed dispatches during
+this recovery.
+
+Ordinary inspection is a read-only snapshot: it never expires a worker lease,
+invalidates a stopped report receipt, materializes a missing Markdown
+projection, or waits behind the lifecycle mutation lock. If the returned
+`lifecycle_recovery` section says `required=true`, it lists the exact affected
+attempts and the bounded server-owned recovery action. Invoke that action only
+when the caller intentionally authorizes the persisted recovery transition;
+the resulting response records whether state changed and never treats the
+ordinary inspect itself as a repair.
 
 The documented `SubagentStart` event binds the parent session, native
 `agent_id`, observed `model`, and exact returned dispatch identity before a
@@ -815,14 +848,19 @@ retain baseline/current digests and
 the changed-path proof. Reopening with `allow_rework` creates a fresh active
 baseline rather than depending on cleaned terminal artifacts.
 
-Reports are sanitized, task- and attempt-bound, and use one-use receipts.
-Consuming a receipt writes an irreversible `reports/consumptions/` tombstone,
-so reconciliation can repair derived receipts, indexes, and Markdown but
-cannot replay consumed evidence. A report is capped at 64 KiB and 100 list
-items per field, and an attempt at 32 reports. Tasks have no report-count or
-aggregate-report-byte quota; immutable history grows in SQLite until storage
-is unavailable or project-scoped state is explicitly pruned. Task and operation ledger files
-have an 8 MiB upper bound. Ordinary JSON writes use `MAX_JSON_BYTES=8 MiB` and
+Reports are sanitized only for sensitive keys, task- and attempt-bound, and
+use one-use receipts. Consuming a receipt writes an irreversible
+`reports/consumptions/` tombstone, so reconciliation can repair derived
+receipts, indexes, and Markdown but cannot replay consumed evidence. Report
+intake retains complete strings and list items rather than applying the former
+64 KiB/100-item sanitization caps. The explicit 8 MiB `MAX_JSON_BYTES` boundary
+is the atomic artifact limit; private report drafts allow 17 MiB for envelope
+headroom. A separate per-attempt report-record limit remains 32; tasks have no
+task-wide report-count or aggregate-report-byte quota. Immutable history grows
+in SQLite until storage is unavailable or project-scoped state is explicitly
+pruned. Report reads return the complete immutable artifact
+through signed cursors, with 32 KiB limiting transport pages only. Task and
+operation ledger files have an 8 MiB upper bound. Ordinary JSON writes
 fail before replacement with actionable diagnostics. Manifest snapshot reads
 use `MAX_MANIFEST_BYTES=64 MiB`; initial capture preflight runs before task-directory creation,
 and handoff/reconciliation snapshot serialization remains bounded, so oversized
@@ -892,7 +930,10 @@ during retirement.
 
 The focused plan-approval, replan, recovery, and read-only artifact regressions
 described here are historical 9.2.4 source evidence; they do not certify the
-9.2.15 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
+9.2.16 hardening release candidate. Coordinator recovery no longer asks a
+reviewer to retry an impossible resolution report; review and close preserve
+honest `BLOCKED` markers while corrective work remains; and the `record_report`
+schema branch matches runtime validation. The cold-boot smoke uses the public JSON-RPC server to reject
 implementation loss, apply three dynamic pipeline changes beyond the persisted
 legacy replan limit, and verify every resulting gate through close. Complete
 discovery validation remains a separate governance-v10 workstream and is not

@@ -90,6 +90,39 @@ class FindingTransitionTests(unittest.TestCase):
         self.assertTrue(stored["blocking"])
         self.assertEqual(stored["severity"], "P2")
 
+    def test_open_p2_is_advisory_unless_explicitly_marked_blocking(self) -> None:
+        ledger_db.upsert_task_finding(
+            self.root,
+            "task-1",
+            self._finding("advisory-p2", severity="P2", blocking=False),
+        )
+        self.assertEqual(ledger_db.task_findings_blockers(self.root, "task-1"), [])
+
+        ledger_db.upsert_task_finding(
+            self.root,
+            "task-1",
+            self._finding("blocking-p2", severity="P2", blocking=True),
+        )
+        blockers = ledger_db.task_findings_blockers(self.root, "task-1")
+        self.assertEqual([item["fingerprint"] for item in blockers], ["blocking-p2"])
+
+    def test_open_p0_and_p1_remain_blockers_without_explicit_flag(self) -> None:
+        ledger_db.upsert_task_finding(
+            self.root,
+            "task-1",
+            self._finding("intrinsic-p0", severity="P0", blocking=False),
+        )
+        ledger_db.upsert_task_finding(
+            self.root,
+            "task-1",
+            self._finding("intrinsic-p1", severity="P1", blocking=False),
+        )
+        blockers = ledger_db.task_findings_blockers(self.root, "task-1")
+        self.assertEqual(
+            [item["fingerprint"] for item in blockers],
+            ["intrinsic-p0", "intrinsic-p1"],
+        )
+
     def test_explicit_resolve_and_waive_transitions_keep_metadata_contract(self) -> None:
         ledger_db.upsert_task_finding(
             self.root,

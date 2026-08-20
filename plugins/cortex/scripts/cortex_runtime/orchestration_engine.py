@@ -41,6 +41,17 @@ class CorrectiveReworkPreflightRequired(ValueError):
 _NO_PROGRESS_REPEAT_LIMIT = 3
 
 
+# Inspection is intentionally split from repair.  A coordinator can obtain a
+# bounded durable snapshot while another task mutation is in flight; it must
+# never acquire the project-wide mutation lock merely to discover that a
+# worker lease or a stopped report needs recovery.  The write-capable mode is
+# explicit so a caller cannot accidentally turn routine recovery/compaction
+# inspection into a state transition.
+_INSPECT_MODE_READ_ONLY = "read_only"
+_INSPECT_MODE_RECOVER_LIFECYCLE = "recover_lifecycle"
+_INSPECT_MODES = {_INSPECT_MODE_READ_ONLY, _INSPECT_MODE_RECOVER_LIFECYCLE}
+
+
 # The executable facade is the composition root.  It supplies this explicitly
 # declared port set after it has finished initialization; this module never
 # imports the facade and therefore cannot form a reverse import cycle.
@@ -3492,73 +3503,155 @@ def _fail_unselectable_reported_attempts(
     return rejected
 
 
+def _inspect_mode(params: dict[str, Any]) -> str:
+    """Return the explicit inspection mode without silently accepting writes.
+
+    ``inspect`` historically accepted no operation-specific payload.  The
+    facade still permits a generic payload for its other operations, so keep a
+    missing payload as the backwards-compatible, read-only default and reject
+    every other shape rather than treating a typo as recovery authority.
+    """
+    raw_payload = params.get("payload")
+    if raw_payload is None:
+        return _INSPECT_MODE_READ_ONLY
+    if not isinstance(raw_payload, dict):
+        raise ValueError("inspect payload must be an object with mode=read_only or mode=recover_lifecycle")
+    unknown = sorted(set(raw_payload) - {"mode"})
+    if unknown:
+        raise ValueError("inspect payload supports only mode: " + ", ".join(unknown))
+    mode = raw_payload.get("mode", _INSPECT_MODE_READ_ONLY)
+    if not isinstance(mode, str) or mode not in _INSPECT_MODES:
+        raise ValueError("inspect payload.mode must be read_only or recover_lifecycle")
+    return mode
+
+
+def _expired_lifecycle_attempt_ids(
+    state: dict[str, Any],
+    *,
+    current_time: datetime | None = None,
+) -> list[str]:
+    """Identify expired leases without changing the durable task projection."""
+    observed_at = current_time or datetime.now(timezone.utc)
+    expired: list[str] = []
+    for attempt in state.get("attempts", []):
+        if attempt.get("invalidated") or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running"}:
+            continue
+        if attempt.get("lifecycle_status") in {"paused_awaiting_user", "report_recorded"}:
+            continue
+        expiry_field = (
+            "spawn_lease_expires_at" if attempt.get("status") == AWAITING_HOST_SPAWN
+            else "worker_lease_expires_at"
+        )
+        raw_expiry = str(attempt.get(expiry_field) or "").strip()
+        if not raw_expiry:
+            continue
+        try:
+            expiry = datetime.fromisoformat(raw_expiry).astimezone(timezone.utc)
+        except (OverflowError, ValueError):
+            # A malformed server-owned lease cannot be presented as a live
+            # worker indefinitely.  Recovery records the same explicit
+            # lifecycle outcome as it did before inspection became read-only.
+            expiry = observed_at
+        if expiry <= observed_at:
+            attempt_id = safe_id(str(attempt.get("attempt_id") or ""))
+            if attempt_id:
+                expired.append(attempt_id)
+    return expired
+
+
+def _expire_lifecycle_attempts(
+    root: Path,
+    task_dir: Path,
+    state: dict[str, Any],
+) -> list[str]:
+    """Persist the explicit lifecycle-recovery transition for expired leases."""
+    expired_attempt_ids = _expired_lifecycle_attempt_ids(state)
+    for attempt_id in expired_attempt_ids:
+        attempt = _attempt(state, attempt_id)
+        stopped_at = now()
+        attempt["status"] = "failed"
+        attempt["lifecycle_status"] = "needs_recovery"
+        attempt["orphaned_at"] = stopped_at
+        attempt["host_stopped_at"] = stopped_at
+        attempt["host_stop_outcome"] = "lifecycle_lease_expired"
+        attempt["finalization_reason"] = "lifecycle_lease_expired"
+        attempt["host_resumable"] = False
+        db_put_worker_session(root, {
+            "task_id": state["task_id"],
+            "attempt_id": attempt_id,
+            "host_agent_id": (attempt.get("host_spawn") or {}).get("agent_id"),
+            "host_task_name": str((attempt.get("spawn_request") or {}).get("task_name") or ""),
+            "host_tool": str((attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent"),
+            "status": "stopped_recoverable",
+            "resumable": False,
+            "started_at": attempt.get("spawn_requested_at") or attempt.get("started_at"),
+            "terminated_at": stopped_at,
+        })
+    if expired_attempt_ids:
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "worker_lease_recovery",
+            "expired worker lifecycle lease marked needs_recovery",
+        )
+    return expired_attempt_ids
+
+
 def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded snapshot, or run explicitly requested lifecycle repair.
+
+    The usual ``inspect`` path must stay safe while another worker is writing:
+    it never takes ``state_lock`` and never changes task/attempt/projection
+    state.  Only a caller that sets ``payload.mode`` to
+    ``recover_lifecycle`` may mark expired leases or reject unusable stopped
+    report receipts.  Both views are derived from the same durable snapshot so
+    recovery never relies on a coordinator reconstructing worker state.
+    """
     task_id = safe_id(str(params.get("task_id", "")))
+    mode = _inspect_mode(params)
     root = ledger_root(params)
-    completion_candidates: list[dict[str, Any]] = []
     recovered_attempt_ids: list[str] = []
-    with state_lock(root):
+    expired_attempt_ids: list[str] = []
+
+    if mode == _INSPECT_MODE_RECOVER_LIFECYCLE:
+        with state_lock(root):
+            _, task_dir, state = load_state(task_id, params)
+            authorize(state, params)
+            expired_attempt_ids = _expire_lifecycle_attempts(root, task_dir, state)
+            plan = _load_orchestrate_plan(task_dir, state)
+            completion_candidates = _reported_attempt_completion_candidates(task_dir, state, plan)
+            recovered_attempt_ids = _fail_unselectable_reported_attempts(
+                root, task_dir, state, completion_candidates
+            )
+            if recovered_attempt_ids:
+                # The failed state changes the recovery projection from a
+                # completion selection prompt to Planner-first recovery.  Do
+                # not expose stale candidate refs as selectable after this
+                # authoritative transition.
+                completion_candidates = []
+    else:
         _, task_dir, state = load_state(task_id, params)
         authorize(state, params)
-        changed = False
-        current_time = datetime.now(timezone.utc)
-        for attempt in state.get("attempts", []):
-            if attempt.get("invalidated") or attempt.get("status") not in {AWAITING_HOST_SPAWN, "running"}:
-                continue
-            if attempt.get("lifecycle_status") in {"paused_awaiting_user", "report_recorded"}:
-                continue
-            expiry_field = (
-                "spawn_lease_expires_at" if attempt.get("status") == AWAITING_HOST_SPAWN
-                else "worker_lease_expires_at"
-            )
-            raw_expiry = str(attempt.get(expiry_field) or "").strip()
-            if not raw_expiry:
-                continue
-            try:
-                expiry = datetime.fromisoformat(raw_expiry).astimezone(timezone.utc)
-            except ValueError:
-                expiry = current_time
-            if expiry > current_time:
-                continue
-            attempt["status"] = "failed"
-            attempt["lifecycle_status"] = "needs_recovery"
-            attempt["orphaned_at"] = now()
-            attempt["host_stopped_at"] = attempt["orphaned_at"]
-            attempt["host_stop_outcome"] = "lifecycle_lease_expired"
-            attempt["finalization_reason"] = "lifecycle_lease_expired"
-            attempt["host_resumable"] = False
-            db_put_worker_session(root, {
-                "task_id": state["task_id"],
-                "attempt_id": attempt["attempt_id"],
-                "host_agent_id": (attempt.get("host_spawn") or {}).get("agent_id"),
-                "host_task_name": str((attempt.get("spawn_request") or {}).get("task_name") or ""),
-                "host_tool": str((attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent"),
-                "status": "stopped_recoverable",
-                "resumable": False,
-                "started_at": attempt.get("spawn_requested_at") or attempt.get("started_at"),
-                "terminated_at": attempt["orphaned_at"],
-            })
-            changed = True
-        if changed:
-            save_state(
-                task_dir,
-                task_dir / "state.sqlite",
-                state,
-                "worker_lease_recovery",
-                "expired worker lifecycle lease marked needs_recovery",
-            )
-        locked_plan = _load_orchestrate_plan(task_dir, state)
-        completion_candidates = _reported_attempt_completion_candidates(task_dir, state, locked_plan)
-        recovered_attempt_ids = _fail_unselectable_reported_attempts(
-            root, task_dir, state, completion_candidates
-        )
-        if recovered_attempt_ids:
-            # The failed state changes the inspect projection from a completion
-            # selection prompt to a normal blocked Planner-first recovery.  Do
-            # not expose stale candidate refs as selectable after this boundary.
-            completion_candidates = []
+        plan = _load_orchestrate_plan(task_dir, state)
+        completion_candidates = _reported_attempt_completion_candidates(task_dir, state, plan)
+        expired_attempt_ids = _expired_lifecycle_attempt_ids(state)
+
+    unselectable_report_attempt_ids = [
+        str(candidate.get("attempt_id") or "")
+        for candidate in completion_candidates
+        if not candidate.get("candidate_report_refs")
+    ]
+    # An ordinary read must show that recovery is needed without presenting
+    # unusable report receipts as a selectable completion.  The explicit
+    # recovery mode retains the existing blocked-state transition instead.
+    if mode == _INSPECT_MODE_READ_ONLY:
+        completion_candidates = [
+            candidate for candidate in completion_candidates
+            if candidate.get("candidate_report_refs")
+        ]
+
     task = load_task_definition(task_dir, state)
-    plan = _load_orchestrate_plan(task_dir, state)
     current_wave = _wave_for_gates(plan, active_gates(state))
     spawn_requests = [
         {**_rehydrate_dispatch_spawn_request(task_dir, task, item), "attempt_id": item["attempt_id"]}
@@ -3568,8 +3661,6 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
         and not item.get("invalidated")
     ]
     report_index = _report_index(report_bus_paths(task_dir), state["task_id"])
-    from cortex_runtime.reports import ensure_report_markdown_path
-
     available_reports = []
     for item in report_index.get("reports", []):
         if not isinstance(item, dict):
@@ -3584,7 +3675,11 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
             "summary": item.get("summary"),
         }
         try:
-            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+            # A normal inspect must not enqueue or repair a lazy Markdown
+            # projection.  It exposes an already materialized path when one
+            # exists; projection repair remains an explicit artifact/repair
+            # operation and cannot make a status check contend on a write.
+            markdown_path = report_markdown_path(task_dir, report_ref)
             report_view.update({
                 "report_markdown_path": str(markdown_path),
                 "report_markdown_link": report_markdown_link(task_dir, report_ref, item.get("gate", "report")),
@@ -3597,6 +3692,26 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
         available_reports.append(report_view)
     available_reports = available_reports[-MAX_CONTEXT_REPORTS:]
     context_handoff = _context_handoff(task_dir, state, task, plan)
+    lifecycle_recovery = {
+        "mode": mode,
+        "state_changed": bool(expired_attempt_ids or recovered_attempt_ids),
+        "expired_attempt_ids": expired_attempt_ids,
+        "unselectable_report_attempt_ids": (
+            recovered_attempt_ids
+            if mode == _INSPECT_MODE_RECOVER_LIFECYCLE else unselectable_report_attempt_ids
+        ),
+    }
+    if mode == _INSPECT_MODE_READ_ONLY and (expired_attempt_ids or unselectable_report_attempt_ids):
+        lifecycle_recovery.update({
+            "required": True,
+            "recovery_intent": "recover_inspect",
+            "next_action": (
+                "Use the explicit recover_inspect lifecycle-recovery intent for this exact task. "
+                "The server derives and applies only the listed lifecycle recovery transitions."
+            ),
+        })
+    elif mode == _INSPECT_MODE_RECOVER_LIFECYCLE:
+        lifecycle_recovery["required"] = False
     return _orchestrate_response(
         "inspect",
         state,
@@ -3609,6 +3724,7 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
             "active_workers": context_handoff["active_workers"],
             "stopped_workers": context_handoff["stopped_workers"],
             "context_handoff": context_handoff,
+            "lifecycle_recovery": lifecycle_recovery,
             **(
                 {"reported_attempt_recovery": {"attempt_ids": recovered_attempt_ids}}
                 if recovered_attempt_ids else {}

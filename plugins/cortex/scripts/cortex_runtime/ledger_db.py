@@ -23,6 +23,7 @@ import secrets
 import sqlite3
 import stat
 import threading
+from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,43 @@ ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
 _MIGRATION_GUARD = threading.Lock()
 _MIGRATION_LOCKS: dict[str, threading.RLock] = {}
+_DATABASE_READINESS_GUARD = threading.RLock()
+_DATABASE_READINESS_CACHE_LIMIT = 128
+
+
+@dataclass(frozen=True)
+class _DatabaseFileIdentity:
+    """Filesystem facts that make one ready-ledger cache entry reusable.
+
+    The cache never trusts this identity alone: every warm open also obtains
+    a short read-only SQLite snapshot of the migration authority below.  The
+    identity makes an atomic database replacement a cache miss even when the
+    replacement happens to carry the same migration metadata.
+    """
+
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+
+
+@dataclass(frozen=True)
+class _DatabaseReadiness:
+    """Validated immutable-schema facts for one process-local warm open."""
+
+    identity: _DatabaseFileIdentity
+    user_version: int
+    schema_version: int
+    history_fingerprint: str
+    plan_fingerprint: str
+
+
+# Keep this deliberately bounded: a long-lived host can inspect many project
+# ledgers, but readiness is an optimization and must not become unbounded
+# per-process state.  Entries are revalidated on every use and therefore are
+# never an authority source.
+_DATABASE_READINESS: OrderedDict[str, _DatabaseReadiness] = OrderedDict()
 
 
 def _now() -> str:
@@ -196,6 +234,31 @@ def _decode_json(text: str, label: str) -> dict[str, Any]:
 
 def database_path(root: Path) -> Path:
     return root / DATABASE_NAME
+
+
+def _database_file_identity(root: Path) -> _DatabaseFileIdentity | None:
+    """Return safe non-content identity facts for the current database file.
+
+    A missing database is a normal first-boot condition.  An existing file
+    still goes through the same private-regular-file check as the write path;
+    a warm cache must never turn an unsafe replacement into a trusted read.
+    """
+    path = database_path(root)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("Cortex database must be a regular non-symlink file")
+    if info.st_mode & 0o077:
+        raise ValueError("Cortex database has unsafe permissions")
+    return _DatabaseFileIdentity(
+        device=int(info.st_dev),
+        inode=int(info.st_ino),
+        size=int(info.st_size),
+        modified_ns=int(info.st_mtime_ns),
+        changed_ns=int(info.st_ctime_ns),
+    )
 
 
 def _assert_private_regular(path: Path, label: str, *, allow_missing: bool = False) -> None:
@@ -1234,15 +1297,139 @@ def _assert_current_migration_history(connection: sqlite3.Connection) -> None:
             raise ValueError("Cortex database requires migration before this nested operation")
 
 
+def _migration_plan_fingerprint(migrations: tuple[_Migration, ...]) -> str:
+    """Bind a warm-read cache entry to this exact immutable migration plan."""
+    payload = [
+        (migration.version, migration.name, _migration_checksum(migration))
+        for migration in migrations
+    ]
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _migration_history_fingerprint(connection: sqlite3.Connection) -> str:
+    """Return a compact fingerprint of the authority checked on every warm open."""
+    rows = [
+        (int(row[0]), str(row[1]), str(row[2]))
+        for row in connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+        )
+    ]
+    return hashlib.sha256(_canonical_json(rows).encode("utf-8")).hexdigest()
+
+
+def _read_database_readiness(
+    root: Path,
+    *,
+    plan_fingerprint: str,
+) -> _DatabaseReadiness | None:
+    """Read the minimal authority needed to reuse one ready schema safely.
+
+    This intentionally opens SQLite read-only: it does not acquire the
+    migration advisory lock, issue ``BEGIN IMMEDIATE``, run DDL, or walk the
+    full required-object schema.  It does, however, check the three mutation
+    signals the ready cache relies on: SQLite's user/schema markers and the
+    ordered migration history.  The filesystem identity is sampled on both
+    sides of the SQLite read so a concurrent replacement becomes a miss.
+    """
+    before = _database_file_identity(root)
+    if before is None:
+        return None
+    path = database_path(root).resolve()
+    try:
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=15,
+            isolation_level=None,
+        )
+    except sqlite3.Error:
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+        history_fingerprint = _migration_history_fingerprint(connection)
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    after = _database_file_identity(root)
+    if after is None or after != before:
+        return None
+    return _DatabaseReadiness(
+        identity=after,
+        user_version=user_version,
+        schema_version=schema_version,
+        history_fingerprint=history_fingerprint,
+        plan_fingerprint=plan_fingerprint,
+    )
+
+
+def _forget_database_readiness(root: Path) -> None:
+    with _DATABASE_READINESS_GUARD:
+        _DATABASE_READINESS.pop(_root_key(root), None)
+
+
+def _cache_database_readiness(root: Path, migrations: tuple[_Migration, ...]) -> None:
+    """Remember a just-validated steady-state schema, if it is still stable.
+
+    The slow migration path is authoritative.  If the database changes after
+    it releases its transaction, this helper simply declines to populate the
+    optimization; the next caller runs the normal fail-closed path again.
+    """
+    plan_fingerprint = _migration_plan_fingerprint(migrations)
+    readiness = _read_database_readiness(root, plan_fingerprint=plan_fingerprint)
+    if readiness is None:
+        _forget_database_readiness(root)
+        return
+    expected_history = hashlib.sha256(_canonical_json([
+        (migration.version, migration.name, _migration_checksum(migration))
+        for migration in migrations
+    ]).encode("utf-8")).hexdigest()
+    if (
+        readiness.history_fingerprint != expected_history
+        or readiness.user_version != (migrations[-1].version if migrations else 0)
+    ):
+        _forget_database_readiness(root)
+        return
+    key = _root_key(root)
+    with _DATABASE_READINESS_GUARD:
+        _DATABASE_READINESS[key] = readiness
+        _DATABASE_READINESS.move_to_end(key)
+        while len(_DATABASE_READINESS) > _DATABASE_READINESS_CACHE_LIMIT:
+            _DATABASE_READINESS.popitem(last=False)
+
+
+def _database_readiness_is_current(root: Path, migrations: tuple[_Migration, ...]) -> bool:
+    """Return whether a read-only probe proves the warm schema is unchanged."""
+    key = _root_key(root)
+    with _DATABASE_READINESS_GUARD:
+        cached = _DATABASE_READINESS.get(key)
+        if cached is not None:
+            _DATABASE_READINESS.move_to_end(key)
+    if cached is None:
+        return False
+    if cached.plan_fingerprint != _migration_plan_fingerprint(migrations):
+        _forget_database_readiness(root)
+        return False
+    observed = _read_database_readiness(root, plan_fingerprint=cached.plan_fingerprint)
+    if observed == cached:
+        return True
+    _forget_database_readiness(root)
+    return False
+
+
 def ensure_database(root: Path) -> None:
     """Open/upgrade one project ledger and apply each migration exactly once."""
     if _root_key(root) in _active_connections():
         _assert_current_migration_history(_active_connections()[_root_key(root)])
         return
+    migrations = _migration_plan()
+    if _database_readiness_is_current(root, migrations):
+        return
     with _migration_lock(root):
         with _connection(root, write=True) as connection:
             user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            migrations = _migration_plan()
             has_history = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
             ).fetchone() is not None
@@ -1290,6 +1477,7 @@ def ensure_database(root: Path) -> None:
             # interrupted upgrade and for deterministic migration tests that
             # intentionally stop at an earlier released plan.
             connection.execute(f"PRAGMA user_version = {migrations[-1].version if migrations else 0}")
+    _cache_database_readiness(root, migrations)
 
 
 def migration_history(root: Path) -> list[dict[str, Any]]:
@@ -1353,7 +1541,19 @@ def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = Tru
 
 
 def task_findings_blockers(root: Path, task_id: str) -> list[dict[str, Any]]:
-    return [item for item in list_task_findings(root, task_id, include_resolved=True) if item.get("status") == "open" and (item["severity"] in {"P0", "P1", "P2"} or item["blocking"])]
+    """Return only open findings that are authoritative transition blockers.
+
+    P0/P1 are intrinsically blocking.  P2 is advisory unless the authoritative
+    finding explicitly declares ``blocking=true``; treating every open P2 as
+    a hard rework requirement made ordinary tracked risk indistinguishable
+    from a closure blocker.
+    """
+    return [
+        item
+        for item in list_task_findings(root, task_id, include_resolved=True)
+        if item.get("status") == "open"
+        and (item["severity"] in {"P0", "P1"} or item["blocking"])
+    ]
 
 
 def task_index(root: Path) -> dict[str, dict[str, Any]]:

@@ -216,6 +216,38 @@ def _planning_preview_resolved_decisions(task_dir: Path, state: dict[str, Any]) 
     return selected
 
 
+def _planning_preview_unit_ref(
+    task_dir: Path,
+    attempt: dict[str, Any],
+    compiled_unit: dict[str, Any],
+) -> dict[str, Any]:
+    """Describe the future compiled-plan artifact without embedding it in a briefing.
+
+    Planner intake preflights the same prompt renderer used by real dispatch.
+    At that point the candidate report has not committed, so there is no
+    durable compiled-plan artifact yet.  A bounded ref-shaped preview proves
+    the briefing contract while preserving the complete candidate unit for the
+    normal post-acceptance immutable artifact/projection path.  The preview is
+    intentionally never exposed to a worker or accepted as an artifact ref.
+    """
+    encoded = json.dumps(compiled_unit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    attempt_id = safe_id(str(attempt.get("attempt_id") or "plan-preview"))
+    package_ids = [str(item) for item in compiled_unit.get("package_ids") or []]
+    return {
+        "schema": "cortex/compiled-plan-unit-ref/v1",
+        "plan_revision": compiled_unit.get("plan_revision"),
+        "source_report_ref": compiled_unit.get("source_report_ref"),
+        "artifact_ref": "preview-not-persisted",
+        "artifact_path": str(task_dir / "planning" / "compiled" / f"{attempt_id}-preview.json"),
+        "digest_sha256": hashlib.sha256(encoded).hexdigest(),
+        "byte_size": len(encoded),
+        "microtask_count": len(compiled_unit.get("microtasks") or []),
+        "package_count": len(package_ids),
+        "package_ids_digest": digest_text(json.dumps(package_ids, ensure_ascii=False, sort_keys=True, separators=(",", ":"))),
+        "read_required": True,
+    }
+
+
 def _validate_planning_dispatch_briefings(
     task_dir: Path,
     state: dict[str, Any],
@@ -286,7 +318,13 @@ def _validate_planning_dispatch_briefings(
                     f"{item['id']}: {item['title']}" for item in compiled_unit["microtasks"]
                 )
                 allowed_paths, acceptance, verification = compiled_paths, compiled_acceptance, compiled_verification
-                plan_unit: dict[str, Any] | None = compiled_unit
+                # The full compiled unit is persisted as an immutable
+                # artifact only after this report passes validation.  Never
+                # inline its full text in the preflight briefing: that turns
+                # report completeness into an unrelated prompt-size failure.
+                plan_unit: dict[str, Any] | None = _planning_preview_unit_ref(
+                    task_dir, attempt, compiled_unit,
+                )
             else:
                 agent = str(spec.get("agent") or "general")
                 gate_briefing = _runtime.render_gate_briefing(gate, task.get("objective", ""), agent)
@@ -338,8 +376,9 @@ def _validate_planning_dispatch_briefings(
             except ValueError as exc:
                 raise ValueError(
                     "planner dispatch briefing budget rejected before persistence for "
-                    f"future {gate}/{agent}: {exc}. Shorten the planning work packages, microtask objectives, "
-                    "acceptance criteria, or verification text; retry this same planner report."
+                    f"future {gate}/{agent}: {exc}. This is a runtime briefing-template problem, not an "
+                    "instruction to remove planner evidence; preserve the complete plan and return the diagnostic "
+                    "to the coordinator."
                 ) from exc
             byte_size = len(rendered.encode("utf-8"))
             if byte_size > hard_budget:
@@ -348,8 +387,9 @@ def _validate_planning_dispatch_briefings(
                 # real dispatcher would reject.
                 raise ValueError(
                     "planner dispatch briefing budget rejected before persistence for "
-                    f"future {gate}/{agent}: {byte_size}>{hard_budget} ({hard_key}). "
-                    "Shorten the plan and retry this same planner report."
+                    f"future {gate}/{agent}: {byte_size}>{hard_budget} ({hard_key}). The plan is retained as an "
+                    "immutable artifact, so return this runtime-template diagnostic to the coordinator rather than "
+                    "discarding planning evidence."
                 )
 
 
@@ -710,7 +750,7 @@ def _read_private_report_draft(path: Path) -> str:
             raise ValueError("report draft must be owned by the current user")
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise ValueError("report draft permissions must be exactly private 0600")
-        if info.st_size > _runtime.MAX_JSON_BYTES:
+        if info.st_size > _runtime.MAX_REPORT_DRAFT_BYTES:
             raise ValueError("report draft is oversized")
         chunks: list[bytes] = []
         size = 0
@@ -719,7 +759,7 @@ def _read_private_report_draft(path: Path) -> str:
             if not chunk:
                 break
             size += len(chunk)
-            if size > _runtime.MAX_JSON_BYTES:
+            if size > _runtime.MAX_REPORT_DRAFT_BYTES:
                 raise ValueError("report draft is oversized")
             chunks.append(chunk)
         return b"".join(chunks).decode("utf-8")
@@ -744,7 +784,7 @@ def _write_system_report_draft_file(draft_path: Path, envelope: dict[str, Any], 
     payload = _runtime._json_text(
         envelope,
         label=f"JSON document '{draft_path.name}'",
-        max_bytes=_runtime.MAX_JSON_BYTES,
+        max_bytes=_runtime.MAX_REPORT_DRAFT_BYTES,
     ).encode("utf-8")
     temporary: str | None = None
     if create:
@@ -1149,7 +1189,13 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("gate_result and closure must describe the same review/close outcome")
         result_validation = None
         if params.get("_require_gate_validation"):
-            result_validation = _validate_gate_result_report(task_dir, state, attempt, report)
+            result_validation = _validate_gate_result_report(
+                task_dir,
+                state,
+                attempt,
+                report,
+                gate_result=gate_result,
+            )
         if params.get("_require_close_validation"):
             _validate_close_report(task_dir, state, attempt, report)
         if is_closure_gate and gate_result is None and closure is None:
@@ -1672,6 +1718,27 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "Stop this worker and preserve the exact diagnostic. The issued immutable briefing is missing, "
                 "writable, out of scope, or digest-mismatched; never substitute another Cortex file or continue."
             )
+        elif any(fragment in message for fragment in (
+            "has no trusted origin evidence",
+            "requires its exact immutable origin report in the rerun handoff",
+            "requires an active server-recorded corrective rework route",
+            "belongs to a superseded corrective route",
+            "does not match the active corrective rework route",
+            "requires the current corrective report in the verifier handoff",
+            "may be published only by a fresh rerun of its origin gate",
+            "requires a fresh rerun attempt, not its origin attempt",
+        )):
+            # The immutable origin and correction receipts are coordinator
+            # state. A reviewer cannot restore either by rewriting report
+            # fields, so this is a recovery boundary rather than a retryable
+            # draft-validation error.
+            code = "corrective_handoff_unavailable"
+            outcome = "blocked"
+            next_action = (
+                "Do not edit or retry this report. The coordinator must recover or reissue the server-owned "
+                "corrective route with the immutable origin and current correction receipts in this verifier's "
+                "handoff; preserve this attempt identity and do not guess missing evidence."
+            )
         elif "English-only" in message:
             code = "worker_output_language_violation"
             outcome = "needs_correction"
@@ -2096,10 +2163,20 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
         knowledge_indexes = sorted(str(item) for item in attempt.get("knowledge_index_files") or [])
         if knowledge_indexes:
             evidence.append("Knowledge reviewed: " + ", ".join(knowledge_indexes))
-        evidence.extend(
-            prefix + "<replace with concrete observed proof>"
-            for prefix, _criterion in _result_contract_markers(attempt, task)
-        )
+        for prefix, _criterion in _result_contract_markers(attempt, task):
+            # A non-pass review/close result can truthfully account for an
+            # unmet criterion as BLOCKED.  Do not pre-fill PASS for those
+            # gates: it encouraged workers to force a false positive before
+            # gate_result could represent the actual observed outcome. Other
+            # gates do not have that result envelope and retain PASS-only
+            # evidence semantics.
+            marker_base = prefix.removesuffix("PASS - ")
+            if gate in _GATE_RESULT_REQUIRED_GATES:
+                evidence.append(
+                    marker_base + "<replace PASS or BLOCKED> - <replace with concrete observed proof or blocker>"
+                )
+            else:
+                evidence.append(prefix + "<replace with concrete observed proof>")
         report = {
             "summary": "<replace with concise result summary>",
             "findings": [],

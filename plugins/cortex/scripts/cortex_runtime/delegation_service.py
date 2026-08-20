@@ -496,7 +496,20 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("exactly one immutable user-intent projection is required before dispatch")
         intent_job = intent_jobs[0]
         if isinstance(params.get("plan_unit"), dict):
-            compiled_plan = sanitize_structured(params["plan_unit"])
+            # ``plan_unit`` is server-derived by the approved-plan compiler,
+            # not an arbitrary worker report field.  It has already passed
+            # the planning schema and is the canonical implementation input.
+            # Do not run it through the general diagnostic sanitizer: that
+            # helper shortens every scalar/list for log-safe projections,
+            # which silently changed the full immutable plan the worker was
+            # authorized to read.  JSON canonicalization gives this artifact
+            # a detached value without altering its approved content.
+            try:
+                compiled_plan = json.loads(json.dumps(
+                    params["plan_unit"], ensure_ascii=False, sort_keys=True,
+                ))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("compiled plan unit must be JSON-serializable") from exc
             compiled_relative = f"planning/compiled/{attempt_id}.json"
             compiled_plan_path = _contained_path(
                 task_dir, task_dir / compiled_relative, "compiled plan unit"
@@ -521,12 +534,24 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             )
             package["plan_unit"] = {
                 "schema": "cortex/compiled-plan-unit-ref/v1",
+                "plan_revision": compiled_plan.get("plan_revision"),
+                "source_report_ref": compiled_plan.get("source_report_ref"),
                 "artifact_ref": compiled_artifact["artifact_ref"],
                 "artifact_path": str(compiled_plan_path),
                 "digest_sha256": compiled_plan_digest,
                 "byte_size": compiled_artifact["byte_size"],
                 "microtask_count": len(compiled_plan.get("microtasks") or []),
-                "package_ids": list(compiled_plan.get("package_ids") or []),
+                "package_count": len(compiled_plan.get("package_ids") or []),
+                # The complete package id list remains inside the immutable
+                # compiled-plan artifact.  A digest keeps the compact
+                # briefing auditable without making plan cardinality consume
+                # its transport budget.
+                "package_ids_digest": digest_text(json.dumps(
+                    [str(item) for item in compiled_plan.get("package_ids") or []],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )),
                 "read_required": True,
             }
         package["intent_clarification_required"] = bool(task_definition.get("intent_clarification_required", False))

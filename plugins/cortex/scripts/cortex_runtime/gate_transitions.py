@@ -84,8 +84,34 @@ def _resolve_active_gate(
     )
     requested_gate = str(params["gate"])
     current_wave = active_gates(state)
-    gate = requested_gate if requested_gate in current_wave else (current_wave[0] if current_wave else "")
+    # ``record_gate`` carries authority to advance a particular gate.  Never
+    # silently substitute the first active gate for a caller-supplied inactive
+    # one: doing so can commit a valid-looking transition to the wrong gate.
+    # The caller turns the empty resolution into a non-mutating,
+    # self-correcting ``gate_mismatch`` response below.
+    gate = requested_gate if requested_gate in current_wave else ""
     return requested_gate, gate, revision_correction
+
+
+def _gate_mismatch(
+    state: dict[str, Any],
+    revision_correction: dict[str, Any] | None,
+    *,
+    requested_gate: str,
+) -> dict[str, Any]:
+    """Return a precise no-op when a gate transition targets an inactive gate."""
+    current_wave = active_gates(state)
+    return _recoverable(
+        state,
+        revision_correction,
+        reason="gate_mismatch",
+        gate=requested_gate,
+        next_action="retry_with_active_gate",
+        requested_gate=requested_gate,
+        active_gates=current_wave,
+        state_changed=False,
+        retryable=True,
+    )
 
 
 def _validate_skip(
@@ -613,6 +639,12 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
         root, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
         requested_gate, gate, revision_correction = _resolve_active_gate(state, params)
+        if not gate:
+            return _gate_mismatch(
+                state,
+                revision_correction,
+                requested_gate=requested_gate,
+            )
         outcome = str(params["outcome"])
         if outcome not in _OUTCOMES:
             raise ValueError("outcome must be passed, failed, blocked, or skipped")

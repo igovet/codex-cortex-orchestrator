@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.15-7c3aed" alt="Cortex 9.2.15" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.16-7c3aed" alt="Cortex 9.2.16" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,6 +691,21 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
+### 9.2.16 coordinator recovery and report-contract hardening release
+
+This source-tree patch closes three recovery and contract gaps. Coordinator
+recovery no longer asks a reviewer to retry an impossible resolution report;
+review and close now preserve honest `BLOCKED` markers when corrective work is
+still required; and the `record_report` schema branch matches the runtime
+validation branch, keeping its public contract aligned.
+Report intake retains complete submitted strings and list items instead of
+applying the former 64 KiB and 100-item sanitization caps. The explicit atomic
+artifact boundary is 8 MiB; private report drafts allow 17 MiB so envelope
+metadata cannot reject an otherwise valid report. Reports are immutable
+cursor-paged artifacts, with 32 KiB limiting transport pages only. Detailed
+plans are passed by their exact artifact ref/path/SHA-256 tuple in the worker
+briefing.
+
 ### 9.2.15 report, hook, and governance-rework hardening release
 
 The current source-tree hardening draft retains the 9.2.10 stopped-report and
@@ -763,7 +778,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.15 cachebuster and full release/live results
+exact 9.2.16 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
@@ -845,7 +860,12 @@ that briefing before project work. Worker Briefing v3 JSON-serializes every
 task-controlled assignment value inside one explicitly untrusted data block;
 the surrounding authority, bounded role contract, optional mode overlay,
 evidence rules, and worker protocol remain fixed instructions. Its byte budget
-is enforced before dispatch. Ordinary profiles do not carry
+is enforced before dispatch. Full Planner microtasks are not embedded in that
+bounded assignment: Cortex writes an immutable compiled-plan artifact and
+places only its exact artifact ref/path/SHA-256, byte size, and compact counts
+in the briefing and native bootstrap. The implementation worker reads that
+one authorized artifact and verifies its digest, so a detailed valid plan is
+not rejected or silently truncated merely to fit a worker prompt. Ordinary profiles do not carry
 harvest specialization; exact harvest routes add a conditional mode overlay.
 A worker never browses unrelated Cortex coordination data. Canonical state is
 stored in the host-private SQLite `cortex/v8` task ledger plus its additive v12
@@ -855,6 +875,9 @@ override and must resolve to a private directory outside the workspace. A
 legacy project-local `.codex/cortex` database is eligible only for a
 same-filesystem atomic rename after ancestry, database, and split-state checks;
 unsafe, non-database, or cross-filesystem legacy state fails closed.
+Ordinary opens preserve an already-matching host-project identity without
+rewriting its metadata; an identity or rename-provenance change remains a
+durable control-plane transition.
 Briefing size is validated when the immutable briefing is saved, before native
 dispatch: the bootstrap is capped at 1.5 KiB, ordinary briefings target 16 KiB
 soft and reject above 24 KiB hard, and harvest briefings target 18 KiB soft and
@@ -891,8 +914,10 @@ from any allowed worker tool is also corrected and retried on the same attempt
 without consuming recovery budget; only explicit `retryable: false` integrity
 or storage blockers are terminal. Successful finalization revalidates the
 current draft and state, commits the durable report atomically, and deletes the
-draft post-commit. Bounded briefing, report, and coordinator artifact reads
-clamp oversized `max_bytes` requests to 32768 and continue with cursors.
+draft post-commit. Bounded briefing and coordinator artifact reads clamp
+oversized `max_bytes` requests to 32768 and continue with cursors. Report reads
+expose the complete immutable report artifact through the same cursor protocol;
+32768 is only the transport page size, not a report-content cap.
 QA, review, implementation, and corrective pipeline rework are unbounded while
 acceptance criteria, required verification, or canonical findings remain
 unresolved. Failure counts are audit and routing inputs, never a completion
