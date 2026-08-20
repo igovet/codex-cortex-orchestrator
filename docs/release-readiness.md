@@ -4,10 +4,10 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.11 release candidate
+## 9.2.13 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.11 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.13 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
@@ -35,6 +35,14 @@ mode; a rejected direct edit is not path-repaired. Evidence-marker diagnostics
 name the exact required marker and criterion, while `changed_files` remains
 bound to the immutable baseline of that exact worker attempt. Lifecycle hooks
 resolve their bundled runtime when a host loads them through `importlib`.
+An active closure-rework route also preserves its exact server-bound corrective
+receipt through intermediate QA/security acknowledgements, so the originating
+verifier can receive both the source finding and correction before issuing a
+resolution receipt. `required_missing=[]` is scoped to the publishing gate and
+does not synthesize a resolved transition for a server-created verification
+finding from another gate. Governance-origin rework moves its fresh origin
+gate and every later closure verifier behind the corrective target, preserving
+the required resolution provenance without weakening the blocker.
 
 Worker Briefing v3 budgets are enforced when the immutable briefing is saved:
 the compact native bootstrap is capped at 1.5 KiB, ordinary briefings use a
@@ -50,7 +58,7 @@ just to fit transport limits.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.11` (the current source candidate carries a cachebuster; installed builds
+  `9.2.13` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -190,7 +198,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.11 release commit only with explicit authorization.
+- Create the Cortex 9.2.13 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

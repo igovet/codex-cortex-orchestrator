@@ -1,5 +1,29 @@
 # Changelog
 
+## [9.2.13] - 2026-08-20
+
+This source-tree patch closes two fail-closed governance finding-route gaps.
+
+- Do not synthesize a resolved `verification-required-missing` finding from a
+  no-findings pass at a different gate. The canonical blocker remains open
+  until its own fresh origin gate can validate the corrective route.
+- Rework raised by `governance_activation` or `governance_close` now moves the
+  originating governance verifier and every later closure verifier behind the
+  corrective target, so a resolution receipt has the required fresh origin
+  rerun instead of an orphaned provenance path.
+
+## [9.2.12] - 2026-08-20
+
+This source-tree patch preserves resolution evidence across multi-hop
+corrective waves.
+
+- Keep the exact server-bound corrective report in active rework handoffs
+  through later QA/security acknowledgements, so the origin verifier receives
+  it with the source finding and can issue a valid resolution receipt.
+- Cover the Review → corrective worker → QA → final Review chain, including
+  the case where ordinary transitive frontier compaction would otherwise drop
+  the corrective receipt.
+
 ## [9.2.11] - 2026-08-20
 
 This source-tree patch hardens the public worker-report boundary and hook

@@ -856,6 +856,88 @@ def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[s
     return selected
 
 
+def _active_rework_corrective_report_ids(root: Path, state: dict[str, Any]) -> list[str]:
+    """Return live corrective receipts that a later verifier must retain.
+
+    The ordinary predecessor frontier intentionally removes a report once a
+    successor has acknowledged it.  That is normally the right compaction,
+    but it is insufficient for an active closure-rework route: the originating
+    verifier must receive the exact current corrective report in order to
+    produce its resolution receipt.  Preserve only server-bound corrective
+    receipts for the active semantic revision, not every historical report
+    that happens to have flowed through a later QA or security gate.
+    """
+    current_revision = int(state.get("task_revision") or 1)
+    active_routes: list[tuple[str, set[str], set[str]]] = []
+    for rework in (state.get("closure_rework") or {}).values():
+        if (
+            not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+            or int(rework.get("task_revision") or 0) != current_revision
+        ):
+            continue
+        target_gate = str(rework.get("target_gate") or "")
+        source_refs = {
+            str(item) for item in rework.get("source_report_refs") or [] if str(item)
+        }
+        fingerprints = {
+            str(item) for item in rework.get("finding_fingerprints") or [] if str(item)
+        }
+        if target_gate and source_refs and fingerprints:
+            active_routes.append((target_gate, source_refs, fingerprints))
+    if not active_routes:
+        return []
+
+    open_findings = {
+        str(item.get("fingerprint") or ""): item
+        for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
+        if isinstance(item, dict)
+    }
+    current_evidence = {
+        str(item.get("report_id") or "")
+        for item in state.get("evidence") or []
+        if isinstance(item, dict)
+        and not item.get("invalidated")
+        and str(item.get("report_id") or "")
+    }
+    bound_by_target: dict[str, set[str]] = {}
+    for target_gate, source_refs, fingerprints in active_routes:
+        for fingerprint in fingerprints:
+            finding = open_findings.get(fingerprint)
+            if not isinstance(finding, dict):
+                continue
+            for source in finding.get("source_evidence") or []:
+                if (
+                    not isinstance(source, dict)
+                    or source.get("transition") != "corrective_reported"
+                    or source.get("gate") != target_gate
+                    or source.get("origin_report_ref") not in source_refs
+                    or int(source.get("task_revision") or 0) != current_revision
+                ):
+                    continue
+                report_ref = str(source.get("report_id") or "")
+                if report_ref and report_ref in current_evidence:
+                    bound_by_target.setdefault(target_gate, set()).add(report_ref)
+
+    selected: list[str] = []
+    for attempt in state.get("attempts") or []:
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("status") != "passed"
+            or attempt.get("invalidated")
+        ):
+            continue
+        for report_ref in attempt.get("report_ids") or []:
+            value = str(report_ref or "")
+            if (
+                value
+                and value in bound_by_target.get(str(attempt.get("gate") or ""), set())
+                and value not in selected
+            ):
+                selected.append(value)
+    return selected
+
+
 def _unresolved_rework_findings(
     root: Path,
     state: dict[str, Any],
@@ -926,6 +1008,9 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
     prepared_attempts: list[tuple[dict[str, Any], dict[str, Any]]] = []
     predecessor_report_ids = _predecessor_context_report_ids(state)
     rework_report_ids = _rework_context_report_ids(state, set(current_gates))
+    rework_corrective_report_ids = _active_rework_corrective_report_ids(
+        _ledger_root_for_artifact(task_dir), state,
+    )
     effective_delegations = list(wave["delegations"])
     if current_gates == ["implementation"]:
         compiled = _compiled_implementation_spec(task_dir, state, wave)
@@ -978,10 +1063,14 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             ))
         # A verified successor report transitively covers only refs that its
         # own passed attempt acknowledged. Preserve active rework sources even
-        # when a later ordinary handoff covered them: they are the current
-        # corrective mission, not merely historical context.
+        # when a later ordinary handoff covered them, and preserve the exact
+        # server-bound corrective receipt until its origin verifier has
+        # resolved the finding.  They are active resolution evidence, not
+        # merely historical context.
         context_report_ids = list(dict.fromkeys(
-            rework_report_ids + _transitive_context_frontier(state, context_report_ids)
+            rework_report_ids
+            + rework_corrective_report_ids
+            + _transitive_context_frontier(state, context_report_ids)
         ))
         delegated = record_delegation({
             **params,
