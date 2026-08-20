@@ -8,9 +8,10 @@ remote, and installed-plugin parity remain separate release gates.
 
 - Add promotion replay lookup by deterministic policy reference, avoiding
   pagination-bound false corruption after a large governance history.
-- Add governance schema v11 integrity: immutable artifact-authoritative record
+- Add governance schema v12 integrity: immutable artifact-authoritative record
   bodies, exact normalized scope, linear revision chains, strict JSON,
-  immutable-field triggers, and conflict-safe submission receipts.
+  immutable-field triggers, conflict-safe submission receipts, and host-keyed
+  authentication for the complete governance lifecycle envelope.
 - Bind coordinator capabilities to task/initiative scope, principal, thread,
   generation, expiry, allowed actions, and revocation; rotate a lost bearer
   only for the same active identity without persisting plaintext.

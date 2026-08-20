@@ -16,7 +16,7 @@
         <img src="https://img.shields.io/badge/Cortex-9.2.6-7c3aed" alt="Cortex 9.2.6" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
-        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v11-0f766e" alt="task schema v8 and governance schema v11" />
+        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
       </p>
     </td>
   </tr>
@@ -599,7 +599,7 @@ flowchart LR
     G -- "passed: full" --> GC["governance_close<br/>code_reviewer"]
     GC --> C
 
-    R <--> L[("Host-private SQLite ledger<br/>task v8 + governance v11")]
+    R <--> L[("Host-private SQLite ledger<br/>task v8 + governance v12")]
 ```
 
 ### Governance resolution
@@ -692,12 +692,13 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 
 ### 9.2.6 hardening release
 
-The current source-tree hardening draft extends governance with schema v11
+The current source-tree hardening draft extends governance with schema v12
 integrity guarantees. Governance record bodies are read from verified
 immutable content artifacts; exact normalized scope, task/initiative links,
 linear revisions, strict JSON, immutable-field triggers, and idempotent
 submission receipts fail closed on corruption or replay conflict. Schema v11
-adds an append-only lifecycle chain for status and approval-basis authority,
+adds the append-only lifecycle chain for status and approval-basis authority;
+schema v12 adds host-keyed authentication for the complete lifecycle envelope,
 requires terminal success for linked milestone/deliverable tasks before an
 initiative can complete, and prevents deletion of initiative-task links that
 are referenced by governance records. Pre-v10 upgrades deterministically
@@ -808,13 +809,18 @@ evidence rules, and worker protocol remain fixed instructions. Its byte budget
 is enforced before dispatch. Ordinary profiles do not carry
 harvest specialization; exact harvest routes add a conditional mode overlay.
 A worker never browses unrelated Cortex coordination data. Canonical state is
-stored in the host-private SQLite `cortex/v8` task ledger plus its additive v11
+stored in the host-private SQLite `cortex/v8` task ledger plus its additive v12
 governance ledger. By default the ledger lives below
 `~/.codex/cortex/projects/p-<sha256>/`; `CORTEX_HOST_STATE_DIR` is a host-only
 override and must resolve to a private directory outside the workspace. A
 legacy project-local `.codex/cortex` database is eligible only for a
 same-filesystem atomic rename after ancestry, database, and split-state checks;
 unsafe, non-database, or cross-filesystem legacy state fails closed.
+Briefing size is validated when the immutable briefing is saved, before native
+dispatch: the bootstrap is capped at 1.5 KiB, ordinary briefings target 16 KiB
+soft and reject above 24 KiB hard, and harvest briefings target 18 KiB soft and
+reject above 28 KiB hard. Oversize rejection leaves the current plan intact;
+it does not silently regenerate a new plan merely to fit transport limits.
 New tasks use pipeline contract v2; active v1 tasks without that field resume
 their persisted pipeline unchanged.
 

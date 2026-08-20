@@ -216,7 +216,7 @@ candidate is committed and rerun on the exact release SHA:
 - Installed-plugin verification and cachebuster parity: **pending; no install
   or user `~/.codex` mutation is implied**.
 
-The draft scope covers governance schema v11 integrity, artifact-authoritative
+The draft scope covers governance schema v12 integrity, artifact-authoritative
 record bodies, exact scope and linear revisions, append-only status/approval
 lifecycle authority, deterministic pre-v10 v9 reconciliation, linked-task
 completion and governed-link deletion restrictions, scoped capability claims
@@ -259,16 +259,17 @@ pending full-suite or live gates.
   audit/Desktop projections; altering, deleting, or adding a projection cannot
   restore or modify coordination state. Existing pre-SQLite files are neither
   inspected, imported, resumed, altered, nor deleted.
-- Database schema changes are numbered and checksummed through **schema v11**.
+- Database schema changes are numbered and checksummed through **schema v12**.
   First MCP access takes
   the project-ledger lock and applies only missing SQLite-to-SQLite migrations
   atomically; a failed or mismatched migration fails closed. Checksums cover
   migration version, name, and ordered normalized SQL content. Legacy
   name-only checksums are upgraded only after schema validation. The schema
   uses unbounded SQLite `TEXT`/`BLOB` values for content and indexed 32 KiB
-  immutable artifact chunks for transport. Schema v11 hardens the governance
-  ledger with an append-only status/approval-basis lifecycle chain, governed
-  link-deletion restrictions, and terminal linked-task checks. Schema v10
+  immutable artifact chunks for transport. Schema v11 added the append-only
+  status/approval-basis lifecycle chain; schema v12 hardens the governance
+  ledger with host-keyed authentication for the complete lifecycle envelope,
+  governed link-deletion restrictions, and terminal linked-task checks. Schema v10
   adds artifact-authoritative bodies, exact non-null scopes, linear revision
   indexes/triggers, and idempotent submission receipts; schema v9
   added the initial governance ledger; schema v8 added task/plan revisions,
@@ -403,8 +404,10 @@ Prompt-architecture regressions validate explicit Cortex opt-in, the
 Worker Briefing v3 budget-enforced assignment envelope. Adversarial task values are serialized
 and round-tripped as JSON, rather than interpreted as prompt structure; tests
 also reject long duplicate prompt paragraphs and enforce representative
-bootstrap/briefing budgets (1,500 bytes; ordinary 10,000/14,000 soft/hard;
-harvest 11,000/15,000 soft/hard). Retry regressions enforce
+bootstrap/briefing budgets (1,500 bytes; ordinary 16/24 KiB soft/hard;
+harvest 18/28 KiB soft/hard). The ordinary values occupy the recommended
+14–16 KiB soft and 20–24 KiB hard envelope; the harvest overlay uses the
+expanded 16–18 KiB soft and 24–28 KiB hard envelope. Retry regressions enforce
 unbounded pipeline rework, the `high`/`xhigh`/`max` effort escalation, Terra
 routing after two unresolved attempts, and optional evidence-backed
 `next_strategy` or pipeline replanning.

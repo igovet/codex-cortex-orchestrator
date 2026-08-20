@@ -4,7 +4,7 @@
 ## Purpose
 
 The local MCP server implements the Cortex 9.2.6 `cortex/v8` task ledger plus
-the additive v11 governance ledger and public `cortex/orchestration/v5`
+the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
 launch-time audience exposes exactly five tools: the coordinator projection
@@ -26,7 +26,7 @@ to the content checksum; inconsistent history fails closed.
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the stable executable and public facade for task, report, and lane tools.
 - [gate_transitions.py](../../../plugins/cortex/scripts/cortex_runtime/gate_transitions.py) owns active-gate resolution, evidence policy, C2/C3 completion requirements, durable transitions, and terminal manifest cleanup behind the `record_gate` facade.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns orchestration start/continue/inspect transitions, transaction checkpoints, waves, and native dispatch assembly.
-- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v11, governance tables, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
+- [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns the SQLite schema, content-checked migration history through v12, governance tables, blobs, logical artifacts, export authorization, projection jobs, prune tombstones, revision/session/question-batch tables, and signed artifact cursors without importing the MCP entrypoint.
 - [governance.py](../../../plugins/cortex/scripts/cortex_runtime/governance.py) owns mode resolution, initiative/dependency integrity, immutable records and snapshots, constrained exceptions, and coordinator-approved promotion.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) owns leased outbox materialization and retry; [health_maintenance.py](../../../plugins/cortex/scripts/cortex_runtime/health_maintenance.py) owns explicit SQLite-aware health, backup, and projection-reconciliation maintenance.
 - [harvest_validation.py](../../../plugins/cortex/scripts/cortex_runtime/harvest_validation.py) owns exhaustive harvest coverage-manifest checks.
@@ -48,8 +48,9 @@ the workspace. SQLite is the sole mutable source for tasks, state, plans,
 operations, report/delegation indexes, questions, snapshots, classifications,
 lanes, activations, resource claims, findings, projection jobs, prune
 tombstones, revisions, worker sessions, attempt messages, trace observations,
-and immutable artifact content. Schema v11 adds append-only governance lifecycle
-authority for status and approval basis, governed link-deletion restrictions,
+and immutable artifact content. Schema v11 added append-only governance lifecycle
+authority for status and approval basis, governed link-deletion restrictions;
+schema v12 adds host-keyed authentication for the complete lifecycle envelope
 and terminal linked-task checks. Schema v10 adds governance integrity indexes,
 scope/revision triggers, and idempotent submission receipts; schema v9 added
 the initial governance tables and records;
@@ -412,9 +413,11 @@ Host spawn prompts use one JSON-serialized, explicitly untrusted assignment
 envelope; task-controlled text cannot become headings, fences, or protocol
 instructions. `start_orchestration.next_action` is serialized before dispatch
 payloads. Representative budgets are 1,500 bytes for the compact native
-bootstrap, 10,000/14,000 bytes for ordinary briefings, and 11,000/15,000 bytes
-for harvest briefings (soft/hard), with validator and regression lints for
-duplicate prompt paragraphs and adversarial assignment data. A worker is not considered sent
+bootstrap, 16/24 KiB for ordinary briefings, and 18/28 KiB for harvest
+briefings (soft/hard). Ordinary uses the top of the recommended 14–16 KiB soft
+and 20–24 KiB hard ranges; the harvest overlay uses the expanded 16–18 KiB
+soft and 24–28 KiB hard ranges. Validator and regression lints continue to
+cover duplicate prompt paragraphs and adversarial assignment data. A worker is not considered sent
 until native `spawn_agent` returns a child id; the coordinator must not announce
 a dispatch or call wait with an empty target list, and native dispatch failure
 is a blocker. Worker prompts have

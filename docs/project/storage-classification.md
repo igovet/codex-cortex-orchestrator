@@ -1,6 +1,6 @@
 # Storage classification ADR
 
-Status: implemented source-tree policy (governance schema v11; task schema remains cortex/v8).
+Status: implemented source-tree policy (governance schema v12; task schema remains cortex/v8).
 
 ## Decision
 
@@ -19,10 +19,11 @@ planning layout merely because a task exists. Legacy v7/v3 task files are
 unsupported input: they are not imported, resumed, repaired, or deleted.
 
 This ADR records the implemented SQLite-authoritative boundary. Governance
-schema v11 additionally makes immutable artifact bodies authoritative, binds
+schema v12 additionally makes immutable artifact bodies authoritative, binds
 records to an exact non-null scope identity, enforces linear revision chains,
 and appends status/approval-basis transitions to an integrity-checked
-lifecycle chain. Initiative completion requires successful linked
+lifecycle chain with host-keyed authentication for the complete event
+envelope. Initiative completion requires successful linked
 milestone/deliverable tasks, and governed initiative-task links cannot be
 deleted. It describes the workspace source; it is not evidence that a
 separately installed plugin has been updated.
@@ -31,8 +32,8 @@ separately installed plugin has been updated.
 
 | Data or path | Canonical owner | Creator / reader | Required or optional | Rebuild, retention, security, completion relevance |
 | --- | --- | --- | --- | --- |
-| `~/.codex/cortex/projects/p-<sha256>/cortex.db` (or the validated host-only override) | SQLite schema (`tasks`, revisions/state, plans, attempts, operations, receipts, documents, findings, blobs, logical artifacts, exports, tombstones, manifests, audit data, governance v11 records/submissions/lifecycle) | Runtime creates/updates; runtime and scoped APIs read | Required | Rebuild is not applicable; retain for active and retained completed tasks; private host-state root and mode `0600`; all state transitions and completion proof depend on it |
-| Governance record body and revision chain | SQLite governance row plus its immutable content artifact; v11 scope/revision/lifecycle indexes and triggers | Governance service writes transactionally; scoped governance APIs read and verify | Required for governance records | The artifact body is authoritative; `content_json` is a checked cache only. Exact initiative/task scope, one successor per predecessor, strict JSON, immutable-field triggers, and append-only status/approval-basis lifecycle authority fail closed on mismatch |
+| `~/.codex/cortex/projects/p-<sha256>/cortex.db` (or the validated host-only override) | SQLite schema (`tasks`, revisions/state, plans, attempts, operations, receipts, documents, findings, blobs, logical artifacts, exports, tombstones, manifests, audit data, governance v12 records/submissions/lifecycle) | Runtime creates/updates; runtime and scoped APIs read | Required | Rebuild is not applicable; retain for active and retained completed tasks; private host-state root and mode `0600`; all state transitions and completion proof depend on it |
+| Governance record body and revision chain | SQLite governance row plus its immutable content artifact; v12 scope/revision/lifecycle indexes, triggers, and host-keyed envelope authentication | Governance service writes transactionally; scoped governance APIs read and verify | Required for governance records | The artifact body is authoritative; `content_json` is a checked cache only. Exact initiative/task scope, one successor per predecessor, strict JSON, immutable-field triggers, and append-only status/approval-basis lifecycle authority fail closed on mismatch |
 | `cortex.db-wal`, `cortex.db-shm` | SQLite engine, not Cortex domain data | SQLite creates/reads; runtime must not treat either as a record | Incidental while WAL is active | SQLite lifecycle controls them; retain only as engine requires and never copy, parse, prune independently, or use for completion; inherit private directory controls |
 | `~/.codex/cortex/projects/p-<sha256>/.state.lock` | Runtime advisory coordination, not task state | Runtime creates/reads during serialized access | Required only while coordinating access | Re-creatable and disposable after no holder remains; host-private root and mode `0600`; never an audit record or completion input |
 | `~/.codex/cortex/projects/p-<sha256>/tasks/<task>/delegations/*.briefing.md` | SQLite artifact catalog plus immutable exported briefing bytes; the file is the host capability | Runtime creates once per dispatch; worker reads exactly the granted file (or scoped paged fallback) | Required for each native dispatch | Not rebuilt in place: digest/path/permissions must remain stable; retain with the attempt until task cleanup policy permits; private regular file (`0400`), no symlink; worker acknowledgement is mandatory close evidence |
@@ -101,7 +102,7 @@ read-only mutation reconciliation, a handoff, or terminal close.
 
 ## Implemented storage workflow
 
-Migrations are append-only through v11 and run in one SQLite transaction with a
+Migrations are append-only through v12 and run in one SQLite transaction with a
 content checksum. The default host-private state root is created only under
 secure `0700` parent directories with no symlink ancestry; a host-only
 `CORTEX_HOST_STATE_DIR` override is accepted only when private and outside the
@@ -114,10 +115,11 @@ then claims a lease, writes a private regular file by atomic replacement and
 leaves retryable canonical state. Required briefings add a hard capability
 check; optional reports, receipts, plans, and journal outputs may be rebuilt.
 
-Governance v11 validates the artifact body and digest before reads, enforces
+Governance v12 validates the artifact body and digest before reads, enforces
 non-null scope keys and exact task/initiative links, rejects sibling revisions,
 and retains an append-only cryptographic lifecycle chain as the authority for
-status and approval basis. The v9-to-v10 upgrade reconciles only deterministic
+status and approval basis, with host-keyed authentication for the complete
+lifecycle envelope. The v9-to-v10 upgrade reconciles only deterministic
 duplicate revisions/sibling successors; ambiguous scope or predecessor graphs
 fail closed before applying v10 indexes. Linked milestone/deliverable tasks
 must be completed before initiative completion, and governance-scoped links

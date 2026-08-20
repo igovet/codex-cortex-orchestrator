@@ -8,7 +8,7 @@ SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.6 source candidate adds governance schema v11 integrity checks. Its
+The 9.2.6 source candidate adds governance schema v12 integrity checks. Its
 exact source cachebuster is `9.2.6+codex.20260820093505`; tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
 a publication or installation claim.
@@ -72,7 +72,7 @@ Secrets, credentials, personal data, and private report contents must
 never be placed in prompts, reports, issues, or logs.
 
 The governance bearer is returned only with the original successful start
-response. Governance schema v11 persists only SHA-256 verifiers plus
+response. Governance schema v12 persists only SHA-256 verifiers plus
 server-owned claims: exact task/initiative scope, principal, thread, allowed
 actions, generation, expiry, and revocation history. It also persists only a
 verifier for a separate, non-durable coordinator recovery proof. It never
@@ -88,8 +88,11 @@ the affected task fails closed instead of preserving a possibly compromised
 credential. Workers must never receive or persist this coordinator-only bearer
 or recovery proof.
 
-Schema v11 also appends every governance record status and approval-basis
-transition to an immutable, cryptographically linked lifecycle chain. The
+Schema v11 appends every governance record status and approval-basis
+transition to an immutable, cryptographically linked lifecycle chain. Schema
+v12 additionally authenticates the complete lifecycle event envelope with a
+host-private key kept outside the SQLite ledger; missing or unavailable key
+material fails closed. The
 mutable current projection is accepted only when it matches that chain. A
 pre-v10 upgrade deterministically reconciles safe v9 duplicate scope revisions
 and sibling successors before v10 uniqueness constraints; missing scope links,

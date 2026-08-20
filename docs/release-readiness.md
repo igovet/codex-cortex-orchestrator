@@ -11,7 +11,7 @@ cachebuster is `9.2.6+codex.20260820093505`. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
-The draft scope is governance schema v11 integrity (artifact-authoritative
+The draft scope is governance schema v12 integrity (artifact-authoritative
 bodies, exact scope, linear revisions, strict JSON, immutable-field triggers,
 idempotent submissions, append-only status/approval-basis lifecycle authority,
 deterministic pre-v10 v9 reconciliation, linked milestone/deliverable success,
@@ -20,6 +20,13 @@ coordinator-audience same-identity recovery proof and revocation,
 no-progress pause semantics, revision-aware steer and questions,
 bounded/cache-backed manifest capture, the 50,000-file benchmark, and
 CI/CODEOWNERS release evidence.
+
+Worker Briefing v3 budgets are enforced when the immutable briefing is saved:
+the compact native bootstrap is capped at 1.5 KiB, ordinary briefings use a
+16 KiB soft target and 24 KiB hard ceiling, and harvest briefings use an
+18 KiB soft target and 28 KiB hard ceiling. A briefing that exceeds its hard
+ceiling is rejected before dispatch, so the planner is not silently rebuilt
+just to fit transport limits.
 
 ## Package contract
 
@@ -60,11 +67,13 @@ MCP approval override, and creates a collision-safe private backup only before
 changing a configured global default-subagent model. It never inspects or
 removes previous orchestration state or unrelated plugin files.
 
-Governance schema v11 makes immutable content artifacts authoritative, enforces
+Governance schema v12 makes immutable content artifacts authoritative, enforces
 exact normalized scope and linear revisions, and fails closed on strict-JSON or
 immutable-field violations. Its append-only lifecycle chain authorizes status
 and approval basis; deterministic v9 conflicts are reconciled before v10
-indexes, while ambiguous graphs fail closed. Linked milestone/deliverable
+indexes, while ambiguous graphs fail closed. Schema v12 additionally
+authenticates the complete lifecycle event envelope with a host-private key
+outside SQLite. Linked milestone/deliverable
 tasks must be terminally successful for initiative completion, and governed
 initiative-task links cannot be deleted. Coordinator capabilities are
 short-lived claims bound to task/initiative, principal, thread, generation,

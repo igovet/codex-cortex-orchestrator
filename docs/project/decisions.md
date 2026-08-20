@@ -72,13 +72,13 @@ review is bound to canonical reviewer attempts and sessions. Full governance
 adds `governance_activation` and `governance_close` review waves owned by
 `code_reviewer`; the resolver never invents a numeric scope trigger.
 
-Governance schema v11 makes the integrity boundary explicit. A record is read
+Governance schema v12 makes the integrity boundary explicit. A record is read
 from and verified against its immutable content artifact; the legacy
 `content_json` column is only a checked cache. Every record has a normalized,
 non-null scope key, task/initiative links are checked exactly, and a partial
 unique index permits at most one successor for a predecessor. Immutable-field
 triggers reject direct SQL mutation, strict JSON rejects non-finite values, and
-`submission_id` plus a command digest makes retries conflict-safe. Schema v11
+`submission_id` plus a command digest makes retries conflict-safe. Schema v12
 adds an append-only cryptographic lifecycle chain for status and approval
 basis, prevents deletion of governance-scoped initiative-task links, and
 requires terminal success for linked milestone/deliverable tasks before an
@@ -285,10 +285,12 @@ profile-owned, while harvest-specific guidance is a conditional
 profile TOML.
 
 Prompt validation keeps representative budgets in the worker contract: 1,500
-bytes for the native bootstrap, 10,000/14,000 bytes for ordinary briefings,
-and 11,000/15,000 bytes for harvest briefings (soft/hard). The marketplace
-validator and regression tests also lint long duplicate prompt paragraphs and
-parse adversarial assignment data as JSON.
+bytes for the native bootstrap, 16/24 KiB for ordinary briefings, and 18/28
+KiB for harvest briefings (soft/hard). Ordinary uses the top of the recommended
+14–16 KiB soft and 20–24 KiB hard ranges; the harvest overlay uses the
+expanded 16–18 KiB soft and 24–28 KiB hard ranges. The marketplace validator
+and regression tests also lint long duplicate prompt paragraphs and parse
+adversarial assignment data as JSON.
 
 Rework policy is explicit, evidence-driven, and unbounded. QA, review,
 implementation, and corrective phases repeat while acceptance, verification,
@@ -479,7 +481,7 @@ initial baseline before replacement dispatches.
 
 `cortex.db` is the sole mutable source of truth for new tasks and is host-private
 by default below `~/.codex/cortex/projects/p-<sha256>/`. The plugin keeps
-numbered, content-checked migrations through v11 in `ledger_db.py`; the first
+numbered, content-checked migrations through v12 in `ledger_db.py`; the first
 MCP call with a new migration takes the project-ledger lock, applies every
 missing migration in order inside one SQLite transaction, and records each
 version in `schema_migrations`. Repeated calls verify history and schema.
