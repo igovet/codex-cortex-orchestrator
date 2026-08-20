@@ -5387,6 +5387,7 @@ class ControlPlaneTests(unittest.TestCase):
             waves=[
                 {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
                 {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "qa", "profile": "build_verification"}]},
                 {"workers": [{"phase": "close", "profile": "build_verification"}]},
             ],
         )
@@ -5434,9 +5435,28 @@ class ControlPlaneTests(unittest.TestCase):
         documentation_results = self.v3_results(
             rework, self.v3_report("documentation correction completed")
         )
-        rerun_review = control.continue_orchestration({
+        qa = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": rework["step"],
             "results": documentation_results,
+        })
+        self.assertTrue(qa["ok"], qa)
+        self.assertEqual(qa["dispatches"][0]["phase"], "qa")
+
+        # A succeeding intermediary may acknowledge the documentation
+        # correction, but that acknowledgement must not replace the exact
+        # corrective receipt required by the final Review resolution route.
+        intermediate = control.load_task_state_for_artifact(task_dir)
+        qa_attempt = next(
+            item for item in intermediate["attempts"]
+            if item["gate"] == "qa" and not item.get("invalidated")
+        )
+        self.assertIn(documentation_results[0]["report_ref"], qa_attempt["context_report_ids"])
+        qa_results = self.v3_results(
+            qa, self.v3_report("QA acknowledged the documentation correction")
+        )
+        rerun_review = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": qa["step"],
+            "results": qa_results,
         })
         self.assertTrue(rerun_review["ok"], rerun_review)
         self.assertEqual(rerun_review["dispatches"][0]["phase"], "review")
@@ -5448,6 +5468,7 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertIn(review_ref, replacement_review["context_report_ids"])
         self.assertIn(documentation_results[0]["report_ref"], replacement_review["context_report_ids"])
+        self.assertIn(qa_results[0]["report_ref"], replacement_review["context_report_ids"])
         corrective_trace = [
             item for item in control.db_list_task_findings(self.ledger, state["task_id"])[0]["source_evidence"]
             if item["transition"] == "corrective_reported"
@@ -5749,6 +5770,141 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(finding["severity"], "P1")
         self.assertEqual(finding["status"], "open")
+
+    def test_governance_pass_does_not_implicitly_resolve_another_gate_verification_finding(self):
+        """A no-findings governance pass must not inherit a hidden resolution.
+
+        ``verification-required-missing`` is server-created from a prior
+        gate's own ``required_missing`` declaration.  A later governance gate
+        with an empty declaration has not rerun that origin and cannot resolve
+        it.  The report should publish as the worker wrote it; canonical
+        blockers are subsequently routed by the controller rather than being
+        turned into a phantom resolved-finding submission at report intake.
+        """
+        started = self.v3_start(
+            "governance pass preserves another gate's verification blocker",
+            complexity="C3",
+            governance_mode="auto",
+            plan_approval="auto",
+            waves=[
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        self.assertTrue(started["ok"], started)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        template_attempt = state["attempts"][0]
+        origin_report = "report-governance-activation-origin"
+        control.db_upsert_task_finding(
+            self.ledger,
+            state["task_id"],
+            {
+                "fingerprint": "verification-required-missing",
+                "severity": "P1",
+                "status": "open",
+                "blocking": True,
+                "summary": "Required verification is missing",
+                "details": ["Run the required activation verification."],
+            },
+            source={
+                "transition": "opened",
+                "report_id": origin_report,
+                "receipt_ref": f"report-receipt-{origin_report}",
+                "report_artifact_ref": "artifact-governance-activation-origin",
+                "report_content_digest": "a" * 64,
+                "attempt_id": "governance-activation-origin",
+                "gate": "governance_activation",
+                "task_revision": int(state.get("task_revision") or 1),
+            },
+        )
+        governance_close = {
+            **template_attempt,
+            "attempt_id": "governance-close-no-findings-pass",
+            "gate": "governance_close",
+            "status": "running",
+            "invalidated": False,
+            "report_ids": [],
+            "context_report_ids": [],
+        }
+        state["attempts"] = [governance_close]
+        self.write_task_state(state)
+        published = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": governance_close["attempt_id"],
+            "profile": governance_close["profile"],
+            "report": self._report_with_briefing(
+                governance_close,
+                self.v3_report("governance close found no additional findings"),
+            ),
+            "gate_result": {
+                "decision": "pass",
+                "failure_class": "product",
+                "findings": [],
+                "verification": {
+                    "executed": ["focused governance close check"],
+                    "not_executed": [],
+                    "required_missing": [],
+                    "limitations": [],
+                },
+                "workspace": {
+                    "modified": [], "untracked": [], "staged": [],
+                    "committed": "not_required",
+                },
+            },
+        })
+        self.assertTrue(published["ok"], published)
+        finding = next(
+            item for item in control.db_list_task_findings(self.ledger, state["task_id"])
+            if item["fingerprint"] == "verification-required-missing"
+        )
+        self.assertEqual(finding["status"], "open")
+        self.assertEqual(
+            [item["transition"] for item in finding["source_evidence"]],
+            ["opened"],
+        )
+
+    def test_governance_activation_rework_reruns_its_origin_gate(self):
+        started = self.v3_start(
+            "governance activation verification rework keeps its origin rerun",
+            complexity="C3",
+            governance_mode="auto",
+            plan_approval="auto",
+            waves=[
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "review"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        )
+        self.assertTrue(started["ok"], started)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        target_gate = gate_transitions._activate_closure_rework(
+            task_dir,
+            state,
+            gate="governance_activation",
+            findings=[{
+                "fingerprint": "verification-required-missing",
+                "severity": "P1",
+                "status": "open",
+                "blocking": True,
+                "summary": "Required activation verification is missing",
+            }],
+            source_report_refs=["report-governance-activation-origin"],
+        )
+        route = state["closure_rework"]["governance_activation"]
+        self.assertIn(target_gate, state["current_pipeline"])
+        self.assertEqual(
+            route["rerun_gates"],
+            ["governance_activation", "review", "governance_close", "close"],
+        )
+        self.assertLess(
+            state["current_pipeline"].index(target_gate),
+            state["current_pipeline"].index("governance_activation"),
+        )
 
     def test_review_report_requires_top_level_closure(self):
         started = self.v3_start("closure is mandatory", waves=[{"workers": [{"phase": "review"}]}])
@@ -9984,7 +10140,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.11")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.13")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

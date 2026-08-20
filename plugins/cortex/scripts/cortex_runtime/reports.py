@@ -1300,9 +1300,28 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 for item in canonical_gate_result.get("findings") or []
                 if isinstance(item, dict)
             }
-            if missing_checks or (
-                isinstance(existing_verification, dict)
+            # ``required_missing=[]`` describes only this report's checks. It
+            # must not silently claim that a verification blocker raised by a
+            # different gate has been resolved.  Besides being untrue, that
+            # used to append a server-synthesized ``resolved`` finding to an
+            # otherwise empty pass result, and the origin-gate validator then
+            # rejected the worker for provenance it never submitted.  A
+            # same-gate rerun still gets the normal fail-closed resolution
+            # route below; an unrelated gate leaves the canonical blocker
+            # open for the controller to route back to its owner.
+            existing_verification_origin = (
+                _open_finding_origin(existing_verification)
+                if isinstance(existing_verification, dict)
                 and existing_verification.get("status") == "open"
+                else None
+            )
+            can_implicitly_resolve_verification = (
+                existing_verification_origin is not None
+                and str(existing_verification_origin.get("gate") or "")
+                == str(attempt.get("gate") or "")
+            )
+            if missing_checks or (
+                can_implicitly_resolve_verification
                 and "verification-required-missing" not in result_fingerprints
             ):
                 verification_finding = {

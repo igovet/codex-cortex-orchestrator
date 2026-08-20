@@ -50,18 +50,24 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -m unittest -v \
   tests.test_cortex_control.ControlPlaneTests.test_closure_finding_is_canonical_across_review_close_and_resolved_rework \
   tests.test_cortex_control.ControlPlaneTests.test_corrective_documentation_cannot_resolve_its_review_finding \
   tests.test_cortex_control.ControlPlaneTests.test_same_gate_resolution_requires_finding_bound_correction_receipt \
-  tests.test_cortex_control.ControlPlaneTests.test_pass_gate_result_rejects_open_findings_at_report_intake
+  tests.test_cortex_control.ControlPlaneTests.test_pass_gate_result_rejects_open_findings_at_report_intake \
+  tests.test_cortex_control.ControlPlaneTests.test_governance_pass_does_not_implicitly_resolve_another_gate_verification_finding \
+  tests.test_cortex_control.ControlPlaneTests.test_governance_activation_rework_reruns_its_origin_gate
 ```
 
-The first control-plane test proves `review → documentation → fresh review →
-close`, including exact immutable source/correction handoffs, stale semantic
-route rejection, and the server-bound resolved transition. The second is the
+The first control-plane test proves `review → documentation → QA → fresh
+review → close`, including exact immutable source/correction handoffs across
+an acknowledging intermediary, stale semantic route rejection, and the
+server-bound resolved transition. The second is the
 authority negative case: Documentation may report a correction but cannot
 resolve Review's finding, including by repeating its fingerprint as open. The
 third test verifies that every route—including same-gate correction—needs a
 separate correction receipt bound to the exact fingerprint and origin report.
-The final test rejects a self-contradictory `pass` plus open finding before an
-immutable report or receipt is written.
+The fourth test rejects a self-contradictory `pass` plus open finding before an
+immutable report or receipt is written. The final two cover the governance
+regression: a no-findings later governance report must not inherit a hidden
+resolution for another gate's verification blocker, and a governance-activation
+rework must rerun that origin before later closure verification.
 
 For a real-host counterpart, run the dedicated source-mode scenario below. It
 uses a minimal C1 workspace and exactly one controlled fingerprint,
@@ -111,7 +117,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.11 hardening release candidate above;
+candidate. They do not certify the 9.2.13 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -198,15 +204,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.11 source cachebuster. Historical
+The source manifest now declares the 9.2.13 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.11 release-candidate evidence status
+## 9.2.13 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.11 base version.
+source cachebuster is generated from the 9.2.13 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -227,7 +233,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.11 source contract
+## Current 9.2.13 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
