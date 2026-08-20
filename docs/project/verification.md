@@ -52,8 +52,17 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -m unittest -v \
   tests.test_cortex_control.ControlPlaneTests.test_same_gate_resolution_requires_finding_bound_correction_receipt \
   tests.test_cortex_control.ControlPlaneTests.test_pass_gate_result_rejects_open_findings_at_report_intake \
   tests.test_cortex_control.ControlPlaneTests.test_governance_pass_does_not_implicitly_resolve_another_gate_verification_finding \
-  tests.test_cortex_control.ControlPlaneTests.test_governance_activation_rework_reruns_its_origin_gate
+  tests.test_cortex_control.ControlPlaneTests.test_governance_activation_rework_reruns_its_origin_gate \
+  tests.test_cortex_control.ControlPlaneTests.test_multi_route_rework_preserves_every_corrective_receipt_for_final_review \
+  tests.test_cortex_control.ControlPlaneTests.test_origin_verifier_preflight_returns_recoverable_response_when_correction_is_missing
 ```
+
+For a successful worker result, `continue_orchestration` receives only
+`{"report_ref": "..."}`. `dispatch_ref` identifies a reportless non-success
+result and must never accompany a successful report receipt. The source-mode
+live evaluator states that distinction explicitly, classifies an accidental
+successful-result `dispatch_ref` separately, and tells the parent to correct a
+named diagnostic once rather than repeat the same continuation call.
 
 The first control-plane test proves `review → documentation → QA → fresh
 review → close`, including exact immutable source/correction handoffs across
@@ -117,7 +126,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.13 hardening release candidate above;
+candidate. They do not certify the 9.2.14 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -204,15 +213,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.13 source cachebuster. Historical
+The source manifest now declares the 9.2.14 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.13 release-candidate evidence status
+## 9.2.14 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.13 base version.
+source cachebuster is generated from the 9.2.14 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -233,7 +242,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.13 source contract
+## Current 9.2.14 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both

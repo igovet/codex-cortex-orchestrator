@@ -326,6 +326,22 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertEqual(lifecycle["failure_class"], "reportless_success")
         self.assertNotIn("SECRET_REPORT", json.dumps(lifecycle))
 
+        copied_dispatch_ref = self.harness.sanitize_codex_stream_line(json.dumps({
+            "item": {
+                "type": "mcp_tool_call",
+                "tool": "mcp__cortex__continue_orchestration",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "ok": False,
+                        "error": "successful results use report_ref only; do not supply dispatch_ref SECRET_REF",
+                    },
+                },
+            },
+        }))
+        self.assertEqual(copied_dispatch_ref["failure_class"], "success_with_dispatch_ref")
+        self.assertNotIn("SECRET_REF", json.dumps(copied_dispatch_ref))
+
     def test_isolated_codex_runtime_uses_minimal_private_environment_and_cleans_up(self) -> None:
         base = self.root / "runtime-base"
         base.mkdir()
