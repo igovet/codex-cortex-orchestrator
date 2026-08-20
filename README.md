@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.9-7c3aed" alt="Cortex 9.2.9" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.10-7c3aed" alt="Cortex 9.2.10" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -672,7 +672,8 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 7. **Fresh approvals and adaptive replanning.** Required approval is available
    only after the final plan. The review records the plan revision, planner
    report reference, verified-predecessor digest, and semantic future-pipeline
-   digest. A material future-wave change or plan rework preserves history,
+   digest. A material future-wave change or any pipeline operation that reopens
+   `plan` preserves history,
    resets approval to `pending_plan`, and requires a replacement Planner plus a
    new approval. No-op and transport-only changes do not invalidate approval;
    stale basis digests block dispatch with recoverable reapproval guidance. The
@@ -690,7 +691,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.9 stopped-report recovery and disaster-recovery hardening release
+### 9.2.10 stopped-report recovery and disaster-recovery hardening release
 
 The current source-tree hardening draft extends governance with schema v12
 integrity guarantees. Governance record bodies are read from verified
@@ -731,7 +732,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.9 cachebuster and full release/live results
+exact 9.2.10 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
