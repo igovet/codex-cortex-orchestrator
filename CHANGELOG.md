@@ -1,12 +1,14 @@
 # Changelog
 
-## [9.2.5] - 2026-08-20
+## [9.2.6] - 2026-08-20
 
 This source-tree hardening candidate is not a publication or installation
-claim. Its source cachebuster is `9.2.5+codex.20260819205849`; tracked-archive,
+claim. Its source cachebuster is `9.2.6+codex.20260820093505`; tracked-archive,
 remote, and installed-plugin parity remain separate release gates.
 
-- Add governance schema v10 integrity: immutable artifact-authoritative record
+- Add promotion replay lookup by deterministic policy reference, avoiding
+  pagination-bound false corruption after a large governance history.
+- Add governance schema v11 integrity: immutable artifact-authoritative record
   bodies, exact normalized scope, linear revision chains, strict JSON,
   immutable-field triggers, and conflict-safe submission receipts.
 - Bind coordinator capabilities to task/initiative scope, principal, thread,

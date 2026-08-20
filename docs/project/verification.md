@@ -111,7 +111,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the Unreleased/9.2.5 hardening draft above;
+candidate. They do not certify the 9.2.6 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -198,15 +198,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares `9.2.5+codex.20260819205849`. Historical
+The source manifest now declares `9.2.6+codex.20260820093505`. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## Unreleased / 9.2.5 draft evidence status
+## 9.2.6 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is `9.2.5+codex.20260819205849`.
+source cachebuster is `9.2.6+codex.20260820093505`.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -226,7 +226,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.5 source contract
+## Current 9.2.6 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both

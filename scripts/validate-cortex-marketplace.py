@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.5":
-        fail("plugin manifest must identify cortex at release version 9.2.5")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.6":
+        fail("plugin manifest must identify cortex at release version 9.2.6")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
