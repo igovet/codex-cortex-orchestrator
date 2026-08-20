@@ -81,6 +81,12 @@ class ToolDedupeTests(unittest.TestCase):
         self.assertEqual(row["repeat_count"], 1)
         self.assertNotIn("first version", row["normalized_arguments"])
 
+        advisory = cortex_hook.duplicate_read_advisory()
+        output = advisory["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertNotIn("permissionDecision", output)
+        self.assertIn("remains allowed", output["additionalContext"])
+
     def test_search_observations_hash_query_and_are_never_cacheable(self):
         secret = "not-for-ledger-token"
         event = {

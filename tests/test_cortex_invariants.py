@@ -145,6 +145,13 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(test_schema["properties"]["exit_code"]["const"], 0)
         self.assertEqual(control.V3_REPORT_SCHEMA["properties"]["questions"]["maxItems"], 0)
         self.assertEqual(control.V3_REPORT_SCHEMA["properties"]["evidence"]["minItems"], 1)
+        # Canonical reports are immutable cursor-paged artifacts.  Their
+        # complete evidence is bounded only by the safe serialized-artifact
+        # size, never by UI-shaped string or item-count schema limits.
+        for field in ("findings", "tests", "evidence", "uncertainty"):
+            self.assertNotIn("maxItems", control.V3_REPORT_SCHEMA["properties"][field])
+        self.assertNotIn("maxLength", control.V3_REPORT_SCHEMA["properties"]["summary"])
+        self.assertNotIn("maxLength", control.V3_REPORT_SCHEMA["properties"]["changed_files"]["items"])
 
         package_schema = control.V3_PLANNING_SCHEMA["properties"]["work_packages"]["items"]
         self.assertFalse(package_schema["additionalProperties"])
@@ -566,18 +573,18 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_record_gate_cannot_remove_mandatory_c2_gates(self):
         state = self.init(complexity="C2")["state"]
-        delegation = self.delegate(state, "task", "plan", "planner")
+        delegation = self.delegate(state, "task", "discover", "planner")
         report = self.report("task", delegation["attempt_id"])
-        evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "planned"})
+        evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": delegation["state"]["revision"], "gate": "discover", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "planned"})
         with self.assertRaisesRegex(ValueError, "retain documentation"):
-            control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"], "gate": "plan", "outcome": "passed", "pipeline_operations": [{"op": "remove", "gate": "documentation"}, {"op": "remove", "gate": "close"}]})
+            control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed", "pipeline_operations": [{"op": "remove", "gate": "documentation"}, {"op": "remove", "gate": "close"}]})
 
     def test_c2_rework_uses_only_current_attempt_evidence(self):
         state = self.init(complexity="C2")["state"]
-        first = self.delegate(state, "task", "plan", "planner")
+        first = self.delegate(state, "task", "discover", "planner")
         first_report = self.report("task", first["attempt_id"], "first")
-        evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": first["state"]["revision"], "gate": "plan", "attempt_id": first["attempt_id"], "report_receipt": first_report["receipt"]["receipt_id"], "summary": "first plan"})
-        passed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
+        evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": first["state"]["revision"], "gate": "discover", "attempt_id": first["attempt_id"], "report_receipt": first_report["receipt"]["receipt_id"], "summary": "first plan"})
+        passed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed"})
         reworked = control.reassess_pipeline({"task_id": "task", "principal": "owner", "expected_revision": passed["state"]["revision"], "signals": [], "intent": "rework_gate", "gate": "plan", "decision": "updated", "reason": "plan changed", "apply": True})
         second = self.delegate(reworked["state"], "task", "plan", "planner")
         second_report = self.report("task", second["attempt_id"], "second")
@@ -1464,7 +1471,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("context_files", skill)
         self.assertIn("dispatch_ref", skill)
         self.assertIn("briefing_digest", skill)
-        self.assertIn("sole direct-read exception", skill)
+        self.assertIn("direct-read exceptions below the host-private Cortex", skill)
+        self.assertIn("optional\n   compiled-plan paths with their exact SHA-256", skill)
         self.assertIn("do not send a corrective follow-up", skill)
         self.assertIn("Only a newly returned top-level dispatch authorizes rework", skill)
         self.assertIn("unbounded while acceptance criteria", skill)
@@ -1950,7 +1958,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.15")
+        self.assertEqual(base_version, "9.2.16")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

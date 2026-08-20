@@ -4,12 +4,23 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.15 release candidate
+## 9.2.16 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.15 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.16 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
+
+The 9.2.16 patch additionally ensures coordinator recovery does not ask a
+reviewer to retry an impossible resolution report, preserves honest `BLOCKED`
+markers through review and close while corrective work remains, and aligns the
+`record_report` schema branch with runtime validation.
+It also removes the former 64 KiB/100-item report sanitization caps: complete
+immutable reports use the explicit 8 MiB atomic artifact boundary, private
+report drafts allow 17 MiB for envelope headroom, and cursor reads expose the
+full artifact while limiting only each transport page to 32 KiB. Detailed
+plans are dispatched by exact immutable artifact ref/path/SHA-256 metadata in
+the briefing.
 
 The draft scope is governance schema v12 integrity (artifact-authoritative
 bodies, exact scope, linear revisions, strict JSON, immutable-field triggers,
@@ -68,7 +79,7 @@ just to fit transport limits.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.15` (the current source candidate carries a cachebuster; installed builds
+  `9.2.16` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -154,8 +165,9 @@ prior failures. A materially identical no-progress signature is the separate
 liveness boundary: it pauses autonomous work and requires an explicit new
 strategy without synthesizing a pass. A different strategy is optional for
 ordinary retries, but required to resume that pause.
-Bounded briefing, report, and coordinator
-artifact reads clamp oversized `max_bytes` to 32768; explicit non-retryable
+Bounded briefing and coordinator artifact reads clamp oversized `max_bytes` to
+32768; report reads use the same transport-page bound while returning the
+complete immutable artifact through cursors. Explicit non-retryable
 integrity, storage, permission, or unavailable-identity failures remain
 terminal.
 
@@ -208,7 +220,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.15 release commit only with explicit authorization.
+- Create the Cortex 9.2.16 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

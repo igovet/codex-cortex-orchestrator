@@ -41,6 +41,45 @@ class HealthMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["checkpoint"]["performed"])
         self.assertEqual(database.stat().st_mtime_ns, before)
 
+    def test_health_reports_physical_lock_state_without_conflating_task_blockers(self) -> None:
+        directory, root = self.make_root()
+        self.addCleanup(directory.cleanup)
+        lock_path = root / ".state.lock"
+        lock_path.touch(mode=0o600)
+
+        result = health_maintenance.manage_health_maintenance(root, {"action": "health"})
+
+        lock = result["availability"]["lock"]
+        self.assertEqual(lock["scope"], "project")
+        self.assertEqual(lock["probe"], "nonblocking")
+        self.assertIn(lock["state"], {"free", "unsupported"})
+        self.assertIn(lock["held"], {False, None})
+        if lock["state"] == "free":
+            self.assertFalse(lock["held"])
+        self.assertIn("task/gate blockers", result["availability"]["meaning"])
+
+    def test_health_lock_probe_reports_busy_without_waiting(self) -> None:
+        directory, root = self.make_root()
+        self.addCleanup(directory.cleanup)
+        lock_path = root / ".state.lock"
+        lock_path.touch(mode=0o600)
+
+        class BusyFcntl:
+            LOCK_EX = 1
+            LOCK_NB = 2
+            LOCK_UN = 4
+
+            @staticmethod
+            def flock(_fd: int, operation: int) -> None:
+                if operation == BusyFcntl.LOCK_EX | BusyFcntl.LOCK_NB:
+                    raise BlockingIOError("busy")
+
+        with mock.patch.object(health_maintenance, "fcntl", BusyFcntl):
+            lock = health_maintenance._state_lock_status(root)
+
+        self.assertEqual(lock["state"], "busy")
+        self.assertTrue(lock["held"])
+
     def test_dr_bundle_restores_governance_authenticity_on_a_fresh_host_root(self) -> None:
         directory, root = self.make_root()
         self.addCleanup(directory.cleanup)

@@ -68,6 +68,22 @@ class HostPrivateControlStoreTests(unittest.TestCase):
                 root,
             )
 
+    def test_reopening_same_private_ledger_does_not_rewrite_host_identity(self) -> None:
+        """Ordinary opens retain rename provenance without becoming DB writes."""
+        with self._environment():
+            root = control.ledger_root({"project_root": str(self.project)})
+            original_identity = ledger_db.get_global(root, control._HOST_PROJECT_IDENTITY_KEY, {})
+
+            with mock.patch.object(control, "db_put_global", wraps=ledger_db.put_global) as put_global:
+                reopened = control.ledger_root({"project_root": str(self.project)})
+
+        self.assertEqual(reopened, root)
+        put_global.assert_not_called()
+        self.assertEqual(
+            ledger_db.get_global(root, control._HOST_PROJECT_IDENTITY_KEY, {}),
+            original_identity,
+        )
+
     def test_projects_have_distinct_control_planes_and_hook_resolves_the_private_mapping(self) -> None:
         with self._environment():
             first = control.ledger_root({"project_root": str(self.project)})

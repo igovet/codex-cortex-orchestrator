@@ -82,13 +82,15 @@ brief, context files, and at most eight validated domains.
 - Tool-observation dedupe is scoped to task, attempt, context epoch,
   normalized fingerprint, and workspace generation. Only a successful
   full-coverage observation is reusable; duplicate calls are counted and
-  partial coverage never authorizes reuse.
+  produce an advisory cache hint, but remain allowed so a lost result cannot
+  become a permission blocker. Partial coverage never authorizes reuse.
 - Every gate report must publish the top-level structured `gate_result` sibling, not a
   ninth member of the strict report. It is canonical for all gates; the older
   `closure` sibling is only a review/close compatibility alias. An unresolved
-  P0/P1/P2 or blocking finding, or a missing required check, takes the recorded
-  gate back through rework. A waiver needs reason, actor, and timestamp and
-  cannot be self-issued.
+  P0/P1 finding, an explicitly blocking finding, or a missing required check,
+  takes the recorded gate back through rework. P2 is advisory unless the
+  finding explicitly sets `blocking=true`. A waiver needs reason, actor, and
+  timestamp and cannot be self-issued.
 - Prune is deliberately two-phase: a tombstone commits before filesystem work;
   canonical rows remain until that work succeeds. Never remove task records,
   WAL, or SHM directly to "help" a failed prune. Use explicit legacy
@@ -397,6 +399,11 @@ brief, context files, and at most eight validated domains.
   `manage_orchestration(intent="inspect")` once, and rehydrate from its
   `context_handoff`. It is ledger-derived recovery state, not a replacement
   for the orchestrator skill; never restart the task or replay completed work.
+  This ordinary inspect is read-only: it does not expire leases, invalidate
+  stopped reports, or materialize missing report exports. A returned
+  `lifecycle_recovery.required=true` identifies the exact scoped recovery that
+  must be intentionally requested; status inspection itself never authorizes
+  that write.
 - New v5 starts use a generated task-local authorization identity, then the
   synchronous Cortex `PostToolUse` hook binds the returned `task_ref` to the
   documented event `session_id`. Explicitly forwarded `CODEX_SESSION_ID` or
@@ -622,8 +629,10 @@ and v8 ledger. They are not caller-facing request envelopes.
 - A worker report must contain exactly the seven ordered `cortex/report/v1`
   fields: `summary`, `findings`, `questions`, `changed_files`, `tests`,
   `evidence`, and `uncertainty`.
-  Reports are size/item bounded, sanitized, task-bound, and tied to a real
-  delegation attempt. Use an empty list rather than omitting a field; reuse a
+  Reports are redacted only for sensitive keys, task-bound, and tied to a real
+  delegation attempt. Complete report artifacts use the 8 MiB atomic boundary;
+  private drafts allow 17 MiB for envelope headroom, and reads use signed
+  cursors with 32 KiB transport pages. Use an empty list rather than omitting a field; reuse a
   `submission_id` only for an identical payload and mint a new id for a
   correction. C2/C3 evidence consumes its attempt receipt once and only
   `running`/`passed` attempts on the current gate may receive it. Do not send

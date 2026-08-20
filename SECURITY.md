@@ -2,13 +2,13 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.15` source line. The public
+Security fixes are prepared for the current `9.2.16` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.15 source candidate retains stopped-report recovery integrity, private
+The 9.2.16 source candidate retains stopped-report recovery integrity, private
 report-draft descriptor validation, importlib-safe lifecycle-hook runtime
 resolution, and active corrective-report preservation across multi-hop
 handoffs. A later no-findings gate cannot silently resolve a server-created
@@ -17,7 +17,11 @@ the fresh origin verifier through the later closure route. For every active
 closure-rework route, dispatch preflight now requires a current server-bound
 passed corrective receipt before the origin verifier is created; that avoids
 an impossible PASS-resolution report contract without accepting unproven
-provenance. Its exact source cachebuster is generated from the 9.2.15 base
+provenance. Coordinator recovery no longer asks a reviewer to retry an
+impossible resolution report; review and close preserve honest `BLOCKED`
+markers while corrective work remains; and the `record_report` schema branch
+matches runtime validation. Its exact source cachebuster is generated from the
+9.2.16 base
 version;
 tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
@@ -139,10 +143,16 @@ history. Independent close evidence is bound to the canonical passed
 `governance_close` code-reviewer attempt, its report reference, and a completed
 native worker session rather than caller-authored reviewer labels.
 
-Each worker-authored report envelope remains bounded to 64 KiB and each
-attempt to 32 reports. The server-owned decision snapshot may enlarge the
-immutable artifact, whose reads remain paged; a task has no artificial
-report-count or aggregate-report-byte quota.
+Each worker-authored report is retained as a complete immutable artifact after
+sensitive-key redaction; the former 64 KiB and 100-item sanitization caps do
+not truncate submitted evidence. The explicit atomic artifact boundary is
+8 MiB, while the private report draft envelope allows 17 MiB so its metadata
+cannot reject a valid report. The separate per-attempt report-record limit
+remains 32; there is no task-wide aggregate-byte quota. Reads are cursor-paged
+over the complete artifact, and
+32 KiB limits only an individual transport page. Detailed plans are passed to
+workers by their exact immutable artifact ref/path/SHA-256 metadata in the
+briefing.
 Long-running histories grow in project-scoped SQLite subject to real storage
 availability and explicit pruning. Successor prompts receive only the verified
 transitive handoff frontier; covered history remains immutable and included in
@@ -164,8 +174,10 @@ audit-only and cannot release the pause. Repeated failures automatically raise
 reasoning effort and, for eligible workers, escalate routing to Terra instead
 of silently closing the task.
 Only explicit non-retryable integrity, storage, permission, or unavailable
-identity failures terminate that worker attempt. Bounded briefing, report, and
-coordinator artifact reads clamp oversized `max_bytes` requests to 32768.
+identity failures terminate that worker attempt. Bounded briefing and
+coordinator artifact reads clamp oversized `max_bytes` requests to 32768;
+report reads use the same transport-page bound while returning the complete
+immutable artifact through cursors.
 
 Manifest capture is fail-closed and bounded by maximum entries, hashed bytes,
 and elapsed time. Budget exhaustion returns a partial result with a reason and

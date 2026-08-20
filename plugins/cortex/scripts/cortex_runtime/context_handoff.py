@@ -54,10 +54,6 @@ def _context_handoff(
     report_handoffs: list[dict[str, Any]] = []
     changed_files: list[str] = []
     verified_facts: list[dict[str, Any]] = []
-    # Context handoff runs outside lifecycle locks.  Recreate the optional
-    # Desktop export from the canonical report object before emitting its link.
-    from cortex_runtime.reports import ensure_report_markdown_path
-
     for item in report_items:
         report_ref = safe_id(str(item.get("report_id") or ""))
         phase = redact(item.get("gate", "report"), 128) or "report"
@@ -76,7 +72,11 @@ def _context_handoff(
             "changed_files": compact_files,
         }
         try:
-            markdown_path = ensure_report_markdown_path(task_dir, state, report_ref)
+            # A normal context handoff is a read-only recovery snapshot.  It
+            # may expose an existing Desktop export, but it must not enqueue
+            # or repair a projection while a coordinator is merely trying to
+            # discover the durable state after compaction.
+            markdown_path = report_markdown_path(task_dir, report_ref)
             report_handoff.update({
                 "report_markdown_path": str(markdown_path),
                 "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),

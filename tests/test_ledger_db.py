@@ -5,6 +5,7 @@ import json
 import hashlib
 import multiprocessing
 import queue
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -70,6 +71,86 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertTrue((root / "cortex.db").is_file())
             self.assertFalse((project / ".codex" / "cortex" / "cortex.db").exists())
             self.assertFalse((root / "task-index.json").exists())
+
+    def test_ready_ledger_uses_read_only_readiness_probe_without_migration_write_path(self) -> None:
+        """A warm helper call must not serialize on bootstrap/migration work."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+
+            # The first call filled the process-local readiness entry.  A
+            # second call may read immutable migration facts, but must not
+            # acquire the advisory migration lock or open BEGIN IMMEDIATE.
+            with mock.patch.object(
+                ledger_db, "_migration_lock", side_effect=AssertionError("warm readiness must not take migration lock")
+            ), mock.patch.object(
+                ledger_db, "_connection", side_effect=AssertionError("warm readiness must not begin a write transaction")
+            ), mock.patch.object(
+                ledger_db, "_assert_migration_schema", side_effect=AssertionError("warm readiness must not sweep schema")
+            ):
+                ledger_db.ensure_database(root)
+
+    def test_ready_ledger_cache_revalidates_history_user_version_and_schema_tampering(self) -> None:
+        """Warm-cache hits must fail closed instead of trusting stale authority."""
+        cases = (
+            (
+                "history",
+                lambda connection: connection.execute(
+                    "UPDATE schema_migrations SET checksum='tampered' WHERE version=2"
+                ),
+                "migration history",
+            ),
+            (
+                "user_version",
+                lambda connection: connection.execute("PRAGMA user_version = 999"),
+                "user_version",
+            ),
+            (
+                "schema",
+                lambda connection: connection.execute("DROP TABLE projection_jobs"),
+                "schema is inconsistent",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / ".codex" / "cortex"
+                ledger_db.ensure_database(root)
+                with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                    mutate(connection)
+                    connection.commit()
+
+                original_lock = ledger_db._migration_lock
+                with mock.patch.object(ledger_db, "_migration_lock", wraps=original_lock) as migration_lock:
+                    with self.assertRaisesRegex(ValueError, expected):
+                        ledger_db.ensure_database(root)
+                self.assertEqual(
+                    migration_lock.call_count,
+                    1,
+                    "cache mismatch must return through the authoritative migration validator",
+                )
+
+    def test_ready_ledger_cache_revalidates_database_replacement_before_reuse(self) -> None:
+        """An inode change cannot silently inherit a previous ready-cache entry."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            database = root / ledger_db.DATABASE_NAME
+            before = database.stat()
+            replacement = root / "replacement-cortex.db"
+            shutil.copyfile(database, replacement)
+            replacement.chmod(0o600)
+            replacement.replace(database)
+            after = database.stat()
+            self.assertNotEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+
+            original_lock = ledger_db._migration_lock
+            with mock.patch.object(ledger_db, "_migration_lock", wraps=original_lock) as migration_lock:
+                ledger_db.ensure_database(root)
+            self.assertEqual(
+                migration_lock.call_count,
+                1,
+                "database replacement must run the authoritative migration validator before reuse",
+            )
 
     def test_pre_database_files_are_never_imported_or_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
