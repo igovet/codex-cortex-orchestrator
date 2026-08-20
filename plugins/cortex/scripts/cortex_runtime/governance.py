@@ -2067,12 +2067,28 @@ def approve_promotion(root: Path, *, proposal_ref: str, actor_role: str, approva
             body = proposal.get("content_json") if isinstance(proposal.get("content_json"), dict) else {}
             policy_ref = "record-policy-" + hashlib.sha256(proposal_id.encode("utf-8")).hexdigest()[:24]
             if proposal.get("status") == "approved":
-                policies = [
-                    item for item in list_records(root, record_type="policy", initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), active_only=False)
-                    if isinstance(item.get("content_json"), dict) and item["content_json"].get("promoted_from") == proposal_id
-                ]
-                if policies:
-                    return {"proposal": proposal, "policy": policies[-1], "policy_snapshot": active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))}
+                # Replay must resolve the deterministic canonical policy ref
+                # directly.  Searching list_records() is pagination-bound at
+                # 256 rows and can miss the already committed policy after a
+                # busy ledger grows beyond one page.
+                policy_row = connection.execute(
+                    "SELECT * FROM governance_records "
+                    "WHERE record_ref = ? AND record_type = 'policy'",
+                    (policy_ref,),
+                ).fetchone()
+                if policy_row is not None:
+                    replay_policy = _record_from_storage(root, connection, policy_row)
+                    replay_body = replay_policy.get("content_json")
+                    if isinstance(replay_body, dict) and replay_body.get("promoted_from") == proposal_id:
+                        return {
+                            "proposal": proposal,
+                            "policy": replay_policy,
+                            "policy_snapshot": active_snapshot(
+                                root,
+                                initiative_ref=proposal.get("initiative_ref"),
+                                task_id=proposal.get("task_id"),
+                            ),
+                        }
                 raise GovernanceError("approved promotion has no canonical policy", code="ledger_corrupt")
             if proposal.get("status") != "pending":
                 raise GovernanceError("promotion proposal is no longer pending", code="proposal_not_pending")
