@@ -19,6 +19,20 @@ class PlanReapprovalRequired(ValueError):
     """A post-plan dispatch cannot use the currently approved evidence basis."""
 
 
+class CorrectiveReworkPreflightRequired(ValueError):
+    """An origin verifier would be dispatched without its resolution receipt."""
+
+    def __init__(self, missing_routes: list[dict[str, Any]]):
+        self.missing_routes = missing_routes
+        origins = ", ".join(
+            str(item.get("origin_gate") or "unknown") for item in missing_routes
+        )
+        super().__init__(
+            "active closure-rework route lacks a current passed corrective receipt "
+            "for origin verifier gate(s): " + origins
+        )
+
+
 # A repeated failure is not itself proof that the task should fail.  It is,
 # however, enough evidence to stop autonomous retries when every material
 # input to the corrective attempt stayed the same.  The pause below therefore
@@ -856,20 +870,25 @@ def _rework_context_report_ids(state: dict[str, Any], gates: set[str]) -> list[s
     return selected
 
 
-def _active_rework_corrective_report_ids(root: Path, state: dict[str, Any]) -> list[str]:
-    """Return live corrective receipts that a later verifier must retain.
+def _active_rework_corrective_receipts(
+    root: Path,
+    state: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return retained corrective receipts and active routes missing one.
 
     The ordinary predecessor frontier intentionally removes a report once a
     successor has acknowledged it.  That is normally the right compaction,
     but it is insufficient for an active closure-rework route: the originating
-    verifier must receive the exact current corrective report in order to
-    produce its resolution receipt.  Preserve only server-bound corrective
-    receipts for the active semantic revision, not every historical report
-    that happens to have flowed through a later QA or security gate.
+    verifier must receive every current, server-bound corrective receipt that
+    it may need to produce a resolution receipt.  The second return value is a
+    durable-dispatch preflight: it names an active route that has no usable
+    correction for at least one of its open finding/origin pairs.  Callers use
+    it only when dispatching that route's origin gate, so a corrective worker
+    is still allowed to run before any correction exists.
     """
     current_revision = int(state.get("task_revision") or 1)
-    active_routes: list[tuple[str, set[str], set[str]]] = []
-    for rework in (state.get("closure_rework") or {}).values():
+    active_routes: list[dict[str, Any]] = []
+    for source_gate, rework in (state.get("closure_rework") or {}).items():
         if (
             not isinstance(rework, dict)
             or rework.get("status") != "rework_required"
@@ -883,43 +902,24 @@ def _active_rework_corrective_report_ids(root: Path, state: dict[str, Any]) -> l
         fingerprints = {
             str(item) for item in rework.get("finding_fingerprints") or [] if str(item)
         }
-        if target_gate and source_refs and fingerprints:
-            active_routes.append((target_gate, source_refs, fingerprints))
+        origin_gate = str(source_gate or "")
+        if target_gate and origin_gate and source_refs and fingerprints:
+            active_routes.append({
+                "origin_gate": origin_gate,
+                "target_gate": target_gate,
+                "source_refs": source_refs,
+                "fingerprints": fingerprints,
+            })
     if not active_routes:
-        return []
+        return [], []
 
     open_findings = {
         str(item.get("fingerprint") or ""): item
         for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
         if isinstance(item, dict)
     }
-    current_evidence = {
-        str(item.get("report_id") or "")
-        for item in state.get("evidence") or []
-        if isinstance(item, dict)
-        and not item.get("invalidated")
-        and str(item.get("report_id") or "")
-    }
-    bound_by_target: dict[str, set[str]] = {}
-    for target_gate, source_refs, fingerprints in active_routes:
-        for fingerprint in fingerprints:
-            finding = open_findings.get(fingerprint)
-            if not isinstance(finding, dict):
-                continue
-            for source in finding.get("source_evidence") or []:
-                if (
-                    not isinstance(source, dict)
-                    or source.get("transition") != "corrective_reported"
-                    or source.get("gate") != target_gate
-                    or source.get("origin_report_ref") not in source_refs
-                    or int(source.get("task_revision") or 0) != current_revision
-                ):
-                    continue
-                report_ref = str(source.get("report_id") or "")
-                if report_ref and report_ref in current_evidence:
-                    bound_by_target.setdefault(target_gate, set()).add(report_ref)
-
-    selected: list[str] = []
+    passed_receipt_gates: dict[str, str] = {}
+    receipt_order: list[str] = []
     for attempt in state.get("attempts") or []:
         if (
             not isinstance(attempt, dict)
@@ -927,15 +927,80 @@ def _active_rework_corrective_report_ids(root: Path, state: dict[str, Any]) -> l
             or attempt.get("invalidated")
         ):
             continue
+        gate = str(attempt.get("gate") or "")
         for report_ref in attempt.get("report_ids") or []:
             value = str(report_ref or "")
-            if (
-                value
-                and value in bound_by_target.get(str(attempt.get("gate") or ""), set())
-                and value not in selected
-            ):
-                selected.append(value)
-    return selected
+            # A source-mode host may publish a valid report and complete the
+            # attempt without a separate evidence projection.  The passed,
+            # non-invalidated attempt plus the immutable report receipt is the
+            # canonical current proof in that flow; requiring a report_id on
+            # optional gate evidence would incorrectly hide the correction.
+            if value:
+                passed_receipt_gates[value] = gate
+                if value not in receipt_order:
+                    receipt_order.append(value)
+
+    retained: set[str] = set()
+    missing_routes: list[dict[str, Any]] = []
+    for route in active_routes:
+        route_receipts: set[str] = set()
+        missing_pairs: list[tuple[str, str]] = []
+        for fingerprint in sorted(route["fingerprints"]):
+            finding = open_findings.get(fingerprint)
+            for origin_report_ref in sorted(route["source_refs"]):
+                pair_receipts: set[str] = set()
+                if isinstance(finding, dict):
+                    for source in finding.get("source_evidence") or []:
+                        if (
+                            not isinstance(source, dict)
+                            or source.get("transition") != "corrective_reported"
+                            or source.get("gate") != route["target_gate"]
+                            or source.get("origin_report_ref") != origin_report_ref
+                            or int(source.get("task_revision") or 0) != current_revision
+                        ):
+                            continue
+                        report_ref = str(source.get("report_id") or "")
+                        if (
+                            report_ref
+                            and passed_receipt_gates.get(report_ref) == route["target_gate"]
+                        ):
+                            pair_receipts.add(report_ref)
+                if not pair_receipts:
+                    missing_pairs.append((fingerprint, origin_report_ref))
+                route_receipts.update(pair_receipts)
+        retained.update(route_receipts)
+        if missing_pairs:
+            # Do not expose private report refs in a public dispatch error.
+            # The coordinator only needs the canonical origin/target route and
+            # count to route the missing corrective work safely.
+            missing_routes.append({
+                "origin_gate": route["origin_gate"],
+                "target_gate": route["target_gate"],
+                "missing_binding_count": len(missing_pairs),
+            })
+
+    return [item for item in receipt_order if item in retained], missing_routes
+
+
+def _active_rework_corrective_report_ids(root: Path, state: dict[str, Any]) -> list[str]:
+    """Return every live corrective receipt required by active rework routes."""
+    receipts, _ = _active_rework_corrective_receipts(root, state)
+    return receipts
+
+
+def _assert_origin_verifier_rework_preflight(
+    root: Path,
+    state: dict[str, Any],
+    current_gates: list[str],
+) -> None:
+    """Never send an origin verifier a report contract it cannot satisfy."""
+    _, missing_routes = _active_rework_corrective_receipts(root, state)
+    origin_gates = {str(gate) for gate in current_gates}
+    blockers = [
+        route for route in missing_routes if route["origin_gate"] in origin_gates
+    ]
+    if blockers:
+        raise CorrectiveReworkPreflightRequired(blockers)
 
 
 def _unresolved_rework_findings(
@@ -981,6 +1046,9 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
     current_gates = active_gates(state)
     if not current_gates:
         return {"wave_id": None, "spawn_requests": [], "attempt_ids": [], "state": state}
+    _assert_origin_verifier_rework_preflight(
+        _ledger_root_for_artifact(task_dir), state, current_gates,
+    )
     _assert_approved_plan_fresh(task_dir, state, plan)
     wave = _wave_for_gates(plan, current_gates)
     if wave is None:
@@ -3871,6 +3939,48 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             params,
             {**result, "transaction_id": None, "idempotent": False},
         )
+    except CorrectiveReworkPreflightRequired as exc:
+        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
+        diagnostics = [
+            {
+                "code": "closure_rework_preflight_required",
+                "phase": "dispatch_preflight",
+                "origin_gate": item["origin_gate"],
+                "target_gate": item["target_gate"],
+                "missing_binding_count": item["missing_binding_count"],
+                "message": (
+                    "The active origin verifier cannot be dispatched because its "
+                    "current server-bound corrective receipt is missing."
+                ),
+                "fix": (
+                    "Dispatch or recover the recorded corrective target gate, then "
+                    "retry the origin verifier only after its passed corrective receipt "
+                    "is durably recorded."
+                ),
+            }
+            for item in exc.missing_routes
+        ]
+        error = _orchestrate_error(
+            operation,
+            "closure_rework_preflight_required",
+            exc,
+            phase="dispatch_preflight",
+            recoverable=True,
+            next_operation=operation,
+            task_id=task_id,
+            diagnostics=diagnostics,
+        )
+        error["state"] = "rework_preflight_required"
+        error["next_action"] = (
+            "recover or dispatch the recorded corrective target gate, retain its "
+            "passed server-bound report receipt, then retry this lifecycle operation "
+            "with a new submission_id; do not dispatch the origin verifier yet"
+        )
+        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+            transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})
+            db_put_operation(transaction_path, safe_id(str(transaction["submission_id"])), transaction)
+            error["transaction_id"] = transaction.get("transaction_id")
+        return error
     except PlanReapprovalRequired as exc:
         task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
         error = _orchestrate_error(

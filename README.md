@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.13-7c3aed" alt="Cortex 9.2.13" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.14-7c3aed" alt="Cortex 9.2.14" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,7 +691,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.13 report, hook, and governance-rework hardening release
+### 9.2.14 report, hook, and governance-rework hardening release
 
 The current source-tree hardening draft retains the 9.2.10 stopped-report and
 plan-approval recovery guarantees, and additionally hardens worker reporting,
@@ -707,8 +707,12 @@ baseline. The lifecycle hook resolves its bundled runtime when a host loads it
 through `importlib`. While a closure rework is active, the exact
 server-bound corrective report remains in later QA/security and final-verifier
 handoffs even when normal transitive frontier compaction would otherwise cover
-it; the originating verifier therefore has the receipt evidence required to
-resolve the finding. An empty `required_missing` list is scoped to the current
+them; the originating verifier therefore has every receipt required to resolve
+each finding. Before it dispatches that verifier, Cortex proves all active
+closure-rework routes have a current passed, server-bound corrective receipt.
+If one is missing, it returns a recoverable preflight result without creating a
+worker or a report draft, instead of issuing a reviewer an impossible
+resolution contract. An empty `required_missing` list is scoped to the current
 gate: it cannot silently resolve a server-created verification blocker from a
 different gate or charge that worker with a provenance transition it never
 submitted. The controller keeps that blocker open and, for governance-origin
@@ -753,7 +757,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.13 cachebuster and full release/live results
+exact 9.2.14 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.

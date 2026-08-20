@@ -2,19 +2,22 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.13` source line. The public
+Security fixes are prepared for the current `9.2.14` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.13 source candidate retains stopped-report recovery integrity, private
+The 9.2.14 source candidate retains stopped-report recovery integrity, private
 report-draft descriptor validation, importlib-safe lifecycle-hook runtime
 resolution, and active corrective-report preservation across multi-hop
 handoffs. A later no-findings gate cannot silently resolve a server-created
 verification blocker from another gate, and governance-origin rework carries
-the fresh origin verifier through the later closure route. Its exact source
-cachebuster is generated from the 9.2.13 base
+the fresh origin verifier through the later closure route. For every active
+closure-rework route, dispatch preflight now requires a current server-bound
+passed corrective receipt before the origin verifier is created; that avoids
+an impossible PASS-resolution report contract without accepting unproven
+provenance. Its exact source cachebuster is generated from the 9.2.14 base
 version;
 tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
