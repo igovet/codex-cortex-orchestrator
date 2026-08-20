@@ -3730,6 +3730,41 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(implementation["agent"], "fullstack_dev")
         self.assertIn("both browser-facing and server-facing", implementation["selection_reason"])
 
+    def test_external_ledger_continuation_omits_write_required_implementation_gate(self):
+        """A Codex-only lifecycle request must not demand a fictitious project delta."""
+        objective = (
+            "Продолжи выполнять задачу codex://threads/01a01fed-4ccc-7321-bd2b-939d1adee101 "
+            "в этом треде. Создай отдельную новую задачу в леджере."
+        )
+        task = {"objective": objective, "requirements": [], "complexity": "C2"}
+        self.assertTrue(control._is_external_lifecycle_only_task(task))
+        waves = control._v3_auto_waves(task)
+        gates = [spec["gate"] for wave in waves for spec in wave["delegations"]]
+        self.assertEqual(gates, ["discover", "plan", "review", "documentation", "close"])
+        self.assertNotIn("implementation", gates)
+        self.assertNotIn("qa", gates)
+
+        started = self.v3_start(objective)
+        self.assertTrue(started["ok"])
+        state = self.task_state(next((self.ledger / "tasks").iterdir()))
+        self.assertEqual(
+            state["current_pipeline"],
+            ["discover", "plan", "review", "documentation", "close"],
+        )
+
+    def test_external_lifecycle_reference_with_project_mutation_keeps_implementation_gate(self):
+        task = {
+            "objective": (
+                "Continue codex://threads/01a01fed-4ccc-7321-bd2b-939d1adee101 in a new ledger task "
+                "and fix the repository source code."
+            ),
+            "requirements": [],
+            "complexity": "C2",
+        }
+        self.assertFalse(control._is_external_lifecycle_only_task(task))
+        gates = [spec["gate"] for wave in control._v3_auto_waves(task) for spec in wave["delegations"]]
+        self.assertIn("implementation", gates)
+
     def test_automatic_pipeline_reads_the_full_task_and_multilingual_specialist_signals(self):
         cases = {
             "Audit authorization security before changing the API": "security",
@@ -6195,6 +6230,157 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(invalid["retryable"])
         self.assertFalse(invalid["attempt_budget_consumed"])
         self.assertEqual(invalid["draft_ref"], template["draft_ref"])
+        self.assertTrue(Path(template["draft_path"]).is_file())
+
+    def test_unhashable_gate_result_value_returns_retryable_draft_diagnostic(self):
+        """Malformed JSON must not escape record_report as an MCP exception."""
+        started = self.v3_start(
+            "malformed gate workspace is rejected as a draft diagnostic",
+            waves=[{"workers": [{"phase": "review"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+        template = control.get_report_template(identity)
+        self.assertTrue(template["ok"], template)
+        report = self._report_with_briefing(
+            attempt, self.v3_report("review has malformed workspace status")
+        )
+        gate_result = {
+            "decision": "pass",
+            "failure_class": "product",
+            "findings": [],
+            "verification": {
+                "executed": ["Focused review completed."],
+                "not_executed": [],
+                "required_missing": [],
+                "limitations": [],
+            },
+            "workspace": {
+                "modified": [],
+                "untracked": [],
+                "staged": [],
+                "committed": [],
+            },
+        }
+
+        direct_invalid = control.publish_worker_report({
+            **identity,
+            "report": report,
+            "gate_result": gate_result,
+        })
+        self.assertFalse(direct_invalid["ok"])
+        self.assertEqual(direct_invalid["outcome"], "needs_correction")
+        self.assertEqual(direct_invalid["code"], "report_validation_failed")
+        self.assertIn("workspace committed", direct_invalid["diagnostics"][0]["message"])
+        self.assertTrue(direct_invalid["retryable"])
+        self.assertFalse(direct_invalid["attempt_budget_consumed"])
+
+        invalid = control.publish_worker_report({
+            **identity,
+            "draft_ref": template["draft_ref"],
+            "report": report,
+            "gate_result": gate_result,
+        })
+        self.assertFalse(invalid["ok"])
+        self.assertEqual(invalid["outcome"], "report_draft_invalid")
+        self.assertEqual(invalid["code"], "report_validation_failed")
+        self.assertEqual(invalid["diagnostics"][0]["path"], "gate_result")
+        self.assertIn("workspace committed", invalid["diagnostics"][0]["message"])
+        self.assertTrue(invalid["retryable"])
+        self.assertFalse(invalid["attempt_budget_consumed"])
+        self.assertTrue(Path(template["draft_path"]).is_file())
+
+    def test_unhashable_governance_exit_code_returns_validation_error(self):
+        """Governance evidence validation must also reject JSON arrays safely."""
+        task_id = "governance-unhashable"
+        evidence_id = "evidence-1"
+        artifact_digest = "a" * 64
+        artifact_ref = "artifact-" + hashlib.sha256(
+            f"{task_id}\0evidence\0evidence/{evidence_id}.json\0{artifact_digest}".encode("utf-8")
+        ).hexdigest()[:32]
+        state = {
+            "task_id": task_id,
+            "governance": {
+                "effective_mode": "light",
+                "autonomous_scope_ref": "governance-scope-autonomous",
+                "close_obligations": ["verification_evidence"],
+            },
+        }
+        evidence = [{
+            "evidence_id": evidence_id,
+            "digest": "server-recorded-evidence-digest",
+            "governance_scope_ref": "governance-scope-autonomous",
+            "governance_obligations": ["verification_evidence"],
+            "kind": "verification_evidence",
+            "artifact_ref": artifact_ref,
+            "artifact_digest": artifact_digest,
+            "artifact_immutable": True,
+            "artifact_verified": True,
+            "verified_execution": True,
+            "exit_code": [],
+        }]
+        with self.assertRaisesRegex(ValueError, "server-verified successful execution"):
+            control.validate_governance_obligation_evidence(
+                state, "governance_close", gate_evidence=evidence
+            )
+
+    def test_record_report_type_boundary_never_leaks_internal_type_errors(self):
+        """A future missed JSON shape guard remains a retryable worker diagnostic."""
+        started = self.v3_start(
+            "report transport rejects malformed JSON without an MCP crash",
+            waves=[{"workers": [{"phase": "review"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+        report = self._report_with_briefing(
+            attempt, self.v3_report("type boundary remains caller-correctable")
+        )
+
+        with mock.patch.object(
+            runtime_reports._runtime,
+            "record_report",
+            side_effect=TypeError("unhashable type: 'list'"),
+        ):
+            direct = control.publish_worker_report({**identity, "report": report})
+        self.assertFalse(direct["ok"])
+        self.assertEqual(direct["outcome"], "needs_correction")
+        self.assertEqual(direct["code"], "report_validation_failed")
+        self.assertTrue(direct["retryable"])
+        self.assertFalse(direct["attempt_budget_consumed"])
+        self.assertNotIn("unhashable", direct["diagnostics"][0]["message"])
+
+        template = control.get_report_template(identity)
+        self.assertTrue(template["ok"], template)
+        with mock.patch.object(
+            runtime_reports._runtime,
+            "record_report",
+            side_effect=AttributeError("list object has no attribute get"),
+        ):
+            draft = control.publish_worker_report({
+                **identity,
+                "draft_ref": template["draft_ref"],
+                "report": report,
+            })
+        self.assertFalse(draft["ok"])
+        self.assertEqual(draft["outcome"], "report_draft_invalid")
+        self.assertEqual(draft["code"], "report_validation_failed")
+        self.assertEqual(draft["diagnostics"][0]["path"], "$")
+        self.assertTrue(draft["retryable"])
+        self.assertFalse(draft["attempt_budget_consumed"])
         self.assertTrue(Path(template["draft_path"]).is_file())
 
     def test_waived_p2_with_auditable_metadata_does_not_block_close(self):
@@ -10370,7 +10556,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.14")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.15")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

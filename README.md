@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.14-7c3aed" alt="Cortex 9.2.14" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.15-7c3aed" alt="Cortex 9.2.15" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,7 +691,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.14 report, hook, and governance-rework hardening release
+### 9.2.15 report, hook, and governance-rework hardening release
 
 The current source-tree hardening draft retains the 9.2.10 stopped-report and
 plan-approval recovery guarantees, and additionally hardens worker reporting,
@@ -718,6 +718,12 @@ different gate or charge that worker with a provenance transition it never
 submitted. The controller keeps that blocker open and, for governance-origin
 findings, places the fresh originating governance gate and all later closure
 verifiers after corrective work before any resolution can be recorded.
+Malformed JSON values at the public report boundary are converted to bounded,
+same-attempt validation diagnostics rather than leaking interpreter exceptions.
+An explicitly external `codex://threads/...` ledger-continuation request that
+does not ask to mutate the project also avoids write-required implementation
+and QA gates; a request that names project changes keeps the ordinary strict
+implementation path.
 
 Governance record bodies are read from verified
 immutable content artifacts; exact normalized scope, task/initiative links,
@@ -757,7 +763,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.14 cachebuster and full release/live results
+exact 9.2.15 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.

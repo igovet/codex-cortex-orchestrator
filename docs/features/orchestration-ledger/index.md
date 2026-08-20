@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.14 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.15 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -20,6 +20,12 @@ explicit atomic transaction. Each migration is recorded with a content-based
 SHA-256 checksum over its version, name, and ordered normalized SQL. Legacy
 name-only checksums are accepted only after schema validation and are upgraded
 to the content checksum; inconsistent history fails closed.
+
+Malformed public report JSON is handled as a bounded validation correction,
+never as an unhandled interpreter error. A narrow external lifecycle-only task
+that explicitly continues a `codex://threads/...` task without requesting a
+project mutation omits write-required implementation and QA gates; ordinary
+repository changes retain those gates and their change-evidence contract.
 
 ## Key files and dependencies
 
@@ -886,7 +892,7 @@ during retirement.
 
 The focused plan-approval, replan, recovery, and read-only artifact regressions
 described here are historical 9.2.4 source evidence; they do not certify the
-9.2.14 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
+9.2.15 hardening release candidate. The cold-boot smoke uses the public JSON-RPC server to reject
 implementation loss, apply three dynamic pipeline changes beyond the persisted
 legacy replan limit, and verify every resulting gate through close. Complete
 discovery validation remains a separate governance-v10 workstream and is not
