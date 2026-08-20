@@ -375,12 +375,17 @@ the normal C1/C2/C3 approval policy.
 The active SQLite ledger never imports legacy filesystem coordination state.
 The separate, explicit legacy lifecycle can inventory it, create a verified
 private archive, and delete only the archived sources after an archive-specific
-confirmation. Health inspection is read-only; checkpoint, SQLite backup,
-backup-restore verification, optimize, vacuum, and projection reconciliation
-each require an action-specific confirmation. WAL/SHM are SQLite sidecars, not
-exports, backups, evidence, or independent prune targets. Lifecycle telemetry
-and model metrics are not canonical task artifacts and must not be used as
-completion proof.
+confirmation. Health inspection is read-only; checkpoint, private
+`.cortex-backup` disaster-recovery bundle creation, fresh-host restore
+verification, optimize, vacuum, and projection reconciliation each require an
+action-specific confirmation. A published bundle atomically contains
+`cortex.db`, the separately host-stored governance lifecycle HMAC key, and a
+manifest binding their fingerprints; verification restores both into a fresh
+disposable host layout and validates governance records through the real v12
+authority layer. Historical bare `.sqlite` snapshots are not represented as
+recoverable Cortex backups. WAL/SHM are SQLite sidecars, not exports, backups,
+evidence, or independent prune targets. Lifecycle telemetry and model metrics
+are not canonical task artifacts and must not be used as completion proof.
 
 ## Bounded private commit-adapter recovery
 

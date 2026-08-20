@@ -1,5 +1,18 @@
 # Changelog
 
+## [9.2.8] - 2026-08-20
+
+This source-tree patch release extends the 9.2.7 recovery hardening line with
+disaster-recovery backups that preserve and verify the governance lifecycle
+authentication key alongside the SQLite ledger. Backup bundles are private,
+atomically published, fingerprinted, and validated through a fresh host
+projection before they are accepted as recoverable evidence.
+
+- Include the governance lifecycle key and integrity manifest in private
+  `.cortex-backup` bundles without returning or logging the key.
+- Reject legacy bare SQLite backup files as insufficient for governance
+  disaster recovery.
+
 ## [9.2.7] - 2026-08-20
 
 This source-tree release extends the 9.2.6 hardening line with the P1.1

@@ -2,17 +2,24 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.7` source line. The public
+Security fixes are prepared for the current `9.2.8` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.7 source candidate adds coordinator recovery delivery guarantees on top
-of the 9.2.6 governance schema v12 integrity checks. Its exact source
-cachebuster is `9.2.7+codex.20260820104507`; tracked-release and
+The 9.2.8 source candidate adds disaster-recovery backup integrity on top of the
+9.2.7 coordinator recovery delivery guarantees and governance schema v12 checks.
+Its exact source cachebuster is generated from the 9.2.8 base version;
+tracked-release and
 installed-plugin parity remain separate gates, and this source-tree note is not
 a publication or installation claim.
+
+Backup bundles contain a private copy of the governance lifecycle key required
+to authenticate restored records. Treat each `.cortex-backup` directory as a
+secret-bearing artifact: preserve its owner and mode, do not share it through
+logs or public issue attachments, and use the verifier before accepting it as a
+disaster-recovery source. The key is never returned by maintenance APIs.
 
 ## Reporting a vulnerability
 
@@ -195,4 +202,4 @@ authorized initial commit exists and the check passes against it.
 This repository is a source candidate only. The prior
 9.2.4+codex.20260819182839 build was not installed from this checkout and is
 not published or tagged here. The current source cachebuster is
-`9.2.7+codex.20260820104507`; installation and publication remain pending.
+`9.2.8+codex.20260820113258`; installation and publication remain pending.

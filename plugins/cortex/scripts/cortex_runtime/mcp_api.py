@@ -636,7 +636,7 @@ def build_public_schemas(
                     "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after an exhausted closure-rework cycle, payload.future_waves must begin with a Planner recovery wave; Cortex infers rework and records the replacement before dispatch. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
                     "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
-                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup targets use only safe backup_name values. Normal wave progression never uses this field."
+                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
                 ),
             },
         },
