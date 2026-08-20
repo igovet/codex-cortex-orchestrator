@@ -300,11 +300,18 @@ paths forbidden above.
    from `context_handoff.stopped_workers`). It omits `report_ref`. This binds a
    failure to one attempt, so a duplicate stale failure can never be applied to
    its replacement. Until all workers finish, remain idle and perform
-   no project operation. A `SubagentStop` after `record_report` is recovered
-   from the persisted report ref; a stop on an open durable question remains
-   resumable; any other stop is durably failed and must be submitted as a
-   non-success result for canonical rework. Never wait on or respawn a stopped
-   child directly.
+   no project operation. A `SubagentStop` after `record_report` leaves the
+   attempt completion-pending (`lifecycle_status=report_recorded`), not active
+   and not resumable. The coordinator must explicitly choose exactly one
+   returned `report_ref` and submit it through `continue_orchestration`; Cortex
+   verifies the ref against the exact task, gate, attempt, and current revision
+   before consumption. Never auto-select a report, silently approve it,
+   respawn the stopped child, or call `followup_task` for this state. Missing,
+   stale, already-consumed, or mismatched refs fail closed and require recovery;
+   multiple valid refs remain audit-visible until the coordinator chooses one. A
+   stop on an open durable question remains resumable; any other stop is
+   durably failed and must be submitted as a non-success result for canonical
+   rework. Never wait on or respawn a stopped child directly.
 
    Native agent slots have their own lifecycle. Before every new native
    `spawn_agent`, use `close_agent` when available to release each known

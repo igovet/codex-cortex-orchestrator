@@ -53,10 +53,16 @@ generic `default` event matches exactly one pending dispatch and its observed
 model. Missing, ambiguous, already-consumed, or model-mismatched identities
 fail closed; the hook never guesses a child or reuses a previous session.
 `SubagentStop` updates the exact child-bound attempt without persisting the
-model-authored final text: an already recorded report is exposed for
-continuation, an open durable question remains resumable, and every other stop
-is failed as `native_worker_stopped_without_report`. Recovery lists these as
-non-waitable `stopped_workers`, never as active children. Because the host does
+model-authored final text: an already recorded report leaves a
+`lifecycle_status=report_recorded` attempt completion-pending, not active and
+not resumable. The coordinator must explicitly choose one `report_ref` and
+continue; the server verifies its exact task, gate, attempt, and revision
+binding. Telemetry never auto-selects or approves reports and never authorizes
+respawn of the stopped child. Missing, stale, already-consumed, or mismatched
+refs fail closed and require recovery; multiple valid candidates remain
+audit-visible until the coordinator chooses one. An open durable question remains resumable,
+and every other stop is failed as `native_worker_stopped_without_report`.
+Recovery lists these as non-waitable `stopped_workers`, never as active children. Because the host does
 not allow `SubagentStop` to emit model context, the supported `PostToolUse`
 hook on the completing wait re-reads this durable state. When the latest
 attempt stopped without a report it instructs the coordinator to inspect and

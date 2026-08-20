@@ -1,5 +1,17 @@
 # Changelog
 
+## [9.2.9] - 2026-08-20
+
+This source-tree patch fixes recovery after a native worker stops after it has
+already recorded a report. The stopped child is no longer projected as a live
+worker or retried automatically.
+
+- Classify host-stopped `report_recorded` attempts as completion-pending and
+  require the coordinator to explicitly select one receipt-attested report.
+- Reject stale Planner report revisions before state mutation; when every
+  stopped-report receipt is unusable, retain it for audit and require a fresh
+  Planner-first recovery instead of leaving the task waiting indefinitely.
+
 ## [9.2.8] - 2026-08-20
 
 This source-tree patch release extends the 9.2.7 recovery hardening line with

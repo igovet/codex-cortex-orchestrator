@@ -829,10 +829,42 @@ def v3_response(
             "rationale. Do not call a UI/input/approval/elicitation tool. End the turn and wait. Submit the user's "
             "next unambiguous response with the exact request_id; preserve requested changes verbatim."
         )
+    elif outcome == "completion_pending":
+        pending = (
+            old.get("result", {}).get("pending_report_completions", [])
+            if isinstance(old.get("result"), dict) else []
+        )
+        selections = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            slot = item.get("worker")
+            refs = [str(ref) for ref in item.get("candidate_report_refs", []) if str(ref).strip()]
+            if slot and refs:
+                selections.append(f"worker={slot}: " + ", ".join(refs))
+        next_action = (
+            f"{coordinator_lock} A native worker already stopped after recording durable reports; it is not a live "
+            "child. Never wait on or respawn it; never resume it. Read the candidate report refs, then explicitly select "
+            "exactly one receipt-validated report_ref for each listed worker slot and call continue_orchestration "
+            f"once for task_ref={task_ref} and this step. Cortex will reject a superseded planner report before any "
+            "state mutation. Candidates: "
+            + ("; ".join(selections) if selections else "none validated; inspect the reported receipt mismatch and do not fabricate a result.")
+        )
     elif outcome == "completed":
         next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
     elif outcome == "blocked":
-        next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
+        reported_recovery = (
+            old.get("result", {}).get("reported_attempt_recovery")
+            if isinstance(old.get("result"), dict) else None
+        )
+        if isinstance(reported_recovery, dict):
+            next_action = (
+                f"{coordinator_lock} The stopped worker's persisted reports cannot be safely consumed. Never wait on or "
+                "respawn it; never resume or manually edit that child/ledger state. Resume the blocked task only through "
+                "manage_orchestration intent=resume; Cortex will issue a fresh Planner-first dispatch."
+            )
+        else:
+            next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
     else:
         next_action = (
             f"{coordinator_lock} Wait idly for the active worker results, then call continue_orchestration "
@@ -863,7 +895,16 @@ def v3_response(
             if item.get("failure_status") == "failed"
             and str(item.get("dispatch_ref") or "").strip()
         ]
-        if outcome == "waiting_workers":
+        if outcome == "completion_pending" or (
+            outcome == "blocked"
+            and isinstance(old.get("result"), dict)
+            and isinstance(old["result"].get("reported_attempt_recovery"), dict)
+        ):
+            # The candidate list above is intentionally more restrictive than
+            # generic stopped-worker prose: each eventual continuation must
+            # select one receipt-attested report for its worker slot.
+            pass
+        elif outcome == "waiting_workers":
             if active_worker_ids:
                 terminal_failure_targets = "; ".join(
                     f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"

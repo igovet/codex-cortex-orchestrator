@@ -426,9 +426,17 @@ failed attempt, recorded as
 the handoff exposes its exact `dispatch_ref`, and the coordinator submits one
 failed continuation with that ref and reason. Cortex alone may return a fresh
 top-level dispatch; the dead child is never waited on, respawned, or resumed
-with `followup_task`. A stopped worker with a report is consumed normally, and
-a worker paused on a durable question remains resumable through its exact host
-identity. Repeated failed continuations remain eligible for fresh top-level
+with `followup_task`. A stopped worker whose lifecycle is
+`report_recorded` is completion-pending, not active and not resumable, even
+when `host_report_refs` contains reports. The coordinator must explicitly
+continue with exactly one chosen `report_ref`; Cortex verifies that ref against
+the exact stopped `attempt_id`, gate, task, and current revision before
+consuming it. Cortex never auto-selects a report, silently approves it, or
+respawns the stopped child. Missing, stale, already-consumed, or mismatched
+refs fail closed and require the normal recovery path; multiple valid refs
+remain audit-visible until the coordinator chooses one. A worker paused on a durable
+question remains resumable through its exact host identity. Repeated failed
+continuations remain eligible for fresh top-level
 dispatches while Cortex raises the effort floor (`high`, then `xhigh`, then
 `max`) and uses Terra for eligible ordinary work after two prior failures.
 Only an explicit non-retryable blocker or user cancellation stops correction.

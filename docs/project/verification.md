@@ -111,7 +111,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.8 hardening release candidate above;
+candidate. They do not certify the 9.2.9 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -198,15 +198,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.8 source cachebuster. Historical
+The source manifest now declares the 9.2.9 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.8 release-candidate evidence status
+## 9.2.9 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.8 base version.
+source cachebuster is generated from the 9.2.9 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -227,7 +227,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.8 source contract
+## Current 9.2.9 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -387,7 +387,13 @@ Control-plane tests cover exact task identity, idempotent starts, concurrent
 project isolation, transaction rollback checkpoints, scoped immutable
 briefings, report/evidence/receipt integrity, compaction recovery, bounded
 rework, stale-state pruning, worker-question resumption, and server-observed
-close evidence. They also cover human-readable `Profile Module` labels and
+close evidence. They also cover the stranded completion-pending stop contract:
+`report_recorded` attempts with `host_report_refs` are not active or resumable;
+continuation requires one explicitly selected report ref bound to the exact
+task/gate/attempt/revision, while auto-selection, implicit approval, respawn,
+and invalid, stale, consumed, or mismatched refs fail closed into recovery.
+Multiple valid refs remain selectable audit evidence. They also cover
+human-readable `Profile Module` labels and
 attempt-unique native `task_name` values, so a host cannot resume a stale child
 under a repeated display label.
 
