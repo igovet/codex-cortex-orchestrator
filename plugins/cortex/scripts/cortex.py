@@ -3429,7 +3429,12 @@ def sanitize_closure_payload(value: Any, *, actor_ids: set[str] | None = None) -
         raise ValueError("closure verification must contain executed, not_executed, required_missing, and limitations")
     if not isinstance(workspace, dict) or set(workspace) != {"modified", "untracked", "staged", "committed"}:
         raise ValueError("closure workspace must contain modified, untracked, staged, and committed")
-    if workspace["committed"] not in {True, False, "not_required"}:
+    # ``workspace`` is caller-controlled JSON.  A malformed list is
+    # unhashable, so testing membership in a set would leak ``TypeError``
+    # through the MCP transport before the public adapter can issue its
+    # normal caller-correctable validation diagnostic.  Tuple membership is
+    # equality-based and is therefore safe for every JSON value.
+    if workspace["committed"] not in (True, False, "not_required"):
         raise ValueError("closure workspace committed must be true, false, or not_required")
     for field in verification:
         if not isinstance(verification[field], list): raise ValueError("closure verification fields must be arrays")
@@ -4545,6 +4550,39 @@ def _is_knowledge_harvest_task(task: dict[str, Any]) -> bool:
     return re.search(r"(?<![a-z0-9])harvest(?:-refresh)?(?![a-z0-9])", routing_text) is not None
 
 
+def _is_external_lifecycle_only_task(task: dict[str, Any]) -> bool:
+    """Recognize the narrow no-project-change Cortex continuation workflow.
+
+    A task that merely asks Cortex to continue a referenced Codex task in a
+    newly-created ledger record is an external control-plane operation.  It
+    still needs discovery, planning, review, documentation, and closure
+    evidence, but an implementation writer cannot truthfully satisfy its
+    required project-file delta.  Keep this detection deliberately narrow:
+    an explicit Codex thread reference and ledger/lifecycle-task creation are
+    both required, and any explicit project mutation keeps the normal route.
+    """
+    routing_text = _implementation_routing_text(task)
+    if not re.search(r"\bcodex://threads/[a-z0-9-]+\b", routing_text):
+        return False
+    has_lifecycle_operation = bool(re.search(
+        r"\b(?:ledger|lifecycle|orchestration)\b|\b(?:леджер|леджере|оркестрац\w*)\b",
+        routing_text,
+    ))
+    has_task_creation = bool(re.search(
+        r"\b(?:create|continue|resume)\b.{0,120}\b(?:task|thread)\b"
+        r"|\b(?:созда\w*|продолж\w*)\b.{0,120}\b(?:задач\w*|тред\w*)\b",
+        routing_text,
+    ))
+    has_project_mutation = bool(re.search(
+        r"\b(?:code|source|repository|repo|file|implement\w*|fix\w*|patch\w*|"
+        r"test\w*|build\w*|deploy\w*|config\w*)\b"
+        r"|\b(?:код\w*|исходник\w*|репозитори\w*|файл\w*|исправ\w*|"
+        r"реализ\w*|тест\w*|сборк\w*|конфиг\w*)\b",
+        routing_text,
+    ))
+    return has_lifecycle_operation and has_task_creation and not has_project_mutation
+
+
 def _required_task_result_contract(task: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Require observable task success and verification before orchestration starts."""
     def items(field: str) -> list[str]:
@@ -5347,7 +5385,10 @@ def validate_governance_obligation_evidence(
     verification = seen.get("verification_evidence")
     if verification is not None and not (
         verification.get("verified_execution") is True
-        and verification.get("exit_code") in {0, None}
+        # Evidence is caller-controlled JSON; avoid set membership so a
+        # malformed array becomes a normal validation error rather than an
+        # unhashable-value exception at the boundary.
+        and verification.get("exit_code") in (0, None)
     ):
         raise ValueError("verification_evidence requires server-verified successful execution")
     receipt = seen.get("audit_receipt")
@@ -9236,7 +9277,19 @@ def _v3_compact_waves(
 
 
 def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
-    classified = classify({"complexity": task["complexity"], "requirements": _task_routing_items(task)})
+    classification_params: dict[str, Any] = {
+        "complexity": task["complexity"],
+        "requirements": _task_routing_items(task),
+    }
+    if _is_external_lifecycle_only_task(task):
+        # The control-plane action is performed by this coordinator at task
+        # creation.  Do not later dispatch an implementation worker whose
+        # report contract requires a project change that the task forbids.
+        classification_params["pipeline"] = [
+            gate for gate in BASE_PIPELINES[str(task["complexity"])]
+            if gate not in {"implementation", "qa"}
+        ]
+    classified = classify(classification_params)
     implementation_selection = select_implementation_profile(task)
 
     def automatic_spec(gate: str) -> dict[str, Any]:

@@ -102,6 +102,35 @@ _RECORD_REPORT_COORDINATOR_TRANSPORT_FIELDS = {
 }
 
 
+def _record_report_payload_type_failure() -> dict[str, Any]:
+    """Return a stable public rejection for malformed JSON value shapes.
+
+    ``record_report`` accepts JSON supplied by a model.  Validators normally
+    turn a bad scalar, array, or object into a ``ValueError`` with a precise
+    field message.  This final transport boundary is deliberately defensive:
+    a missed hash/mapping operation must never escape as an MCP ``TypeError``
+    or ``AttributeError``.  Do not expose the Python exception here, since it
+    can disclose an implementation detail and is not actionable to a worker.
+    """
+    message = (
+        "record_report payload contains an invalid JSON value type; use the documented "
+        "string, number, boolean, object, or array shape for the named report field"
+    )
+    return {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": False,
+        "outcome": "needs_correction",
+        "code": "report_validation_failed",
+        "diagnostics": [{"code": "report_validation_failed", "message": message}],
+        "next_action": (
+            "Correct only the malformed report field using the exact structure from get_report_template, then "
+            "retry record_report on this same task and attempt. The rejected call did not consume a worker attempt."
+        ),
+        "retryable": True,
+        "attempt_budget_consumed": False,
+    }
+
+
 def _planning_preview_compiled_unit(planning: dict[str, Any]) -> tuple[str, dict[str, Any], list[str], list[str], list[str]]:
     """Build the plan-owned portion of the real implementation dispatch.
 
@@ -1585,6 +1614,10 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "_require_gate_validation": True,
             "_require_close_validation": True,
         })
+    except (TypeError, AttributeError):
+        # Do not let a missed type assertion in a deep validator turn a
+        # caller-controlled JSON shape into an MCP transport failure.
+        return _record_report_payload_type_failure()
     except ValueError as exc:
         message = str(exc)
         if "blocking worker question(s) remain unanswered" in message:
@@ -1989,6 +2022,16 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
             if diagnostics:
                 return None, _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
             return {**identity, "draft_ref": draft_ref}, None
+    except (TypeError, AttributeError):
+        return None, _draft_invalid_result([{
+            "code": "report_validation_failed",
+            "path": "$",
+            "message": (
+                "record_report payload contains an invalid JSON value type; use the documented "
+                "string, number, boolean, object, or array shape for the named report field"
+            ),
+            "fix": "Correct the malformed field in this existing draft and retry with the same draft_ref.",
+        }], draft_ref=draft_ref or None, draft_path=draft_path)
     except ValueError as exc:
         message = redact(str(exc), 1000)
         return None, _draft_invalid_result([{

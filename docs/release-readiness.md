@@ -4,10 +4,10 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.14 release candidate
+## 9.2.15 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.14 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.15 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
@@ -48,6 +48,11 @@ binding must have a current passed, server-bound corrective receipt; otherwise
 the controller returns recoverable `closure_rework_preflight_required` before
 creating a worker or report draft. This keeps a reviewer from being asked to
 write a resolution report that its permitted context cannot prove.
+Malformed caller JSON at the public report boundary is converted into a bounded
+same-attempt validation result rather than an interpreter exception. An
+explicitly external `codex://threads/...` ledger-continuation task without a
+requested project mutation omits write-required implementation and QA gates;
+any explicit repository mutation preserves the standard implementation route.
 
 Worker Briefing v3 budgets are enforced when the immutable briefing is saved:
 the compact native bootstrap is capped at 1.5 KiB, ordinary briefings use a
@@ -63,7 +68,7 @@ just to fit transport limits.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.14` (the current source candidate carries a cachebuster; installed builds
+  `9.2.15` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -203,7 +208,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.14 release commit only with explicit authorization.
+- Create the Cortex 9.2.15 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

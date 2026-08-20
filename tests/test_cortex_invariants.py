@@ -1950,7 +1950,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.14")
+        self.assertEqual(base_version, "9.2.15")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

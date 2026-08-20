@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `9.2.14`. This
+The current source manifest and server are intended for plugin version `9.2.15`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -57,6 +57,12 @@ resolves its findings. Before that verifier dispatches, the controller checks
 each active finding/origin binding has a passed corrective receipt; a missing
 receipt returns `closure_rework_preflight_required` before any worker or draft
 is created. Packaging/runtime tests cover the multi-hop and two-route handoff.
+
+Malformed public report JSON must return a bounded validation diagnostic rather
+than an MCP-level interpreter error. The automatic pipeline recognizes only an
+explicit no-project-mutation `codex://threads/...` ledger-continuation request
+as external lifecycle-only; it bypasses write-required implementation/QA while
+ordinary repository mutation requests keep those gates.
 
 The current start contract requires `start_orchestration.task.user_request` and
 preserves the exact user-authored text. If `task.objective` is supplied, request

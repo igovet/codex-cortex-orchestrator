@@ -1,5 +1,18 @@
 # Changelog
 
+## [9.2.15] - 2026-08-20
+
+This source-tree patch makes the public report boundary and external
+control-plane routing recoverable without weakening ledger integrity.
+
+- Reject malformed JSON scalar values at the public report boundary with a
+  structured retryable validation result instead of leaking a Python exception
+  through MCP; both direct and draft-backed reports retain the normal repair
+  path.
+- Route an explicitly external `codex://threads/...` ledger-continuation task
+  without a requested project mutation around write-required implementation
+  and QA gates, while retaining those gates for actual repository changes.
+
 ## [9.2.14] - 2026-08-20
 
 This source-tree patch prevents an origin verifier from receiving a report
