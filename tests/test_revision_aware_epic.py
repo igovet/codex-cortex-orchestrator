@@ -113,14 +113,16 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
             migrations = connection.execute(
                 "SELECT version, name FROM schema_migrations ORDER BY version"
             ).fetchall()
-            self.assertEqual(migrations[-4]["version"], 8)
-            self.assertEqual(migrations[-4]["name"], "revision-aware-orchestration")
-            self.assertEqual(migrations[-3]["version"], 9)
-            self.assertEqual(migrations[-3]["name"], "governance-ledger")
-            self.assertEqual(migrations[-2]["version"], 10)
-            self.assertEqual(migrations[-2]["name"], "governance-integrity-hardening")
-            self.assertEqual(migrations[-1]["version"], 11)
-            self.assertEqual(migrations[-1]["name"], "governance-lifecycle-authority")
+            self.assertEqual(migrations[-5]["version"], 8)
+            self.assertEqual(migrations[-5]["name"], "revision-aware-orchestration")
+            self.assertEqual(migrations[-4]["version"], 9)
+            self.assertEqual(migrations[-4]["name"], "governance-ledger")
+            self.assertEqual(migrations[-3]["version"], 10)
+            self.assertEqual(migrations[-3]["name"], "governance-integrity-hardening")
+            self.assertEqual(migrations[-2]["version"], 11)
+            self.assertEqual(migrations[-2]["name"], "governance-lifecycle-authority")
+            self.assertEqual(migrations[-1]["version"], 12)
+            self.assertEqual(migrations[-1]["name"], "governance-lifecycle-envelope-authentication")
             tables = {
                 row["name"]
                 for row in connection.execute(

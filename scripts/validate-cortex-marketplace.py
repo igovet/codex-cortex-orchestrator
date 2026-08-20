@@ -234,10 +234,10 @@ def main() -> int:
     prompt_budgets = shared.get("prompt_budgets")
     if prompt_budgets != {
         "bootstrap_hard_bytes": 1500,
-        "ordinary_briefing_soft_bytes": 10000,
-        "ordinary_briefing_hard_bytes": 14000,
-        "harvest_briefing_soft_bytes": 11000,
-        "harvest_briefing_hard_bytes": 15000,
+        "ordinary_briefing_soft_bytes": 16384,
+        "ordinary_briefing_hard_bytes": 24576,
+        "harvest_briefing_soft_bytes": 18432,
+        "harvest_briefing_hard_bytes": 28672,
     }:
         fail("shared worker contract must define the canonical prompt budgets")
     mode_overlays = profile_contract.get("mode_overlays")

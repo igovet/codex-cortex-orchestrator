@@ -131,6 +131,70 @@ def _ensure_briefing_task_directory(task_dir: Path) -> None:
         raise ValueError("dispatch briefing task directory must be a real directory")
     task_dir.chmod(0o700, follow_symlinks=False)
 
+
+_EPHEMERAL_SPAWN_FIELDS = frozenset({"briefing_path", "message", "prompt"})
+
+
+def _durable_spawn_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Keep host-private artifact paths out of durable attempt state.
+
+    The host payload is a one-shot projection.  Persisting its rendered
+    message used to retain absolute host-control paths, so an atomically
+    relocated legacy ledger could replay a stale path after recovery.  The
+    immutable dispatch identity below is enough to recreate the transport
+    payload against the current ledger root.
+    """
+    return {key: value for key, value in request.items() if key not in _EPHEMERAL_SPAWN_FIELDS}
+
+
+def rehydrate_dispatch_spawn_request(
+    task_dir: Path,
+    task_definition: dict[str, Any],
+    attempt: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebuild one transient native host payload from durable relative refs."""
+    request = dict(attempt.get("spawn_request") or {})
+    task_id = str(attempt.get("task_id") or task_definition.get("task_id") or "")
+    attempt_id = str(attempt.get("attempt_id") or "")
+    dispatch_ref = str(attempt.get("dispatch_ref") or "")
+    profile = str(attempt.get("profile") or attempt.get("agent") or "")
+    briefing_file = str(attempt.get("briefing_file") or "")
+    briefing_digest = str(attempt.get("briefing_digest") or "")
+    project_root = Path(str(task_definition.get("project_root") or ""))
+    relative = Path(briefing_file)
+    if (
+        not task_id or not attempt_id or not dispatch_ref or not profile or not briefing_digest
+        or not project_root.is_absolute() or relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("attempt is missing its durable dispatch identity")
+    briefing_path = _contained_path(task_dir, task_dir / relative, "dispatch briefing")
+    intent_relative = Path(str(task_definition.get("user_intent_artifact_path") or "intent/user-request.txt"))
+    if intent_relative.is_absolute() or any(part in {"", ".", ".."} for part in intent_relative.parts):
+        raise ValueError("task user-intent artifact path is unsafe")
+    intent_path = _contained_path(task_dir, task_dir / intent_relative, "user intent artifact")
+    plan_relative_raw = str(attempt.get("plan_unit_file") or "")
+    plan_path: Path | None = None
+    if plan_relative_raw:
+        plan_relative = Path(plan_relative_raw)
+        if plan_relative.is_absolute() or any(part in {"", ".", ".."} for part in plan_relative.parts):
+            raise ValueError("attempt compiled-plan artifact path is unsafe")
+        plan_path = _contained_path(task_dir, task_dir / plan_relative, "compiled plan unit")
+    request["briefing_file"] = briefing_file
+    request["briefing_path"] = str(briefing_path)
+    request["briefing_digest"] = briefing_digest
+    request["dispatch_ref"] = dispatch_ref
+    request["message"] = host_spawn_bootstrap(
+        profile, briefing_path, briefing_digest, dispatch_ref, task_id, attempt_id, project_root,
+        intent_path=str(intent_path),
+        intent_digest=str(task_definition.get("user_request_digest") or ""),
+        plan_unit_path=str(plan_path) if plan_path is not None else None,
+        plan_unit_digest=str(attempt.get("plan_unit_digest") or ""),
+    )
+    if request.get("host_tool") == "create_thread":
+        request["prompt"] = request["message"]
+        request.setdefault("title", str(attempt.get("display_name") or request.get("task_name") or "Cortex worker"))
+    return request
+
 def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     prepared: dict[str, Any]
@@ -140,6 +204,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     intent_job: dict[str, Any] | None = None
     intent_path: Path | None = None
     intent_digest: str | None = None
+    compiled_relative: str | None = None
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
@@ -524,8 +589,12 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             # keeps the package readable by existing coordinator adapters.
             spawn_request["prompt"] = spawn_request["message"]
             spawn_request["title"] = display_name
+        # The package and state are both durable.  Retain only the logical
+        # dispatch contract there; absolute briefing paths and the rendered
+        # host prompt are recreated after a restart/host-store relocation.
+        package["spawn_request"] = _durable_spawn_request(spawn_request)
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
         db_put_worker_session(ledger_root(params), {
             "task_id": state["task_id"],
             "attempt_id": attempt_id,

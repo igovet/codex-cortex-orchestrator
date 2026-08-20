@@ -5726,6 +5726,79 @@ class ControlPlaneTests(unittest.TestCase):
             "approved",
         )
 
+    def test_v3_planner_rejects_oversized_future_dispatch_before_plan_approval(self):
+        """An overlarge compiled plan must be corrected by the same planner.
+
+        The old failure happened only after a human had approved the planning
+        report and the implementation briefing was materialized.  That left a
+        passed planner report and forced an unnecessary replan/reapproval.
+        """
+        started = self.v3_start(
+            "validate future worker briefing capacity before asking for approval",
+            complexity="C1",
+            plan_approval="required",
+            waves=[
+                {"workers": [{"phase": "plan"}]},
+                {"workers": [{"phase": "implementation"}]},
+            ],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        before = self.task_state(task_dir)
+        planner = before["attempts"][0]
+        artifacts_before = control.db_list_artifacts(self.ledger, before["task_id"], page_size=100)[0]
+        oversized = self.v3_planning()
+        oversized["work_packages"][0]["microtasks"] = [
+            {
+                "id": f"oversized_{index}",
+                "title": f"Oversized implementation unit {index}",
+                "objective": "x" * 3600,
+                "profile": "backend_dev",
+                "allowed_paths": ["src"],
+                "acceptance_criteria": ["a" * 900],
+                "verification": ["v" * 900],
+            }
+            for index in range(1, 7)
+        ]
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": before["task_id"],
+            "attempt_id": planner["attempt_id"], "profile": planner["profile"],
+            "report": self._report_with_briefing(planner, self.v3_report("oversized plan")),
+            "planning": oversized,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "planner_briefing_budget_exceeded")
+        self.assertTrue(rejected["retryable"])
+        self.assertFalse(rejected["attempt_budget_consumed"])
+        self.assertIn("future implementation/backend_dev", rejected["diagnostics"][0]["message"])
+        self.assertIn(">24576", rejected["diagnostics"][0]["message"])
+        self.assertIn("retry this same planner report", rejected["diagnostics"][0]["message"])
+        after_rejection = self.task_state(task_dir)
+        self.assertEqual(after_rejection, before)
+        artifacts_after = control.db_list_artifacts(self.ledger, before["task_id"], page_size=100)[0]
+        self.assertEqual(artifacts_after, artifacts_before)
+        self.assertIsNone(control.current_planning_manifest(task_dir))
+
+        accepted = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": before["task_id"],
+            "attempt_id": planner["attempt_id"], "profile": planner["profile"],
+            "report": self._report_with_briefing(planner, self.v3_report("bounded plan")),
+            "planning": self.v3_planning(),
+        })
+        self.assertTrue(accepted["ok"], accepted)
+        held = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": accepted["report_ref"]}],
+        })
+        self.assertEqual(held["outcome"], "awaiting_plan_approval")
+        prompt = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"],
+            "intent": "plan_approval", "payload": {"decision": "prompt"},
+        })
+        approved = control.manage_orchestration(prompt["plan_approval_interaction"]["actions"][0]["arguments"])
+        self.assertTrue(approved["ok"], approved)
+        self.assertEqual(approved["outcome"], "ready_to_spawn")
+        self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
+
     def test_plan_approval_rejects_a_stale_basis_before_post_plan_dispatch(self):
         started = self.v3_start(
             "block stale plan approval",
