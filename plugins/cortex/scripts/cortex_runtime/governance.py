@@ -1,4 +1,4 @@
-"""Server-owned governance primitives for the v11 Cortex ledger.
+"""Server-owned governance primitives for the v12 Cortex ledger.
 
 The orchestration engine remains responsible for sequencing workers.  This
 module owns the durable governance contract that sits beside that pipeline:
@@ -11,6 +11,7 @@ focused migration and adversarial tests.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -427,7 +428,7 @@ def _validated_artifact_payload(connection: sqlite3.Connection, metadata: dict[s
         raise GovernanceError("governance evidence artifact must contain canonical JSON", code="artifact_schema_invalid") from exc
 
 
-def _validate_record_lifecycle(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+def _validate_record_lifecycle(root: Path, connection: sqlite3.Connection, row: sqlite3.Row) -> None:
     """Fail closed unless the indexed lifecycle projection has an exact chain.
 
     The record row is intentionally convenient for snapshot indexes, but it
@@ -443,8 +444,12 @@ def _validate_record_lifecycle(connection: sqlite3.Connection, row: sqlite3.Row)
         if sequence < 0 or not re.fullmatch(r"[0-9a-f]{64}", binding):
             raise ValueError("record lifecycle projection is malformed")
         events = connection.execute(
-            "SELECT lifecycle_sequence,previous_binding,status,approval_basis_json,binding "
-            "FROM governance_record_lifecycle WHERE record_ref=? ORDER BY lifecycle_sequence",
+            "SELECT lifecycle.lifecycle_ref,lifecycle.lifecycle_sequence,lifecycle.previous_binding,"
+            "lifecycle.status,lifecycle.approval_basis_json,lifecycle.binding,lifecycle.action,"
+            "lifecycle.actor_role,lifecycle.created_at,auth.envelope_hmac "
+            "FROM governance_record_lifecycle AS lifecycle "
+            "LEFT JOIN governance_record_lifecycle_auth AS auth ON auth.lifecycle_ref=lifecycle.lifecycle_ref "
+            "WHERE lifecycle.record_ref=? ORDER BY lifecycle.lifecycle_sequence",
             (record_ref,),
         ).fetchall()
         if len(events) != sequence + 1:
@@ -469,6 +474,22 @@ def _validate_record_lifecycle(connection: sqlite3.Connection, row: sqlite3.Row)
                 or event_binding != expected_binding
             ):
                 raise ValueError("record lifecycle event binding is inconsistent")
+            expected_hmac = ledger_db.governance_lifecycle_envelope_hmac(
+                root,
+                lifecycle_ref=str(event["lifecycle_ref"]),
+                record_ref=record_ref,
+                lifecycle_sequence=event_sequence,
+                previous_binding=event_previous,
+                status=event_status,
+                approval_basis_json=event_basis,
+                binding=event_binding,
+                action=str(event["action"]),
+                actor_role=str(event["actor_role"]),
+                created_at=str(event["created_at"]),
+            )
+            supplied_hmac = str(event["envelope_hmac"] or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", supplied_hmac) or not hmac.compare_digest(supplied_hmac, expected_hmac):
+                raise ValueError("record lifecycle event authentication is inconsistent")
             previous = event_binding
         latest = events[-1]
         row_basis = str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None
@@ -484,6 +505,7 @@ def _validate_record_lifecycle(connection: sqlite3.Connection, row: sqlite3.Row)
 
 
 def _append_record_lifecycle_transition(
+    root: Path,
     connection: sqlite3.Connection,
     row: sqlite3.Row,
     *,
@@ -492,7 +514,7 @@ def _append_record_lifecycle_transition(
     actor_role: str,
 ) -> sqlite3.Row:
     """Append and apply one authorized governance status/basis transition."""
-    _validate_record_lifecycle(connection, row)
+    _validate_record_lifecycle(root, connection, row)
     record_ref = str(row["record_ref"])
     current_status = str(row["status"])
     current_basis = str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None
@@ -513,9 +535,24 @@ def _append_record_lifecycle_transition(
     lifecycle_ref = "lifecycle-" + hashlib.sha256(
         f"{record_ref}:{sequence}:{binding}".encode("utf-8")
     ).hexdigest()[:32]
+    created_at = _now()
     connection.execute(
         "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (lifecycle_ref, record_ref, sequence, previous_binding, target_status, approval_basis_json, binding, "transition", actor_role, _now()),
+        (lifecycle_ref, record_ref, sequence, previous_binding, target_status, approval_basis_json, binding, "transition", actor_role, created_at),
+    )
+    ledger_db.insert_governance_lifecycle_auth(
+        root,
+        connection,
+        lifecycle_ref=lifecycle_ref,
+        record_ref=record_ref,
+        lifecycle_sequence=sequence,
+        previous_binding=previous_binding,
+        status=target_status,
+        approval_basis_json=approval_basis_json,
+        binding=binding,
+        action="transition",
+        actor_role=actor_role,
+        created_at=created_at,
     )
     connection.execute(
         "UPDATE governance_records SET status=?,approval_basis_json=?,lifecycle_sequence=?,lifecycle_binding=? WHERE record_ref=?",
@@ -527,14 +564,14 @@ def _append_record_lifecycle_transition(
     return updated
 
 
-def _record_from_storage(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def _record_from_storage(root: Path, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     """Read a record from its immutable artifact and verify the cache.
 
     ``content_json`` remains in the v9 table only for indexed migration
     compatibility.  It is never authoritative after v10: any disagreement
     between that cache and the immutable artifact is ledger corruption.
     """
-    _validate_record_lifecycle(connection, row)
+    _validate_record_lifecycle(root, connection, row)
     record = _record_row(row)
     artifact_ref = str(row["content_artifact_ref"] or "").strip()
     if not artifact_ref:
@@ -1387,6 +1424,7 @@ def create_record(
         record_expires_at = expires_at
         if kind != "policy" and _contains_sensitive_marker(body):
             sensitive_policy = _sensitive_record_policy(
+                root,
                 connection,
                 initiative_ref=initiative,
                 task_id=task,
@@ -1451,7 +1489,7 @@ def create_record(
                 stored = connection.execute("SELECT * FROM governance_records WHERE record_ref=?", (submitted["record_ref"],)).fetchone()
                 if stored is None:
                     raise GovernanceError("submission points to a missing governance record", code="ledger_corrupt")
-                return _record_from_storage(connection, stored)
+                return _record_from_storage(root, connection, stored)
         existing = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (ref,)).fetchone()
         if existing is not None:
             existing_envelope = {
@@ -1471,7 +1509,7 @@ def create_record(
                 "expires_at": str(existing["expires_at"] or "") or None,
             }
             if existing_envelope == command_envelope:
-                result = _record_from_storage(connection, existing)
+                result = _record_from_storage(root, connection, existing)
                 if submission:
                     connection.execute(
                         "INSERT INTO governance_submissions(submission_id,command_digest,record_ref,created_at) VALUES(?,?,?,?)",
@@ -1502,6 +1540,7 @@ def create_record(
                         raise GovernanceError("governance revision chain is missing a predecessor", code="ledger_corrupt")
                     if str(current["status"]) not in {"superseded", "expired", "rejected"}:
                         _append_record_lifecycle_transition(
+                            root,
                             connection,
                             current,
                             status="superseded",
@@ -1540,13 +1579,27 @@ def create_record(
             "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (lifecycle_ref, ref, 0, None, status_value, approval_json, lifecycle_binding, "created", role, created),
         )
+        ledger_db.insert_governance_lifecycle_auth(
+            root,
+            connection,
+            lifecycle_ref=lifecycle_ref,
+            record_ref=ref,
+            lifecycle_sequence=0,
+            previous_binding=None,
+            status=status_value,
+            approval_basis_json=approval_json,
+            binding=lifecycle_binding,
+            action="created",
+            actor_role=role,
+            created_at=created,
+        )
         if submission:
             connection.execute(
                 "INSERT INTO governance_submissions(submission_id,command_digest,record_ref,created_at) VALUES(?,?,?,?)",
                 (submission, command_digest, ref, created),
             )
         row = connection.execute("SELECT * FROM governance_records WHERE record_ref = ?", (ref,)).fetchone()
-        result = _record_from_storage(connection, row) if row else {"record_ref": ref}
+        result = _record_from_storage(root, connection, row) if row else {"record_ref": ref}
     return result
 
 
@@ -1624,7 +1677,7 @@ def list_records(
         rows = connection.execute(query, tuple(values)).fetchall()
         records: list[dict[str, Any]] = []
         for row in rows:
-            records.append(_record_from_storage(connection, row))
+            records.append(_record_from_storage(root, connection, row))
     return records
 
 
@@ -1634,7 +1687,7 @@ def inspect_record(root: Path, record_ref: str) -> dict[str, Any] | None:
     ref = _safe_ref(record_ref, "record_ref", prefix="record-")
     with _connection(root) as connection:
         row = connection.execute("SELECT * FROM governance_records WHERE record_ref=?", (ref,)).fetchone()
-        return _record_from_storage(connection, row) if row is not None else None
+        return _record_from_storage(root, connection, row) if row is not None else None
 
 
 def active_snapshot(
@@ -1797,6 +1850,7 @@ def _validate_sensitive_field_policy(body: Any, policy: dict[str, Any]) -> None:
 
 
 def _sensitive_record_policy(
+    root: Path,
     connection: sqlite3.Connection,
     *,
     initiative_ref: str | None,
@@ -1829,7 +1883,7 @@ def _sensitive_record_policy(
     ).fetchall()
     for row in rows:
         try:
-            body = _record_from_storage(connection, row).get("content_json")
+            body = _record_from_storage(root, connection, row).get("content_json")
         except GovernanceError as exc:
             raise GovernanceError("sensitive policy ledger record is corrupt", code="ledger_corrupt") from exc
         if not isinstance(body, dict):
@@ -2026,7 +2080,7 @@ def evaluate_promotion(
                 (initiative_ref,),
             ).fetchall()
             existing = [
-                item for item in (_record_from_storage(connection, row) for row in existing_rows)
+                item for item in (_record_from_storage(root, connection, row) for row in existing_rows)
                 if isinstance(item.get("content_json"), dict)
                 and item["content_json"].get("fingerprint") == needle
                 and item.get("status") not in {"rejected", "superseded", "expired"}
@@ -2063,28 +2117,45 @@ def approve_promotion(root: Path, *, proposal_ref: str, actor_role: str, approva
             row = connection.execute("SELECT * FROM governance_records WHERE record_ref = ? AND record_type = 'promotion'", (proposal_id,)).fetchone()
             if row is None:
                 raise GovernanceError("promotion proposal does not exist", code="proposal_not_found")
-            proposal = _record_from_storage(connection, row)
+            proposal = _record_from_storage(root, connection, row)
             body = proposal.get("content_json") if isinstance(proposal.get("content_json"), dict) else {}
             policy_ref = "record-policy-" + hashlib.sha256(proposal_id.encode("utf-8")).hexdigest()[:24]
             if proposal.get("status") == "approved":
-                policies = [
-                    item for item in list_records(root, record_type="policy", initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), active_only=False)
-                    if isinstance(item.get("content_json"), dict) and item["content_json"].get("promoted_from") == proposal_id
-                ]
-                if policies:
-                    return {"proposal": proposal, "policy": policies[-1], "policy_snapshot": active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))}
+                # Replay must resolve the deterministic canonical policy ref
+                # directly.  Searching list_records() is pagination-bound at
+                # 256 rows and can miss the already committed policy after a
+                # busy ledger grows beyond one page.
+                policy_row = connection.execute(
+                    "SELECT * FROM governance_records "
+                    "WHERE record_ref = ? AND record_type = 'policy'",
+                    (policy_ref,),
+                ).fetchone()
+                if policy_row is not None:
+                    replay_policy = _record_from_storage(root, connection, policy_row)
+                    replay_body = replay_policy.get("content_json")
+                    if isinstance(replay_body, dict) and replay_body.get("promoted_from") == proposal_id:
+                        return {
+                            "proposal": proposal,
+                            "policy": replay_policy,
+                            "policy_snapshot": active_snapshot(
+                                root,
+                                initiative_ref=proposal.get("initiative_ref"),
+                                task_id=proposal.get("task_id"),
+                            ),
+                        }
                 raise GovernanceError("approved promotion has no canonical policy", code="ledger_corrupt")
             if proposal.get("status") != "pending":
                 raise GovernanceError("promotion proposal is no longer pending", code="proposal_not_pending")
             policy = create_record(root, record_type="policy", content={"promoted_from": proposal_id, "finding": body}, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"), created_by=created_by, status="approved", approval_basis=approval_basis or {"proposal_ref": proposal_id, "actor_role": "coordinator"}, record_ref=policy_ref, actor_role="coordinator")
             updated = _append_record_lifecycle_transition(
+                root,
                 connection,
                 row,
                 status="approved",
                 approval_basis_json=_canonical(approval_basis or {"policy_ref": policy["record_ref"], "actor_role": "coordinator"}),
                 actor_role="coordinator",
             )
-            updated_proposal = _record_from_storage(connection, updated) if updated else proposal
+            updated_proposal = _record_from_storage(root, connection, updated) if updated else proposal
             snapshot = active_snapshot(root, initiative_ref=proposal.get("initiative_ref"), task_id=proposal.get("task_id"))
     return {"proposal": updated_proposal, "policy": policy, "policy_snapshot": snapshot}
 
@@ -2181,6 +2252,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
             if proposal is None or str(proposal["status"]) != "pending":
                 raise GovernanceError("promotion proposal is not pending", code="proposal_not_pending")
             _append_record_lifecycle_transition(
+                root,
                 connection,
                 proposal,
                 status="rejected",

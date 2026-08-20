@@ -97,6 +97,228 @@ _GATE_RESULT_REQUIRED_GATES = {
 }
 
 
+def _planning_preview_compiled_unit(planning: dict[str, Any]) -> tuple[str, dict[str, Any], list[str], list[str], list[str]]:
+    """Build the plan-owned portion of the real implementation dispatch.
+
+    The implementation dispatcher turns the accepted planner artifact into one
+    dependency-safe composite unit.  This preview deliberately contains the
+    same user-authored fields that reach ``host_spawn_prompt``; it is used
+    before a planner report is persisted, so a too-large plan is a retryable
+    report correction rather than an approval/replan incident.
+    """
+    packages = [item for item in planning.get("work_packages", []) if isinstance(item, dict)]
+    microtasks = [
+        {**microtask, "package_id": package["id"]}
+        for package in packages
+        for microtask in package.get("microtasks", [])
+        if isinstance(microtask, dict)
+    ]
+    profiles = [str(item.get("profile") or "") for item in microtasks if str(item.get("profile") or "")]
+    non_devops = [profile for profile in profiles if profile != "devops_engineer"]
+    profile_set = set(non_devops or profiles)
+    if "mobile_dev" in profile_set:
+        agent = "mobile_dev"
+    elif profile_set and profile_set <= {"backend_dev", "data_engineer", "debugger"}:
+        agent = "backend_dev"
+    elif profile_set == {"frontend_dev"}:
+        agent = "frontend_dev"
+    elif profile_set == {"fullstack_dev"} or {"frontend_dev", "backend_dev"}.issubset(profile_set):
+        agent = "fullstack_dev"
+    elif len(profile_set) == 1:
+        agent = next(iter(profile_set))
+    else:
+        agent = "general"
+    paths = list(dict.fromkeys(
+        str(path) for item in microtasks for path in item.get("allowed_paths", []) if str(path).strip()
+    ))
+    if agent == "devops_engineer" and any(
+        not path.startswith((".github/", "infra/", "deploy/", "ops/")) for path in paths
+    ):
+        agent = "general"
+    acceptance = list(dict.fromkeys(
+        str(value) for item in microtasks for value in item.get("acceptance_criteria", []) if str(value).strip()
+    ))
+    verification = list(dict.fromkeys(
+        str(value) for item in microtasks for value in item.get("verification", []) if str(value).strip()
+    ))
+    plan_unit = {
+        "schema": "cortex/compiled-plan-unit/v1",
+        # The eventual report ref/revision are short server-generated ids.  A
+        # fixed preview value preserves the exact rendered shape without
+        # consuming an id or creating an immutable planning artifact.
+        "plan_revision": "plan-pending-preview",
+        "source_report_ref": "report-pending-preview",
+        "package_ids": [str(package["id"]) for package in packages],
+        "microtasks": [
+            {
+                "sequence": index,
+                "package_id": item["package_id"],
+                "id": item["id"],
+                "title": item["title"],
+                "objective": item["objective"],
+                "profile": item.get("profile"),
+                "allowed_paths": item.get("allowed_paths") or [],
+                "depends_on": item.get("depends_on") or [],
+                "acceptance_criteria": item.get("acceptance_criteria") or [],
+                "verification": item.get("verification") or [],
+            }
+            for index, item in enumerate(microtasks, 1)
+        ],
+    }
+    return agent, plan_unit, paths, acceptance, verification
+
+
+def _planning_preview_resolved_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Mirror the dispatch-time bounded decision projection without writes."""
+    selected: list[dict[str, Any]] = []
+    consumed = 2
+    for decision in reversed(_resolved_user_decisions(task_dir, state)):
+        encoded = json.dumps(decision, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if consumed + len(encoded) + 1 > 32 * 1024:
+            break
+        selected.append(decision)
+        consumed += len(encoded) + 1
+    selected.reverse()
+    return selected
+
+
+def _validate_planning_dispatch_briefings(
+    task_dir: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    planning: dict[str, Any],
+    project_root: Path,
+) -> None:
+    """Prove every post-plan briefing fits before the planner report commits.
+
+    ``record_delegation`` has always defended the host boundary, but doing so
+    after explicit human approval can turn a planner's valid-looking plan into
+    a forced replan.  Rendering here uses the production renderer and the
+    production hard budget, while this function performs no allocation,
+    artifact, outbox, attempt, or state mutation.
+    """
+    try:
+        plan = _runtime._load_orchestrate_plan(task_dir, state)
+    except ValueError:
+        # Direct, non-facade planner delegations have no future-wave contract
+        # to preview.  Their normal dispatch-time check remains authoritative.
+        return
+    waves = [item for item in plan.get("waves", []) if isinstance(item, dict)]
+    plan_index = next(
+        (
+            index for index, wave in enumerate(waves)
+            if any(
+                isinstance(spec, dict) and str(spec.get("gate") or "") == "plan"
+                for spec in wave.get("delegations", [])
+            )
+        ),
+        None,
+    )
+    if plan_index is None:
+        return
+    task = load_task_definition(task_dir, state)
+    resolved_decisions = _planning_preview_resolved_decisions(task_dir, state)
+    known_reports = [
+        safe_id(str(report_id))
+        for prior in state.get("attempts", [])
+        if prior.get("status") == "passed" and not prior.get("invalidated")
+        for report_id in prior.get("report_ids", [])
+        if str(report_id).strip()
+    ]
+    # The accepted planner report becomes predecessor evidence for successors;
+    # account for it without reserving its server-owned report id.
+    known_reports.append("report-pending-preview")
+    known_reports = list(dict.fromkeys(known_reports))[-32:]
+    compiled_agent, compiled_unit, compiled_paths, compiled_acceptance, compiled_verification = (
+        _planning_preview_compiled_unit(planning)
+    )
+    mode = "harvest" if _runtime._is_knowledge_harvest_task(task) else "ordinary"
+    hard_key = "harvest_briefing_hard_bytes" if mode == "harvest" else "ordinary_briefing_hard_bytes"
+    hard_budget = int(_runtime.PROMPT_BUDGETS[hard_key])
+
+    for wave in waves[plan_index + 1:]:
+        delegations = [item for item in wave.get("delegations", []) if isinstance(item, dict)]
+        for spec in delegations:
+            gate = str(spec.get("gate") or "").strip()
+            if not gate:
+                continue
+            context_files, knowledge_index_files = _runtime._project_knowledge_context(
+                project_root,
+                spec.get("context_files"),
+            )
+            if gate == "implementation":
+                agent = compiled_agent
+                objective = "Execute the approved Planner microtasks in dependency order: " + "; ".join(
+                    f"{item['id']}: {item['title']}" for item in compiled_unit["microtasks"]
+                )
+                allowed_paths, acceptance, verification = compiled_paths, compiled_acceptance, compiled_verification
+                plan_unit: dict[str, Any] | None = compiled_unit
+            else:
+                agent = str(spec.get("agent") or "general")
+                gate_briefing = _runtime.render_gate_briefing(gate, task.get("objective", ""), agent)
+                objective = str(spec.get("objective") or gate_briefing["objective"]).strip()
+                allowed_paths = list(spec.get("allowed_paths") or task.get("allowed_paths") or ["."])
+                acceptance = list(spec.get("acceptance_criteria") or gate_briefing["acceptance_criteria"])
+                verification = list(spec.get("verification") or gate_briefing["verification"])
+                plan_unit = None
+            package = {
+                "task_id": state["task_id"],
+                "task_ref": _runtime._v3_task_ref(state["task_id"]),
+                "gate": gate,
+                "attempt_id": f"{gate}-preview",
+                "agent": agent,
+                "profile": agent,
+                "mode": mode,
+                "objective": redact(objective, 4000),
+                "selection_reason": redact(spec.get("selection_reason") or "Planner briefing-budget preflight.", 1000),
+                "strategy": redact(spec.get("strategy") or "default", 1000),
+                "depends_on_phases": [redact(item, 64) for item in spec.get("context_gates", [])],
+                "user_intent": {
+                    "projection": redact(task.get("user_request_projection") or task.get("user_request") or task.get("objective", ""), 1600),
+                    "artifact_ref": task.get("user_intent_artifact_ref"),
+                    "artifact_path": str(task_dir / str(task.get("user_intent_artifact_path") or "intent/user-request.txt")),
+                    "digest_sha256": task.get("user_request_digest"),
+                    "byte_size": task.get("user_intent_byte_size"),
+                },
+                "plan_unit": plan_unit,
+                "task_requirements": [redact(item, 1000) for item in task.get("requirements", [])][:100],
+                "task_scope": [redact(item, 500) for item in task.get("scope", [])][:100],
+                "task_acceptance_criteria": [redact(item, 1000) for item in task.get("acceptance_criteria", [])][:100],
+                "task_verification": [redact(item, 1000) for item in task.get("verification", [])][:100],
+                "budget": redact(task.get("budget", ""), 500),
+                "pause_conditions": [redact(item, 1000) for item in task.get("pause_conditions", [])][:100],
+                "allowed_paths": [redact(item, 500) for item in allowed_paths][:50],
+                "context_files": [redact(item, 500) for item in context_files],
+                "knowledge_index_files": knowledge_index_files,
+                "context_report_ids": known_reports,
+                "acceptance_criteria": [redact(item, 1000) for item in acceptance][:50],
+                "verification": [redact(item, 1000) for item in verification][:50],
+                "resolved_user_decisions": resolved_decisions,
+                "user_owned_thread": str(spec.get("dispatch_mode") or "") == "visible_thread",
+                "follow_up": task.get("follow_up") if isinstance(task.get("follow_up"), dict) else None,
+                "intent_clarification_required": bool(task.get("intent_clarification_required")),
+                "intent_clarification_reason": redact(task.get("intent_clarification_reason", ""), 500) or None,
+            }
+            try:
+                rendered = _runtime.host_spawn_prompt(agent, package)
+            except ValueError as exc:
+                raise ValueError(
+                    "planner dispatch briefing budget rejected before persistence for "
+                    f"future {gate}/{agent}: {exc}. Shorten the planning work packages, microtask objectives, "
+                    "acceptance criteria, or verification text; retry this same planner report."
+                ) from exc
+            byte_size = len(rendered.encode("utf-8"))
+            if byte_size > hard_budget:
+                # Defensive parity guard if the renderer's own contract ever
+                # changes: never let the review gate accept a plan that the
+                # real dispatcher would reject.
+                raise ValueError(
+                    "planner dispatch briefing budget rejected before persistence for "
+                    f"future {gate}/{agent}: {byte_size}>{hard_budget} ({hard_key}). "
+                    "Shorten the plan and retry this same planner report."
+                )
+
+
 def _semantic_task_revision(state: dict[str, Any]) -> int:
     """Return the durable user-meaningful task revision, never state CAS rev."""
     value = state.get("task_revision") or 1
@@ -793,6 +1015,13 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             )
         if raw_planning is not None:
             planning = sanitize_planning_payload(raw_planning, persisted=bool(supplied_draft_ref))
+            _validate_planning_dispatch_briefings(
+                task_dir,
+                state,
+                attempt,
+                planning,
+                select_project_root(params),
+            )
         elif params.get("_require_plan_artifact") and attempt.get("gate") == "plan":
             raise ValueError("planner reports require a planning artifact with overview and work_packages")
         raw_scoping = params.get("scoping")
@@ -1235,6 +1464,14 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "report.evidence as one string item, then retry record_report on this same attempt. If another "
                 "caller-correctable validation diagnostic is returned, correct it and retry again without ending "
                 "the worker or changing the attempt."
+            )
+        elif "planner dispatch briefing budget rejected before persistence" in message:
+            code = "planner_briefing_budget_exceeded"
+            outcome = "needs_correction"
+            next_action = (
+                "Shorten the named future dispatch's planning work packages, microtask objectives, acceptance "
+                "criteria, or verification text and retry this same planner report. The rejected plan was not "
+                "persisted, did not consume the worker attempt, and did not require user reapproval."
             )
         elif "dispatch briefing" in message:
             code = "dispatch_briefing_invalid"

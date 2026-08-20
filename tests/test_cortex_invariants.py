@@ -1586,6 +1586,16 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertIn(marker, planner)
 
     def test_every_profile_effective_prompt_has_exact_files_tools_and_completion_contract(self):
+        self.assertEqual(
+            control.PROMPT_BUDGETS,
+            {
+                "bootstrap_hard_bytes": 1500,
+                "ordinary_briefing_soft_bytes": 16 * 1024,
+                "ordinary_briefing_hard_bytes": 24 * 1024,
+                "harvest_briefing_soft_bytes": 18 * 1024,
+                "harvest_briefing_hard_bytes": 28 * 1024,
+            },
+        )
         contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
         profiles = {item["name"]: item for item in contract["profiles"]}
         execution_contracts = contract["profile_execution_contracts"]
@@ -1681,6 +1691,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
                     control.PROMPT_BUDGETS["bootstrap_hard_bytes"],
                     name,
                 )
+                self.assertLessEqual(len(bootstrap.encode("utf-8")), 1500, name)
                 self.assertIn(package["dispatch_ref"], bootstrap)
                 self.assertIn(digest, bootstrap)
                 self.assertIn("only direct-read exception is exactly paths supplied", bootstrap)
@@ -1939,7 +1950,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.5")
+        self.assertEqual(base_version, "9.2.6")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

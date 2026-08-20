@@ -543,7 +543,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
 
     The previous briefing repeated the full request three times and embedded
     every shared rule plus a long role playbook. Real task briefings therefore
-    exceeded their declared 14/15 KiB limits. This contract keeps one mission,
+    exceeded their former 14/15 KiB limits. This contract keeps one mission,
     one bounded user-intent projection, an exact immutable intent reference,
     and phase-specific output rules. Full predecessor reports and the exact
     request remain available through their separately authorized artifacts.

@@ -110,6 +110,7 @@ bind_symbols(
         "primary_gate",
         "publish_worker_question",
         "read_immutable_json_artifact",
+        "_rehydrate_dispatch_spawn_request",
         "reassess_pipeline",
         "reconcile_lane",
         "record_delegation",
@@ -884,6 +885,7 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
     wave = _wave_for_gates(plan, current_gates)
     if wave is None:
         raise ValueError("orchestrate plan has no wave for the current gates")
+    task_definition = load_task_definition(task_dir, state)
     retired_failures = False
     for attempt in state.get("attempts", []):
         if (
@@ -903,7 +905,7 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             "retry_invalidation",
             "retired unsuccessful attempts before retry",
         )
-    prepared_attempts: list[dict[str, Any]] = []
+    prepared_attempts: list[tuple[dict[str, Any], dict[str, Any]]] = []
     predecessor_report_ids = _predecessor_context_report_ids(state)
     rework_report_ids = _rework_context_report_ids(state, set(current_gates))
     effective_delegations = list(wave["delegations"])
@@ -933,7 +935,9 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             if not existing.get("orchestration_wave_id"):
                 existing["orchestration_wave_id"] = wave["wave_id"]
                 existing["orchestration_delegation_key"] = key
-            prepared_attempts.append(existing)
+            prepared_attempts.append((existing, _rehydrate_dispatch_spawn_request(
+                task_dir, task_definition, existing,
+            )))
             continue
         observed = status({**params, "task_id": state["task_id"]})
         if "context_report_ids" in spec:
@@ -976,15 +980,18 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
         if delegated.get("recorded") is False:
             raise ValueError(str(delegated.get("reason") or "wave delegation was not recorded"))
         state = delegated["state"]
-        prepared_attempts.append(_attempt(state, delegated["attempt_id"]))
+        prepared_attempts.append((
+            _attempt(state, delegated["attempt_id"]),
+            dict(delegated["spawn_request"]),
+        ))
     wave["status"] = "active"
-    wave["attempt_ids"] = [item["attempt_id"] for item in prepared_attempts]
+    wave["attempt_ids"] = [item[0]["attempt_id"] for item in prepared_attempts]
     _write_orchestrate_plan(task_dir, plan)
     save_state(task_dir, task_dir / "state.sqlite", state, "orchestrate_wave", wave["wave_id"])
     spawn_requests = [
-        {**item["spawn_request"], "attempt_id": item["attempt_id"]}
-        for item in prepared_attempts
-        if item.get("status") == AWAITING_HOST_SPAWN
+        {**request, "attempt_id": attempt["attempt_id"]}
+        for attempt, request in prepared_attempts
+        if attempt.get("status") == AWAITING_HOST_SPAWN
     ]
     return {"wave_id": wave["wave_id"], "spawn_requests": spawn_requests, "attempt_ids": wave["attempt_ids"], "state": state}
 
@@ -3180,7 +3187,7 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
     plan = _load_orchestrate_plan(task_dir, state)
     current_wave = _wave_for_gates(plan, active_gates(state))
     spawn_requests = [
-        {**item["spawn_request"], "attempt_id": item["attempt_id"]}
+        {**_rehydrate_dispatch_spawn_request(task_dir, task, item), "attempt_id": item["attempt_id"]}
         for item in state.get("attempts", [])
         if item.get("status") == AWAITING_HOST_SPAWN
         and (current_wave is None or item.get("gate") in current_wave.get("gates", []))

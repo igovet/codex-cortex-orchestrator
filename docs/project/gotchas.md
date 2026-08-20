@@ -57,7 +57,8 @@ brief, context files, and at most eight validated domains.
   revisions; schema v10 enforces artifact-authoritative bodies, exact scope,
   linear revisions, and durable idempotent submissions, while schema v11 adds
   an append-only status/approval-basis lifecycle chain and governed link and
-  initiative-completion integrity. The task ledger still includes native
+  initiative-completion integrity, and schema v12 authenticates the complete
+  lifecycle envelope with a host-private key outside SQLite. The task ledger still includes native
   worker sessions, attempt messages,
   trace/tool observations, and question-batch storage. Schema v7 does not use
   one artifact identity for everything. A content blob
@@ -342,8 +343,10 @@ brief, context files, and at most eight validated domains.
   envelope; do not interpolate task-controlled values as Markdown or protocol
   headings. `start_orchestration.next_action` is serialized before dispatch
   payloads. Representative prompt budgets are 1,500 bytes for the compact
-  native bootstrap, 10,000/14,000 bytes for ordinary briefings, and
-  11,000/15,000 bytes for harvest briefings (soft/hard). The validator also
+  native bootstrap, 16/24 KiB for ordinary briefings, and 18/28 KiB for
+  harvest briefings (soft/hard). Ordinary uses the top of the recommended
+  14–16 KiB soft and 20–24 KiB hard ranges; the harvest overlay uses the
+  expanded 16–18 KiB soft and 24–28 KiB hard ranges. The validator also
   rejects long duplicate prompt paragraphs and tests adversarial assignment
   data. A worker is not sent until native
   `spawn_agent` returns a child id; empty dispatch announcements or waits are

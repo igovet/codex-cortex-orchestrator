@@ -42,23 +42,25 @@ class GovernanceIntegrityTests(unittest.TestCase):
             owner="coordinator",
         )
 
-    def test_v11_schema_has_non_null_scope_lifecycle_authority_and_public_uow_boundary(self) -> None:
-        self.assertEqual(ledger_db.DATABASE_SCHEMA_VERSION, 11)
+    def test_v12_schema_has_non_null_scope_lifecycle_authority_and_public_uow_boundary(self) -> None:
+        self.assertEqual(ledger_db.DATABASE_SCHEMA_VERSION, 12)
         history = ledger_db.migration_history(self.root)
-        self.assertEqual(history[-1]["name"], "governance-lifecycle-authority")
+        self.assertEqual(history[-1]["name"], "governance-lifecycle-envelope-authentication")
         with ledger_db.connection(self.root) as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(governance_records)")}
             indexes = {row[1] for row in connection.execute("PRAGMA index_list(governance_records)")}
             lifecycle_columns = {row[1] for row in connection.execute("PRAGMA table_info(governance_record_lifecycle)")}
+            auth_columns = {row[1] for row in connection.execute("PRAGMA table_info(governance_record_lifecycle_auth)")}
         self.assertIn("scope_key", columns)
         self.assertTrue({"lifecycle_sequence", "lifecycle_binding"}.issubset(columns))
         self.assertIn("governance_records_scope_revision_unique", indexes)
         self.assertTrue({"record_ref", "lifecycle_sequence", "previous_binding", "binding"}.issubset(lifecycle_columns))
+        self.assertEqual(auth_columns, {"lifecycle_ref", "envelope_hmac"})
         self.assertFalse(ledger_db.in_transaction(self.root))
         with ledger_db.transaction(self.root):
             self.assertTrue(ledger_db.in_transaction(self.root))
 
-    def test_released_v9_database_upgrades_atomically_through_v10_to_v11(self) -> None:
+    def test_released_v9_database_upgrades_atomically_through_v10_to_v12(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             plan = ledger_db._migration_plan()
@@ -66,7 +68,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
                 ledger_db.ensure_database(root)
                 self.assertEqual(ledger_db.migration_history(root)[-1]["version"], 9)
             ledger_db.ensure_database(root)
-            self.assertEqual(ledger_db.migration_history(root)[-1]["version"], 11)
+            self.assertEqual(ledger_db.migration_history(root)[-1]["version"], 12)
             with ledger_db.connection(root) as connection:
                 self.assertIn(
                     "scope_key",
@@ -76,6 +78,74 @@ class GovernanceIntegrityTests(unittest.TestCase):
                     connection.execute("SELECT COUNT(*) FROM governance_record_lifecycle").fetchone()[0],
                     0,
                 )
+
+    def test_released_v11_lifecycle_history_is_preserved_and_sealed_by_v12(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            plan = ledger_db._migration_plan()
+            with mock.patch.object(ledger_db, "_migration_plan", return_value=plan[:11]):
+                ledger_db.ensure_database(root)
+            record_ref = "record-v11-lifecycle"
+            status = "active"
+            binding = ledger_db.governance_lifecycle_binding(
+                record_ref=record_ref,
+                sequence=0,
+                previous_binding=None,
+                status=status,
+                approval_basis_json=None,
+            )
+            lifecycle_ref = "lifecycle-" + hashlib.sha256(
+                f"{record_ref}:0:{binding}".encode("utf-8")
+            ).hexdigest()[:32]
+            created_at = "2026-01-01T00:00:00+00:00"
+            with ledger_db.connection(root, write=True) as connection:
+                connection.execute(
+                    "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at,scope_key,lifecycle_sequence,lifecycle_binding) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (record_ref, None, None, "decision", 1, None, status, "{}", hashlib.sha256(b"{}").hexdigest(), None, None, "coordinator", created_at, None, "project:", 0, binding),
+                )
+                connection.execute(
+                    "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (lifecycle_ref, record_ref, 0, None, status, None, binding, "created", "coordinator", created_at),
+                )
+            with ledger_db.connection(root) as connection:
+                v11_checksum = connection.execute(
+                    "SELECT checksum FROM schema_migrations WHERE version=11"
+                ).fetchone()[0]
+            ledger_db.ensure_database(root)
+            with ledger_db.connection(root) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT checksum FROM schema_migrations WHERE version=11").fetchone()[0],
+                    v11_checksum,
+                )
+                event = connection.execute(
+                    "SELECT lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at "
+                    "FROM governance_record_lifecycle WHERE lifecycle_ref=?",
+                    (lifecycle_ref,),
+                ).fetchone()
+                sealed = connection.execute(
+                    "SELECT envelope_hmac FROM governance_record_lifecycle_auth WHERE lifecycle_ref=?",
+                    (lifecycle_ref,),
+                ).fetchone()
+            self.assertIsNotNone(event)
+            self.assertIsNotNone(sealed)
+            assert event is not None and sealed is not None
+            self.assertEqual(
+                sealed["envelope_hmac"],
+                ledger_db.governance_lifecycle_envelope_hmac(
+                    root,
+                    lifecycle_ref=str(event["lifecycle_ref"]),
+                    record_ref=str(event["record_ref"]),
+                    lifecycle_sequence=int(event["lifecycle_sequence"]),
+                    previous_binding=str(event["previous_binding"] or "") or None,
+                    status=str(event["status"]),
+                    approval_basis_json=None,
+                    binding=str(event["binding"]),
+                    action=str(event["action"]),
+                    actor_role=str(event["actor_role"]),
+                    created_at=str(event["created_at"]),
+                ),
+            )
 
     def test_conflicting_v9_scope_revisions_and_sibling_successors_reconcile_before_v10_indexes(self) -> None:
         """Exercise the actual released-v9 -> current path, not v10 -> v11."""
@@ -103,8 +173,9 @@ class GovernanceIntegrityTests(unittest.TestCase):
                     )
             ledger_db.ensure_database(root)
             history = ledger_db.migration_history(root)
-            self.assertEqual(history[-2]["version"], 10)
-            self.assertEqual(history[-1]["version"], 11)
+            self.assertEqual(history[-3]["version"], 10)
+            self.assertEqual(history[-2]["version"], 11)
+            self.assertEqual(history[-1]["version"], 12)
             with ledger_db.connection(root) as connection:
                 reconciled = connection.execute(
                     "SELECT record_ref,revision,supersedes FROM governance_records ORDER BY revision"
@@ -122,6 +193,74 @@ class GovernanceIntegrityTests(unittest.TestCase):
                 governance.inspect_record(root, "record-v9-right")["content_json"],
                 {},
             )
+
+    def test_lifecycle_hmac_covers_fields_outside_the_v11_public_chain(self) -> None:
+        initiative = self.initiative("lifecycle-envelope")
+        record = governance.create_record(
+            self.root,
+            record_type="decision",
+            content={"choice": "sealed envelope"},
+            initiative_ref=initiative["initiative_ref"],
+        )
+        database = self.root / ledger_db.DATABASE_NAME
+        immutable_trigger = next(
+            statement
+            for migration in ledger_db._migration_plan()
+            if migration.version == 11
+            for statement in migration.statements
+            if statement.startswith("CREATE TRIGGER governance_record_lifecycle_immutable_update")
+        )
+        with sqlite3.connect(database) as connection:
+            # actor_role is deliberately absent from v11's public SHA-256
+            # binding.  It is included in v12's host-keyed full envelope.
+            connection.execute("DROP TRIGGER governance_record_lifecycle_immutable_update")
+            connection.execute(
+                "UPDATE governance_record_lifecycle SET actor_role='worker' WHERE record_ref=?",
+                (record["record_ref"],),
+            )
+            connection.execute(immutable_trigger)
+            connection.commit()
+        with self.assertRaisesRegex(governance.GovernanceError, "lifecycle authority is invalid") as raised:
+            governance.inspect_record(self.root, record["record_ref"])
+        self.assertEqual(raised.exception.code, "ledger_corrupt")
+
+    def test_lifecycle_hmac_is_host_private_and_missing_authentication_fails_closed(self) -> None:
+        initiative = self.initiative("lifecycle-auth")
+        record = governance.create_record(
+            self.root,
+            record_type="decision",
+            content={"choice": "host private key"},
+            initiative_ref=initiative["initiative_ref"],
+        )
+        key_path = ledger_db._governance_lifecycle_key_path(self.root)
+        self.assertTrue(key_path.is_file())
+        self.assertNotEqual(key_path.parent, self.root)
+        self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+        database = self.root / ledger_db.DATABASE_NAME
+        with sqlite3.connect(database) as connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "authentication is append-only"):
+                connection.execute(
+                    "DELETE FROM governance_record_lifecycle_auth WHERE lifecycle_ref IN "
+                    "(SELECT lifecycle_ref FROM governance_record_lifecycle WHERE record_ref=?)",
+                    (record["record_ref"],),
+                )
+            connection.execute("DROP TRIGGER governance_record_lifecycle_auth_immutable_delete")
+            connection.execute(
+                "DELETE FROM governance_record_lifecycle_auth WHERE lifecycle_ref IN "
+                "(SELECT lifecycle_ref FROM governance_record_lifecycle WHERE record_ref=?)",
+                (record["record_ref"],),
+            )
+            auth_delete_trigger = next(
+                statement
+                for migration in ledger_db._migration_plan()
+                if migration.version == 12
+                for statement in migration.statements
+                if statement.startswith("CREATE TRIGGER governance_record_lifecycle_auth_immutable_delete")
+            )
+            connection.execute(auth_delete_trigger)
+            connection.commit()
+        with self.assertRaisesRegex(governance.GovernanceError, "lifecycle authority is invalid"):
+            governance.inspect_record(self.root, record["record_ref"])
 
     def test_ambiguous_v9_successor_graph_fails_closed_before_v10(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -268,7 +407,9 @@ class GovernanceIntegrityTests(unittest.TestCase):
                 connection.execute("DELETE FROM governance_record_lifecycle WHERE record_ref=?", (record["record_ref"],))
             authority_trigger = next(
                 statement
-                for statement in ledger_db._migration_plan()[-1].statements
+                for migration in ledger_db._migration_plan()
+                if migration.version == 11
+                for statement in migration.statements
                 if statement.startswith("CREATE TRIGGER governance_records_lifecycle_authority_update")
             )
             connection.execute("DROP TRIGGER governance_records_lifecycle_authority_update")

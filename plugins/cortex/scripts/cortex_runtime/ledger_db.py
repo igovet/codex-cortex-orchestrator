@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 11
+DATABASE_SCHEMA_VERSION = 12
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
@@ -78,6 +78,110 @@ def governance_lifecycle_binding(
         "status": str(status),
         "approval_basis_json": approval_basis_json,
     }).encode("utf-8")).hexdigest()
+
+
+def _governance_lifecycle_key_path(root: Path) -> Path:
+    """Return the host-private sidecar key path for one project ledger.
+
+    The ledger's project directory is movable (legacy project-local state is
+    migrated into ``<host>/projects/<opaque-id>``), while the host control
+    store is not part of the project checkout.  Keep the HMAC key beside that
+    control store rather than in the SQLite ledger it authenticates.  The
+    opaque ledger directory name is stable for the normal host-private layout;
+    a digest fallback keeps source-mode/legacy fixtures collision-free.
+    """
+    resolved = root.resolve()
+    host_root = resolved.parent.parent if resolved.parent.name == "projects" else resolved.parent
+    key_id = resolved.name if re.fullmatch(r"p-[0-9a-f]{64}", resolved.name) else hashlib.sha256(
+        str(resolved).encode("utf-8")
+    ).hexdigest()
+    return host_root / "governance-lifecycle-keys" / f"{key_id}.key"
+
+
+def _governance_lifecycle_hmac_key(root: Path, *, create: bool) -> bytes:
+    """Load a non-ledger key, creating it only during an authorized upgrade.
+
+    The key is intentionally never represented in SQLite, lifecycle rows,
+    responses, logs, or fixtures.  Losing it makes lifecycle authority
+    unverifiable and therefore fails closed instead of silently resealing a
+    tampered ledger with a replacement key.
+    """
+    path = _governance_lifecycle_key_path(root)
+    parent = path.parent
+    if not parent.exists():
+        if not create:
+            raise ValueError("Cortex governance lifecycle host key is unavailable")
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent_info = parent.lstat()
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_mode & 0o077:
+        raise ValueError("Cortex governance lifecycle host key directory is unsafe")
+    if os.name != "nt" and hasattr(os, "getuid") and int(parent_info.st_uid) != int(os.getuid()):
+        raise ValueError("Cortex governance lifecycle host key directory must be owned by the current user")
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        raise
+    if not path.exists():
+        if not create:
+            raise ValueError("Cortex governance lifecycle host key is unavailable")
+        raw = secrets.token_bytes(32)
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return raw
+    _assert_private_regular(path, "Cortex governance lifecycle host key")
+    path_info = path.lstat()
+    if os.name != "nt" and hasattr(os, "getuid") and int(path_info.st_uid) != int(os.getuid()):
+        raise ValueError("Cortex governance lifecycle host key must be owned by the current user")
+    raw = path.read_bytes()
+    if len(raw) != 32:
+        raise ValueError("Cortex governance lifecycle host key is invalid")
+    return raw
+
+
+def governance_lifecycle_envelope_hmac(
+    root: Path,
+    *,
+    lifecycle_ref: str,
+    record_ref: str,
+    lifecycle_sequence: int,
+    previous_binding: str | None,
+    status: str,
+    approval_basis_json: str | None,
+    binding: str,
+    action: str,
+    actor_role: str,
+    created_at: str,
+    create_key: bool = False,
+) -> str:
+    """Authenticate the complete immutable lifecycle event envelope.
+
+    v11's public SHA-256 chain intentionally remains readable for backwards
+    compatibility.  v12 seals every field omitted by that chain with an HMAC
+    whose key lives outside the project ledger.
+    """
+    payload = _canonical_json({
+        "schema": "cortex/governance-lifecycle-envelope/v2",
+        "lifecycle_ref": str(lifecycle_ref),
+        "record_ref": str(record_ref),
+        "lifecycle_sequence": int(lifecycle_sequence),
+        "previous_binding": str(previous_binding or "") or None,
+        "status": str(status),
+        "approval_basis_json": approval_basis_json,
+        "binding": str(binding),
+        "action": str(action),
+        "actor_role": str(actor_role),
+        "created_at": str(created_at),
+    }).encode("utf-8")
+    return hmac.new(
+        _governance_lifecycle_hmac_key(root, create=create_key), payload, hashlib.sha256
+    ).hexdigest()
 
 
 def _decode_json(text: str, label: str) -> dict[str, Any]:
@@ -694,6 +798,22 @@ _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS = (
     "BEGIN SELECT RAISE(ABORT, 'terminal initiative requires linked task terminal success'); END",
 )
 
+# v12 seals the *complete* lifecycle event envelope with a host-private HMAC.
+# The v11 SHA-256 chain remains intact and readable; a separate append-only
+# authentication projection avoids rewriting a released migration checksum or
+# mutating historical lifecycle rows during upgrade.
+_GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS = (
+    "CREATE TABLE governance_record_lifecycle_auth(lifecycle_ref TEXT PRIMARY KEY REFERENCES governance_record_lifecycle(lifecycle_ref) ON DELETE RESTRICT, envelope_hmac TEXT NOT NULL)",
+    "CREATE TRIGGER governance_record_lifecycle_auth_insert_integrity BEFORE INSERT ON governance_record_lifecycle_auth FOR EACH ROW "
+    "WHEN length(NEW.envelope_hmac) != 64 OR NOT EXISTS (SELECT 1 FROM governance_record_lifecycle WHERE lifecycle_ref=NEW.lifecycle_ref) "
+    "OR EXISTS (SELECT 1 FROM governance_record_lifecycle_auth WHERE lifecycle_ref=NEW.lifecycle_ref) "
+    "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication integrity violation'); END",
+    "CREATE TRIGGER governance_record_lifecycle_auth_immutable_update BEFORE UPDATE ON governance_record_lifecycle_auth FOR EACH ROW "
+    "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication is append-only'); END",
+    "CREATE TRIGGER governance_record_lifecycle_auth_immutable_delete BEFORE DELETE ON governance_record_lifecycle_auth FOR EACH ROW "
+    "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication is append-only'); END",
+)
+
 
 def _v9_scope_key(initiative_ref: object, task_id: object) -> str:
     """Mirror v10's collision-free scope key before the v10 columns exist."""
@@ -871,6 +991,70 @@ def _finalize_governance_lifecycle_migration(connection: sqlite3.Connection) -> 
         )
 
 
+def insert_governance_lifecycle_auth(
+    root: Path,
+    connection: sqlite3.Connection,
+    *,
+    lifecycle_ref: str,
+    record_ref: str,
+    lifecycle_sequence: int,
+    previous_binding: str | None,
+    status: str,
+    approval_basis_json: str | None,
+    binding: str,
+    action: str,
+    actor_role: str,
+    created_at: str,
+    create_key: bool = False,
+) -> None:
+    """Append the v12 host-authentication projection for one lifecycle row."""
+    envelope_hmac = governance_lifecycle_envelope_hmac(
+        root,
+        lifecycle_ref=lifecycle_ref,
+        record_ref=record_ref,
+        lifecycle_sequence=lifecycle_sequence,
+        previous_binding=previous_binding,
+        status=status,
+        approval_basis_json=approval_basis_json,
+        binding=binding,
+        action=action,
+        actor_role=actor_role,
+        created_at=created_at,
+        create_key=create_key,
+    )
+    connection.execute(
+        "INSERT INTO governance_record_lifecycle_auth(lifecycle_ref,envelope_hmac) VALUES(?,?)",
+        (lifecycle_ref, envelope_hmac),
+    )
+
+
+def _finalize_governance_lifecycle_envelope_auth_migration(root: Path, connection: sqlite3.Connection) -> None:
+    """Seal each released v11 event without rewriting its public chain."""
+    # Initialize the host key even for a fresh ledger with no governance
+    # events.  Later runtime writes must never recreate a missing key, since
+    # that would turn key deletion into an undetectable reseal opportunity.
+    _governance_lifecycle_hmac_key(root, create=True)
+    rows = connection.execute(
+        "SELECT lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at "
+        "FROM governance_record_lifecycle ORDER BY record_ref,lifecycle_sequence"
+    ).fetchall()
+    for row in rows:
+        insert_governance_lifecycle_auth(
+            root,
+            connection,
+            lifecycle_ref=str(row["lifecycle_ref"]),
+            record_ref=str(row["record_ref"]),
+            lifecycle_sequence=int(row["lifecycle_sequence"]),
+            previous_binding=str(row["previous_binding"] or "") or None,
+            status=str(row["status"]),
+            approval_basis_json=(str(row["approval_basis_json"]) if row["approval_basis_json"] is not None else None),
+            binding=str(row["binding"]),
+            action=str(row["action"]),
+            actor_role=str(row["actor_role"]),
+            created_at=str(row["created_at"]),
+        )
+
+
 def _migration_plan() -> tuple[_Migration, ...]:
     return (
         _Migration(1, "sqlite-ledger-base", _BASE_SCHEMA_STATEMENTS),
@@ -884,6 +1068,7 @@ def _migration_plan() -> tuple[_Migration, ...]:
         _Migration(9, "governance-ledger", _GOVERNANCE_SCHEMA_STATEMENTS),
         _Migration(10, "governance-integrity-hardening", _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS),
         _Migration(11, "governance-lifecycle-authority", _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS),
+        _Migration(12, "governance-lifecycle-envelope-authentication", _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS),
     )
 
 
@@ -937,6 +1122,12 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "initiative_task_links_terminal_success_insert",
             "initiatives_terminal_linked_task_integrity_update",
             "tasks_terminal_linked_initiative_integrity_update",
+        },
+        12: {
+            "governance_record_lifecycle_auth",
+            "governance_record_lifecycle_auth_insert_integrity",
+            "governance_record_lifecycle_auth_immutable_update",
+            "governance_record_lifecycle_auth_immutable_delete",
         },
     }
     present = {
@@ -1005,6 +1196,9 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
         11: {
             "governance_records": {"lifecycle_sequence", "lifecycle_binding"},
             "governance_record_lifecycle": {"lifecycle_ref", "record_ref", "lifecycle_sequence", "previous_binding", "status", "approval_basis_json", "binding", "action", "actor_role", "created_at"},
+        },
+        12: {
+            "governance_record_lifecycle_auth": {"lifecycle_ref", "envelope_hmac"},
         },
     }
     for table, expected_columns in column_requirements.get(version, {}).items():
@@ -1087,6 +1281,8 @@ def ensure_database(root: Path) -> None:
                 _execute_migration_statements(connection, migration.statements)
                 if migration.version == 11:
                     _finalize_governance_lifecycle_migration(connection)
+                if migration.version == 12:
+                    _finalize_governance_lifecycle_envelope_auth_migration(root, connection)
                 _record_migration(connection, migration)
                 applied[migration.version] = (migration.name, checksum)
             # Keep SQLite's schema marker coupled to the immutable plan that

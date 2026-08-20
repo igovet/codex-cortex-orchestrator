@@ -1072,6 +1072,22 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         self.assertTrue(result["proposal_created"])
         with self.assertRaisesRegex(governance.GovernanceError, "coordinator"):
             governance.approve_promotion(self.root, proposal_ref=result["proposal"]["record_ref"], actor_role="worker")
+        # Keep the canonical policy beyond the public history page.  Promotion
+        # replay must use its deterministic record_ref, not list_records()
+        # pagination, or a busy governance ledger makes a valid retry look
+        # corrupt after the first response is lost.
+        for index in range(256):
+            governance.create_record(
+                self.root,
+                record_type="policy",
+                content={"padding": index},
+                initiative_ref=initiative["initiative_ref"],
+                created_by="coordinator",
+                status="approved",
+                approval_basis={"actor_role": "coordinator", "padding": index},
+                record_ref=f"record-policy-padding-{index:03d}",
+                actor_role="coordinator",
+            )
         approved = governance.approve_promotion(
             self.root,
             proposal_ref=result["proposal"]["record_ref"],

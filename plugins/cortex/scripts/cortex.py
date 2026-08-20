@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -298,10 +299,10 @@ if (
     or not all(isinstance(value, str) and value.strip() for value in MODE_OVERLAYS["harvest"].values())
     or PROMPT_BUDGETS != {
         "bootstrap_hard_bytes": 1500,
-        "ordinary_briefing_soft_bytes": 10000,
-        "ordinary_briefing_hard_bytes": 14000,
-        "harvest_briefing_soft_bytes": 11000,
-        "harvest_briefing_hard_bytes": 15000,
+        "ordinary_briefing_soft_bytes": 16384,
+        "ordinary_briefing_hard_bytes": 24576,
+        "harvest_briefing_soft_bytes": 18432,
+        "harvest_briefing_hard_bytes": 28672,
     }
 ):
     raise RuntimeError("bundled Cortex shared worker contract is invalid")
@@ -1162,6 +1163,107 @@ def stable_project_id(project: Path) -> str:
     ).hexdigest()
 
 
+_HOST_PROJECT_IDENTITY_KEY = "host_project_identity"
+_HOST_PROJECT_IDENTITY_SCHEMA = "cortex/host-project-identity/v1"
+
+
+def _host_project_identity(project: Path) -> dict[str, Any]:
+    """Return the non-secret filesystem identity used for rename recovery.
+
+    The opaque namespace intentionally includes the spelling of ``project`` so
+    a new checkout at the same pathname cannot inherit a prior ledger.  A
+    rename of the *same* directory, however, preserves its device/inode pair.
+    Keep that pair in the private ledger so the host can relocate the opaque
+    namespace atomically without retaining any task artifact absolute paths.
+    """
+    info = project.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("project root is not a directory")
+    return {
+        "schema": _HOST_PROJECT_IDENTITY_SCHEMA,
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+        "path": str(project.absolute()),
+    }
+
+
+def _record_host_project_identity(root: Path, project: Path, *, rebound_from: str | None = None) -> None:
+    identity = _host_project_identity(project)
+    existing = db_get_global(root, _HOST_PROJECT_IDENTITY_KEY, {})
+    history = list(existing.get("history") or []) if isinstance(existing, dict) else []
+    if rebound_from and rebound_from != identity["path"]:
+        history.append({"from": rebound_from, "to": identity["path"], "at": now()})
+    db_put_global(root, _HOST_PROJECT_IDENTITY_KEY, {
+        **identity,
+        "history": history[-16:],
+        "updated_at": now(),
+    })
+
+
+def _find_renamed_project_ledger(project: Path, target: Path) -> Path | None:
+    """Find one private ledger whose recorded directory was renamed in place.
+
+    This is deliberately narrow: the desired namespace must not exist, every
+    candidate must be a validated private ledger, and there must be exactly
+    one matching device/inode record.  Ambiguity is a hard error rather than a
+    best-effort attempt to choose another project's control plane.
+    """
+    projects = target.parent
+    if not projects.exists():
+        return None
+    desired = _host_project_identity(project)
+    matches: list[Path] = []
+    for candidate in sorted(projects.iterdir(), key=lambda item: item.name):
+        if candidate == target or not candidate.name.startswith("p-"):
+            continue
+        try:
+            _assert_private_directory(candidate, "Cortex host project ledger")
+            identity = db_get_global(candidate, _HOST_PROJECT_IDENTITY_KEY, {})
+        except (OSError, ValueError, sqlite3.Error):
+            # An unrelated stale/corrupt namespace must not become a rename
+            # candidate. Normal maintenance remains responsible for it.
+            continue
+        if not isinstance(identity, dict) or identity.get("schema") != _HOST_PROJECT_IDENTITY_SCHEMA:
+            continue
+        if int(identity.get("device", -1)) == desired["device"] and int(identity.get("inode", -1)) == desired["inode"]:
+            matches.append(candidate)
+    if len(matches) > 1:
+        raise ValueError("multiple host-private Cortex ledgers match this renamed project; refuse to choose state")
+    return matches[0] if matches else None
+
+
+def _maybe_rebind_renamed_project_ledger(project: Path, target: Path) -> None:
+    """Atomically move an exact private ledger after a workspace rename."""
+    if _lstat_or_none(target) is not None:
+        return
+    source = _find_renamed_project_ledger(project, target)
+    if source is None:
+        return
+    # Active task definitions and manifest snapshots deliberately bind the
+    # workspace spelling.  Moving only the control root would leave those
+    # immutable baselines pointing at the old workspace and turn a rename
+    # into a misleading verification failure.  Completed ledgers are safe to
+    # rebind automatically; active work needs an explicit future maintenance
+    # protocol that invalidates/re-baselines every live attempt atomically.
+    active = []
+    for task_id in db_task_index(source):
+        loaded = db_load_task(source, task_id)
+        if loaded is not None and str(loaded[1].get("status") or "") in {"active", "blocked"}:
+            active.append(task_id)
+    if active:
+        raise ValueError(
+            "renamed project has active Cortex tasks; explicit rebind maintenance must re-baseline live task state"
+        )
+    source_identity = db_get_global(source, _HOST_PROJECT_IDENTITY_KEY, {})
+    old_path = str(source_identity.get("path") or "") if isinstance(source_identity, dict) else ""
+    try:
+        os.replace(source, target)
+        _fsync_directory(source.parent)
+    except OSError as exc:
+        raise ValueError("renamed project Cortex ledger could not be rebound atomically") from exc
+    _record_host_project_identity(target, project, rebound_from=old_path)
+
+
 def ledger_root_path(params: dict[str, Any] | None = None, *, create: bool = False) -> Path:
     """Return the host-private ledger path for one workspace without opening SQLite.
 
@@ -1389,6 +1491,9 @@ def existing_ledger_root(params: dict[str, Any] | None = None) -> Path:
                 "legacy project-local Cortex directory has no regular cortex.db; explicit legacy maintenance is required"
             )
     target_info = _lstat_or_none(target)
+    if target_info is None:
+        _maybe_rebind_renamed_project_ledger(project, target)
+        target_info = _lstat_or_none(target)
     if target_info is not None:
         _assert_private_directory(target, "Cortex host project ledger")
     return target
@@ -2141,8 +2246,10 @@ def ledger_root(params: dict[str, Any] | None = None) -> Path:
     project = select_project_root(params)
     path = ledger_root_path({"project_root": str(project)}, create=True)
     _maybe_migrate_legacy_ledger(project, path)
+    _maybe_rebind_renamed_project_ledger(project, path)
     _ensure_private_directory(path, "Cortex host project ledger")
     ensure_ledger_database(path)
+    _record_host_project_identity(path, project)
     # Task capability files and optional exports remain beneath the same
     # private host store.  A worker receives only an exact capability path or
     # the scoped public artifact fallback; it never receives a browsable
@@ -10792,7 +10899,10 @@ from cortex_runtime.briefings import (
 )
 if __name__ != "cortex" and "_importlib_facade" in globals():
     _importlib_facade.__dict__.update(globals())
-from cortex_runtime.delegation_service import record_delegation as _record_delegation_service
+from cortex_runtime.delegation_service import (
+    record_delegation as _record_delegation_service,
+    rehydrate_dispatch_spawn_request as _rehydrate_dispatch_spawn_request,
+)
 from cortex_runtime.context_handoff import _context_handoff as _context_handoff_service
 from cortex_runtime.artifact_transport import manage_task_artifacts
 from cortex_runtime.health_maintenance import manage_health_maintenance

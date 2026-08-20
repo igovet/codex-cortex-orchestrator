@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins" / "cortex" / "scrip
 
 import cortex as control
 import cortex_hook
-from cortex_runtime import ledger_db
+from cortex_runtime import governance, ledger_db
 
 
 class HostPrivateControlStoreTests(unittest.TestCase):
@@ -92,6 +92,99 @@ class HostPrivateControlStoreTests(unittest.TestCase):
         self.assertTrue((private / "cortex.db").is_file())
         self.assertEqual(ledger_db.get_global(private, "migration-sentinel", {}), {"preserved": True})
         self.assertFalse((self.project / ".codex" / "cortex" / "cortex.db").exists())
+
+    def test_workspace_rename_rebinds_one_private_ledger_without_rebuilding_tasks(self) -> None:
+        with self._environment():
+            original = control.ledger_root({"project_root": str(self.project)})
+            ledger_db.put_global(original, "rename-sentinel", {"preserved": True})
+            original_id = original.name
+            renamed = self.base / "renamed-project"
+            self.project.rename(renamed)
+
+            rebound = control.ledger_root({"project_root": str(renamed)})
+
+        self.assertNotEqual(rebound.name, original_id)
+        self.assertFalse(original.exists())
+        self.assertTrue((rebound / "cortex.db").is_file())
+        self.assertEqual(ledger_db.get_global(rebound, "rename-sentinel", {}), {"preserved": True})
+        identity = ledger_db.get_global(rebound, control._HOST_PROJECT_IDENTITY_KEY, {})
+        self.assertEqual(identity["path"], str(renamed.absolute()))
+        self.assertEqual(identity["history"][-1]["from"], str(self.project.absolute()))
+
+    def test_workspace_rename_does_not_choose_ambiguous_private_ledger(self) -> None:
+        with self._environment():
+            original = control.ledger_root({"project_root": str(self.project)})
+            identity = ledger_db.get_global(original, control._HOST_PROJECT_IDENTITY_KEY, {})
+            duplicate = self.host_store / "projects" / ("p-" + "0" * 64)
+            duplicate.mkdir(parents=True, mode=0o700)
+            duplicate.chmod(0o700)
+            ledger_db.ensure_database(duplicate)
+            ledger_db.put_global(duplicate, control._HOST_PROJECT_IDENTITY_KEY, identity)
+            renamed = self.base / "renamed-project"
+            self.project.rename(renamed)
+            with self.assertRaisesRegex(ValueError, "multiple host-private Cortex ledgers match"):
+                control.ledger_root({"project_root": str(renamed)})
+
+    def test_workspace_rename_fails_closed_while_a_task_is_active(self) -> None:
+        with self._environment():
+            original = control.ledger_root({"project_root": str(self.project)})
+            ledger_db.create_task(
+                original,
+                {"task_id": "active-task", "objective": "fixture", "created_at": "now"},
+                {
+                    "task_id": "active-task", "task_number": 1, "status": "active",
+                    "revision": 0, "updated_at": "now",
+                },
+                "tasks/active-task",
+            )
+            renamed = self.base / "renamed-project"
+            self.project.rename(renamed)
+            with self.assertRaisesRegex(ValueError, "active Cortex tasks"):
+                control.ledger_root({"project_root": str(renamed)})
+
+        self.assertTrue(original.exists())
+
+    def test_active_legacy_relocation_rehydrates_pending_dispatch_from_relative_identity(self) -> None:
+        with self._environment():
+            started = control.start_orchestration({
+                "project_root": str(self.project),
+                "task": {
+                    "user_request": "Create a bounded local note.",
+                    "complexity": "C1",
+                    "governance_mode": "off",
+                    "risk_triggers": {key: False for key in governance.OFF_ASSESSMENT_KEYS},
+                    "acceptance_criteria": ["Pending dispatch remains recoverable."],
+                    "verification": ["Inspect after migration."],
+                },
+                "waves": [{"workers": [{"phase": "discover"}]}],
+            })
+            self.assertTrue(started["ok"], started)
+            original = control.ledger_root({"project_root": str(self.project)})
+            legacy = self.project / ".codex" / "cortex"
+            legacy.parent.mkdir(mode=0o700)
+            legacy.parent.chmod(0o700)
+            original.rename(legacy)
+            new_host_store = self.base / "relocated-host-private-store"
+            new_host_store.mkdir(mode=0o700)
+            new_host_store.chmod(0o700)
+            with mock.patch.dict(
+                os.environ, {control.HOST_CONTROL_STORE_ENV: str(new_host_store)}, clear=False,
+            ):
+                rebound = control.ledger_root({"project_root": str(self.project)})
+                inspected = control.manage_orchestration({
+                    "project_root": str(self.project),
+                    "intent": "inspect",
+                    "task_ref": started["task_ref"],
+                })
+
+        self.assertFalse(legacy.exists())
+        self.assertTrue(rebound.exists())
+        dispatch = inspected["dispatches"][0]
+        self.assertIn(str(rebound), dispatch["arguments"]["message"])
+        self.assertNotIn(str(original), dispatch["arguments"]["message"])
+        loaded = ledger_db.load_task(rebound, next(iter(ledger_db.task_index(rebound))))
+        self.assertIsNotNone(loaded)
+        self.assertNotIn("briefing_path", loaded[1]["attempts"][0]["spawn_request"])
 
     def test_dual_legacy_and_private_databases_fail_closed_without_selecting_one(self) -> None:
         legacy = self._legacy_root()
