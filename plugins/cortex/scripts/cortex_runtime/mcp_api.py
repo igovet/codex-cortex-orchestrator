@@ -488,7 +488,7 @@ def build_public_schemas(
     WORKER_RECORD_REPORT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": f"Worker report request. Normal finalization sends draft_ref after editing the private file returned by get_report_template. A complete {len(report_fields)}-field replacement or a small JSON Merge Patch may accompany draft_ref when the worker cannot edit draft_path. Cortex validates and persists in one atomic operation; invalid drafts remain editable.",
+        "description": f"Worker report request. Normal finalization sends draft_ref after editing the private file returned by get_report_template. A complete {len(report_fields)}-field replacement belongs in `report`; a small JSON Merge Patch belongs in `patch`. Cortex validates and persists in one atomic operation; invalid drafts remain editable.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
             "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
@@ -636,7 +636,7 @@ def build_public_schemas(
                     "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after an exhausted closure-rework cycle, payload.future_waves must begin with a Planner recovery wave; Cortex infers rework and records the replacement before dispatch. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
                     "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
-                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup targets use only safe backup_name values. Normal wave progression never uses this field."
+                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
                 ),
             },
         },
@@ -829,10 +829,42 @@ def v3_response(
             "rationale. Do not call a UI/input/approval/elicitation tool. End the turn and wait. Submit the user's "
             "next unambiguous response with the exact request_id; preserve requested changes verbatim."
         )
+    elif outcome == "completion_pending":
+        pending = (
+            old.get("result", {}).get("pending_report_completions", [])
+            if isinstance(old.get("result"), dict) else []
+        )
+        selections = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            slot = item.get("worker")
+            refs = [str(ref) for ref in item.get("candidate_report_refs", []) if str(ref).strip()]
+            if slot and refs:
+                selections.append(f"worker={slot}: " + ", ".join(refs))
+        next_action = (
+            f"{coordinator_lock} A native worker already stopped after recording durable reports; it is not a live "
+            "child. Never wait on or respawn it; never resume it. Read the candidate report refs, then explicitly select "
+            "exactly one receipt-validated report_ref for each listed worker slot and call continue_orchestration "
+            f"once for task_ref={task_ref} and this step. Cortex will reject a superseded planner report before any "
+            "state mutation. Candidates: "
+            + ("; ".join(selections) if selections else "none validated; inspect the reported receipt mismatch and do not fabricate a result.")
+        )
     elif outcome == "completed":
         next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
     elif outcome == "blocked":
-        next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
+        reported_recovery = (
+            old.get("result", {}).get("reported_attempt_recovery")
+            if isinstance(old.get("result"), dict) else None
+        )
+        if isinstance(reported_recovery, dict):
+            next_action = (
+                f"{coordinator_lock} The stopped worker's persisted reports cannot be safely consumed. Never wait on or "
+                "respawn it; never resume or manually edit that child/ledger state. Resume the blocked task only through "
+                "manage_orchestration intent=resume; Cortex will issue a fresh Planner-first dispatch."
+            )
+        else:
+            next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
     else:
         next_action = (
             f"{coordinator_lock} Wait idly for the active worker results, then call continue_orchestration "
@@ -863,7 +895,16 @@ def v3_response(
             if item.get("failure_status") == "failed"
             and str(item.get("dispatch_ref") or "").strip()
         ]
-        if outcome == "waiting_workers":
+        if outcome == "completion_pending" or (
+            outcome == "blocked"
+            and isinstance(old.get("result"), dict)
+            and isinstance(old["result"].get("reported_attempt_recovery"), dict)
+        ):
+            # The candidate list above is intentionally more restrictive than
+            # generic stopped-worker prose: each eventual continuation must
+            # select one receipt-attested report for its worker slot.
+            pass
+        elif outcome == "waiting_workers":
             if active_worker_ids:
                 terminal_failure_targets = "; ".join(
                     f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"

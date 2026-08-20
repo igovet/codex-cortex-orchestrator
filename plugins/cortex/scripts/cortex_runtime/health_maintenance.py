@@ -9,18 +9,29 @@ in particular, backups never copy a live database file.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
 import stat
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cortex_runtime import ledger_db
 from cortex_runtime.ledger_db import DATABASE_NAME, DATABASE_SCHEMA_VERSION
 
 
-_BACKUP_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.sqlite")
+# A backup is deliberately a directory rather than a bare SQLite file: v12
+# governance authenticity also depends on a host-private key which SQLite
+# alone cannot recover.  A distinct suffix prevents old DB-only snapshots
+# from being mistaken for a recoverable Cortex backup.
+_BACKUP_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.cortex-backup")
+_BACKUP_MANIFEST_NAME = "manifest.json"
+_BACKUP_DATABASE_NAME = DATABASE_NAME
+_BACKUP_GOVERNANCE_KEY_NAME = "governance-lifecycle.key"
+_BACKUP_SCHEMA = "cortex/ledger-backup/v1"
 _WRITE_CONFIRMATIONS = {
     "checkpoint": "CHECKPOINT",
     "backup": "BACKUP",
@@ -41,6 +52,8 @@ def _private_directory(path: Path, label: str, *, create: bool = False) -> Path:
         info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         raise ValueError(f"{label} must be a real directory")
+    if os.name != "nt" and hasattr(os, "getuid") and int(info.st_uid) != int(os.getuid()):
+        raise ValueError(f"{label} must be owned by the current user")
     if info.st_mode & 0o077:
         path.chmod(0o700)
     return path
@@ -53,6 +66,8 @@ def _private_file(path: Path, label: str) -> Path:
         raise ValueError(f"{label} is unavailable") from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise ValueError(f"{label} must be a regular non-symlink file")
+    if os.name != "nt" and hasattr(os, "getuid") and int(info.st_uid) != int(os.getuid()):
+        raise ValueError(f"{label} must be owned by the current user")
     if info.st_mode & 0o077:
         raise ValueError(f"{label} has unsafe permissions")
     return path
@@ -164,15 +179,15 @@ def _backup_directory(root: Path, *, create: bool) -> Path:
 def _backup_target(root: Path, payload: dict[str, Any], *, require_existing: bool = False) -> Path:
     name = str(payload.get("backup_name") or "")
     if not _BACKUP_NAME_RE.fullmatch(name):
-        raise ValueError("backup_name must be a safe .sqlite filename")
+        raise ValueError("backup_name must be a safe .cortex-backup bundle name")
     directory = _backup_directory(root, create=not require_existing)
     target = directory / name
     if target.parent != directory:
         raise ValueError("backup target escapes Cortex backups")
     if require_existing:
-        return _private_file(target, "SQLite backup")
+        return _private_directory(target, "Cortex backup bundle")
     if target.exists() or target.is_symlink():
-        raise ValueError("SQLite backup target already exists")
+        raise ValueError("Cortex backup bundle target already exists")
     return target
 
 
@@ -198,31 +213,191 @@ def _backup_connection(source: Path, target: Path) -> None:
             destination.close()
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_private_bytes(path: Path, value: bytes, label: str) -> None:
+    """Create one private regular file and persist it before publication."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    _private_file(path, label)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory entry where the platform permits it."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _bundle_manifest(*, database: Path, governance_key: Path) -> dict[str, Any]:
+    return {
+        "schema": _BACKUP_SCHEMA,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "database": {
+            "name": _BACKUP_DATABASE_NAME,
+            "bytes": int(database.stat().st_size),
+            "sha256": _sha256_file(database),
+            "schema_version": DATABASE_SCHEMA_VERSION,
+        },
+        # This is only a fingerprint.  The key bytes are present exclusively
+        # in the 0600 bundle member and never returned in a maintenance result.
+        "governance_lifecycle_key": {
+            "name": _BACKUP_GOVERNANCE_KEY_NAME,
+            "sha256": _sha256_file(governance_key),
+        },
+    }
+
+
+def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    _write_private_bytes(
+        path,
+        (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"),
+        "Cortex backup manifest",
+    )
+
+
+def _read_bundle_manifest(bundle: Path) -> dict[str, Any]:
+    path = _private_file(bundle / _BACKUP_MANIFEST_NAME, "Cortex backup manifest")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Cortex backup manifest is invalid") from exc
+    if not isinstance(value, dict) or value.get("schema") != _BACKUP_SCHEMA:
+        raise ValueError("Cortex backup manifest schema is invalid")
+    database = value.get("database")
+    key = value.get("governance_lifecycle_key")
+    if not isinstance(database, dict) or not isinstance(key, dict):
+        raise ValueError("Cortex backup manifest is incomplete")
+    if database.get("name") != _BACKUP_DATABASE_NAME or key.get("name") != _BACKUP_GOVERNANCE_KEY_NAME:
+        raise ValueError("Cortex backup manifest members are invalid")
+    for item in (database, key):
+        if not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", str(item["sha256"])):
+            raise ValueError("Cortex backup manifest fingerprint is invalid")
+    if not isinstance(database.get("bytes"), int) or database["bytes"] < 0:
+        raise ValueError("Cortex backup manifest database size is invalid")
+    return value
+
+
+def _bundle_members(bundle: Path, manifest: dict[str, Any]) -> tuple[Path, Path]:
+    database = _private_file(bundle / _BACKUP_DATABASE_NAME, "Cortex backup database")
+    governance_key = _private_file(bundle / _BACKUP_GOVERNANCE_KEY_NAME, "Cortex backup governance key")
+    expected_database = manifest["database"]
+    expected_key = manifest["governance_lifecycle_key"]
+    if int(database.stat().st_size) != int(expected_database["bytes"]):
+        raise ValueError("Cortex backup database size does not match manifest")
+    if _sha256_file(database) != expected_database["sha256"]:
+        raise ValueError("Cortex backup database fingerprint does not match manifest")
+    if _sha256_file(governance_key) != expected_key["sha256"]:
+        raise ValueError("Cortex backup governance key fingerprint does not match manifest")
+    return database, governance_key
+
+
+def _governance_records_verified(root: Path) -> int:
+    """Read every record through the real v12 validation layer."""
+    from cortex_runtime import governance
+
+    offset, total = 0, 0
+    while True:
+        page = governance.list_records(root, limit=256, offset=offset)
+        total += len(page)
+        if len(page) < 256:
+            return total
+        offset += len(page)
+
+
 def create_backup(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     _require_confirmation("backup", payload)
     source, target = _database(root), _backup_target(root, payload)
-    _backup_connection(source, target)
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    return {"operation": "backup", "backup_name": target.name, "bytes": int(target.stat().st_size), "sha256": digest}
+    # Use the ledger helper rather than merely opening the file: it also
+    # checks current-user ownership, expected key length, and fail-closed key
+    # availability semantics.
+    key_material = ledger_db._governance_lifecycle_hmac_key(root, create=False)
+    directory = _backup_directory(root, create=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".creating-", dir=directory))
+    try:
+        temporary.chmod(0o700)
+        database = temporary / _BACKUP_DATABASE_NAME
+        copied_key = temporary / _BACKUP_GOVERNANCE_KEY_NAME
+        _backup_connection(source, database)
+        _write_private_bytes(copied_key, key_material, "Cortex backup governance key")
+        manifest = _bundle_manifest(database=database, governance_key=copied_key)
+        _write_manifest(temporary / _BACKUP_MANIFEST_NAME, manifest)
+        _fsync_directory(temporary)
+        os.replace(temporary, target)
+        _fsync_directory(directory)
+    except BaseException:
+        # The private temporary directory never becomes a valid bundle and is
+        # safe to remove only because it was created by this call underneath a
+        # validated backup directory.
+        if temporary.exists():
+            for member in temporary.iterdir():
+                member.unlink()
+            temporary.rmdir()
+        raise
+    return {
+        "operation": "backup",
+        "backup_name": target.name,
+        "bundle_schema": _BACKUP_SCHEMA,
+        "database_bytes": int(manifest["database"]["bytes"]),
+        "database_sha256": manifest["database"]["sha256"],
+        "governance_lifecycle_key_fingerprint": manifest["governance_lifecycle_key"]["sha256"],
+    }
 
 
 def verify_backup_restore(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """Restore a backup via SQLite into a disposable DB, then inspect it."""
-    source = _backup_target(root, payload, require_existing=True)
+    """Verify a portable bundle in a fresh host/root through governance v12."""
+    bundle = _backup_target(root, payload, require_existing=True)
+    manifest = _read_bundle_manifest(bundle)
+    source, source_key = _bundle_members(bundle, manifest)
     with tempfile.TemporaryDirectory(prefix=".restore-check-", dir=_backup_directory(root, create=False)) as temporary:
-        restored = Path(temporary) / "restored.sqlite"
+        # Deliberately choose a fresh host-private layout.  This proves the
+        # key is rehomed by the restore contract instead of accidentally using
+        # the source host's sidecar path.
+        # Keep the opaque ledger ID construction explicit and stable for
+        # ledger_db's host-key lookup.
+        restored_root = Path(temporary) / "fresh-host" / "projects" / ("p-" + "0" * 64)
+        restored_root.mkdir(parents=True, mode=0o700)
+        restored = restored_root / DATABASE_NAME
         _backup_connection(source, restored)
+        restored_key = ledger_db._governance_lifecycle_key_path(restored_root)
+        restored_key.parent.mkdir(parents=True, mode=0o700)
+        restored_key.parent.chmod(0o700)
+        _write_private_bytes(restored_key, source_key.read_bytes(), "Cortex restored governance lifecycle host key")
         with _readonly_connection(restored) as connection:
             quick_check = [str(row[0]) for row in connection.execute("PRAGMA quick_check")]
             foreign_key_violations = _read_rows(connection, "PRAGMA foreign_key_check")
             schema = _schema_status(connection)
+        governance_records_verified = _governance_records_verified(restored_root)
     return {
         "operation": "verify_backup_restore",
-        "backup_name": source.name,
+        "backup_name": bundle.name,
+        "bundle_schema": _BACKUP_SCHEMA,
         "restored_with_sqlite_backup_api": True,
         "quick_check": {"ok": quick_check == ["ok"], "rows": quick_check},
         "foreign_key_check": {"ok": not foreign_key_violations, "violations": foreign_key_violations},
         "schema": schema,
+        "governance": {"verified_records": governance_records_verified, "fresh_host_root": True},
     }
 
 

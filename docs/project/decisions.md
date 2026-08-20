@@ -375,12 +375,17 @@ the normal C1/C2/C3 approval policy.
 The active SQLite ledger never imports legacy filesystem coordination state.
 The separate, explicit legacy lifecycle can inventory it, create a verified
 private archive, and delete only the archived sources after an archive-specific
-confirmation. Health inspection is read-only; checkpoint, SQLite backup,
-backup-restore verification, optimize, vacuum, and projection reconciliation
-each require an action-specific confirmation. WAL/SHM are SQLite sidecars, not
-exports, backups, evidence, or independent prune targets. Lifecycle telemetry
-and model metrics are not canonical task artifacts and must not be used as
-completion proof.
+confirmation. Health inspection is read-only; checkpoint, private
+`.cortex-backup` disaster-recovery bundle creation, fresh-host restore
+verification, optimize, vacuum, and projection reconciliation each require an
+action-specific confirmation. A published bundle atomically contains
+`cortex.db`, the separately host-stored governance lifecycle HMAC key, and a
+manifest binding their fingerprints; verification restores both into a fresh
+disposable host layout and validates governance records through the real v12
+authority layer. Historical bare `.sqlite` snapshots are not represented as
+recoverable Cortex backups. WAL/SHM are SQLite sidecars, not exports, backups,
+evidence, or independent prune targets. Lifecycle telemetry and model metrics
+are not canonical task artifacts and must not be used as completion proof.
 
 ## Bounded private commit-adapter recovery
 
@@ -421,9 +426,17 @@ failed attempt, recorded as
 the handoff exposes its exact `dispatch_ref`, and the coordinator submits one
 failed continuation with that ref and reason. Cortex alone may return a fresh
 top-level dispatch; the dead child is never waited on, respawned, or resumed
-with `followup_task`. A stopped worker with a report is consumed normally, and
-a worker paused on a durable question remains resumable through its exact host
-identity. Repeated failed continuations remain eligible for fresh top-level
+with `followup_task`. A stopped worker whose lifecycle is
+`report_recorded` is completion-pending, not active and not resumable, even
+when `host_report_refs` contains reports. The coordinator must explicitly
+continue with exactly one chosen `report_ref`; Cortex verifies that ref against
+the exact stopped `attempt_id`, gate, task, and current revision before
+consuming it. Cortex never auto-selects a report, silently approves it, or
+respawns the stopped child. Missing, stale, already-consumed, or mismatched
+refs fail closed and require the normal recovery path; multiple valid refs
+remain audit-visible until the coordinator chooses one. A worker paused on a durable
+question remains resumable through its exact host identity. Repeated failed
+continuations remain eligible for fresh top-level
 dispatches while Cortex raises the effort floor (`high`, then `xhigh`, then
 `max`) and uses Terra for eligible ordinary work after two prior failures.
 Only an explicit non-retryable blocker or user cancellation stops correction.

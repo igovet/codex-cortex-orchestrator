@@ -76,6 +76,11 @@ class LiveFindingReworkContractTests(HostPrivateControlStoreTestMixin, unittest.
             )
             self.assertTrue(all(checks.values()))
 
+            target.write_text(EVALUATOR.FINDING_REWORK_DOCUMENTATION_CONTENT.rstrip("\n"), encoding="utf-8")
+            self.assertTrue(EVALUATOR.finding_rework_trace_checks(
+                state, reports, findings=findings, project=project,
+            )["documentation_content_exact"])
+
             wrong_handoff = copy.deepcopy(state)
             wrong_handoff["attempts"][2]["context_report_ids"] = [opening_ref]
             self.assertFalse(EVALUATOR.finding_rework_trace_checks(
@@ -108,7 +113,12 @@ class LiveFindingReworkContractTests(HostPrivateControlStoreTestMixin, unittest.
         self.assertIn("Only after start_orchestration returns ready_to_spawn", prompt)
         self.assertIn("Call start_orchestration exactly once", prompt)
         self.assertIn("Open exactly one P2 finding", prompt)
+        self.assertIn('"profile":"code_reviewer"', prompt)
         self.assertIn("decision=rework (never fail or blocked)", prompt)
+        self.assertIn("only when docs/finding-fixture.md is absent", prompt)
+        self.assertIn("This is a CLOSED-WORLD fixture", prompt)
+        self.assertIn("do not assess the task plan, handoff, process, tests", prompt)
+        self.assertIn("never reopen or add a finding after the correction", prompt)
         self.assertIn("spawn_agent -> wait -> read_worker_report -> close_agent", prompt)
         self.assertIn("trusted host binding is intentionally unavailable", prompt)
         self.assertNotIn("confirm_host_spawn", prompt)
@@ -208,6 +218,12 @@ class LiveFindingReworkContractTests(HostPrivateControlStoreTestMixin, unittest.
         wrong = [item.copy() for item in duplicated * 4]
         wrong[2]["outcome"] = "question_recorded"
         self.assertFalse(EVALUATOR.observed_native_lifecycle(wrong))
+
+        echoed_close = [item.copy() for item in duplicated * 4]
+        for item in echoed_close:
+            if item["tool"] == "close_agent":
+                item["outcome"] = "report_recorded"
+        self.assertTrue(EVALUATOR.observed_native_lifecycle(echoed_close))
 
     def test_live_eval_returns_fail_without_task_state(self) -> None:
         streamed = {

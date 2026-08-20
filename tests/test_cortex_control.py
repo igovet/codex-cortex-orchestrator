@@ -951,6 +951,163 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn(recorded["report_ref"], inspected["next_action"])
         self.assertIn("Never wait on or respawn", inspected["next_action"])
 
+    def test_inspect_requires_explicit_consumption_of_a_stopped_planner_report(self):
+        """A persisted SubagentStop report is completion-pending, never a live worker.
+
+        This recreates the durable stranded shape from the host incident:
+        ``running + report_recorded + host_stopped_at + host_report_refs``
+        with no consumed ``report_ids``.  Inspect must leave report selection
+        to the coordinator, and the normal relative continue path must consume
+        the selected immutable receipt and open a fresh plan approval.
+        """
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "recover a planner report after the parent lost its completion response",
+                plan_approval="required",
+                waves=[
+                    {"workers": [{"phase": "plan"}]},
+                    {"workers": [{"phase": "implementation"}]},
+                ],
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        parent_session = "host-stranded-plan-parent"
+        control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
+        bound = control.bind_host_worker_from_hook(
+            str(self.project), state["task_id"], parent_session, "default",
+            "native.StrandedPlan:01", attempt["expected_model"],
+        )
+        self.assertTrue(bound["bound"], bound)
+        report_ref = self._publish_attempt_report(task_dir, state, attempt)
+        stopped = control.finalize_host_worker_stop_from_hook(
+            str(self.project), state["task_id"], parent_session, "native.StrandedPlan:01",
+        )
+        self.assertEqual(stopped["outcome"], "report_recorded")
+
+        stranded = self.task_state(task_dir)
+        stranded_attempt = stranded["attempts"][0]
+        self.assertEqual(stranded_attempt["status"], "running")
+        self.assertEqual(stranded_attempt["lifecycle_status"], "report_recorded")
+        self.assertTrue(stranded_attempt["host_stopped_at"])
+        self.assertEqual(stranded_attempt["host_report_refs"], [report_ref])
+        self.assertEqual(stranded_attempt["report_ids"], [])
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"], inspected)
+        self.assertEqual(inspected["outcome"], "completion_pending")
+        self.assertEqual(inspected["dispatches"], [])
+        candidates = inspected["result"]["pending_report_completions"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["worker"], 1)
+        self.assertEqual(candidates[0]["candidate_report_refs"], [report_ref])
+        self.assertTrue(candidates[0]["selection_required"])
+        self.assertIn("Never wait on or respawn", inspected["next_action"])
+        after_inspect = self.task_state(task_dir)
+        self.assertEqual(after_inspect["attempts"][0]["status"], "running")
+        self.assertEqual(after_inspect["attempts"][0]["report_ids"], [])
+
+        # A valid report for the attempt is still insufficient when the
+        # host-stop receipt did not attest it.  This guards a coordinator from
+        # using an arbitrary earlier report after recovering a stopped child.
+        after_inspect["attempts"][0]["host_report_refs"] = []
+        self.write_task_state(after_inspect)
+        unattested = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": report_ref}],
+        })
+        self.assertFalse(unattested["ok"])
+        self.assertIn("attested by the native host stop receipt", unattested["diagnostics"][0]["message"])
+        after_inspect["attempts"][0]["host_report_refs"] = [report_ref]
+        self.write_task_state(after_inspect)
+
+        continued = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": report_ref}],
+        })
+        self.assertTrue(continued["ok"], continued)
+        self.assertEqual(continued["outcome"], "awaiting_plan_approval")
+        recovered = self.task_state(task_dir)
+        self.assertEqual(recovered["attempts"][0]["status"], "passed")
+        self.assertEqual(recovered["attempts"][0]["report_ids"], [report_ref])
+        self.assertEqual(recovered["plan_approval"]["status"], "awaiting_user")
+        replayed = control.continue_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "step": started["step"],
+            "results": [{"report_ref": report_ref}],
+        })
+        self.assertTrue(replayed["ok"], replayed)
+        self.assertTrue(replayed["replayed"])
+        self.assertEqual(replayed["dispatches"], [])
+        self.assertEqual(self.task_state(task_dir)["attempts"][0]["report_ids"], [report_ref])
+
+    def test_inspect_blocks_stale_stopped_planner_reports_for_fresh_planner_recovery(self):
+        """No host-attested report may be selected when its plan revision is stale."""
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "fail closed when a stopped planner only has a stale report",
+                plan_approval="required",
+                waves=[
+                    {"workers": [{"phase": "plan"}]},
+                    {"workers": [{"phase": "implementation"}]},
+                ],
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        parent_session = "host-stale-plan-parent"
+        control.bind_host_session_from_hook(str(self.project), started["task_ref"], parent_session)
+        bound = control.bind_host_worker_from_hook(
+            str(self.project), state["task_id"], parent_session, "default",
+            "native.StalePlan:01", attempt["expected_model"],
+        )
+        self.assertTrue(bound["bound"], bound)
+        report_ref = self._publish_attempt_report(task_dir, state, attempt)
+        stopped = control.finalize_host_worker_stop_from_hook(
+            str(self.project), state["task_id"], parent_session, "native.StalePlan:01",
+        )
+        self.assertEqual(stopped["outcome"], "report_recorded")
+        stale_manifest = control.current_planning_manifest(task_dir)
+        self.assertIsNotNone(stale_manifest)
+        stale_manifest["source_report_ref"] = "report-0000"
+        control.db_put_task_document(self.ledger, state["task_id"], "planning_current", stale_manifest)
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"], inspected)
+        self.assertEqual(inspected["outcome"], "blocked")
+        self.assertEqual(inspected["dispatches"], [])
+        self.assertEqual(inspected["result"]["reported_attempt_recovery"]["attempt_ids"], [attempt["attempt_id"]])
+        self.assertIn("fresh Planner-first dispatch", inspected["next_action"])
+        blocked = self.task_state(task_dir)
+        failed = blocked["attempts"][0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["lifecycle_status"], "needs_recovery")
+        self.assertEqual(failed["host_report_refs"], [report_ref])
+        self.assertEqual(failed["report_ids"], [])
+        self.assertEqual(blocked["plan_approval"]["status"], "pending_plan")
+
+        resumed = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "resume",
+        })
+        self.assertTrue(resumed["ok"], resumed)
+        self.assertEqual(resumed["outcome"], "ready_to_spawn")
+        self.assertEqual(resumed["dispatches"][0]["phase"], "plan")
+        recovered = self.task_state(task_dir)
+        self.assertTrue(recovered["attempts"][0]["invalidated"])
+        self.assertEqual(recovered["attempts"][1]["gate"], "plan")
+        self.assertEqual(recovered["attempts"][1]["status"], control.AWAITING_HOST_SPAWN)
+
     def test_report_link_is_published_once_after_real_subagent_completion_with_summary(self):
         with mock.patch.dict(
             os.environ,
@@ -2579,10 +2736,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertRegex(expected_task_name, r"^explorer_objective_01_[0-9a-f]{8}$")
         briefing = self.briefing_from_request(delegated["spawn_request"])
         self.assertIn("Use attempt_id='discover-01' exactly", briefing)
-        self.assertIn("stable lowercase submission_id", briefing)
+        self.assertIn("For record_report, use only project_root=", briefing)
+        self.assertIn("Do not send task_ref, dispatch_ref, or submission_id", briefing)
         report_fields = ", ".join(control.REPORT_FIELDS)
         self.assertIn(f"exactly {len(control.REPORT_FIELDS)} keys: {report_fields}", briefing)
-        self.assertIn("byte-identical retry", briefing)
+        self.assertIn("Correct retryable schema errors on this same attempt", briefing)
         self.assertIn("Do not activate or initialize Cortex", briefing)
         confirmed = control.confirm_host_spawn({
                 "task_id": "host-name-contract", "principal": "thread-a",
@@ -5260,6 +5418,9 @@ class ControlPlaneTests(unittest.TestCase):
             resolved_finding["source_evidence"][-1]["correction_report_refs"],
             [documentation_results[0]["report_ref"]],
         )
+        resolved_route = control.load_task_state_for_artifact(task_dir)["closure_rework"]["review"]
+        self.assertEqual(resolved_route["status"], "resolved")
+        self.assertEqual(resolved_route["resolved_by_gate"], "review")
 
         completed = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": close["step"],
@@ -7293,6 +7454,8 @@ class ControlPlaneTests(unittest.TestCase):
             prompt = self.briefing_from_response(current)
             if current["dispatches"][0]["phase"] == "architecture":
                 self.assertIn("Verified predecessor handoff refs: report-0001", prompt)
+                self.assertIn(f"task_ref={started['task_ref']!r}", prompt)
+                self.assertIn("and that exact report_ref", prompt)
                 self.assertNotIn("report-0002", prompt)
             if current["dispatches"][0]["phase"] == "plan":
                 self.assertIn("Verified predecessor handoff refs: report-0002", prompt)
@@ -8232,7 +8395,15 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("call the public `get_report_template` tool", briefing)
         self.assertIn("returns draft_path plus draft_ref", briefing)
         self.assertIn("small JSON Merge Patch", briefing)
+        self.assertIn("complete `report` object or a small JSON Merge Patch in `patch`", briefing)
+        self.assertIn("`replacement` is not a public field", briefing)
         self.assertIn("call `record_report` with this identity and draft_ref", briefing)
+        record_report_properties = set(control.WORKER_RECORD_REPORT_SCHEMA["properties"])
+        self.assertTrue({"project_root", "task_id", "attempt_id", "profile", "draft_ref"}.issubset(record_report_properties))
+        self.assertFalse({"task_ref", "dispatch_ref", "submission_id"} & record_report_properties)
+        self.assertIn("For record_report, use only project_root=", briefing)
+        self.assertIn("Do not send task_ref, dispatch_ref, or submission_id.", briefing)
+        self.assertIn("known baseline is a limitation, not a failure_class value", briefing)
         self.assertNotIn("validate_report_draft", briefing)
         self.assertNotIn("validation_digest", briefing)
         self.assertIn("consume no worker attempt", briefing)
@@ -9602,7 +9773,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.7")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.9")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

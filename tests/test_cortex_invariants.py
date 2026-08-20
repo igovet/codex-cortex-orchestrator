@@ -1950,7 +1950,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.7")
+        self.assertEqual(base_version, "9.2.9")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
@@ -2016,6 +2016,18 @@ class OrchestrationInvariantTests(unittest.TestCase):
         ):
             self.assertIn(marker, workflow)
         self.assertNotIn("tests.test_ledger_db", workflow)
+
+    def test_fresh_plugin_probe_uses_only_the_host_private_control_store(self):
+        probe = (Path(__file__).parents[1] / "scripts/probe-fresh-cortex-plugin.py").read_text(encoding="utf-8")
+        self.assertIn('"CORTEX_HOST_STATE_DIR": str(host_store)', probe)
+        self.assertIn('cortex.ledger_root_path({"project_root": str(workspace)}, create=False)', probe)
+        self.assertIn('(workspace / ".codex/cortex/cortex.db").exists()', probe)
+        self.assertNotIn('(workspace / ".codex/cortex/tasks").iterdir()', probe)
+
+    def test_live_evaluator_declares_its_private_store_for_the_mcp_subprocess(self):
+        evaluator = (Path(__file__).parents[1] / "scripts/cortex-luna-high-eval.py").read_text(encoding="utf-8")
+        self.assertIn('mcp_servers.cortex.env.CORTEX_HOST_STATE_DIR="{host_store}"', evaluator)
+        self.assertIn("This is not a JSON-RPC/MCP tool input.", evaluator)
 
     def test_user_requested_model_schema_is_explicit_and_sol_escalation_is_removed(self):
         for tool_name in ("resolve_dispatch_route", "record_delegation"):

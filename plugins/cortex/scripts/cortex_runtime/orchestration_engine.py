@@ -188,8 +188,25 @@ def _orchestrate_state_name(state: dict[str, Any]) -> str:
     attempts = [item for item in state.get("attempts", []) if item.get("gate") in current and not item.get("invalidated")]
     if any(item.get("status") == AWAITING_HOST_SPAWN for item in attempts):
         return "ready_to_spawn"
-    if any(item.get("status") == "running" for item in attempts):
+    # A native ``SubagentStop`` can durably record one or more immutable
+    # reports before the coordinator has selected the exact report receipt to
+    # consume.  That worker has stopped: presenting it as ``waiting_workers``
+    # makes a coordinator wait on a phantom child (and later makes resume
+    # reject the wave as still live).  Do not select a report here; selection
+    # remains an explicit ``continue`` result bound to one worker slot.
+    live_attempts = [
+        item for item in attempts
+        if item.get("status") == "running"
+        and item.get("lifecycle_status") not in {"paused_awaiting_user", "report_recorded"}
+    ]
+    if live_attempts:
         return "waiting_workers"
+    if any(
+        item.get("status") == "running"
+        and item.get("lifecycle_status") == "report_recorded"
+        for item in attempts
+    ):
+        return "completion_pending"
     return "needs_input"
 
 
@@ -1011,6 +1028,12 @@ def _orchestrate_response(
         next_action = "invoke every returned native spawn request, wait for the wave, then call orchestrate(operation=advance) once"
     elif facade_state == "waiting_workers":
         next_action = "wait for every worker in the current wave, then call orchestrate(operation=advance) once"
+    elif facade_state == "completion_pending":
+        next_action = (
+            "read the verified stopped-worker report candidates, then explicitly select exactly one immutable "
+            "report_ref for each affected worker slot when calling orchestrate(operation=advance); do not wait, "
+            "respawn, or resume the stopped worker"
+        )
     elif facade_state == "completed":
         next_action = "report the verified task result to the user"
     elif facade_state == "blocked":
@@ -2296,7 +2319,27 @@ def _preflight_orchestrate_completion(
         if not report_ref:
             raise ValueError("passed completion requires report_ref from record_report")
         record, _ = _pre_recorded_report(task_dir, state, attempt_id, report_ref)
+        if attempt.get("lifecycle_status") == "report_recorded":
+            stopped_refs = {
+                safe_id(str(item))
+                for item in attempt.get("host_report_refs") or []
+                if str(item or "").strip()
+            }
+            if report_ref not in stopped_refs:
+                raise ValueError(
+                    "stopped-worker completion must select a report_ref attested by the native host stop receipt"
+                )
         _validate_report_decision_closure(task_dir, state, attempt, record["report"])
+        if attempt.get("gate") == "plan":
+            manifest = current_planning_manifest(task_dir)
+            if (
+                not isinstance(manifest, dict)
+                or str(manifest.get("source_report_ref") or "") != safe_id(report_ref)
+            ):
+                raise ValueError(
+                    "planner completion must select the current planning revision report_ref; "
+                    "do not consume a superseded planner report"
+                )
     elif not str(completion.get("reason", "")).strip():
         raise ValueError("non-success completion requires an explicit reason")
 
@@ -2943,6 +2986,12 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             if recorded.get("recorded") is False:
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
             state = recorded["state"]
+            # The gate-result projection is durable only after record_gate.
+            # Re-evaluate then, rather than only before it, so a fresh Review
+            # that just resolved an inherited finding also retires the active
+            # corrective route before Close/handoff is prepared.
+            if outcome == "passed":
+                _unresolved_rework_findings(root, state, gate)
             # A steer is material new evidence, so it must first reopen the
             # affected pipeline.  Do not let the liveness detector classify
             # the just-completed pre-steer work as a repeated corrective loop.
@@ -3130,9 +3179,143 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
         )
 
 
+def _reported_attempt_completion_candidates(
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return receipt-validated, explicitly selectable stopped-worker reports.
+
+    A host stop receipt is evidence that the native worker is no longer live,
+    but it is deliberately *not* a coordinator decision to consume one of
+    that worker's reports.  In particular a planner may have published a
+    superseded revision before its final report.  Inspection therefore exposes
+    only immutable candidates for the normal relative ``continue`` contract;
+    it never chooses a report, marks a gate passed, or revives a stale plan
+    approval.
+    """
+    active = set(active_gates(state))
+    wave = _wave_for_gates(plan, list(active))
+    slots = {
+        str(attempt_id): index
+        for index, attempt_id in enumerate((wave or {}).get("attempt_ids") or [], 1)
+    }
+    candidates: list[dict[str, Any]] = []
+    for attempt in state.get("attempts", []):
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("invalidated")
+            or attempt.get("status") != "running"
+            or attempt.get("lifecycle_status") != "report_recorded"
+            or not attempt.get("host_stopped_at")
+            or attempt.get("gate") not in active
+        ):
+            continue
+        attempt_id = safe_id(str(attempt.get("attempt_id") or ""))
+        report_refs: list[str] = []
+        rejected_refs: list[dict[str, str]] = []
+        for raw_ref in attempt.get("host_report_refs") or []:
+            report_ref = safe_id(str(raw_ref or ""))
+            if not report_ref or report_ref in report_refs:
+                continue
+            try:
+                record, receipt = _pre_recorded_report(task_dir, state, attempt_id, report_ref)
+                if receipt.get("consumed_at") or receipt.get("consumed_by_evidence_id"):
+                    raise ValueError("report receipt was already consumed")
+                if str(record.get("gate") or "") != str(attempt.get("gate") or ""):
+                    raise ValueError("report gate does not match the stopped attempt")
+                if attempt.get("gate") == "plan":
+                    manifest = current_planning_manifest(task_dir)
+                    if (
+                        not isinstance(manifest, dict)
+                        or str(manifest.get("source_report_ref") or "") != report_ref
+                    ):
+                        raise ValueError("planner report is not the current planning revision")
+            except ValueError as exc:
+                rejected_refs.append({"report_ref": report_ref, "reason": redact(str(exc), 300)})
+                continue
+            report_refs.append(report_ref)
+        candidate = {
+            "attempt_id": attempt_id,
+            "worker": slots.get(attempt_id),
+            "phase": str(attempt.get("gate") or ""),
+            "candidate_report_refs": report_refs,
+            "selection_required": True,
+            "host_stopped_at": attempt.get("host_stopped_at"),
+        }
+        if rejected_refs:
+            candidate["rejected_report_refs"] = rejected_refs
+        candidates.append(candidate)
+    return candidates
+
+
+def _fail_unselectable_reported_attempts(
+    root: Path,
+    task_dir: Path,
+    state: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> list[str]:
+    """Fail closed when a stopped worker has no report eligible for continuation.
+
+    We retain the host-stop refs and immutable records for audit, but a stale
+    planner revision (or an invalid receipt) cannot be treated as a living
+    worker and cannot be retried through the same attempt.  The active gate is
+    therefore blocked at the server-owned state boundary; its normal recovery
+    path will invalidate this failed attempt and issue a fresh Planner-first
+    dispatch rather than approving or consuming a stale plan.
+    """
+    rejected: list[str] = []
+    for candidate in candidates:
+        if candidate.get("candidate_report_refs"):
+            continue
+        attempt_id = safe_id(str(candidate.get("attempt_id") or ""))
+        attempt = _attempt(state, attempt_id)
+        if attempt.get("status") != "running" or attempt.get("lifecycle_status") != "report_recorded":
+            continue
+        attempt["status"] = "failed"
+        attempt["lifecycle_status"] = "needs_recovery"
+        attempt["finalized_at"] = now()
+        attempt["finalization_reason"] = "reported_worker_receipt_unusable"
+        attempt["host_stop_outcome"] = "report_recorded_unusable"
+        attempt["host_resumable"] = False
+        db_put_worker_session(root, {
+            "task_id": state["task_id"],
+            "attempt_id": attempt_id,
+            "host_agent_id": (attempt.get("host_spawn") or {}).get("agent_id"),
+            "host_task_name": str((attempt.get("spawn_request") or {}).get("task_name") or ""),
+            "host_tool": str((attempt.get("spawn_request") or {}).get("host_tool") or "spawn_agent"),
+            "status": "stopped_recoverable",
+            "resumable": False,
+            "started_at": attempt.get("spawn_requested_at") or attempt.get("started_at"),
+            "terminated_at": attempt.get("finalized_at"),
+        })
+        rejected.append(attempt_id)
+    if rejected:
+        state["status"] = "blocked"
+        state["blocked_reason"] = (
+            "stopped worker reports cannot be safely consumed; recover with a fresh Planner-first dispatch"
+        )
+        state.setdefault("reported_attempt_recovery", []).append({
+            "attempt_ids": rejected,
+            "reason": "reported_worker_receipt_unusable",
+            "at": now(),
+        })
+        state["reported_attempt_recovery"] = state["reported_attempt_recovery"][-32:]
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "reported_attempt_recovery",
+            "stopped worker reports were ineligible for canonical continuation",
+        )
+    return rejected
+
+
 def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
     task_id = safe_id(str(params.get("task_id", "")))
     root = ledger_root(params)
+    completion_candidates: list[dict[str, Any]] = []
+    recovered_attempt_ids: list[str] = []
     with state_lock(root):
         _, task_dir, state = load_state(task_id, params)
         authorize(state, params)
@@ -3183,6 +3366,16 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
                 "worker_lease_recovery",
                 "expired worker lifecycle lease marked needs_recovery",
             )
+        locked_plan = _load_orchestrate_plan(task_dir, state)
+        completion_candidates = _reported_attempt_completion_candidates(task_dir, state, locked_plan)
+        recovered_attempt_ids = _fail_unselectable_reported_attempts(
+            root, task_dir, state, completion_candidates
+        )
+        if recovered_attempt_ids:
+            # The failed state changes the inspect projection from a completion
+            # selection prompt to a normal blocked Planner-first recovery.  Do
+            # not expose stale candidate refs as selectable after this boundary.
+            completion_candidates = []
     task = load_task_definition(task_dir, state)
     plan = _load_orchestrate_plan(task_dir, state)
     current_wave = _wave_for_gates(plan, active_gates(state))
@@ -3235,6 +3428,14 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
             "active_workers": context_handoff["active_workers"],
             "stopped_workers": context_handoff["stopped_workers"],
             "context_handoff": context_handoff,
+            **(
+                {"reported_attempt_recovery": {"attempt_ids": recovered_attempt_ids}}
+                if recovered_attempt_ids else {}
+            ),
+            **(
+                {"pending_report_completions": completion_candidates}
+                if completion_candidates else {}
+            ),
             **(
                 {"plan_review": dict(_plan_approval(state).get("review") or {})}
                 if _plan_approval_is_pending(state) else {}

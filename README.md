@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.7-7c3aed" alt="Cortex 9.2.7" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.9-7c3aed" alt="Cortex 9.2.9" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -690,7 +690,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.7 recovery hardening release
+### 9.2.9 stopped-report recovery and disaster-recovery hardening release
 
 The current source-tree hardening draft extends governance with schema v12
 integrity guarantees. Governance record bodies are read from verified
@@ -727,7 +727,11 @@ Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
 reuse a bounded digest cache. A partial capture remains diagnostic evidence
 only: it cannot authorize read-only mutation reconciliation, a handoff, or
 terminal close. CI runs the 50,000-file manifest benchmark and requires
-`target_met: true`. The exact 9.2.7 cachebuster and full release/live results
+`target_met: true`. A stopped native worker that has already recorded reports
+is completion-pending rather than live: Cortex requires an explicit
+receipt-attested report selection, refuses stale Planner revisions, and falls
+back to a fresh Planner-first recovery when none can be safely consumed. The
+exact 9.2.9 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.

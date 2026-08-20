@@ -151,8 +151,8 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             f"public `get_report_template` tool with this exact identity. It creates a private temporary JSON file "
             f"and returns draft_path plus draft_ref. Open that file, replace every placeholder, and call "
             f"`record_report` with this identity and draft_ref. Its report has {report_contract}; use [] "
-            "when empty. If the host sandbox cannot edit draft_path, send one complete replacement once or a small "
-            "JSON Merge Patch through record_report. "
+            "when empty. If the host sandbox cannot edit draft_path, send one complete `report` object or a small "
+            "JSON Merge Patch in `patch` through record_report; `replacement` is not a public field. "
             "Never route work; coordinator routes. "
             "Every "
             "changed_files item must be a safe project-relative path, never absolute, `..`, URI, or prose. After "
@@ -184,19 +184,21 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Do not subdelegate. Return questions and blockers to the main chat. "
             "Before finishing, call get_report_template, edit its returned private draft_path, replace every "
             "placeholder, and publish that same draft_ref through record_report. If the sandbox cannot edit the file, "
-            "use a small patch or a complete replacement in record_report. Invalid records keep the draft and consume "
+            "use a small `patch` or a complete `report` object in record_report; never use a `replacement` field. Invalid records keep the draft and consume "
             "no worker attempt; correct the diagnostics and retry the same call. The final tool validates, commits, "
             "and deletes the same file only after success. "
-            f"Use attempt_id={package['attempt_id']!r} exactly and a stable lowercase submission_id such as "
-            f"{package['attempt_id']}-report-1; never substitute the profile name for the attempt id. "
+            f"Use attempt_id={package['attempt_id']!r} exactly; never substitute the profile name for the attempt id. "
+            "For record_report, send only its public worker identity (project_root, task_id, attempt_id, profile) "
+            "and draft_ref, plus an optional patch or report payload. Do not send task_ref, dispatch_ref, or "
+            "submission_id: those are not record_report fields. "
             f"The report object must contain {report_contract}. Never route work; the coordinator owns routing. "
             "Use [] when empty; "
             "never "
             "omit evidence or any other key. Every changed_files item must be a safe project-relative path such as "
             "`docs/features/trading/index.md`; never use an absolute path, `..`, a URI, or prose in changed_files. "
-            "Put descriptive details in findings or evidence instead. Reuse the same submission_id only for a byte-identical retry. If the "
-            "report content changes after validation, increment the suffix (for example, -report-2) instead of "
-            "reusing the prior id. Do not publish after the coordinator has cancelled, superseded, or reworked this "
+            "Put descriptive details in findings or evidence instead. If report validation fails, correct the same draft or "
+            "patch and retry record_report with the public worker fields only. Do not publish after the coordinator has "
+            "cancelled, superseded, or reworked this "
             "attempt; preserve the stale-attempt error and stop rather than retrying with another attempt id. "
             "If a requirement, branch, trade-off, missing fact, or implementation choice needs user approval, "
             "do not decide silently: call cortex.question with this task_id, the coordinator principal, "
@@ -643,7 +645,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         )
     predecessor_refs = list(assignment.get("predecessor_report_refs") or [])
     predecessor_rule = (
-        "Verified predecessor handoff refs: " + ", ".join(predecessor_refs) + ". Before repository work, read every ref with the public read_worker_report tool. If complete=false, keep "
+        "Verified predecessor handoff refs: " + ", ".join(predecessor_refs) + ". Before repository work, read every ref with the public read_worker_report tool using "
+        f"project_root={package.get('project_root')!r}, task_ref={package.get('task_ref')!r}, attempt_id={package.get('attempt_id')!r}, profile={agent!r}, and that exact report_ref. If complete=false, keep "
         "calling with next_cursor until complete=true. Predecessor review requirement: reconcile every handoff against current source/tests, then include `"
         + _predecessor_review_marker(predecessor_refs) + "` in report.evidence."
         if predecessor_refs else
@@ -733,10 +736,11 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         changed_files_rule,
         "Use current source/tests as authority. Read each unchanged source range once. Record facts, inference, uncertainty, "
         "changed files, and exact executed checks honestly; never claim an unrun check.",
-        "report.tests entries require an exact command (no `...`), cwd, integer exit_code 0, and concrete observed evidence; preserve any nonzero executed result as a failed gate rather than a passing report.",
-        f"Use attempt_id={package.get('attempt_id')!r} exactly and a stable lowercase submission_id for each semantic payload; reuse it only for a byte-identical retry. Then call the public `get_report_template` tool; it returns draft_path plus draft_ref. Edit that private draft and call `record_report` with this identity and draft_ref; if direct draft editing is unavailable, send one complete replacement or a small JSON Merge Patch. Use task_ref={package.get('task_ref')!r}, "
-        f"attempt_id={package.get('attempt_id')!r}, profile={agent!r}, and the exact task identity and draft_ref from this dispatch. "
+        "report.tests entries require an exact command (no `...`), cwd, integer exit_code 0, and concrete observed evidence; preserve any nonzero executed result as a failed gate rather than a passing report. A known baseline belongs in findings or limitations, not as a fabricated passing test.",
+        f"Use attempt_id={package.get('attempt_id')!r} exactly. Then call the public `get_report_template` tool; it returns draft_path plus draft_ref. Edit that private draft and call `record_report` with this identity and draft_ref; if direct draft editing is unavailable, send one complete `report` object or a small JSON Merge Patch in `patch`; `replacement` is not a public field. For record_report, use only project_root={package.get('project_root')!r}, "
+        f"task_id={package.get('task_id')!r}, attempt_id={package.get('attempt_id')!r}, profile={agent!r}, draft_ref, and optional patch/report fields. Do not send task_ref, dispatch_ref, or submission_id. "
         "The report object has exactly 7 keys: summary, findings, questions, changed_files, tests, evidence, uncertainty." + report_extra,
+        "For review/close gate_result.failure_class use exactly one of product, infrastructure, environment, policy, or worker. A known baseline is a limitation, not a failure_class value.",
         "Outside review/close, gate_result is optional and pass uses findings=[]; corrective workers may not resolve inherited findings; never add the legacy closure alias.",
         "Include `Dispatch briefing reviewed: <briefing_digest>` in report.evidence. Correct retryable schema errors on this same attempt; invalid records consume no worker attempt. Stop only on retryable=false.",
         "After success return only REPORT_RECORDED report_ref=<id> plus at most two sentences; do not paste or reproduce that JSON.",

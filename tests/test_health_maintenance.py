@@ -1,7 +1,9 @@
 """Deterministic coverage for explicit SQLite health maintenance."""
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import os
 import sys
 import tempfile
@@ -12,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
-from cortex_runtime import health_maintenance, ledger_db
+from cortex_runtime import governance, health_maintenance, ledger_db
 import cortex
 
 
@@ -39,26 +41,90 @@ class HealthMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["checkpoint"]["performed"])
         self.assertEqual(database.stat().st_mtime_ns, before)
 
-    def test_sqlite_backup_and_restore_verification_are_consistent_and_private(self) -> None:
+    def test_dr_bundle_restores_governance_authenticity_on_a_fresh_host_root(self) -> None:
         directory, root = self.make_root()
         self.addCleanup(directory.cleanup)
         ledger_db.put_global(root, "health-backup-fixture", {"value": "canonical"})
+        governance.create_record(
+            root,
+            record_type="policy",
+            content={"fixture": "backup-governance"},
+            status="approved",
+            created_by="coordinator",
+        )
 
         backup = health_maintenance.manage_health_maintenance(root, {
-            "action": "backup", "confirmation": "BACKUP", "backup_name": "ledger-check.sqlite",
+            "action": "backup", "confirmation": "BACKUP", "backup_name": "ledger-check.cortex-backup",
         })
         verified = health_maintenance.manage_health_maintenance(root, {
-            "action": "verify_backup_restore", "backup_name": "ledger-check.sqlite",
+            "action": "verify_backup_restore", "backup_name": "ledger-check.cortex-backup",
         })
-        target = root / "backups" / "ledger-check.sqlite"
+        target = root / "backups" / "ledger-check.cortex-backup"
 
         self.assertEqual(backup["operation"], "backup")
-        self.assertTrue(target.is_file())
+        self.assertEqual(backup["bundle_schema"], "cortex/ledger-backup/v1")
+        self.assertTrue(target.is_dir())
         self.assertEqual(target.stat().st_mode & 0o077, 0)
+        for member in target.iterdir():
+            self.assertEqual(member.stat().st_mode & 0o077, 0, member)
+        self.assertTrue((target / "cortex.db").is_file())
+        self.assertTrue((target / "governance-lifecycle.key").is_file())
+        self.assertTrue((target / "manifest.json").is_file())
+        self.assertNotIn("governance_lifecycle_key", backup)
         self.assertTrue(verified["restored_with_sqlite_backup_api"])
         self.assertTrue(verified["quick_check"]["ok"])
         self.assertTrue(verified["foreign_key_check"]["ok"])
         self.assertTrue(verified["schema"]["current"])
+        self.assertTrue(verified["governance"]["fresh_host_root"])
+        self.assertEqual(verified["governance"]["verified_records"], 1)
+
+    def test_backup_verification_rejects_tampered_key_or_legacy_sqlite_snapshot(self) -> None:
+        directory, root = self.make_root()
+        self.addCleanup(directory.cleanup)
+        health_maintenance.manage_health_maintenance(root, {
+            "action": "backup", "confirmation": "BACKUP", "backup_name": "tamper.cortex-backup",
+        })
+        key = root / "backups" / "tamper.cortex-backup" / "governance-lifecycle.key"
+        key.write_bytes(b"x" * 32)
+        key.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "key fingerprint"):
+            health_maintenance.manage_health_maintenance(root, {
+                "action": "verify_backup_restore", "backup_name": "tamper.cortex-backup",
+            })
+        with self.assertRaisesRegex(ValueError, "safe .cortex-backup bundle name"):
+            health_maintenance.manage_health_maintenance(root, {
+                "action": "backup", "confirmation": "BACKUP", "backup_name": "legacy.sqlite",
+            })
+
+    def test_backup_verification_uses_governance_authority_not_only_manifest_hashes(self) -> None:
+        directory, root = self.make_root()
+        self.addCleanup(directory.cleanup)
+        governance.create_record(
+            root,
+            record_type="policy",
+            content={"fixture": "authority-check"},
+            status="approved",
+            created_by="coordinator",
+        )
+        health_maintenance.manage_health_maintenance(root, {
+            "action": "backup", "confirmation": "BACKUP", "backup_name": "authority.cortex-backup",
+        })
+        bundle = root / "backups" / "authority.cortex-backup"
+        key = bundle / "governance-lifecycle.key"
+        # Model a bundle attacker who can also recompute the non-secret
+        # manifest fingerprint.  The v12 lifecycle read must still reject the
+        # mismatched key rather than treating fingerprint agreement as proof.
+        key.write_bytes(b"y" * 32)
+        key.chmod(0o600)
+        manifest_path = bundle / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["governance_lifecycle_key"]["sha256"] = hashlib.sha256(key.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        manifest_path.chmod(0o600)
+        with self.assertRaisesRegex(governance.GovernanceError, "lifecycle authority"):
+            health_maintenance.manage_health_maintenance(root, {
+                "action": "verify_backup_restore", "backup_name": "authority.cortex-backup",
+            })
 
     def test_mutating_actions_require_exact_confirmation_and_backup_names_are_contained(self) -> None:
         directory, root = self.make_root()
@@ -66,7 +132,7 @@ class HealthMaintenanceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "confirmation='CHECKPOINT'"):
             health_maintenance.manage_health_maintenance(root, {"action": "checkpoint"})
-        with self.assertRaisesRegex(ValueError, "safe .sqlite filename"):
+        with self.assertRaisesRegex(ValueError, "safe .cortex-backup bundle name"):
             health_maintenance.manage_health_maintenance(root, {
                 "action": "backup", "confirmation": "BACKUP", "backup_name": "../escape.sqlite",
             })
