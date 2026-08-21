@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.18-7c3aed" alt="Cortex 9.2.18" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.19-7c3aed" alt="Cortex 9.2.19" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,6 +691,37 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
+### 9.2.19 bounded report intake and hook snapshot release
+
+This source-tree patch prepares report drafts outside the mutation lease and
+revalidates the task revision, draft registration, file identity, and content
+digest before the final commit. Lock acquisition is bounded to five seconds;
+the commit itself remains serialized and may still perform canonical artifact,
+finding, and index writes. All ledger mutation paths now use the same bounded
+lock-acquisition policy by default, with non-secret holder metadata in
+retryable `ledger_busy` diagnostics. Contention returns retryable
+`ledger_busy`; stale preparation preserves the draft and returns retryable
+`stale_preparation`. The `CORTEX_REPORT_PREPARE_COMMIT=off` environment flag
+retains the serialized legacy path for rollback without invalidating committed
+artifacts or queued projections.
+
+Lifecycle hooks read one existing SQLite database through a bounded read-only
+snapshot and keep optional telemetry writes fail-open with a 100 ms busy
+timeout. Coordinator targetless waits and read-only file inspection receive
+non-blocking advisories; worker identity and all mutation boundaries remain
+fail-closed.
+
+Planner revisions preserve the complete requirement history and the latest
+user steer, require explicit requirement-to-plan coverage, and maintain one
+task-local tracker for package and microtask status, order, dependencies, gates,
+acceptance, and verification. Worker sessions rehydrate their exact immutable
+assignment, compiled plan unit, and user-intent artifact after compaction.
+User-facing updates use the configured `natural`, `compact`, or `technical`
+communication profile; internal identifiers remain in separate metadata, and
+start/progress/approval/question/problem/blocker/completion messages pass the
+same quality checks. Report validation returns all correctable diagnostics
+together.
+
 ### 9.2.18 orchestration recovery hardening release
 
 This source-tree patch removes dispatch-briefing size rejection from report
@@ -799,8 +830,9 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.18 cachebuster and full release/live results
-remain pending until the release commit is validated. The
+historical 9.2.18 cachebuster and release/live result slots belong to that
+prior candidate. Current 9.2.19 release evidence remains pending until the
+release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
 

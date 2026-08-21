@@ -1,5 +1,34 @@
 # Changelog
 
+## [9.2.19] - 2026-08-21
+
+This source-tree patch hardens bounded report intake and lifecycle-hook
+snapshots without weakening ledger integrity.
+
+- Prepare and validate worker report drafts outside the mutation lease, then
+  recheck task revision, draft identity, and content digest in the final
+  serialized commit. Lock acquisition is bounded; contention and stale
+  preparation remain retryable and preserve the draft;
+  `CORTEX_REPORT_PREPARE_COMMIT=off` retains the serialized fallback.
+- Bound every ledger mutation lock by default and return structured
+  `ledger_busy` diagnostics with non-secret holder metadata; expected
+  contention is not written to the private tool-error log.
+- Read lifecycle-hook state through a bounded read-only SQLite snapshot and keep
+  optional telemetry writes fail-open when the database is busy.
+- Preserve every user requirement and the latest steer in Planner feedback,
+  require traceability coverage for revised tasks, and expose a single mutable
+  task-local plan tracker with status, order, dependencies, gates, acceptance,
+  and verification for every package and microtask.
+- Add `natural`, `compact`, and `technical` user-communication profiles with
+  separated internal metadata and quality checks for start, progress, plan
+  approval, questions, errors, blockers, and completion; aggregate all report
+  validation diagnostics in one safe retry response.
+- Rehydrate an exact worker's immutable assignment, compiled plan unit, and
+  user-intent artifact after compaction/reset, failing closed on ambiguous
+  identity or missing artifacts.
+- Align the marketplace validator, installer, documentation, and invariant
+  checks with the 9.2.19 source manifest.
+
 ## [9.2.18] - 2026-08-21
 
 This source-tree patch closes report and corrective-orchestration liveness

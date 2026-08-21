@@ -68,6 +68,35 @@ class RecordReportSliceTests(HostPrivateControlStoreTestMixin, unittest.TestCase
     def tearDown(self) -> None:
         self.tear_down_host_private_control_store()
 
+    def test_gate_validation_returns_all_test_diagnostics_and_preserves_failure_evidence(self):
+        report = {
+            "summary": "review",
+            "findings": [],
+            "questions": [],
+            "changed_files": [],
+            "tests": [
+                {"command": "pytest", "cwd": ".", "exit_code": "0", "evidence": ""},
+                {"command": "...", "cwd": "../outside", "exit_code": 1, "evidence": "observed failure"},
+            ],
+            "evidence": ["Observed failing check: pytest reported one assertion failure."],
+            "uncertainty": [],
+        }
+        with mock.patch.object(control, "load_task_definition", return_value={"project_root": "."}), \
+             mock.patch.object(control, "_validate_dispatch_briefing_review", return_value={}), \
+             mock.patch.object(control, "_result_contract_markers", return_value=[]):
+            with self.assertRaises(control.ReportValidationError) as raised:
+                control._validate_gate_result_report(
+                    Path("."), {}, {"gate": "review", "attempt_id": "attempt-1"}, report,
+                )
+        diagnostics = raised.exception.diagnostics
+        paths = {item["path"] for item in diagnostics}
+        self.assertIn("report.tests[0].exit_code", paths)
+        self.assertIn("report.tests[0].evidence", paths)
+        self.assertIn("report.tests[1].command", paths)
+        self.assertIn("report.tests[1].cwd", paths)
+        self.assertIn("report.tests", paths)
+        self.assertEqual(report["evidence"], ["Observed failing check: pytest reported one assertion failure."])
+
     def test_domain_ports_and_use_case_do_not_depend_on_runtime_facades(self):
         modules = ("domain.py", "ports.py", "use_case.py")
         root = SCRIPTS / "cortex_runtime" / "record_report"
@@ -278,6 +307,71 @@ class RecordReportSliceTests(HostPrivateControlStoreTestMixin, unittest.TestCase
                     [item["report_id"] for item in control.list_task_reports({**scope, "task_id": "independent-draft", "principal": "owner-independent-draft"})["reports"]],
                     ["report-0001"],
                 )
+            finally:
+                if old_project is None:
+                    os.environ.pop("CORTEX_PROJECT_ROOT", None)
+                else:
+                    os.environ["CORTEX_PROJECT_ROOT"] = old_project
+
+    def test_manifest_cas_after_preliminary_recheck_keeps_draft_and_attempt_retryable(self):
+        """A source change in the final commit window must not consume the attempt."""
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir()
+            old_project = os.environ.get("CORTEX_PROJECT_ROOT")
+            os.environ["CORTEX_PROJECT_ROOT"] = str(project)
+            try:
+                scope = {"project_root": str(project)}
+                control.activate_orchestration({**scope, "user_command": "/cortex", "principal": "owner", "thread_id": "owner"})
+                classified = control.classify_task({**scope, "complexity": "C1", "requirements": [], "principal": "owner"})
+                created = control.init_task({
+                    **scope, "task_id": "cas-task", "objective": "cas test", "complexity": "C1",
+                    "classification_id": classified["classification_id"], "requirements": [],
+                    "principal": "owner", "thread_id": "owner",
+                })
+                observed = control.status({**scope, "task_id": "cas-task", "principal": "owner"})
+                delegated = control.record_delegation({
+                    **scope, "task_id": "cas-task", "principal": "owner", "expected_revision": created["state"]["revision"],
+                    "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
+                    "task_kind": "discover", "risk": "low", "objective": "inspect", "ownership": "Read-only discovery",
+                    "allowed_paths": ["."], "acceptance_criteria": ["Report findings"], "verification": ["Cite inspected paths"],
+                })
+                control.confirm_host_spawn({
+                    **scope, "task_id": "cas-task", "principal": "owner", "expected_revision": delegated["state"]["revision"],
+                    "attempt_id": delegated["attempt_id"], "host_agent_id": "cas-worker",
+                    "host_task_name": delegated["spawn_request"]["task_name"], "host_model": delegated["spawn_request"]["model"],
+                })
+                identity = {**scope, "task_id": "cas-task", "attempt_id": delegated["attempt_id"], "profile": "explorer"}
+                template = control.get_report_template(identity)
+                draft_path = Path(template["draft_path"])
+                envelope = json.loads(draft_path.read_text(encoding="utf-8"))
+                envelope["report"].update({
+                    "summary": "cas report", "findings": [], "questions": [], "changed_files": [], "tests": [],
+                    "evidence": [envelope["report"]["evidence"][0], "Gate acceptance 1: PASS - Report findings observed.", "Gate verification 1: PASS - Cite inspected paths observed."],
+                    "uncertainty": [],
+                })
+                reports._write_report_draft_file(draft_path, envelope)
+                payload = {**identity, "draft_ref": template["draft_ref"]}
+                original = reports._revalidate_prepared_result_manifest
+                calls = 0
+
+                def fail_on_final(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        raise reports.StaleReportPreparationError("project manifest changed during report preparation")
+                    return original(*args, **kwargs)
+
+                with mock.patch.object(reports, "_revalidate_prepared_result_manifest", side_effect=fail_on_final):
+                    stale = control.publish_worker_report(payload)
+                self.assertEqual(stale["outcome"], "stale_preparation")
+                self.assertFalse(stale["attempt_budget_consumed"])
+                self.assertTrue(draft_path.exists(), "stale preparation must retain the worker draft")
+                self.assertEqual(control.list_task_reports({**scope, "task_id": "cas-task", "principal": "owner"})["reports"], [])
+
+                accepted = control.publish_worker_report(payload)
+                self.assertTrue(accepted["ok"], accepted)
+                self.assertEqual(accepted["report_ref"], "report-0001")
             finally:
                 if old_project is None:
                     os.environ.pop("CORTEX_PROJECT_ROOT", None)

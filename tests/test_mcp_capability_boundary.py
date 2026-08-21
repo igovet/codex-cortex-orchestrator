@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
@@ -16,6 +18,7 @@ SCRIPTS = Path(__file__).parents[1] / "plugins" / "cortex" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import cortex
+from cortex_runtime import mcp_api
 
 
 class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
@@ -29,6 +32,43 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
     def tearDown(self) -> None:
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
+
+    def test_stdio_ledger_busy_is_structured_and_skips_tool_error_log(self) -> None:
+        def busy_handler(_arguments: dict[str, object]) -> dict[str, object]:
+            raise cortex.LedgerBusyError(
+                "report_publication",
+                37,
+                holder={"pid": 123, "operation": "report_publication", "task_id": "task-1"},
+            )
+
+        request = {
+            "jsonrpc": "2.0",
+            "id": "busy-1",
+            "method": "tools/call",
+            "params": {"name": "start_orchestration", "arguments": {}},
+        }
+        output = io.StringIO()
+        with mock.patch.object(mcp_api.sys, "stdin", io.StringIO(json.dumps(request) + "\n")), \
+            mock.patch.object(mcp_api.sys, "stdout", output), \
+            mock.patch("cortex_runtime.mcp_api.log_tool_error", create=True) as log_error:
+            mcp_api.serve_stdio(
+                public_tools={"start_orchestration": (busy_handler, {})},
+                internal_handlers={},
+                server_version="9.2.19",
+                instructions="test",
+                log_tool_error=log_error,
+                audience="coordinator",
+            )
+
+        response = json.loads(output.getvalue())
+        self.assertEqual(response["error"]["code"], -32009)
+        data = response["error"]["data"]
+        self.assertEqual(data["schema"], "cortex/ledger-busy/v1")
+        self.assertTrue(data["retryable"])
+        self.assertEqual(data["operation"], "report_publication")
+        self.assertEqual(data["held_duration_ms"], 37)
+        self.assertNotIn("token", data["holder"])
+        log_error.assert_not_called()
 
     def _rpc(self, audience: str | None, request: dict[str, object]) -> dict[str, object]:
         command = [sys.executable, str(self.server)]
