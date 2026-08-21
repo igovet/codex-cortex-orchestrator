@@ -69,7 +69,7 @@ class ToolDedupeTests(unittest.TestCase):
         succeeded = self.event(agent_id="agent-a", tool_response={"content": "first version\n"})
         self.assertIsNone(cortex_hook.apply_tool_deduplication(succeeded, self.project, self.ledger, "task-a", state))
         duplicate = cortex_hook.apply_tool_deduplication(pre, self.project, self.ledger, "task-a", state)
-        self.assertEqual(duplicate, {"duplicate": True, "tool_name": "Read"})
+        self.assertEqual(duplicate, {"duplicate": True, "tool_name": "Read", "resource_kind": "project_file"})
 
         observation = self.observation(agent_id="agent-a")
         with ledger_db._connection(self.ledger) as connection:
@@ -86,6 +86,37 @@ class ToolDedupeTests(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "PreToolUse")
         self.assertNotIn("permissionDecision", output)
         self.assertIn("remains allowed", output["additionalContext"])
+
+    def test_owned_cortex_skill_read_gets_a_specific_duplicate_advisory(self):
+        skill = cortex_hook.CORTEX_SKILLS_ROOT / "cortex-control" / "SKILL.md"
+        self.assertTrue(skill.is_file())
+        state = {"attempts": [{"attempt_id": "attempt-a", "host_spawn": {"agent_id": "agent-a"}}]}
+        succeeded = self.event(agent_id="agent-a", tool_input={"file_path": str(skill)}, tool_response={"content": "skill"})
+        pre = self.event(hook="PreToolUse", agent_id="agent-a", tool_input={"file_path": str(skill)})
+
+        observation = cortex_hook.tool_observation(succeeded, self.project, "task-a", "attempt-a", 0)
+        self.assertTrue(observation["cacheable"])
+        self.assertEqual(observation["resource_kind"], "cortex_skill")
+        self.assertNotIn(str(skill), observation["normalized_arguments"])
+        self.assertIsNone(cortex_hook.apply_tool_deduplication(succeeded, self.project, self.ledger, "task-a", state))
+        duplicate = cortex_hook.apply_tool_deduplication(pre, self.project, self.ledger, "task-a", state)
+        self.assertEqual(duplicate, {"duplicate": True, "tool_name": "Read", "resource_kind": "cortex_skill"})
+
+        output = cortex_hook.duplicate_read_advisory(duplicate["resource_kind"])["hookSpecificOutput"]
+        self.assertIn("exact bundled skill", output["additionalContext"])
+        self.assertIn("remains allowed", output["additionalContext"])
+
+        # A host-reported compaction starts a new durable context epoch.  The
+        # same immutable skill may legitimately load again after that boundary.
+        after_compaction = self.event(
+            hook="PreToolUse",
+            agent_id="agent-a",
+            context_epoch=1,
+            tool_input={"file_path": str(skill)},
+        )
+        self.assertIsNone(cortex_hook.apply_tool_deduplication(
+            after_compaction, self.project, self.ledger, "task-a", state,
+        ))
 
     def test_search_observations_hash_query_and_are_never_cacheable(self):
         secret = "not-for-ledger-token"
