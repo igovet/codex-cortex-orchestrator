@@ -1,5 +1,23 @@
 # Changelog
 
+## [9.2.20] - 2026-08-21
+
+This source-tree patch closes the remaining human-boundary, dispatch-authority,
+and release-marker gaps.
+
+- Validate user-facing candidates before redaction, apply complete metadata and
+  path removal in every communication profile, and keep localized natural,
+  compact, technical, and neutral projections inside the public boundary.
+- Keep plan and question views limited to safe user content, with profile-aware
+  rendering and deterministic quality fallbacks; internal protocol data remains
+  under `internal`.
+- Reject public compact-wave requests for visible threads unless the immutable
+  task contract carries explicit `visible_thread_requested=true`; hidden
+  subagents remain the default and explicit visible-thread dispatches retain
+  their existing host checks.
+- Move release markers and validator expectations to 9.2.20 while preserving
+  the complete 9.2.19 historical entry.
+
 ## [9.2.19] - 2026-08-21
 
 This source-tree patch hardens bounded report intake and lifecycle-hook
@@ -23,6 +41,19 @@ snapshots without weakening ledger integrity.
   separated internal metadata and quality checks for start, progress, plan
   approval, questions, errors, blockers, and completion; aggregate all report
   validation diagnostics in one safe retry response.
+- Make `user_view` the human-facing boundary and keep a bounded machine
+  receipt/compatibility projection under `internal`; localize Russian and
+  English lifecycle/plan messages, map `neutral` to `natural`, enforce quality
+  fallbacks, keep worker waiting silent, and cover delegation/report
+  persistence with a live smoke test.
+- Preserve scalar task text as one atomic scope/requirement during task and
+  dispatch materialization, reject malformed list items, and return all
+  independent Planner identifier, dependency, and coverage-reference errors
+  with exact draft paths in one retry.
+- Require positive evidence for every passed gate, preserve failed checks for
+  honest blocked/rework results, harden harvest evidence and feature-page
+  validation, and prevent mutating task kinds or negated failure text from
+  taking read-only or incorrect recovery routes.
 - Rehydrate an exact worker's immutable assignment, compiled plan unit, and
   user-intent artifact after compaction/reset, failing closed on ambiguous
   identity or missing artifacts.

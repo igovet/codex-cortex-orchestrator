@@ -113,18 +113,24 @@ def delegation_lists(
     briefing: Mapping[str, Any],
 ) -> dict[str, list[str]]:
     """Select bounded worker contract lists with task-level inheritance only for paths."""
+    def text_items(value: object) -> list[str]:
+        # Legacy task definitions may have persisted one path/criterion as a
+        # scalar.  Treat it as one item instead of silently falling back to a
+        # broad default or iterating it character-by-character.
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, list):
+            return []
+        return [item.strip() for item in values if isinstance(item, str) and item.strip()]
+
     def choose(field: str, fallback: list[str], *, inherit_task: bool = False) -> list[str]:
         supplied = params.get(field)
-        if isinstance(supplied, list):
-            cleaned = [item.strip() for item in supplied if isinstance(item, str) and item.strip()]
+        cleaned = text_items(supplied)
+        if cleaned:
+            return cleaned
+        if inherit_task:
+            cleaned = text_items(task_definition.get(field))
             if cleaned:
                 return cleaned
-        if inherit_task:
-            inherited = task_definition.get(field)
-            if isinstance(inherited, list):
-                cleaned = [item.strip() for item in inherited if isinstance(item, str) and item.strip()]
-                if cleaned:
-                    return cleaned
         return fallback
 
     return {

@@ -68,6 +68,35 @@ class RecordReportSliceTests(HostPrivateControlStoreTestMixin, unittest.TestCase
     def tearDown(self) -> None:
         self.tear_down_host_private_control_store()
 
+    def test_rejected_draft_preserves_structured_paths_and_fixes(self):
+        result = reports._draft_record_failure({
+            "outcome": "needs_correction",
+            "code": "report_validation_failed",
+            "next_action": "generic fallback that must not replace field fixes",
+            "diagnostics": [{
+                "code": "report_validation_failed",
+                "path": "report.tests[1].evidence",
+                "message": "result evidence is not concrete",
+                "fix": "Replace report.tests[1].evidence with observed output.",
+            }],
+        }, draft_ref="draft-regression")
+
+        self.assertTrue(result["draft_persisted"])
+        self.assertEqual(result["draft_ref"], "draft-regression")
+        self.assertEqual(result["diagnostics"][0]["path"], "report.tests[1].evidence")
+        self.assertEqual(result["diagnostics"][0]["fix"], "Replace report.tests[1].evidence with observed output.")
+
+    def test_generic_value_error_with_diagnostics_is_aggregated(self):
+        class StructuredValueError(ValueError):
+            diagnostics = [
+                {"code": "report_field_missing", "path": "report.summary", "message": "summary missing", "fix": "Add summary."},
+                {"code": "report_field_missing", "path": "report.evidence", "message": "evidence missing", "fix": "Add evidence."},
+            ]
+
+        diagnostics = reports._validation_diagnostics(StructuredValueError("report validation failed"))
+        self.assertEqual([item["path"] for item in diagnostics or []], ["report.summary", "report.evidence"])
+        self.assertEqual([item["fix"] for item in diagnostics or []], ["Add summary.", "Add evidence."])
+
     def test_gate_validation_returns_all_test_diagnostics_and_preserves_failure_evidence(self):
         report = {
             "summary": "review",
@@ -96,6 +125,53 @@ class RecordReportSliceTests(HostPrivateControlStoreTestMixin, unittest.TestCase
         self.assertIn("report.tests[1].cwd", paths)
         self.assertIn("report.tests", paths)
         self.assertEqual(report["evidence"], ["Observed failing check: pytest reported one assertion failure."])
+
+    def test_gate_markers_use_whole_words_and_reject_duplicates(self):
+        report = {
+            "summary": "review",
+            "findings": [],
+            "questions": [],
+            "changed_files": [],
+            "tests": [{"command": "pytest", "cwd": ".", "exit_code": 0, "evidence": "passed"}],
+            "evidence": [
+                "Gate acceptance 1: PASS - observed unknowns are documented in the findings",
+            ],
+            "uncertainty": [],
+        }
+        with mock.patch.object(control, "load_task_definition", return_value={"project_root": "."}), \
+             mock.patch.object(control, "_validate_dispatch_briefing_review", return_value={}), \
+             mock.patch.object(control, "_validate_result_artifacts", return_value={}), \
+             mock.patch.object(control, "_result_contract_markers", return_value=[("Gate acceptance 1: PASS - ", "criterion")]):
+            # ``unknowns`` is a concrete plural noun, not the unresolved marker
+            # ``unknown`` and must not be rejected as a substring false positive.
+            control._validate_gate_result_report(
+                Path("."), {}, {"gate": "review", "attempt_id": "attempt-1"}, report,
+            )
+            report["evidence"].append("Gate acceptance 1: PASS - second observed proof")
+            with self.assertRaisesRegex(ValueError, "expected exactly one PASS/BLOCKED marker"):
+                control._validate_gate_result_report(
+                    Path("."), {}, {"gate": "review", "attempt_id": "attempt-1"}, report,
+                )
+
+    def test_gate_validation_rejects_non_string_evidence_items(self):
+        report = {
+            "summary": "review",
+            "findings": [],
+            "questions": [],
+            "changed_files": [],
+            "tests": [{"command": "pytest", "cwd": ".", "exit_code": 0, "evidence": "passed"}],
+            "evidence": [123],
+            "uncertainty": [],
+        }
+        with mock.patch.object(control, "load_task_definition", return_value={"project_root": "."}), \
+             mock.patch.object(control, "_validate_dispatch_briefing_review", return_value={}), \
+             mock.patch.object(control, "_validate_result_artifacts", return_value={}), \
+             mock.patch.object(control, "_result_contract_markers", return_value=[]):
+            with self.assertRaises(control.ReportValidationError) as raised:
+                control._validate_gate_result_report(
+                    Path("."), {}, {"gate": "review", "attempt_id": "attempt-1"}, report,
+                )
+        self.assertIn("report.evidence", {item["path"] for item in raised.exception.diagnostics})
 
     def test_domain_ports_and_use_case_do_not_depend_on_runtime_facades(self):
         modules = ("domain.py", "ports.py", "use_case.py")
