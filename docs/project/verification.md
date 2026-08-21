@@ -133,7 +133,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.20 hardening release candidate above;
+candidate. They do not certify the 9.2.21 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -220,15 +220,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.20 source cachebuster. Historical
+The source manifest now declares the 9.2.21 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.20 release-candidate evidence status
+## 9.2.21 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.20 base version.
+source cachebuster is generated from the 9.2.21 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -238,11 +238,16 @@ candidate is committed and rerun on the exact release SHA:
 - Installed-plugin verification and cachebuster parity: **pending; no install
   or user `~/.codex` mutation is implied**.
 
-The 9.2.20 patch retains the 9.2.17/9.2.16 recovery guarantees, removes
+The 9.2.21 patch retains the 9.2.17/9.2.16 recovery guarantees, removes
 programmatic planner/dispatch briefing size rejection in favor of immutable
 plan-artifact references, and scopes no-progress pauses and evidence to their
 exact gate. Independent current-wave siblings remain executable, while a
 multi-pause recovery names and releases only its intended gate.
+Prompt Contract Architecture v2 adds deterministic `cortex-prompt-lint.py` and
+`cortex-prompt-eval.py` checks for ownership, source parity, section order,
+duplicate-section rejection, and the assignment data boundary. Offline evals
+do not call a model. Live evaluation remains pending unless an explicit
+no-fallback Luna-high executor is run and recorded separately.
 
 The draft scope covers governance schema v12 integrity, artifact-authoritative
 record bodies, exact scope and linear revisions, append-only status/approval
@@ -255,7 +260,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.20 source contract
+## Current 9.2.21 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -489,6 +494,8 @@ bounded identifiers.
 - The [Cortex offline-validation workflow](../../.github/workflows/cortex.yml) runs this suite on Python 3.11 and 3.12 with `PYTHONDONTWRITEBYTECODE=1`, `PYTHONUNBUFFERED=1`, and `PYTHONHASHSEED=0`; each command also uses `python -B` so hosted runs do not create bytecode or depend on hash iteration order.
 - The workflow runs the reportless plan-stop regression in an isolated step before the aggregate suite. Reproduce that gate locally with `PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 python3 -B -W error::ResourceWarning -m unittest -v tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry`.
 - `python3 scripts/cortex-cold-boot-smoke.py` — black-box JSON-RPC lifecycle smoke test; CI source: [cortex.yml](../../.github/workflows/cortex.yml).
+- `PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-prompt-lint.py && PYTHONDONTWRITEBYTECODE=1 python3 scripts/cortex-prompt-eval.py` — canonical prompt ownership/source lint and offline golden fixture checks. The eval compares exact SHA-256 output plus heading order/count/uniqueness, byte ceiling, dynamic-fence width, assignment-only hostile markers, and an explicit fixed v2-adapter/v3-compiler structural delta; it makes no model call or subjective quality claim.
+- `python3 scripts/cortex-prompt-live-eval.py --live` — optional real Codex A/B evidence, never a default or CI command. It renders the same fixture package through legacy v2 and canonical v3, launches each only as `gpt-5.6-luna` with `reasoning_effort=high`, no fallback, ephemeral/ignore-config/read-only execution, and bounded stream output/time. It normalizes schema/report shape, question/tool/metadata leakage, route/retry/replay/completion, output bytes, observed output tokens, and elapsed time. A missing Luna route or authentication returns `SKIP`/`BLOCKED`; neither is passing live evidence.
 - `python3 scripts/cortex-luna-high-eval.py` — deterministic Luna-high fixtures; add `--live --scenario automatic_sequential` for the ordinary lifecycle, `--live --scenario automatic_governance` for the C3 auto-governance lifecycle, `--live --scenario finding_rework_documentation` for the narrow seeded-origin finding route, or `--live --scenario finding_rework_documentation_full` for the complete real C2 finding lifecycle through Close and handoff. The full finding route can run on the nine-operation compatibility projection; host-provisioned per-agent audiences additionally prove strict role separation (coordinator for the parent, worker for every child). It neither installs nor verifies an installed plugin. `--live-timeout-seconds` accepts 10..7200 seconds and defaults to 1800; the narrow finding scenario is capped at 300 seconds, and the full finding scenario is capped at 1800 seconds. `--retain-failure-metadata` explicitly opts into bounded sanitized `/tmp` metadata. `SKIP` is not live evidence.
 - `python3 scripts/cortex-composite-benchmark.py` — MCP call-count contract benchmark; it makes no latency claim.
 - `python3 scripts/probe-fresh-cortex-plugin.py` — isolated fresh-plugin registration probe. `SKIP` means the Codex CLI is unavailable.

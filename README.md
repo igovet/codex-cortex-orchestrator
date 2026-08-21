@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.20-7c3aed" alt="Cortex 9.2.20" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.21-7c3aed" alt="Cortex 9.2.21" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,7 +691,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.20 human-boundary and dispatch-authority release
+### 9.2.21 prompt-contract and dispatch-authority release
 
 This source-tree patch prepares report drafts outside the mutation lease and
 revalidates the task revision, draft registration, file identity, and content
@@ -710,6 +710,20 @@ snapshot and keep optional telemetry writes fail-open with a 100 ms busy
 timeout. Coordinator targetless waits and read-only file inspection receive
 non-blocking advisories; worker identity and all mutation boundaries remain
 fail-closed.
+
+Prompt Contract Architecture v2 compiles each v3 briefing from the canonical
+ownership matrix: stable authority and worker policy are Markdown sections,
+while every dispatch-controlled value is fenced, untrusted assignment JSON.
+The old expanded v2 path is a deprecated compatibility adapter only. Offline
+prompt fixtures compare stable SHA-256 goldens and structural metrics (heading
+order/count, byte ceiling, one assignment boundary, and data-boundary markers),
+including a fixed v2-versus-v3 delta; they do not make model-quality claims.
+The separate live A/B runner is disabled unless explicitly selected. It sends
+both versions of the same fixture through Codex with exactly Luna at `high`
+reasoning, no fallback, and scores only structured response, report shape,
+question/tool/metadata leakage, route/retry/replay/completion signals, and
+bounded output/token/time observations. Missing Luna or authentication is
+`SKIP`/`BLOCKED`, never evidence of a pass.
 
 Planner revisions preserve the complete requirement history and the latest
 user steer, require explicit requirement-to-plan coverage, and maintain one
@@ -831,7 +845,7 @@ is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
 historical 9.2.18 cachebuster and release/live result slots belong to that
-prior candidate. Current 9.2.20 release evidence remains pending until the
+prior candidate. Current 9.2.21 release evidence remains pending until the
 release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.

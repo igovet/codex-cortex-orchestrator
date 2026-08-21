@@ -2,13 +2,13 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.20` source line. The public
+Security fixes are prepared for the current `9.2.21` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.20 source candidate retains stopped-report and duplicate-skill-read
+The 9.2.21 source candidate retains stopped-report and duplicate-skill-read
 recovery integrity, removes briefing size rejection while preserving immutable
 artifact transport, and scopes no-progress pauses to their exact gate. Its
 bounded report intake uses a prepare/commit CAS with retryable busy and stale
@@ -18,9 +18,20 @@ acquisition; the acquired report commit remains serialized until its canonical
 SQLite/artifact writes finish. `ledger_busy` holder metadata excludes the
 private owner token.
 Its exact source cachebuster is generated from
-the 9.2.20 base version;
+the 9.2.21 base version;
 tracked-release and installed-plugin parity remain separate gates, and this
 source-tree note is not a publication or installation claim.
+Prompt Contract Architecture v2 keeps every dispatch-controlled path, identity,
+digest, report reference, and user-authored value inside one explicitly
+untrusted fenced JSON assignment block. The v3 compiler never interpolates
+those values into normative Markdown instructions; a data value cannot become a
+heading, tool protocol line, or replacement authority.
+The optional prompt A/B runner remains disabled by default. When explicitly
+requested it sends each fixed compiled fixture to `codex exec` through stdin
+only, with an ephemeral, ignore-user-config/read-only Luna-high invocation and
+no fallback. Its normalized result excludes prompts, model prose, and raw tool
+arguments; unavailable model or authentication is `SKIP`/`BLOCKED`, never
+passing live evidence.
 The 9.2.16 source candidate retains stopped-report recovery integrity, private
 report-draft descriptor validation, importlib-safe lifecycle-hook runtime
 resolution, and active corrective-report preservation across multi-hop
