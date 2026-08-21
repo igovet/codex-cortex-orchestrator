@@ -18,6 +18,7 @@ class CommunicationProfileTests(unittest.TestCase):
 
     def test_aliases_and_human_message_types(self):
         self.assertEqual(communication.select_profile({"communication_profile": "detailed"}), "technical")
+        self.assertEqual(communication.select_profile({"communication_profile": "neutral"}), "natural")
         self.assertEqual(communication.message_type("blocked"), "Action needed")
         self.assertEqual(communication.message_type("private_internal_value"), "Update")
 
@@ -67,6 +68,113 @@ class CommunicationProfileTests(unittest.TestCase):
                 self.assertTrue(result["next_step"])
                 self.assertTrue(result["quality"]["ok"], result)
                 self.assertNotRegex(result["message"], communication._INTERNAL_RE)
+
+    def test_profiles_localize_and_have_distinct_detail_levels(self):
+        natural = communication.render_lifecycle(
+            "completed", config={"communication_profile": "natural", "user_language": "ru"}
+        )
+        compact = communication.render_lifecycle(
+            "completed", config={"communication_profile": "compact", "user_language": "en"}
+        )
+        technical = communication.render_lifecycle(
+            "completed", config={"communication_profile": "technical", "user_language": "en"}
+        )
+        self.assertIn("Задача завершена", natural["message"])
+        self.assertEqual({natural["detail_level"], compact["detail_level"], technical["detail_level"]},
+                         {"plain", "minimal", "diagnostic"})
+        self.assertIn("technical_context", technical)
+
+    def test_natural_and_compact_hide_internal_values_and_waiting_is_silent(self):
+        for profile in ("natural", "compact"):
+            rendered = communication.render(
+                "Task abc1234567890abcdef is complete.",
+                config={"communication_profile": profile},
+                next_step="Review the result.",
+            )
+            self.assertNotIn("abc1234567890abcdef", rendered["message"])
+        waiting = communication.render_lifecycle("waiting_workers")
+        self.assertEqual(waiting["output_policy"], "silent")
+
+    def test_technical_profile_keeps_diagnostics_but_redacts_values_and_paths(self):
+        rendered = communication.render(
+            "Inspect the ledger pipeline and report the diagnostic result.",
+            config={"communication_profile": "technical"},
+            next_step="Review the diagnostic result.",
+        )
+        self.assertEqual(rendered["profile"], "technical")
+        self.assertIn("ledger", rendered["message"])
+        self.assertTrue(rendered["quality"]["ok"], rendered)
+        redacted = communication.render(
+            "Inspect task_ref=task-123 in plugins/cortex/private.py through the ledger pipeline.",
+            config={"communication_profile": "technical"},
+            next_step="Review the diagnostic result.",
+        )
+        self.assertNotIn("task-123", redacted["message"])
+        self.assertNotIn("plugins/cortex/private.py", redacted["message"])
+
+    def test_raw_quality_failure_cannot_become_a_fragment_after_redaction(self):
+        rendered = communication.render(
+            "Use plugins/cortex/private.py after task_ref=task-123.",
+            kind="question",
+            next_step="Choose the safe option.",
+            config={"communication_profile": "natural"},
+        )
+        self.assertTrue(rendered["quality"]["fallback_applied"])
+        self.assertTrue(rendered["quality"]["ok"], rendered)
+        self.assertNotIn("Use from", rendered["message"])
+
+    def test_plan_summary_is_bounded_and_contains_one_question(self):
+        result = communication.render_plan(
+            "Deliver the requested change.",
+            ["Discover", "Design", "Implement", "Verify", "Close", "Extra"],
+            question="Approve this plan?",
+        )
+        self.assertEqual(result["question"], "Approve this plan?")
+        self.assertEqual(len([line for line in result["message"].splitlines() if line[:2].rstrip(".").isdigit()]), 5)
+
+    def test_russian_plan_projection_is_localized_path_free_and_has_bounded_steps(self):
+        result = communication.render_plan(
+            "Изменить plugins/cortex/secrets.py для task_ref=abc1234567890abcdef",
+            ["Изменить plugins/cortex/secrets.py для task_ref=abc1234567890abcdef"],
+            question="Утвердить план?",
+            config={"communication_profile": "natural", "user_language": "ru"},
+        )
+        self.assertTrue(result["message"].startswith("План:"))
+        self.assertNotIn("plugins/cortex", result["message"])
+        self.assertNotIn("task_ref", result["message"])
+        self.assertIn("План готов к проверке.", result["message"])
+        self.assertGreaterEqual(
+            len([line for line in result["message"].splitlines() if line[:2].rstrip(".").isdigit()]),
+            3,
+        )
+        self.assertEqual(result["next_step"], "Ответьте на вопрос ниже.")
+
+    def test_renderer_falls_back_for_low_quality_messages_across_lifecycle_types(self):
+        # A malformed model sentence must never be exposed merely because the
+        # caller inspected (or ignored) quality.ok.  The deterministic fallback
+        # remains user-facing and itself passes the same quality gate.
+        for kind in ("launch", "plan", "steer", "question", "blocked", "completion"):
+            with self.subTest(kind=kind):
+                result = communication.render(
+                    "The pipeline worker task_ref abc is complete. The pipeline worker task_ref abc is complete.",
+                    kind=kind,
+                    next_step="",
+                    config={"communication_profile": "natural"},
+                )
+                self.assertTrue(result["quality"]["fallback_applied"])
+                self.assertTrue(result["quality"]["ok"], result)
+                self.assertNotRegex(result["message"], communication._INTERNAL_RE)
+                self.assertTrue(result["next_step"])
+
+    def test_quality_gate_supports_plain_russian_user_text(self):
+        result = communication.render(
+            "Задача завершена.",
+            kind="completed",
+            next_step="Проверьте результат.",
+            config={"communication_profile": "natural"},
+        )
+        self.assertTrue(result["quality"]["ok"], result)
+        self.assertFalse(result["quality"]["fallback_applied"])
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ from cortex_runtime import gate_transitions
 from cortex_runtime import mcp_api
 from cortex_runtime import reports as runtime_reports
 from cortex_runtime import delegation_service
+from cortex_runtime import briefings
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -119,6 +120,49 @@ class ControlPlaneTests(unittest.TestCase):
         self.activate()
         classified = control.classify_task({"complexity": complexity, "requirements": [], "principal": "thread-a"})
         return control.init_task({"task_id": task_id, "objective": "test objective", "complexity": complexity, "classification_id": classified["classification_id"], "principal": "thread-a"})
+
+    def test_init_task_keeps_scalar_scope_and_text_lists_atomic(self):
+        self.activate()
+        classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
+        created = control.init_task({
+            "task_id": "atomic-scope",
+            "objective": "atomic scope",
+            "complexity": "C1",
+            "classification_id": classified["classification_id"],
+            "principal": "thread-a",
+            "scope": "Текущий репозиторий",
+            "acceptance_criteria": "one acceptance criterion",
+            "allowed_paths": "plugins/cortex",
+            "verification": "run focused tests",
+            "pause_conditions": "ask before widening scope",
+        })
+        task = control.db_load_task(self.ledger, created["task_id"])[0]
+        self.assertEqual(task["scope"], ["Текущий репозиторий"])
+        self.assertEqual(task["acceptance_criteria"], ["one acceptance criterion"])
+        self.assertEqual(task["allowed_paths"], ["plugins/cortex"])
+        self.assertEqual(task["verification"], ["run focused tests"])
+        self.assertEqual(task["pause_conditions"], ["ask before widening scope"])
+        self.assertEqual(briefings._briefing_scope(task["scope"]), ["Текущий репозиторий"])
+        self.assertEqual(briefings._briefing_scope("Текущий репозиторий"), ["Текущий репозиторий"])
+        legacy_lists = delegation_service.delegation_lists(
+            {},
+            {"allowed_paths": "plugins/cortex"},
+            {"acceptance_criteria": ["fallback acceptance"], "verification": ["fallback verification"]},
+        )
+        self.assertEqual(legacy_lists["allowed_paths"], ["plugins/cortex"])
+
+    def test_init_task_rejects_non_string_items_in_text_lists(self):
+        self.activate()
+        classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
+        with self.assertRaisesRegex(ValueError, "scope must contain only strings"):
+            control.init_task({
+                "task_id": "invalid-scope",
+                "objective": "invalid scope",
+                "complexity": "C1",
+                "classification_id": classified["classification_id"],
+                "principal": "thread-a",
+                "scope": ["valid", 123],
+            })
 
     def write_canonical_harvest_project_docs(self):
         project_docs = self.project / "docs/project"
@@ -2207,13 +2251,19 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertEqual(consequential["policy_reason"], expected_reason)
 
     def test_lightweight_categories_route_to_luna_with_multi_agent_v2(self):
-        for agent, task_kind in (("explorer", "reading"), ("explorer", "discover"), ("explorer", "read_discovery"), ("explorer", "read_only_audit"), ("explorer", "comparative_audit"), ("explorer", "comparative-audit"), ("general", "data_gathering"), ("general", "crud_edit"), ("general", "small_fix")):
+        for agent, task_kind in (("explorer", "reading"), ("explorer", "discover"), ("explorer", "read_discovery"), ("explorer", "read_only_audit"), ("explorer", "comparative_audit"), ("explorer", "comparative-audit"), ("general", "data_gathering")):
             for effort in ("high", "xhigh"):
                 with self.subTest(agent=agent, task_kind=task_kind, effort=effort):
                     route = control.resolve_dispatch_route({"agent": agent, "task_kind": task_kind, "risk": "low", "complexity": "C1", "requested_reasoning_effort": effort})
                     self.assertEqual(route["policy_model"], "gpt-5.6-luna")
                     self.assertEqual(route["selected_model"], "gpt-5.6-luna")
                     self.assertEqual(route["selected_reasoning_effort"], effort)
+        for task_kind in ("crud_edit", "crud-edit", "small_fix", "small-fix", "audit_fix"):
+            with self.subTest(mutating_task_kind=task_kind):
+                route = control.resolve_dispatch_route({
+                    "agent": "general", "task_kind": task_kind, "risk": "low", "complexity": "C1",
+                })
+                self.assertFalse(route["read_only"])
         for task_kind, expected_model in (
             ("implementation", "gpt-5.6-luna"),
             ("tests", "gpt-5.6-luna"),
@@ -2709,7 +2759,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(statuses[replacement["attempt_id"]], "passed")
         self.assertEqual(closed["state"]["current_gates"], ["plan"])
 
-    def test_failed_terminal_attempt_without_evidence_does_not_block_gate_completion(self):
+    def test_failed_terminal_attempt_without_evidence_cannot_pass_gate(self):
         state = self.init(task_id="failed-only-attempt", complexity="C2")["state"]
         failed = self.delegate(state, "failed-only-attempt", "discover", "explorer")
         finalized = control.finalize_attempt({
@@ -2728,7 +2778,9 @@ class ControlPlaneTests(unittest.TestCase):
             "outcome": "passed",
         })
         self.assertEqual(closed["state"]["attempts"][0]["status"], "failed")
-        self.assertEqual(closed["state"]["current_gates"], ["plan"])
+        self.assertFalse(closed["recorded"])
+        self.assertEqual(closed["reason"], "evidence_required")
+        self.assertEqual(closed["next_action"], "record_evidence")
 
     def test_active_running_attempt_without_evidence_still_blocks_gate(self):
         state = self.init(task_id="active-attempt", complexity="C2")["state"]
@@ -5124,6 +5176,34 @@ class ControlPlaneTests(unittest.TestCase):
                 {"workers": [{"phase": "discover", "allowed_paths": ["."]}]},
             ], {"objective": "narrow worker scope", "complexity": "C1"})
 
+    def test_v3_visible_worker_requires_immutable_user_opt_in(self):
+        with self.assertRaisesRegex(ValueError, "visible thread requires an explicit user-authorized task"):
+            control._v3_compact_waves([
+                {"workers": [{"phase": "review", "visible": True}]},
+            ], {"objective": "visible review", "complexity": "C1"})
+        compact = control._v3_compact_waves([
+            {"workers": [{"phase": "review", "visible": True}]},
+        ], {
+            "objective": "visible review",
+            "complexity": "C1",
+            "visible_thread_requested": True,
+        }, allow_visible_threads=True)
+        self.assertEqual(compact[0]["delegations"][0]["dispatch_mode"], "visible_thread")
+
+    def test_v3_compact_corrective_worker_preserves_explicit_origin_reports(self):
+        compact = control._v3_compact_waves([
+            {"workers": [{
+                "phase": "review",
+                "profile": "code_reviewer",
+                "context_report_ids": ["report-0016"],
+            }]},
+        ], {"objective": "rerun corrective review", "complexity": "C1"})
+        self.assertEqual(
+            compact[0]["delegations"][0]["context_report_ids"],
+            ["report-0016"],
+        )
+        self.assertIn("context_report_ids", control.V3_WORKER_SCHEMA["properties"])
+
     def test_v3_planner_dispatch_stays_below_host_output_truncation_budget(self):
         request = (
             "$cortex:orchestrator harvest\nRun a source-backed full knowledge harvest for this small repository as a "
@@ -5600,6 +5680,36 @@ class ControlPlaneTests(unittest.TestCase):
             [{"fingerprint": "implementation-absent", "details": {"affected_paths": ["plugins/cortex"]}}],
         )
         self.assertEqual(target, "plan")
+
+    def test_closure_rework_does_not_classify_parent_traversal_as_documentation(self):
+        state = {
+            "current_pipeline": ["implementation", "documentation", "close"],
+            "pipeline_obligations": ["implementation", "documentation", "close"],
+            "pipeline_changes": [],
+            "plan_approval": {"status": "not_required"},
+            "attempts": [{"gate": "implementation", "status": "passed"}],
+        }
+        target = gate_transitions._closure_rework_target(
+            state,
+            "close",
+            [{"details": {"affected_paths": ["docs/../src/main.py"]}}],
+        )
+        self.assertEqual(target, "implementation")
+
+    def test_closure_rework_normalizes_documentation_path(self):
+        state = {
+            "current_pipeline": ["implementation", "documentation", "close"],
+            "pipeline_obligations": ["implementation", "documentation", "close"],
+            "pipeline_changes": [],
+            "plan_approval": {"status": "not_required"},
+            "attempts": [{"gate": "implementation", "status": "passed"}],
+        }
+        target = gate_transitions._closure_rework_target(
+            state,
+            "close",
+            [{"details": {"affected_paths": ["docs/./features/index.md"]}}],
+        )
+        self.assertEqual(target, "documentation")
 
     def test_closure_finding_is_canonical_across_review_close_and_resolved_rework(self):
         started = self.v3_start(
@@ -6492,8 +6602,8 @@ class ControlPlaneTests(unittest.TestCase):
             "tests": [{
                 "command": "python3 -m unittest focused_test",
                 "cwd": ".",
-                "exit_code": 0,
-                "evidence": "Focused verification completed successfully with zero failures.",
+                "exit_code": 1,
+                "evidence": "Focused verification found the coordinator-owned receipt unavailable; the failure is preserved as the blocking result.",
             }],
             "evidence": [control.dispatch_briefing_review_marker(attempt["briefing_digest"])],
             "uncertainty": ["The coordinator-owned receipt is unavailable in this worker scope."],
@@ -7210,6 +7320,7 @@ class ControlPlaneTests(unittest.TestCase):
             "keep approval across a transport-only future change",
             complexity="C1",
             plan_approval="required",
+            visible_thread_requested=True,
             waves=[
                 {"workers": [{"phase": "plan"}]},
                 {"workers": [{"phase": "implementation"}]},
@@ -7702,6 +7813,40 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertIn("planner reports require", missing["diagnostics"][0]["message"])
         self.assertTrue(started["ok"])
+
+    def test_planner_report_returns_independent_identifier_and_reference_diagnostics(self):
+        started = self.v3_start("validate planning diagnostics", waves=[{"workers": [{"phase": "plan"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        planning = self.v3_planning()
+        planning["work_packages"][0]["id"] = "Core"
+        planning["work_packages"][0]["microtasks"][0]["depends_on"] = ["MT-01"]
+        planning["requirement_coverage"] = [{
+            "requirement": "The requested behavior is implemented.",
+            "plan_refs": ["missing_package"],
+            "verification": ["Run focused tests."],
+            "status": "covered",
+        }]
+        rejected = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"], "profile": attempt["profile"],
+            "report": self._report_with_briefing(attempt, self.v3_report("invalid plan")),
+            "planning": planning,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "report_validation_failed")
+        self.assertEqual(
+            {item["code"] for item in rejected["diagnostics"]},
+            {"planning_identifier_invalid", "planning_requirement_bad_reference"},
+        )
+        self.assertEqual(len(rejected["diagnostics"]), 3)
+        self.assertIn(
+            "planning.work_packages[0].microtasks[0].depends_on[0]",
+            {item["path"] for item in rejected["diagnostics"]},
+        )
+        self.assertTrue(rejected["retryable"])
+        self.assertFalse(rejected["attempt_budget_consumed"])
 
     def test_planner_microtasks_allow_cross_package_dependencies_but_keep_one_global_dag(self):
         planning = self.v3_planning()
@@ -8429,6 +8574,52 @@ class ControlPlaneTests(unittest.TestCase):
                 self.project,
                 {"objective": "harvest exhaustive repository knowledge"},
                 "documentation",
+            )
+
+    def test_harvest_rejects_placeholder_unknowns_and_duplicate_features(self):
+        self.write_canonical_harvest_project_docs()
+        feature_docs = self.project / "docs/features"
+        feature_docs.mkdir(parents=True)
+        (feature_docs / "trading").mkdir(parents=True)
+        (feature_docs / "trading/index.md").write_text(
+            "# Trading\n\n## Runtime owner\n\nThe engine owns trading.\n\n"
+            "## Behavior and workflow\n\nThe workflow handles orders.\n\n"
+            "## State and data\n\nOrder state is persisted.\n\n"
+            "## Interfaces\n\nThe command is an entry point.\n\n"
+            "## Failure and recovery\n\nErrors recover safely.\n\n"
+            "## Verification\n\nTests verify behavior.\n",
+            encoding="utf-8",
+        )
+        (feature_docs / "index.md").write_text(
+            "# Features\n\n## Inventory totals\n\nTotal: 1.\n\n## Coverage matrix\n\n"
+            "| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| Trading | engine | command | service.py | [Trading](trading/index.md) | test.py | documented |\n"
+            "| Trading | engine | command | service.py | [Trading](trading/index.md) | test.py | documented |\n\n"
+            "## Unmapped surfaces\n\nNone.\n\n## Exclusions\n\nNone.\n\n"
+            "## Known unknowns\n\nNone.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "duplicates feature"):
+            control._validate_harvest_coverage_manifest(
+                self.project, {"objective": "harvest exhaustive repository knowledge"}, "documentation"
+            )
+
+    def test_harvest_rejects_empty_known_unknowns_and_empty_feature_sections(self):
+        self.write_canonical_harvest_project_docs()
+        feature_docs = self.project / "docs/features"
+        feature_docs.mkdir(parents=True)
+        (feature_docs / "index.md").write_text(
+            "# Features\n\n## Inventory totals\n\nTotal: 1.\n\n## Coverage matrix\n\n"
+            "| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |\n"
+            "| --- | --- | --- | --- | --- | --- | --- |\n"
+            "| Trading | engine | command | service.py | [Trading](trading/index.md) | test.py | documented |\n\n"
+            "## Unmapped surfaces\n\nNone.\n\n## Exclusions\n\nNone.\n\n## Known unknowns\n\n## Notes\n\nReviewed.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "Known unknowns section"):
+            control._validate_harvest_coverage_manifest(
+                self.project, {"objective": "harvest exhaustive repository knowledge"}, "documentation"
             )
 
     def test_harvest_requires_all_canonical_project_documents_and_index_links(self):
@@ -10969,7 +11160,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.19")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.20")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

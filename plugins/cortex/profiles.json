@@ -4,9 +4,17 @@
     "default": "natural",
     "profiles": ["natural", "compact", "technical"],
     "selection": "config.communication_profile or CORTEX_COMMUNICATION_PROFILE; invalid values use natural",
-    "aliases": {"default": "natural", "normal": "natural", "detailed": "technical"},
-    "quality_checks": ["plain_language", "no_internal_metadata", "no_repetition", "next_step", "profile_match"],
-    "internal_metadata": "Never include transport identity, digests, ledger references, or tool names in user prose."
+    "aliases": {"default": "natural", "normal": "natural", "neutral": "natural", "detailed": "technical"},
+    "quality_checks": ["plain_language", "no_internal_metadata", "no_repetition", "next_step", "profile_match", "quality_gate"],
+    "internal_metadata": "Never include transport identity, digests, ledger references, or tool names in user prose.",
+    "user_view": "The only user-facing projection is user_view; internal is the bounded machine receipt projection, while legacy top-level protocol fields are compatibility-only and must never be rendered as user prose.",
+    "languages": ["en", "ru"],
+    "profile_behavior": {
+      "natural": "Plain human language with a short bounded summary and one decision.",
+      "compact": "Minimal human language containing only the result and next action.",
+      "technical": "Diagnostic language with explicit technical context for troubleshooting."
+    },
+    "waiting_workers": "silent"
   },
   "mode_overlays": {
     "harvest": {

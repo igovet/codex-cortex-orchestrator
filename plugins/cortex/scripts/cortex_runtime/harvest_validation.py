@@ -113,6 +113,23 @@ def validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any],
         raise ValueError(
             "harvest coverage manifest is shallow or incomplete; missing: " + ", ".join(missing)
         )
+    # A heading alone is not evidence.  Keep the explicit ``None`` spelling
+    # useful for a reviewed empty set, but reject empty/template declarations.
+    known_unknowns_match = re.search(
+        r"^#{2,6}\s+Known unknowns\s*$([\s\S]*?)(?=^#{2,6}\s+|\Z)",
+        raw_text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if known_unknowns_match and not re.search(r"[A-Za-z0-9А-Яа-я]", known_unknowns_match.group(1)):
+        raise ValueError("harvest coverage manifest Known unknowns section must contain an explicit reviewed result")
+    known_unknowns_body = (
+        re.sub(r"[`*_>#|\-]", " ", known_unknowns_match.group(1)).strip().lower()
+        if known_unknowns_match else ""
+    )
+    if known_unknowns_match and known_unknowns_body in {"", "tbd", "todo", "unknown", "n/a", "na"}:
+        # ``None`` remains a supported explicit result for repositories with
+        # no unresolved items; template/placeholder declarations do not.
+        raise ValueError("harvest coverage manifest Known unknowns section must explain the reviewed result")
     header_index, coverage_headers = coverage_table
     coverage_rows: list[tuple[str, ...]] = []
     for line in lines[header_index + 2:]:
@@ -129,6 +146,7 @@ def validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any],
         raise ValueError("harvest coverage matrix has no feature rows")
     documentation_links: set[Path] = set()
     row_errors: list[str] = []
+    seen_features: set[str] = set()
     allowed_statuses = {"covered", "documented", "verified", "excluded"}
     for row_number, cells in enumerate(coverage_rows, 1):
         required_cells = cells[:len(expected_headers)]
@@ -140,11 +158,37 @@ def validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any],
         if empty_labels:
             row_errors.append(f"row {row_number} has empty: {', '.join(empty_labels)}")
         status = re.sub(r"\s+", " ", required_cells[6].strip()).lower()
+        feature_name = re.sub(r"\s+", " ", required_cells[0].strip()).lower()
+        if feature_name in seen_features:
+            row_errors.append(f"row {row_number} duplicates feature {required_cells[0]!r}")
+        elif feature_name:
+            seen_features.add(feature_name)
         if status not in allowed_statuses:
             row_errors.append(
                 f"row {row_number} status must be covered, documented, verified, or excluded; got {required_cells[6]!r}"
             )
         documentation_cell = required_cells[4]
+        # These columns are the evidence contract, not decorative placeholders.
+        # Do not force a filesystem interpretation on values such as ``command``
+        # used by existing repositories, but reject generic empty/placeholder
+        # claims and validate any explicit repository-relative markdown links.
+        for label, value in (("Entry points", required_cells[2]), ("Source evidence", required_cells[3])):
+            normalized_value = re.sub(r"[`*_]", "", value).strip().lower()
+            if normalized_value in {"", "n/a", "na", "unknown", "tbd", "todo", "-", "none"}:
+                row_errors.append(f"row {row_number} {label} must name a concrete observed surface")
+            for raw_evidence_link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", value):
+                target = raw_evidence_link.strip().strip("<>").split("#", 1)[0].strip()
+                if not target or "://" in target or target.startswith("/"):
+                    row_errors.append(f"row {row_number} {label} has an invalid project-relative link")
+                    continue
+                candidate = (path.parent / target).resolve()
+                try:
+                    candidate.relative_to(project_root.resolve())
+                except ValueError:
+                    row_errors.append(f"row {row_number} {label} link leaves the project")
+                    continue
+                if not candidate.is_file() or candidate.is_symlink():
+                    row_errors.append(f"row {row_number} {label} references missing file: {target}")
         row_links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", documentation_cell)
         if status != "excluded" and not row_links:
             row_errors.append(f"row {row_number} Documentation must link to a canonical feature page")
@@ -184,18 +228,42 @@ def validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any],
     ]
     if incomplete_rows:
         raise ValueError("harvest coverage manifest still has incomplete feature rows; finish every feature before reporting")
-    required_page_topics = {
-        "runtime": ("runtime", "owner"),
-        "behavior": ("behavior", "workflow", "scenario", "logic"),
-        "state/data": ("state", "data", "persistence"),
-        "interfaces": ("interface", "entry point", "route", "api"),
-        "failure/recovery": ("failure", "recovery", "error"),
-        "verification": ("verification", "test"),
-    }
     shallow_pages: list[str] = []
+    required_page_sections = {
+        "runtime": ("runtime owner", "ownership"),
+        "behavior": ("behavior", "workflow", "scenarios", "logic"),
+        "state/data": ("state and data", "state", "data"),
+        "interfaces": ("interfaces", "entry points", "interface"),
+        "failure/recovery": ("failure and recovery", "failure", "recovery"),
+        "verification": ("verification", "tests", "test"),
+    }
     for page in sorted(documentation_links):
-        content = page.read_text(encoding="utf-8").lower()
-        absent = [topic for topic, markers in required_page_topics.items() if not any(marker in content for marker in markers)]
+        page_text = page.read_text(encoding="utf-8")
+        page_lines = page_text.splitlines()
+        page_heading_rows = [
+            (index, re.sub(r"\s+", " ", match.group(1).strip().rstrip("#").strip()).lower())
+            for index, line in enumerate(page_lines)
+            if (match := re.match(r"^#{2,6}\s+(.+?)\s*$", line.strip()))
+        ]
+        page_headings = {heading for _, heading in page_heading_rows}
+        absent = [
+            topic for topic, markers in required_page_sections.items()
+            if not any(any(marker in heading for marker in markers) for heading in page_headings)
+        ]
+        # A section must contain prose, otherwise a list of headings can pass.
+        empty_sections = []
+        for topic, markers in required_page_sections.items():
+            matching = next(
+                ((index, heading) for index, heading in page_heading_rows if any(marker in heading for marker in markers)),
+                None,
+            )
+            if matching:
+                start = matching[0] + 1
+                end = next((index for index, _ in page_heading_rows if index > matching[0]), len(page_lines))
+                section_body = "\n".join(page_lines[start:end])
+                if len(re.findall(r"[A-Za-z0-9А-Яа-я]+", section_body)) < 3:
+                    empty_sections.append(topic)
+        absent.extend(f"{topic} (empty)" for topic in empty_sections if topic not in absent)
         if absent:
             shallow_pages.append(f"{page.relative_to(project_root).as_posix()} ({', '.join(absent)})")
     if shallow_pages:

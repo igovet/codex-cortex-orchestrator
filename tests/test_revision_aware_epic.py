@@ -21,7 +21,7 @@ SCRIPTS = Path(__file__).parents[1] / "plugins" / "cortex" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import cortex as control
-from cortex_runtime import ledger_db
+from cortex_runtime import ledger_db, orchestration_engine, mcp_api, reports, questions
 
 
 class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
@@ -190,9 +190,126 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(waiting["output_policy"], "silent")
         self.assertEqual(
             waiting["allowed_visible_events"],
-            ["user_message", "worker_question", "worker_completed", "worker_failed", "blocking_error"],
+            [],
         )
+        self.assertIsNone(waiting["user_view"])
         self.assertEqual(waiting["context_handoff"]["state"]["status"], state["status"])
+
+    def test_scalar_requirement_stays_atomic_for_revised_plan_traceability(self) -> None:
+        requirement = "preserve this atomic requirement"
+        planning = {
+            "work_packages": [{"id": "core", "microtasks": [{"id": "core_change"}]}],
+            "requirement_coverage": [{
+                "requirement": requirement,
+                "plan_refs": ["core"],
+                "verification": ["Run the focused check."],
+                "status": "covered",
+            }],
+        }
+        reports._validate_latest_intent_coverage(
+            {
+                "requirements": requirement,
+                "current_user_intent": requirement,
+                "current_user_intent_revision": 2,
+                "active_steers": [{"task_revision": 2}],
+            },
+            planning,
+        )
+
+    def test_russian_question_user_view_uses_localized_scaffolding(self) -> None:
+        interaction = questions._chat_question_interaction(
+            question_ref="question-0001",
+            questions=[{
+                "localized_question": "Какой вариант выбрать?",
+                "canonical_question": "Which option should be selected?",
+                "localized_header": "Выбор варианта",
+                "options": [{
+                    "option_id": "safe",
+                    "label_localized": "Безопасный вариант",
+                    "label_en": "Safe option",
+                    "description_localized": "Сохраняет текущие ограничения.",
+                }],
+                "recommended_option_ids": ["safe"],
+                "recommendation": "Choose the safe option.",
+                "context": "The worker needs a decision.",
+            }],
+            user_language="ru",
+            communication_profile="compact",
+        )
+        self.assertEqual(interaction["user_view"]["message"], "Какой вариант выбрать?")
+        self.assertIn("безопасно продолжить", interaction["user_view"]["why_it_matters"])
+        self.assertEqual(interaction["user_view"]["next_step"], "Ответьте на вопрос или укажите ограничения.")
+        self.assertNotIn("The worker", str(interaction["user_view"]))
+
+    def test_question_user_view_redacts_private_paths_and_refs(self) -> None:
+        interaction = questions._chat_question_interaction(
+            question_ref="question-private-task-ref",
+            questions=[{
+                "question": "Which behavior should task_ref=private-task-ref preserve?",
+                "context": "See private.py and attempt_id=attempt-0001 before deciding.",
+                "options": [{
+                    "option_id": "safe",
+                    "label_en": "Use private.py",
+                    "description": "Preserve dispatch_ref=dispatch-0001.",
+                }],
+                "recommended_option_ids": ["safe"],
+                "recommendation": "Choose the safe option.",
+            }],
+            user_language="en",
+        )
+        visible = interaction["user_view"]
+        self.assertNotIn("private.py", str(visible))
+        self.assertNotIn("task_ref", str(visible))
+        self.assertNotIn("attempt_id", str(visible))
+        self.assertNotIn("dispatch_ref", str(visible))
+        self.assertEqual(visible["profile"], "natural")
+        self.assertTrue(visible["quality"]["ok"])
+        self.assertIn("private.py", str(interaction["internal"]))
+
+    def test_unsafe_question_options_remain_distinguishable_in_public_view(self) -> None:
+        interaction = questions._chat_question_interaction(
+            question_ref="question-private-options",
+            questions=[{
+                "question": "Which behavior should be selected?",
+                "options": [
+                    {"option_id": "one", "label_en": "Use plugins/cortex/one.py", "description": "See task_ref=one."},
+                    {"option_id": "two", "label_en": "Use plugins/cortex/two.py", "description": "See task_ref=two."},
+                ],
+                "recommended_option_ids": ["one"],
+                "recommendation": "Choose the first bounded behavior.",
+            }],
+        )
+        options = interaction["user_view"]["options"]
+        self.assertEqual([item["number"] for item in options], [1, 2])
+        self.assertEqual([item["label"] for item in options], ["Option 1", "Option 2"])
+        self.assertNotEqual(options[0]["description"], options[1]["description"])
+        self.assertNotIn("plugins/cortex", str(interaction["user_view"]))
+        self.assertTrue(interaction["user_view"]["quality"]["ok"])
+
+    def test_v3_boundary_segregates_internal_fields_and_localizes_plan_view(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "awaiting_plan_approval",
+                "wave_id": "wave-1",
+                "user_language": "ru",
+                "result": {"plan_review": {
+                    "summary": "Проверенный план",
+                    "work_packages": [{"title": "Проверить реализацию"}, {"title": "Запустить проверки"}],
+                    "risks": ["Нужна явная проверка результата"],
+                }},
+            },
+            "private-task-ref",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertEqual(response["user_view"]["profile"], "natural")
+        self.assertTrue(response["user_view"]["message"].startswith("План:"))
+        self.assertEqual(response["user_view"]["risks"], ["Нужна явная проверка результата"])
+        self.assertNotIn("private-task-ref", str(response["user_view"]))
+        self.assertEqual(response["internal"]["task_ref"], "private-task-ref")
 
     def test_active_steer_preserves_task_ref_and_resumes_same_native_worker(self) -> None:
         started = self.start()
@@ -1121,6 +1238,14 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertEqual(final_state["status"], "blocked")
         self.assertEqual(final_state["rework_pause"]["status"], "needs_user_decision")
         self.assertEqual(final_state["rework_pause"]["failure_class"], "worker")
+
+    def test_native_worker_stop_reason_is_classified_as_worker(self) -> None:
+        self.assertEqual(
+            orchestration_engine._failure_class_from_completion(
+                {"reason": "native_worker_stopped_without_report"}
+            ),
+            "worker",
+        )
 
     def test_localized_question_projection_keeps_canonical_option_ids(self) -> None:
         canonical = control._question_options(

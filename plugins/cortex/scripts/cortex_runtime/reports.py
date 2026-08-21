@@ -27,6 +27,7 @@ from cortex import (
     PUBLIC_ORCHESTRATION_SCHEMA,
     REPORT_FIELDS,
     REPORT_SCHEMA,
+    SAFE_ID_RE,
     EXECUTED_CHECK_RESULT_GATES,
     WRITE_REQUIRED_RESULT_GATES,
     _attempt,
@@ -136,6 +137,31 @@ def _report_metric(name: str, value: int = 1) -> None:
 
 class StaleReportPreparationError(ValueError):
     """Prepared report input no longer matches the worker's current draft."""
+
+
+def _validation_diagnostics(exc: BaseException) -> list[dict[str, str]] | None:
+    """Return structured caller-correctable diagnostics carried by an error.
+
+    Most validators raise ``ReportValidationError`` directly, but adapters and
+    compatibility validators may expose the same collection on a generic
+    ``ValueError``.  Keep the original paths and fixes intact instead of
+    forcing the draft adapter to reverse-engineer them from prose.
+    """
+    diagnostics = getattr(exc, "diagnostics", None)
+    if not isinstance(diagnostics, list):
+        return None
+    normalized: list[dict[str, str]] = []
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        message = str(item.get("message") or "Report draft validation failed.")
+        normalized.append({
+            "code": str(item.get("code") or "report_validation_failed"),
+            "path": str(item.get("path") or "$"),
+            "message": message,
+            "fix": str(item.get("fix") or "Correct the named field in the existing draft file."),
+        })
+    return normalized
 
 
 def _report_validation_result(
@@ -337,9 +363,17 @@ def _validate_latest_intent_coverage(
     steers = task.get("active_steers")
     if revision <= 1 and not isinstance(steers, list):
         return
+    raw_requirements = task.get("requirements") or []
+    # Task records created before the scalar-list compatibility boundary may
+    # still contain one string.  Treat it as one atomic requirement; never let
+    # revised-plan coverage turn it into one requirement per character.
+    if isinstance(raw_requirements, str):
+        raw_requirements = [raw_requirements]
+    elif not isinstance(raw_requirements, list):
+        raw_requirements = []
     requirements = list(dict.fromkeys(
-        str(item).strip() for item in [*(task.get("requirements") or []), latest]
-        if str(item).strip()
+        str(item).strip() for item in [*raw_requirements, latest]
+        if isinstance(item, str) and str(item).strip()
     ))
     if not requirements:
         return
@@ -385,6 +419,90 @@ def _validate_latest_intent_coverage(
             })
     if diagnostics:
         raise ReportValidationError(diagnostics)
+
+
+def _planning_independent_diagnostics(value: Any) -> list[dict[str, str]]:
+    """Collect planning id/reference errors before deep sanitization aborts.
+
+    Planner payloads commonly contain two independent mistakes: an unsafe id
+    and a coverage row referring to an id that therefore cannot exist.  The
+    sanitizer must remain fail-closed, but record_report should show both
+    repairs in one retry instead of forcing an avoidable validation loop.
+    """
+    if not isinstance(value, dict):
+        return []
+    diagnostics: list[dict[str, str]] = []
+    package_ids: set[str] = set()
+    microtask_ids: set[str] = set()
+    packages = value.get("work_packages")
+    if isinstance(packages, list):
+        for package_index, package in enumerate(packages):
+            if not isinstance(package, dict):
+                continue
+            package_id = str(package.get("id") or "").strip()
+            if not SAFE_ID_RE.fullmatch(package_id):
+                diagnostics.append({
+                    "code": "planning_identifier_invalid",
+                    "path": f"planning.work_packages[{package_index}].id",
+                    "message": "Planning package id must be a lowercase safe identifier.",
+                    "fix": "Use a unique lowercase identifier containing only letters, numbers, '_' or '-'.",
+                })
+            else:
+                package_ids.add(package_id)
+            package_dependencies = package.get("depends_on")
+            if isinstance(package_dependencies, list):
+                for dependency_index, dependency in enumerate(package_dependencies):
+                    dependency_id = str(dependency or "").strip()
+                    if not SAFE_ID_RE.fullmatch(dependency_id):
+                        diagnostics.append({
+                            "code": "planning_identifier_invalid",
+                            "path": f"planning.work_packages[{package_index}].depends_on[{dependency_index}]",
+                            "message": "Planning package dependency must be a lowercase safe identifier.",
+                            "fix": "Use a lowercase package or microtask identifier containing only letters, numbers, '_' or '-'.",
+                        })
+            microtasks = package.get("microtasks")
+            if not isinstance(microtasks, list):
+                continue
+            for micro_index, microtask in enumerate(microtasks):
+                if not isinstance(microtask, dict):
+                    continue
+                microtask_id = str(microtask.get("id") or "").strip()
+                if not SAFE_ID_RE.fullmatch(microtask_id):
+                    diagnostics.append({
+                        "code": "planning_identifier_invalid",
+                        "path": f"planning.work_packages[{package_index}].microtasks[{micro_index}].id",
+                        "message": "Planning microtask id must be a lowercase safe identifier.",
+                        "fix": "Use a unique lowercase identifier containing only letters, numbers, '_' or '-'.",
+                    })
+                else:
+                    microtask_ids.add(microtask_id)
+                micro_dependencies = microtask.get("depends_on")
+                if isinstance(micro_dependencies, list):
+                    for dependency_index, dependency in enumerate(micro_dependencies):
+                        dependency_id = str(dependency or "").strip()
+                        if not SAFE_ID_RE.fullmatch(dependency_id):
+                            diagnostics.append({
+                                "code": "planning_identifier_invalid",
+                                "path": f"planning.work_packages[{package_index}].microtasks[{micro_index}].depends_on[{dependency_index}]",
+                                "message": "Planning microtask dependency must be a lowercase safe identifier.",
+                                "fix": "Use a lowercase package or microtask identifier containing only letters, numbers, '_' or '-'.",
+                            })
+    valid_refs = package_ids | microtask_ids
+    coverage = value.get("requirement_coverage")
+    if isinstance(coverage, list):
+        for row_index, row in enumerate(coverage):
+            if not isinstance(row, dict) or not isinstance(row.get("plan_refs"), list):
+                continue
+            refs = sorted({str(ref).strip() for ref in row["plan_refs"] if isinstance(ref, str) and ref.strip()})
+            unknown = [ref for ref in refs if ref not in valid_refs]
+            if unknown:
+                diagnostics.append({
+                    "code": "planning_requirement_bad_reference",
+                    "path": f"planning.requirement_coverage[{row_index}].plan_refs",
+                    "message": "Coverage row references unknown plan items: " + ", ".join(unknown),
+                    "fix": "Use existing package or microtask ids from planning.work_packages.",
+                })
+    return diagnostics
 
 
 def _planning_preview_unit_ref(
@@ -974,6 +1092,9 @@ def _prepare_report_validation(
     candidate = {**params, **envelope}
     report = sanitize_report_payload(candidate.get("report"))
     if candidate.get("planning") is not None and attempt.get("gate") == "plan":
+        independent_planning_diagnostics = _planning_independent_diagnostics(candidate["planning"])
+        if independent_planning_diagnostics:
+            raise ReportValidationError(independent_planning_diagnostics)
         planning_candidate = sanitize_planning_payload(candidate["planning"])
         _validate_latest_intent_coverage(load_task_definition(task_dir, state), planning_candidate)
     actor_ids = {str(candidate.get("principal") or "").strip(), str(candidate.get("profile") or "").strip()}
@@ -1697,6 +1818,9 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 str(attempt.get("gate") or ""),
             )
         if raw_planning is not None:
+            independent_planning_diagnostics = _planning_independent_diagnostics(raw_planning)
+            if independent_planning_diagnostics:
+                raise ReportValidationError(independent_planning_diagnostics)
             planning = sanitize_planning_payload(raw_planning, persisted=bool(supplied_draft_ref))
             _validate_latest_intent_coverage(load_task_definition(task_dir, state), planning)
             _validate_planning_dispatch_briefings(
@@ -2228,7 +2352,7 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             result["draft_path"] = preloaded["draft_path"]
         return result
     except ReportValidationError as exc:
-        result = _report_validation_result(exc.diagnostics)
+        result = _report_validation_result(_validation_diagnostics(exc) or [])
         draft_ref = str(params.get("_draft_ref") or params.get("draft_ref") or "").strip()
         preloaded = params.get("_preloaded_report_draft")
         if draft_ref:
@@ -2242,8 +2366,9 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
         # caller-controlled JSON shape into an MCP transport failure.
         return _record_report_payload_type_failure()
     except ValueError as exc:
-        if isinstance(exc, ReportValidationError):
-            result = _report_validation_result(exc.diagnostics)
+        structured = _validation_diagnostics(exc)
+        if structured is not None:
+            result = _report_validation_result(structured)
             draft_ref = str(params.get("_draft_ref") or params.get("draft_ref") or "").strip()
             preloaded = params.get("_preloaded_report_draft")
             if draft_ref:
@@ -2751,9 +2876,13 @@ def _draft_record_failure(result: dict[str, Any], *, draft_ref: str) -> dict[str
         message = str(item.get("message") or "Report draft validation failed.")
         diagnostics.append({
             "code": item.get("code") or result.get("code") or "report_validation_failed",
-            "path": _draft_diagnostic_path(message),
+            # Validation already knows the exact field.  Never replace that
+            # path with a best-effort substring guess: diagnostics such as
+            # ``report.tests[1].evidence`` and nested planning fields are
+            # otherwise routinely redirected to the wrong draft location.
+            "path": str(item.get("path") or _draft_diagnostic_path(message)),
             "message": message,
-            "fix": result.get("next_action") or "Correct the named field in the existing draft file.",
+            "fix": str(item.get("fix") or result.get("next_action") or "Correct the named field in the existing draft file."),
         })
     # _prepare_draft_for_record loaded this exact draft and no rejected record
     # path removes it, so callers can safely retry against the same ref.
@@ -2856,7 +2985,7 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
             required_top_level.append("scoping")
         if gate == "plan" and profile == "planner":
             template["planning"] = {
-                "overview": "<replace with implementation plan overview>",
+                "overview": "<replace with implementation plan overview; use unique lowercase safe ids matching [a-z0-9_-]+ for every package/microtask id, depends_on value, and plan_refs value>",
                 "recommendation": "approve",
                 "recommendation_rationale": "<replace with why this plan is ready or what remains>",
                 "requirement_coverage": [],

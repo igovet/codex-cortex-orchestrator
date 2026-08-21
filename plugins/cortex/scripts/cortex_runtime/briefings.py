@@ -761,7 +761,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     elif gate == "plan" and agent == "planner":
         report_extra = (
             " REQUIRED top-level planning sibling={overview,work_packages}. Every microtask requires a unique id, narrow objective, explicit profile, "
-            "non-broad allowed_paths, dependencies, acceptance criteria, and exact verification."
+            "non-broad allowed_paths, dependencies, acceptance criteria, and exact verification. All package/microtask ids, depends_on values, and requirement_coverage.plan_refs "
+            "must be unique lowercase safe identifiers matching [a-z0-9_-]+ and every reference must name an existing package or microtask."
         )
     elif gate in {"review", "governance_activation", "governance_close", "close"}:
         report_extra = (

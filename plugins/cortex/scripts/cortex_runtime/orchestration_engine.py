@@ -7,6 +7,7 @@ loaded lazily by the facade after the entrypoint has completed initialization.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +150,8 @@ bind_symbols(
         "release_lock",
         "release_resource",
         "render_gate_briefing",
+        "render_lifecycle",
+        "quality_checks",
         "report_bus_paths",
         "report_markdown_link",
         "report_markdown_path",
@@ -181,7 +184,7 @@ def _orchestrate_error(
     diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     resolved_next_operation = next_operation or (operation if operation in ORCHESTRATE_OPERATIONS else None)
-    return {
+    return _segregate_orchestration_output({
         "schema": ORCHESTRATE_SCHEMA,
         "ok": False,
         "operation": operation,
@@ -201,7 +204,121 @@ def _orchestrate_error(
             "retry orchestrate with a supported operation" if recoverable else
             "inspect the Cortex installation"
         ),
+    })
+
+
+def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
+    """Expose a stable human view beside the coordinator compatibility shape.
+
+    Existing callers still receive the historical top-level protocol fields.
+    ``user_view`` is deliberately small and contains no task/dispatch IDs or
+    machine recovery instructions; ``internal`` is the explicit machine
+    boundary for coordinators that want to avoid rendering those fields.
+    """
+    state = str(response.get("state") or "needs_input")
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    state_summary = response.get("state_summary") if isinstance(response.get("state_summary"), dict) else {}
+    communication_config = {
+        "communication_profile": response.get("communication_profile") or state_summary.get("communication_profile") or "natural",
+        "user_language": response.get("user_language") or state_summary.get("user_language") or "en",
     }
+    rendered = render_lifecycle(
+        state,
+        ok=bool(response.get("ok", True)),
+        config=communication_config,
+        metadata={"state": state},
+    )
+    language_is_ru = str(communication_config.get("user_language") or "").lower().startswith("ru")
+    requires_decision = state in {"awaiting_plan_approval", "blocked", "needs_input", "rework_preflight_required"}
+    if state == "awaiting_plan_approval":
+        next_step = "Утвердите план, запросите доработку или отмените." if language_is_ru else "Choose approve, revise, or cancel."
+        recommendation = (
+            "Утвердите план, если он соответствует цели; иначе запросите доработку."
+            if language_is_ru else
+            "Approve the plan if it matches the requested outcome; otherwise request a revision."
+        )
+    elif state in {"blocked", "rework_preflight_required"}:
+        next_step = "Устраните блокер и возобновите задачу." if language_is_ru else "Resolve the blocker and continue the task."
+        recommendation = "Следуйте указанному способу устранения блокера." if language_is_ru else "Follow the recorded way to resolve the blocker."
+    else:
+        next_step = rendered.get("next_step") or ("Продолжите текущий шаг." if language_is_ru else "Continue the current work step.")
+        recommendation = rendered.get("message") or ("Продолжите после готовности результата." if language_is_ru else "Continue when the result is ready.")
+    profile = str(rendered.get("profile") or communication_config.get("communication_profile") or "natural")
+
+    def _safe_visible_field(value: object, fallback: str) -> tuple[str, list[str]]:
+        """Apply the same plain-language gate to every visible text field.
+
+        ``render_lifecycle`` validates its primary message, but orchestration
+        adds ``why_it_matters``, ``next_step`` and ``recommendation`` after
+        rendering.  Validate those additions too so a technical template
+        cannot leak into a natural user view while still reporting quality OK.
+        """
+        candidate = str(value or "").strip()
+        failures = quality_checks(candidate, profile=profile, next_step="continue")
+        if failures:
+            return fallback, failures
+        return candidate, []
+
+    if language_is_ru:
+        why_it_matters = (
+            "Следующий шаг зависит от этого решения."
+            if requires_decision else
+            "Задача продвигается на основе проверенных данных."
+        )
+        why_fallback = "Следующая часть задачи зависит от этого решения." if requires_decision else "Задача продвигается по проверенному плану."
+        next_fallback = "Укажите решение, чтобы продолжить." if requires_decision else "Продолжите задачу, когда будете готовы."
+        recommendation_fallback = "Выберите безопасный вариант для продолжения." if requires_decision else "Продолжите после проверки результата."
+    else:
+        why_it_matters = (
+            "The next step depends on this decision."
+            if requires_decision else
+            "The task is moving forward using checked information."
+        )
+        why_fallback = "The next step depends on your decision." if requires_decision else "The task is moving forward with checked information."
+        next_fallback = "Provide the decision to continue." if requires_decision else "Continue the task when you are ready."
+        recommendation_fallback = "Choose the safe option to continue." if requires_decision else "Continue after reviewing the result."
+    why_it_matters, why_failures = _safe_visible_field(why_it_matters, why_fallback)
+    next_step, next_failures = _safe_visible_field(next_step, next_fallback)
+    recommendation, recommendation_failures = _safe_visible_field(recommendation, recommendation_fallback)
+    field_failures = why_failures + next_failures + recommendation_failures
+    quality = dict(rendered.get("quality") or {})
+    if field_failures:
+        quality["checks"] = list(quality.get("checks") or []) + field_failures
+        quality["fallback_applied"] = True
+        # All rejected candidates were replaced with complete safe copy.
+        quality["ok"] = True
+    user_view = {
+        "message": rendered.get("message"),
+        "profile": rendered.get("profile"),
+        "detail_level": rendered.get("detail_level"),
+        "quality": quality,
+        "message_type": "decision_required" if requires_decision else "progress",
+        "why_it_matters": why_it_matters,
+        "next_step": next_step,
+        "requires_user_decision": requires_decision,
+        "recommendation": recommendation,
+        "risks": [],
+    }
+    dispatches = response.get("dispatches")
+    if not isinstance(dispatches, list) or not dispatches:
+        dispatches = response.get("spawn_requests", [])
+    response["user_view"] = user_view
+    if state == "waiting_workers":
+        response["user_view"] = None
+        response["allowed_visible_events"] = []
+    internal = {
+        key: value for key, value in response.items()
+        if key not in {"user_view", "internal"}
+    }
+    internal.update({
+        "task_ref": response.get("task_id"),
+        "wave_id": response.get("wave_id"),
+        "dispatches": dispatches,
+        "next_action": response.get("next_action"),
+        "diagnostics": response.get("diagnostics", []),
+    })
+    response["internal"] = internal
+    return response
 
 
 def _orchestrate_state_name(state: dict[str, Any]) -> str:
@@ -244,6 +361,7 @@ def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
         "revision": state.get("revision"),
         "complexity": state.get("complexity"),
         "communication_profile": state.get("communication_profile") or "natural",
+        "user_language": state.get("user_language") or "en",
         "current_gates": active_gates(state),
         "completed_gates": list(state.get("completed_gates", [])),
         "skipped_gates": list(state.get("skipped_gates", [])),
@@ -1304,7 +1422,7 @@ def _orchestrate_response(
                 "keep the plan approval pending and wait for a later user message; do not dispatch, revise, "
                 "or emit cancellation commentary"
             )
-    return response
+    return _segregate_orchestration_output(response)
 
 
 def _plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -> str:
@@ -1604,6 +1722,32 @@ _RECOVERY_REMEDIATION_ACTIONS = (
     "repair", "remediate", "restore", "configure", "provision", "install", "grant", "restart", "resolve",
 )
 
+_NEGATION_WORDS = {"not", "no", "never", "without", "avoid", "dont", "don't"}
+
+
+def _has_non_negated_term(text: str, term: str) -> bool:
+    """Return whether *term* occurs as a standalone, non-negated phrase.
+
+    Recovery and failure classification are safety-sensitive routing hints. A
+    substring match such as ``network`` in ``networking`` or ``restart`` in
+    ``do not restart`` must not release a circuit breaker or misclassify a
+    failure. Negation scope is deliberately limited to the current clause so
+    that ``do not restart; repair the network`` still recognises the repair.
+    """
+    escaped = re.escape(term)
+    # Treat underscores as separators as well: host lifecycle reasons are
+    # commonly serialized as ``native_worker_stopped_without_report``.
+    # Keep letters, digits, apostrophes and hyphens as word characters so a
+    # marker such as ``network`` does not match ``networking``.
+    pattern = re.compile(rf"(?<![A-Za-z0-9'-]){escaped}(?![A-Za-z0-9'-])", re.IGNORECASE)
+    for match in pattern.finditer(text):
+        clause = re.split(r"[;,.!?\n]", text[:match.start()])[-1]
+        words = re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", clause.casefold())
+        if any(word in _NEGATION_WORDS for word in words[-4:]):
+            continue
+        return True
+    return False
+
 
 def _has_matching_environment_remediation(
     pause: dict[str, Any],
@@ -1633,7 +1777,9 @@ def _has_matching_environment_remediation(
             *(planner.get("verification") or []),
         )
     ).casefold()
-    return any(marker in text for marker in markers) and any(action in text for action in _RECOVERY_REMEDIATION_ACTIONS)
+    return any(_has_non_negated_term(text, marker) for marker in markers) and any(
+        _has_non_negated_term(text, action) for action in _RECOVERY_REMEDIATION_ACTIONS
+    )
 
 
 def _validate_no_progress_recovery_plan(
@@ -2131,6 +2277,7 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
 
 def _materialize_response_report_links(params: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
     """Add Desktop Markdown links only after the business transaction commits."""
+    response = _segregate_orchestration_output(response)
     result = response.get("result")
     review = result.get("plan_review") if isinstance(result, dict) else None
     if not isinstance(review, dict) or "report_markdown_path" in review:
@@ -2284,10 +2431,13 @@ def _failure_class_from_completion(completion: dict[str, Any]) -> str:
         ("infrastructure", ("infrastructure", "network", "transport", "connection", "timeout", "rate limit", "service unavailable", "host unavailable", "mcp")),
         ("environment", ("environment", "dependency", "permission", "missing binary", "configuration", "sandbox", "disk full", "toolchain")),
         ("policy", ("policy", "governance", "authorization", "forbidden")),
-        ("worker", ("worker", "agent stopped", "child stopped", "lease expired")),
+        # Hook-produced stop reasons use the stable compound token below.  It
+        # must be explicit because the standalone-word matcher intentionally
+        # does not treat ``worker`` inside ``native_worker`` as a match.
+        ("worker", ("native_worker_stopped_without_report", "worker", "agent stopped", "child stopped", "lease expired")),
     )
     for failure_class, markers in categories:
-        if any(marker in reason for marker in markers):
+        if any(_has_non_negated_term(reason, marker) for marker in markers):
             return failure_class
     return "product"
 
@@ -4141,6 +4291,7 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
         if key in params
     }
     reserved["user_language"] = str(state.get("user_language") or "en")
+    reserved["communication_profile"] = str(state.get("communication_profile") or "natural")
     call_payload = {**payload, **reserved}
     if command == "answer":
         # The user's next ordinary chat message is the durable resume event.

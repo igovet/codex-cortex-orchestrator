@@ -2,13 +2,13 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.19` source line. The public
+Security fixes are prepared for the current `9.2.20` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.19 source candidate retains stopped-report and duplicate-skill-read
+The 9.2.20 source candidate retains stopped-report and duplicate-skill-read
 recovery integrity, removes briefing size rejection while preserving immutable
 artifact transport, and scopes no-progress pauses to their exact gate. Its
 bounded report intake uses a prepare/commit CAS with retryable busy and stale
@@ -18,7 +18,7 @@ acquisition; the acquired report commit remains serialized until its canonical
 SQLite/artifact writes finish. `ledger_busy` holder metadata excludes the
 private owner token.
 Its exact source cachebuster is generated from
-the 9.2.19 base version;
+the 9.2.20 base version;
 tracked-release and installed-plugin parity remain separate gates, and this
 source-tree note is not a publication or installation claim.
 The 9.2.16 source candidate retains stopped-report recovery integrity, private
