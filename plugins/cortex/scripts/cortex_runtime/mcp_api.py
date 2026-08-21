@@ -376,6 +376,14 @@ def build_public_schemas(
                 "description": "Optional concise name for the worker approach; Cortex preserves it as rework evidence but never uses it to impose an attempt limit.",
             },
             "paths": {"type": "array", "items": {"type": "string"}},
+            "allowed_paths": {
+                "type": "array", "minItems": 1, "maxItems": 50,
+                "items": {"type": "string", "minLength": 1},
+                "description": (
+                    "Canonical server-owned worker write scope. Paths must be narrow, project-relative, and "
+                    "must not be `.` or `*`; Cortex validates and normalizes them before dispatch."
+                ),
+            },
             "acceptance": {"type": "array", "items": {"type": "string"}},
             "verification": {"type": "array", "items": {"type": "string"}},
             "context_files": {

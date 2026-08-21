@@ -9709,7 +9709,7 @@ def _v3_compact_waves(
         raise ValueError("waves must be a non-empty array when supplied")
     result: list[dict[str, Any]] = []
     allowed_worker_keys = {
-        "phase", "profile", "objective", "paths", "acceptance", "verification",
+        "phase", "profile", "objective", "paths", "allowed_paths", "acceptance", "verification",
         "model", "user_requested_model", "effort", "visible", "isolated_checkout", "depends_on", "context_files",
         "strategy",
     }
@@ -9806,12 +9806,22 @@ def _v3_compact_waves(
                 spec["context_gates"] = dependencies
             for source, target in (
                 ("objective", "objective"), ("paths", "allowed_paths"),
+                ("allowed_paths", "allowed_paths"),
                 ("acceptance", "acceptance_criteria"), ("verification", "verification"),
                 ("context_files", "context_files"), ("strategy", "strategy"),
             ):
                 if source in worker:
                     if source == "context_files" and project_root is not None:
                         spec[target] = _project_knowledge_context(project_root, worker[source])[0]
+                    elif source == "allowed_paths":
+                        # Keep the canonical field server-owned: unlike the
+                        # legacy `paths` hint, the explicit field is a
+                        # validated narrow write scope and cannot broaden a
+                        # worker to the whole project.
+                        paths = _planning_paths_list(worker[source], "worker allowed_paths")
+                        if any(path in {".", "*"} for path in paths):
+                            raise ValueError("worker allowed_paths must be explicit and non-broad")
+                        spec[target] = paths
                     else:
                         spec[target] = worker[source]
             model = _v3_model(worker.get("model"))

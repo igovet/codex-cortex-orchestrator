@@ -444,7 +444,7 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "ownership": str(package.get("ownership") or "").strip(),
         "phase_dependencies": list(package.get("depends_on_phases") or []),
         "requirements": list(package.get("task_requirements") or []),
-        "scope": list(package.get("task_scope") or []),
+        "scope": _briefing_scope(package.get("task_scope")),
         "allowed_paths": [] if plan_backed_implementation else list(package.get("allowed_paths") or []),
         "context_files": list(package.get("context_files") or []),
         "task_acceptance_criteria": list(package.get("task_acceptance_criteria") or []),
@@ -576,6 +576,16 @@ def _bounded_strings(values: object, *, limit: int, item_chars: int) -> list[str
     if not isinstance(values, list):
         return []
     return [str(item).strip()[:item_chars] for item in values if str(item).strip()][:limit]
+
+
+def _briefing_scope(values: object) -> list[str]:
+    """Keep a scalar scope entry atomic when rendering legacy briefings."""
+    if isinstance(values, str):
+        value = values.strip()
+        return [value] if value else []
+    if isinstance(values, list):
+        return [str(item).strip() for item in values if str(item).strip()]
+    return []
 
 
 def _compact_plan_unit_assignment(value: object) -> dict[str, Any] | None:

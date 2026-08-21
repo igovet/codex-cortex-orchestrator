@@ -5097,6 +5097,26 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(attempt["verification"], ["Cite files"])
         self.assertEqual(attempt["expected_model"], "gpt-5.6-luna")
 
+    def test_v3_start_accepts_server_owned_allowed_paths_worker_field(self):
+        started = self.v3_start(
+            "explicit worker scope",
+            waves=[{"workers": [{
+                "phase": "discover",
+                "profile": "explorer",
+                "allowed_paths": ["README.md"],
+            }]}],
+        )
+        self.assertTrue(started["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(state["attempts"][0]["allowed_paths"], ["README.md"])
+
+    def test_v3_worker_allowed_paths_rejects_broad_scope(self):
+        with self.assertRaisesRegex(ValueError, "explicit and non-broad"):
+            control._v3_compact_waves([
+                {"workers": [{"phase": "discover", "allowed_paths": ["."]}]},
+            ], {"objective": "narrow worker scope", "complexity": "C1"})
+
     def test_v3_planner_dispatch_stays_below_host_output_truncation_budget(self):
         request = (
             "$cortex:orchestrator harvest\nRun a source-backed full knowledge harvest for this small repository as a "

@@ -17,6 +17,7 @@ import cortex as control
 import cortex_hook
 from cortex_runtime import identity as worker_identity
 from cortex_runtime import mcp_api
+from cortex_runtime import briefings as runtime_briefings
 
 
 class OrchestrationInvariantTests(unittest.TestCase):
@@ -1807,6 +1808,24 @@ class OrchestrationInvariantTests(unittest.TestCase):
         hook = (repository / "plugins/cortex/scripts/cortex_hook.py").read_text(encoding="utf-8")
         self.assertIn("COORDINATOR LOCK", hook)
         self.assertIn("never permission for direct coordinator work", hook)
+
+    def test_legacy_briefing_keeps_scalar_scope_atomic(self):
+        prompt = runtime_briefings._expanded_host_spawn_prompt(
+            "planner",
+            {
+                "task_id": "scope-atomic",
+                "gate": "plan",
+                "attempt_id": "plan-01",
+                "dispatch_ref": "dispatch-scope-atomic",
+                "project_root": "/workspace/scope-atomic",
+                "task_scope": "Текущий репозиторий",
+                "task_objective": "Preserve the task scope",
+                "task_user_request": "Preserve the task scope",
+                "objective": "Preserve the task scope",
+            },
+        )
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["scope"], ["Текущий репозиторий"])
 
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
         contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
