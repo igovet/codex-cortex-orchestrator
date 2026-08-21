@@ -4,14 +4,14 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.20 release candidate
+## 9.2.21 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.20 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.21 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
-The 9.2.20 patch keeps programmatic dispatch-briefing size rejection removed and
+The 9.2.21 patch keeps programmatic dispatch-briefing size rejection removed and
 keeps complete Planner content in digest-bound immutable artifacts. It also
 makes no-progress recovery gate-local: an unpaused current-wave sibling can
 finish, later dependency waves do not leapfrog a pause, and multi-pause
@@ -22,6 +22,21 @@ the canonical report/artifact commit remains serialized until its writes finish.
 `ledger_busy` and `stale_preparation` are retryable and preserve the draft. The
 `CORTEX_REPORT_PREPARE_COMMIT=off` rollback flag retains the serialized legacy
 path.
+
+Prompt Contract Architecture v2 uses one versioned ownership matrix and a
+conditional v3 compiler. Dispatch-specific strings remain in one untrusted
+JSON assignment block; role, mode, gate, context, tool, output, and stopping
+policy remains sourced from bundled contracts. Production orchestration has no
+v2 selection path: the deprecated adapter is limited by source lint to the
+explicit compatibility A/B baseline. Deterministic lint/eval fixtures
+are offline and compare stable SHA-256 goldens plus structural heading, byte,
+fence, assignment-boundary, and legacy-v2/canonical-v3 delta metrics; they make
+no subjective model-quality claim. The separate `cortex-prompt-live-eval.py`
+runner is disabled by default. When a maintainer explicitly chooses `--live`,
+it sends both versions through Codex exactly as `gpt-5.6-luna` with
+`reasoning_effort=high`, no fallback or implicit executor, and reports only
+deterministic behavioral/transport metrics. Model or authentication absence is
+`SKIP`/`BLOCKED`, not passing evidence.
 
 All other ledger mutation callers use the same bounded lock default. A busy
 response contains only operation, duration, and non-secret holder metadata;
@@ -104,7 +119,7 @@ than a duplicated inline plan.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.20` (the current source candidate carries a cachebuster; installed builds
+  `9.2.21` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -245,7 +260,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.20 release commit only with explicit authorization.
+- Create the Cortex 9.2.21 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

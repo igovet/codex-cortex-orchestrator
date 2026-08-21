@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import stat
+import sys
 import tomllib
 from pathlib import Path
 from typing import NoReturn
@@ -81,6 +82,19 @@ def main() -> int:
         fail("retired nested marketplace artifacts must not ship")
     reject_symlinks(root / ".agents", "root marketplace metadata")
     reject_symlinks(plugin, "canonical plugin source")
+    runtime_path = str(plugin / "scripts")
+    if runtime_path not in sys.path:
+        sys.path.insert(0, runtime_path)
+    try:
+        from cortex_runtime.prompt_compiler import lint_prompt_sources
+        from cortex_runtime.prompt_eval import run_prompt_ab_evals, run_prompt_evals
+        prompt_issues = lint_prompt_sources(root)
+        if prompt_issues:
+            fail("prompt contract lint failed: " + "; ".join(prompt_issues))
+        run_prompt_evals(fixtures_path=plugin / "prompt-evals" / "fixtures.json")
+        run_prompt_ab_evals(fixtures_path=plugin / "prompt-evals" / "fixtures.json")
+    except (AssertionError, OSError, RuntimeError, ValueError) as exc:
+        fail("prompt contract validation failed: " + str(exc))
     try:
         payload = json.loads(marketplace.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -111,8 +125,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.20":
-        fail("plugin manifest must identify cortex at release version 9.2.20")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.21":
+        fail("plugin manifest must identify cortex at release version 9.2.21")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"

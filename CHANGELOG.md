@@ -1,5 +1,29 @@
 # Changelog
 
+## [9.2.21] - 2026-08-21
+
+This source-tree patch introduces Prompt Contract Architecture v2 without
+changing the orchestration lifecycle, dispatch artifact, digest, bootstrap, or
+report transport contracts.
+
+- Compile artifact-backed v3 worker briefings from one structured ownership
+  matrix in the fixed authority → constraints → untrusted assignment JSON →
+  role → conditional mode/gate/context → tool/output/stopping order.
+- Keep dispatch-specific values inside a dynamically fenced JSON assignment
+  boundary, retain the v2 expanded briefing only as a deprecated compatibility
+  adapter with required-marker parity, and reject duplicate/unknown sections.
+  Production orchestration is statically fail-closed to canonical v3; v2 is
+  callable only by the explicit compatibility A/B baseline.
+- Add deterministic source lint and fixture prompt-eval checks. Live prompt
+  evaluation fails closed unless an explicit no-fallback `gpt-5.6-luna` high
+  executor is supplied; the normal suite never calls a model.
+- Add a separately opt-in v2 compatibility-adapter versus canonical-v3 A/B
+  fixture. Offline checks report only digest/section/byte/data-boundary deltas;
+  the live Codex runner reports deterministic structured-response, leakage,
+  tool, routing, retry/replay/completion, output, token, and time metrics.
+- Align source release markers, marketplace validation, and installer parity
+  with 9.2.21.
+
 ## [9.2.20] - 2026-08-21
 
 This source-tree patch closes the remaining human-boundary, dispatch-authority,
