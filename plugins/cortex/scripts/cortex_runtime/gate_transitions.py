@@ -8,6 +8,7 @@ the stdio entrypoint remains the single composition root.
 """
 from __future__ import annotations
 
+import posixpath
 from pathlib import Path
 from typing import Any
 
@@ -197,11 +198,12 @@ def _validate_pass_evidence(
     """Validate the evidence branch, returning only evidence tied to this transition."""
     if outcome != "passed":
         return gate_evidence, None
-    if not gate_evidence and not (
-        state.get("require_delegation")
-        and gate_attempts
-        and len(terminal_non_success_attempts) == len(gate_attempts)
-    ):
+    # A passed gate always needs positive, gate-scoped evidence.  In
+    # particular, terminal failed/cancelled attempts are not evidence of
+    # success: accepting that state would allow a gate to close after every
+    # delegated worker failed (the old branch below treated that as an
+    # implicit pass).
+    if not gate_evidence:
         return [], {
             "recorded": False,
             "reason": "evidence_required",
@@ -511,9 +513,23 @@ def _closure_rework_target(
         details = finding.get("details")
         if isinstance(details, dict) and isinstance(details.get("affected_paths"), list):
             affected_paths.extend(str(path).replace("\\", "/") for path in details["affected_paths"])
+    def is_documentation_path(raw_path: str) -> bool:
+        """Return true only for a normalized, relative docs path.
+
+        Findings are untrusted input.  Normalize separators and dot segments
+        before classification so ``docs/../src/file.py`` cannot be routed to
+        the documentation wave.  Absolute paths and paths escaping through a
+        parent segment are never documentation-only paths.
+        """
+        normalized_input = str(raw_path).replace("\\", "/")
+        if normalized_input.startswith("/"):
+            return False
+        normalized = posixpath.normpath(normalized_input)
+        return normalized == "docs" or normalized.startswith("docs/")
+
     if (
         affected_paths
-        and all(path.startswith("docs/") for path in affected_paths)
+        and all(is_documentation_path(path) for path in affected_paths)
         and "documentation" in pipeline
         and pipeline.index("documentation") <= gate_index
     ):

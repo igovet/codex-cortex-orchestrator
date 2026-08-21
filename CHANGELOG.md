@@ -1,5 +1,61 @@
 # Changelog
 
+## [9.2.22] - 2026-08-21
+
+This source-tree patch clarifies the public start-task contract without
+weakening its fail-closed validation boundary.
+
+- State in both the public MCP description and the bundled coordinator protocol
+  that `task.verification` is the array of concrete authoritative checks, not a
+  mode selector, and that `verification_mode` is not a task field.
+- Keep unknown task fields rejected before reservation or task creation, and
+  add contract parity coverage for the public schema, coordinator skill, and
+  no-task-created negative path.
+- Align the manifest cachebuster, source validators, release markers, and
+  current-source documentation with 9.2.22.
+
+## [9.2.21] - 2026-08-21
+
+This source-tree patch introduces Prompt Contract Architecture v2 without
+changing the orchestration lifecycle, dispatch artifact, digest, bootstrap, or
+report transport contracts.
+
+- Compile artifact-backed v3 worker briefings from one structured ownership
+  matrix in the fixed authority → constraints → untrusted assignment JSON →
+  role → conditional mode/gate/context → tool/output/stopping order.
+- Keep dispatch-specific values inside a dynamically fenced JSON assignment
+  boundary, retain the v2 expanded briefing only as a deprecated compatibility
+  adapter with required-marker parity, and reject duplicate/unknown sections.
+  Production orchestration is statically fail-closed to canonical v3; v2 is
+  callable only by the explicit compatibility A/B baseline.
+- Add deterministic source lint and fixture prompt-eval checks. Live prompt
+  evaluation fails closed unless an explicit no-fallback `gpt-5.6-luna` high
+  executor is supplied; the normal suite never calls a model.
+- Add a separately opt-in v2 compatibility-adapter versus canonical-v3 A/B
+  fixture. Offline checks report only digest/section/byte/data-boundary deltas;
+  the live Codex runner reports deterministic structured-response, leakage,
+  tool, routing, retry/replay/completion, output, token, and time metrics.
+- Align source release markers, marketplace validation, and installer parity
+  with 9.2.21.
+
+## [9.2.20] - 2026-08-21
+
+This source-tree patch closes the remaining human-boundary, dispatch-authority,
+and release-marker gaps.
+
+- Validate user-facing candidates before redaction, apply complete metadata and
+  path removal in every communication profile, and keep localized natural,
+  compact, technical, and neutral projections inside the public boundary.
+- Keep plan and question views limited to safe user content, with profile-aware
+  rendering and deterministic quality fallbacks; internal protocol data remains
+  under `internal`.
+- Reject public compact-wave requests for visible threads unless the immutable
+  task contract carries explicit `visible_thread_requested=true`; hidden
+  subagents remain the default and explicit visible-thread dispatches retain
+  their existing host checks.
+- Move release markers and validator expectations to 9.2.20 while preserving
+  the complete 9.2.19 historical entry.
+
 ## [9.2.19] - 2026-08-21
 
 This source-tree patch hardens bounded report intake and lifecycle-hook
@@ -23,6 +79,19 @@ snapshots without weakening ledger integrity.
   separated internal metadata and quality checks for start, progress, plan
   approval, questions, errors, blockers, and completion; aggregate all report
   validation diagnostics in one safe retry response.
+- Make `user_view` the human-facing boundary and keep a bounded machine
+  receipt/compatibility projection under `internal`; localize Russian and
+  English lifecycle/plan messages, map `neutral` to `natural`, enforce quality
+  fallbacks, keep worker waiting silent, and cover delegation/report
+  persistence with a live smoke test.
+- Preserve scalar task text as one atomic scope/requirement during task and
+  dispatch materialization, reject malformed list items, and return all
+  independent Planner identifier, dependency, and coverage-reference errors
+  with exact draft paths in one retry.
+- Require positive evidence for every passed gate, preserve failed checks for
+  honest blocked/rework results, harden harvest evidence and feature-page
+  validation, and prevent mutating task kinds or negated failure text from
+  taking read-only or incorrect recovery routes.
 - Rehydrate an exact worker's immutable assignment, compiled plan unit, and
   user-intent artifact after compaction/reset, failing closed on ambiguous
   identity or missing artifacts.

@@ -13,6 +13,7 @@ SCRIPTS = Path(__file__).parents[1] / "plugins" / "cortex" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import cortex as control
+from cortex_runtime import communication, orchestration_engine
 
 
 class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
@@ -26,6 +27,71 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
     def tearDown(self) -> None:
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
+
+    def test_orchestration_output_has_segregated_human_and_internal_views(self) -> None:
+        response = orchestration_engine._segregate_orchestration_output({
+            "schema": "cortex/orchestration/v3",
+            "ok": True,
+            "task_id": "private-task-ref",
+            "wave_id": "wave-1",
+            "state": "awaiting_plan_approval",
+            "spawn_requests": [{"attempt_id": "attempt-1"}],
+            "diagnostics": [],
+            "next_action": "call plan_approval with request_id=private-request",
+        })
+        self.assertEqual(response["internal"]["task_ref"], "private-task-ref")
+        self.assertEqual(response["internal"]["dispatches"], [{"attempt_id": "attempt-1"}])
+        self.assertIn("request_id=private-request", response["internal"]["next_action"])
+        self.assertTrue(response["user_view"]["requires_user_decision"])
+        self.assertEqual(response["user_view"]["next_step"], "Choose approve, revise, or cancel.")
+        self.assertNotIn("private-task-ref", str(response["user_view"]))
+        self.assertNotIn("attempt-1", str(response["user_view"]))
+        self.assertNotIn("request_id", str(response["user_view"]))
+
+    def test_natural_progress_views_keep_all_visible_fields_plain(self) -> None:
+        for state in ("ready_to_spawn", "completed"):
+            with self.subTest(state=state):
+                response = orchestration_engine._segregate_orchestration_output({
+                    "schema": "cortex/orchestration/v3",
+                    "ok": True,
+                    "state": state,
+                    "communication_profile": "natural",
+                    "user_language": "en",
+                    "spawn_requests": [],
+                    "diagnostics": [],
+                })
+                view = response["user_view"]
+                visible = " ".join(str(view.get(field) or "") for field in (
+                    "message", "why_it_matters", "next_step", "recommendation", "risks"
+                ))
+                self.assertNotRegex(visible, communication._TECHNICAL_RE)
+                self.assertTrue(view["quality"]["ok"], view)
+
+    def test_remediation_heuristic_ignores_negated_action_but_accepts_later_clause(self) -> None:
+        self.assertFalse(
+            orchestration_engine._has_non_negated_term(
+                "Do not restart the service; investigate the timeout.", "restart"
+            )
+        )
+        self.assertTrue(
+            orchestration_engine._has_non_negated_term(
+                "Do not restart the service; repair the network configuration.", "repair"
+            )
+        )
+
+    def test_failure_classifier_does_not_treat_negated_network_as_infrastructure(self) -> None:
+        self.assertEqual(
+            orchestration_engine._failure_class_from_completion(
+                {"reason": "This was not a network timeout; the product assertion failed."}
+            ),
+            "product",
+        )
+        self.assertEqual(
+            orchestration_engine._failure_class_from_completion(
+                {"reason": "Network timeout prevented the dependency download."}
+            ),
+            "infrastructure",
+        )
 
     def _start(self) -> dict:
         return control.start_orchestration({

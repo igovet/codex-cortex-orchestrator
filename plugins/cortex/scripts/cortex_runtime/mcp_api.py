@@ -15,11 +15,52 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from cortex_runtime.communication import render_lifecycle
+from cortex_runtime.communication import public_risks, render, render_lifecycle, render_plan
 
 
 MCP_AUDIENCES = frozenset({"compat", "coordinator", "worker"})
 DEFAULT_MCP_AUDIENCE = "compat"
+
+
+def _public_user_view(rendered: object) -> dict[str, Any]:
+    """Return only presentation fields; transport metadata stays internal."""
+    if not isinstance(rendered, dict):
+        return {}
+    allowed = (
+        "message_type", "message", "next_step", "profile", "detail_level",
+        "quality", "question", "requires_user_decision", "recommendation",
+        "risks", "why_it_matters", "output_policy",
+    )
+    return {key: rendered[key] for key in allowed if key in rendered}
+
+
+def _internal_protocol(response: Mapping[str, Any]) -> dict[str, Any]:
+    """Nest a bounded machine receipt under one explicit boundary.
+
+    The legacy top-level response still carries the native dispatch payload for
+    compatibility.  Repeating those large host messages inside ``internal``
+    can exceed the host's response budget, so this boundary keeps identity,
+    receipt references, and dispatch metadata while leaving the authoritative
+    native payload at its existing compatibility location.
+    """
+    keep = {"schema", "ok", "outcome", "task_ref", "step", "replayed", "report_ref", "receipt_ref"}
+    result = {key: response[key] for key in keep if key in response}
+    dispatches = response.get("dispatches")
+    if isinstance(dispatches, list):
+        result["dispatches"] = [
+            {
+                key: item[key]
+                for key in ("dispatch_ref", "phase", "profile", "display_name", "briefing_digest", "worker")
+                if isinstance(item, dict) and key in item
+            }
+            for item in dispatches
+            if isinstance(item, dict)
+        ]
+    if "next_action" in response:
+        result["next_action_ref"] = "top-level next_action"
+    if isinstance(response.get("diagnostics"), list):
+        result["diagnostic_count"] = len(response["diagnostics"])
+    return result
 
 # ``read_worker_report`` is intentionally shared: the coordinator reads a
 # completed report, while a successor worker may read only refs granted in its
@@ -59,9 +100,9 @@ COMPAT_PUBLIC_TOOL_NAMES = (
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
-    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
+    "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question as an ordinary detailed chat message, or review a completed plan in chat. intent=inspect is always read-only; when its lifecycle_recovery result explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact repair scope from current state. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses return cortex/chat-interaction/v1: render it completely in the user's language as the final assistant message, visibly name the LLM-recommended response and rationale, end the turn, and wait for the user's next ordinary message. Never call a UI/input/approval/elicitation tool and never infer approval from silence. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. task_ref, dispatch_ref, and submission_id are coordinator transport fields: omit them rather than trying to translate them into worker identity. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
@@ -405,6 +446,17 @@ def build_public_schemas(
                     "is intentionally independent."
                 ),
             },
+            "context_report_ids": {
+                "type": "array",
+                "maxItems": 32,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+                "description": (
+                    "Optional exact immutable report receipts that must be supplied to this worker. "
+                    "Use for corrective handoffs that must retain an origin report; Cortex validates that "
+                    "each receipt belongs to the current task before dispatch."
+                ),
+            },
             "model": {"type": "string", "description": "Optional expert override; luna, terra, and sol aliases are accepted."},
             "user_requested_model": {
                 "type": "string",
@@ -414,8 +466,19 @@ def build_public_schemas(
                 ),
             },
             "effort": {"type": "string", "description": "Optional expert reasoning-effort override."},
-            "visible": {"type": "boolean", "default": False},
-            "isolated_checkout": {"type": "boolean", "default": False},
+            "visible": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Opt into a user-owned visible task only when the immutable task contract contains "
+                    "visible_thread_requested=true; otherwise Cortex rejects this field and uses a hidden subagent."
+                ),
+            },
+            "isolated_checkout": {
+                "type": "boolean",
+                "default": False,
+                "description": "Optional worktree isolation for an explicitly authorized visible task.",
+            },
         },
         "required": ["phase"],
     }
@@ -461,7 +524,16 @@ def build_public_schemas(
                     "multi_session_handoff": {"type": "boolean"},
                     "user_language": {"type": "string"},
                     "language": {"type": "string"},
-                    "communication_profile": {"type": "string", "enum": ["natural", "compact", "technical"], "default": "natural", "description": "User-facing message style. Defaults to natural; internal metadata remains separate."},
+                    "communication_profile": {"type": "string", "enum": ["natural", "neutral", "compact", "technical"], "default": "natural", "description": "User-facing message style. neutral is an alias for natural; internal metadata remains separate."},
+                    "visible_thread_requested": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Explicit user authorization for visible task creation. Set only when the user asked "
+                            "for a visible task; hidden subagents remain the default and visible worker fields are "
+                            "rejected without this immutable opt-in."
+                        ),
+                    },
                     "complexity": {"type": ["string", "integer"], "description": "Optional C1/C2/C3 or human alias; defaults to C2."},
                     "replan_limit": {
                         "type": "integer",
@@ -804,8 +876,11 @@ def v3_response(
 ) -> dict[str, Any]:
     state_summary = old.get("state_summary") if isinstance(old.get("state_summary"), dict) else {}
     communication_profile = old.get("communication_profile") or state_summary.get("communication_profile")
-    communication_config = ({"communication_profile": communication_profile}
-                            if communication_profile else None)
+    user_language = old.get("user_language") or state_summary.get("user_language")
+    communication_config = ({key: value for key, value in {
+        "communication_profile": communication_profile,
+        "user_language": user_language,
+    }.items() if value} or None)
     wave_label = str(old.get("wave_id") or "")
     wave_match = re.search(r"(\d+)$", wave_label)
     step = int(wave_match.group(1)) if wave_match else None
@@ -846,6 +921,8 @@ def v3_response(
             response.get("outcome"), ok=False, config=communication_config,
             metadata={"code": response.get("code"), "recoverable": response.get("recoverable")},
         )
+        response["user_view"] = _public_user_view(response["user_message"])
+        response["internal"] = _internal_protocol(response)
         return response
     requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
     prepared_dispatches = [
@@ -1133,9 +1210,7 @@ def v3_response(
     if outcome == "waiting_workers":
         response.update({
             "output_policy": "silent",
-            "allowed_visible_events": [
-                "user_message", "worker_question", "worker_completed", "worker_failed", "blocking_error",
-            ],
+            "allowed_visible_events": [],
         })
     if start_replayed is not None:
         response["replayed"] = start_replayed
@@ -1171,6 +1246,75 @@ def v3_response(
         review = (old.get("result") or {}).get("plan_review") if isinstance(old.get("result"), dict) else None
         if isinstance(review, dict):
             response["plan_review"] = review
+    response["user_view"] = None if outcome == "waiting_workers" else _public_user_view(response["user_message"])
+    if outcome == "awaiting_plan_approval" and isinstance(response.get("plan_review"), dict):
+        review = response["plan_review"]
+        packages = review.get("work_packages") if isinstance(review.get("work_packages"), list) else []
+        steps = [
+            str(item.get("title") or item.get("summary") or "Review the planned work.").strip()
+            for item in packages if isinstance(item, dict)
+        ][:5]
+        if not steps:
+            steps = ["Review the proposed work and its verification."]
+        review_recommendation = str(review.get("recommendation") or "approve").strip().lower()
+        has_material_risk = bool(review.get("risks") or review.get("uncertainty") or review.get("findings"))
+        recommended_decision = "revise" if review_recommendation == "revise" or has_material_risk else "approve"
+        is_ru = str(user_language or "").lower().startswith("ru")
+        if is_ru:
+            recommendation = (
+                "Рекомендация: доработать план — остаётся существенный риск или пробел в проверке."
+                if recommended_decision == "revise" else
+                "Рекомендация: утвердить план — требования покрыты, неопределённости закрыты, проверки конкретны."
+            )
+            approval_question = "Утвердить план, запросить доработку или отменить?"
+        else:
+            recommendation = (
+                "Recommendation: revise — a material risk or verification gap remains."
+                if recommended_decision == "revise" else
+                "Recommendation: approve — the request is covered, uncertainties are closed, and checks are concrete."
+            )
+            approval_question = "Approve the plan, request a revision, or cancel?"
+        response["user_view"] = render_plan(
+            str(review.get("summary") or review.get("objective") or "Review the proposed plan."),
+            steps,
+            question=approval_question,
+            recommendation=recommendation,
+            config=communication_config,
+        )
+        recommendation_rendered = render(
+            recommendation,
+            kind="question",
+            next_step=approval_question,
+            config=communication_config,
+        )
+        why_rendered = render(
+            "Решение определяет, можно ли перейти к выполнению плана." if is_ru else
+            "Your decision determines whether the plan can move to implementation.",
+            kind="question",
+            next_step=approval_question,
+            config=communication_config,
+        )
+        response["user_view"]["risks"] = public_risks(
+            review.get("risks") or review.get("uncertainty") or review.get("findings"),
+            config=communication_config,
+            limit=4,
+        )
+        response["user_view"]["recommendation"] = recommendation_rendered["message"]
+        response["user_view"]["requires_user_decision"] = True
+        response["user_view"]["why_it_matters"] = why_rendered["message"]
+        quality = dict(response["user_view"].get("quality") or {})
+        quality["fallback_applied"] = bool(
+            quality.get("fallback_applied")
+            or recommendation_rendered["quality"].get("fallback_applied")
+            or why_rendered["quality"].get("fallback_applied")
+        )
+        quality["ok"] = bool(
+            quality.get("ok")
+            and recommendation_rendered["quality"].get("ok")
+            and why_rendered["quality"].get("ok")
+        )
+        response["user_view"]["quality"] = quality
+    response["internal"] = _internal_protocol(response)
     return response
 
 def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[str, Any]]]) -> set[str]:

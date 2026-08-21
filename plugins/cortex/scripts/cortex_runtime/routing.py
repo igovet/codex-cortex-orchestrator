@@ -52,7 +52,6 @@ def resolve_dispatch_route(
         or task_kind.startswith("read_only")
         or task_kind.startswith("read_discovery")
         or task_kind.startswith("data_gather")
-        or task_kind.startswith("audit")
     )
     analysis_dispatch = lightweight_dispatch or task_kind in policy["analysis_task_kinds"] or any(
         task_kind.startswith(prefix) for prefix in policy["analysis_task_kind_prefixes"]

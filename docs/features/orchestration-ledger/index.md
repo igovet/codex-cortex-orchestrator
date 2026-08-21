@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.19 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.22 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -327,7 +327,11 @@ paths, dependencies, verification, material risks, `report_ref`,
 `remaining_phases`, and the derived absolute
 `report_markdown_path`. The coordinator reads
 the referenced planner report, gives the user a concise main-chat summary,
-and waits for an explicit decision. It resumes with
+and waits for an explicit decision. The ordinary-chat `user_view` contains a
+localized summary, at most five plain-language steps, one approve/revise/cancel
+question, the recommendation, and only path-free localized risks; package
+titles, repository paths, dependencies, report references, and request IDs stay
+in the internal plan receipt. It resumes with
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`,
 which returns a `cortex/chat-interaction/v1` ordinary-chat hold with an opaque
 request ID, approve/revise/cancel meanings, and the LLM-recommended response
@@ -655,11 +659,19 @@ optional projection already exists; use the exact report ref with
 User-facing completion projections additionally expose `completion_update.user_message`.
 Its profile is selected from `task.communication_profile` (or
 `CORTEX_COMMUNICATION_PROFILE`) with `natural` as the fallback; `compact` and
-`technical` are supported alternatives. The projection uses human-readable
-message types, keeps transport metadata in a separate `metadata` object, and
-records quality checks for plain language, internal-metadata leakage,
-repetition, an explicit next step, and profile fit. The structured completion
-fields remain the coordinator contract and are not replaced by this
+`technical` are supported alternatives; `neutral` is a compatibility alias for
+`natural`. The projection uses human-readable message types, keeps transport
+metadata in a separate `metadata` object, and records quality checks for plain
+language, internal-metadata leakage, repetition, an explicit next step, and
+profile fit. A failed quality check is a gate: the renderer replaces the
+candidate with a deterministic safe message before it can reach `user_view`.
+The public boundary is `user_view` only. The `internal` field contains a bounded
+machine receipt projection (identity, references, dispatch metadata, and
+diagnostic counts); legacy top-level protocol fields remain for compatibility
+and must not be copied into user prose. Russian and English lifecycle and plan
+projections are deterministic, and waiting-worker states set
+`output_policy: silent` with no allowed visible events. The structured
+completion fields remain the coordinator contract and are not replaced by this
 presentation projection.
 
 Review, governance activation, governance close, and final close reports

@@ -58,6 +58,25 @@ hosts that require transport-enforced separation must use a strict `worker` or `
 | completed | user asks to correct the result | `manage_orchestration(intent="follow_up")` | linked-task summary |
 | context uncertain | compaction or reset | `manage_orchestration(intent="inspect")` once | recovered-state summary only when action is needed |
 
+### Natural-facing coordinator contract
+
+The state machine above is internal protocol; never expose its state names,
+tool calls, IDs, paths, cursors, worker details, or validation mechanics to the
+user in the default `natural` profile. Translate each meaningful event into
+3–5 short steps: result, importance, next action, and (only when needed) one
+user decision. A user-facing message contains at most one actionable question.
+While the state is `waiting_workers`, the coordinator is completely silent:
+wait timeouts and unchanged worker state produce no heartbeat, progress note,
+or repeated explanation.
+
+For plan approval, the coordinator must state its recommendation. When the
+plan covers the request, all material uncertainty is closed, and its gates
+have concrete verification, recommend **Approve**. Recommend **Revise** only
+when naming a specific unresolved risk, dependency, omitted requirement, or
+verification gap; recommend **Cancel** only when the user has requested
+cancellation or the task is no longer authorized. Never ask the user to
+choose between unlabeled internal states, and never treat silence as approval.
+
 ## Root coordinator lock
 
 An active Cortex root is coordination-only. It must not use project-reading,
@@ -94,6 +113,10 @@ paths forbidden above.
    matches `user_request`. Add requirements, acceptance criteria,
    scope, allowed paths, verification, budget, pause conditions, language, or
    complexity only when the user supplied them or they are established facts.
+   `task.verification` is the non-empty array of concrete authoritative checks;
+   it is not a mode selector. In particular, never add a `verification_mode`
+   task field or any other field absent from the public `start_orchestration`
+   schema: Cortex rejects unknown task fields before creating a task.
    Do not make an abstract request look decision-complete by inventing product
    intent, audience, design direction, behavior, or acceptance. Complexity
    defaults to C2 and accepts aliases. Before the one start call, verify that
@@ -194,18 +217,24 @@ paths forbidden above.
    `manage_orchestration(task_ref="<current task ref>", intent="question",
    payload={"question_ref": "<exact ref>"})` exactly once; Cortex owns
    task/principal/thread resolution and returns a complete
-   `cortex/chat-interaction/v1`. Render that interaction as the final ordinary
-   assistant message in the user's language, including context, consequences,
-   every option and trade-off, and the visibly labelled LLM recommendation with
-   rationale. End the turn without calling any UI/input/approval/elicitation
-   tool. A batch is rendered sequentially as ordinary chat interactions; every
-   user answer is checkpointed before the next question is shown. The next
-   ordinary user message supplies the answer for the same interaction ref; do
-   not guess an internal identity or infer an answer from silence. After the
-   answer is durably recorded,
-   resume the exact same native worker through `followup_task`; that worker
-   calls `worker_question(action="poll")` with the same attempt and ref before
-   continuing. Never replace the worker or advance the wave for a question.
+`cortex/chat-interaction/v1` with a bounded `user_view` and an internal
+receipt. Render only `user_view` as the final ordinary
+   assistant message in
+   the user's language: one decision, its concrete options/trade-offs, and the
+   visibly labelled recommendation. For a non-English task, the question
+   scaffolding (`why_it_matters`, recommendation, and `next_step`) must use
+   that same language; canonical worker rationale remains internal. Never copy
+   keys, IDs, cursors, tools, or
+   the remaining batch into user prose. End the turn without calling any UI/input/approval/elicitation
+   tool. A batch is rendered sequentially as
+ordinary chat interactions; every user answer is checkpointed before the next
+question is shown. The next
+ordinary user message supplies the answer for the same interaction ref; do
+not guess an internal identity or infer an answer from silence. After the
+answer is durably recorded,
+resume the exact same native worker through `followup_task`; that worker
+calls `worker_question(action="poll")` with the same attempt and ref before
+continuing. Never replace the worker or advance the wave for a question.
    After work completes, `get_report_template` creates one private temporary
    JSON file already filled with the exact gate-specific skeleton and returns
    its `draft_path` and `draft_ref`. The worker edits that file, replaces every
@@ -369,15 +398,16 @@ repeat a dispatch, or treat the original inspect as permission to mutate state.
 `required` for C2/C3 and `auto` for C1. The C1 auto policy does not require
 user confirmation. A required plan must be its own wave. Once that plan
 completes, the lifecycle result is `awaiting_plan_approval` with no successor
-dispatch and a bounded `plan_review` containing the objective, complete work
+dispatch and a machine-readable `plan_review` containing the objective, complete work
 packages and microtasks, paths, dependencies, verification, material risks,
 `report_ref`, and `remaining_phases`. The
-coordinator reads the report, summarizes the plan in the main chat, then calls
+coordinator reads the report, then calls
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
-Cortex returns `cortex/chat-interaction/v1`. Render it as one detailed ordinary
-final assistant message, including every work package, verification and risk,
-all approve/revise/cancel meanings, and the visibly labelled LLM recommendation
-with rationale. Do not call a UI, input, approval, or elicitation tool. End the
+Cortex returns `cortex/chat-interaction/v1` with `user_view` and `internal`.
+Render only `user_view`: a 3–5 step human summary, one approve/revise/cancel
+question, the material risk (if any), and the explicit LLM recommendation.
+Do not expose work-package paths, dependencies, report/request IDs, or tool
+instructions. Do not call a UI, input, approval, or elicitation tool. End the
 turn and wait. Submit the user's next message with the exact `interaction_ref`
 as `request_id`: unambiguous approval uses `approve`, explicit cancellation uses
 `cancel`, and any requested change uses `revise` with the exact feedback text.
@@ -392,7 +422,10 @@ has `id`, `title`, `objective`, optional `allowed_paths`/`depends_on`, and
 non-empty microtasks; `profile` is forbidden at package level. Each microtask
 requires `id`, `title`, `objective`, an explicit `profile`, narrow non-broad
 `allowed_paths`, non-empty `acceptance_criteria`, and non-empty `verification`,
-with optional `depends_on`.
+with optional `depends_on`. Every package/microtask `id`, dependency, and
+`requirement_coverage.plan_refs` value must be a unique lowercase safe
+identifier matching `[a-z0-9_-]+` and must reference an existing package or
+microtask; never emit display labels such as `MT-01`.
 Cortex requires microtask IDs to be globally unique across the plan, allows
 `depends_on` to reference microtasks in another work package, rejects unknown
 references, and validates the combined microtask dependency graph as acyclic.
@@ -551,9 +584,9 @@ text or a choice's free-form custom response before the worker receives the
 canonical English answer. Every choice question renders that optional custom
 field beside its stable options. Workers may use
 `worker_question(action="ask_batch")` with 1–32 stable questions and poll the
-same `batch_ref` with `action="poll_batch"`; the coordinator renders all
-currently unanswered items in one understandable chat message and Cortex
-durably checkpoints the next user answer before resuming. For a non-English
+same `batch_ref` with `action="poll_batch"`; the coordinator renders one
+currently unanswered decision at a time in a natural-facing message and
+Cortex durably checkpoints that answer before showing the next item. For a non-English
 batch, `localized_questions` is an ordered display
 projection only: preserve the canonical order when possible, but never invent
 or reconstruct canonical `question_key` or `option_id` values. Cortex maps

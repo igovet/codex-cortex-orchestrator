@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any
 
+from cortex_runtime import communication
+
 from cortex_runtime.core.runtime_bindings import bind_symbols
 
 
@@ -1567,9 +1569,105 @@ def _chat_question_item(question: dict[str, Any]) -> dict[str, Any]:
 
 def _chat_question_interaction(
     *, question_ref: str, questions: list[dict[str, Any]], progress: dict[str, Any] | None = None,
+    user_language: str = "en", communication_profile: str = "natural",
 ) -> dict[str, Any]:
     """Describe the user-visible message and exact durable resume boundary."""
-    return {
+    rendered_questions = [_chat_question_item(item) for item in questions]
+    first = rendered_questions[0] if rendered_questions else {
+        "question": "A decision is needed before the task can continue.",
+        "why_needed": "The task cannot safely continue without this decision.",
+        "options": [],
+        "llm_recommendation": {"rationale": "Choose the safest bounded option."},
+    }
+    # Only one decision is shown in the human-facing projection.  The complete
+    # batch remains available below ``internal`` for checkpointed processing.
+    is_ru = str(user_language or "en").lower().startswith("ru")
+    public_why = (
+        "Это решение нужно, чтобы безопасно продолжить задачу."
+        if is_ru else
+        str(first.get("why_needed") or "This decision is required before work can continue safely.")
+    )
+    public_recommendation = (
+        "Рекомендуется выбрать предложенный безопасный вариант или указать необходимые ограничения."
+        if is_ru else
+        (first.get("llm_recommendation") or {}).get("rationale")
+    )
+    public_config = {
+        "communication_profile": communication_profile or "natural",
+        "user_language": user_language,
+    }
+    question_rendered = communication.render(
+        str(first.get("question") or "A decision is needed before the task can continue."),
+        kind="question",
+        next_step=("Ответьте на вопрос или укажите ограничения." if is_ru else "Reply with your decision or constraints."),
+        config=public_config,
+    )
+    why_rendered = communication.render(
+        public_why,
+        kind="question",
+        next_step=("Ответьте на вопрос или укажите ограничения." if is_ru else "Reply with your decision or constraints."),
+        config=public_config,
+    )
+    recommendation_rendered = communication.render(
+        str((first.get("llm_recommendation") or {}).get("rationale") or ""),
+        kind="question",
+        next_step=("Ответьте на вопрос или укажите ограничения." if is_ru else "Reply with your decision or constraints."),
+        config=public_config,
+    )
+    public_options = []
+    option_checks: list[str] = []
+    for option_index, option in enumerate(first.get("options") or [], 1):
+        label_rendered = communication.render(
+            option.get("label"), kind="question", next_step="Continue when ready.", config=public_config,
+        )
+        description_rendered = communication.render(
+            option.get("description"), kind="question", next_step="Continue when ready.", config=public_config,
+        )
+        label = label_rendered["message"]
+        description = description_rendered["message"]
+        # A path/ref-bearing option cannot be repaired by redaction without
+        # risking a misleading fragment. Keep every choice distinguishable in
+        # the public view by its display number, while preserving the exact
+        # canonical option and id only in ``internal``.
+        if label_rendered["quality"].get("fallback_applied"):
+            label = f"Вариант {option_index}" if is_ru else f"Option {option_index}"
+        if description_rendered["quality"].get("fallback_applied"):
+            description = (
+                f"Описание варианта {option_index} недоступно в безопасном виде."
+                if is_ru else
+                f"Details for option {option_index} are not available in a safe public form."
+            )
+        public_options.append({
+            "number": option_index,
+            "label": label,
+            "description": description,
+        })
+        option_checks.extend(label_rendered["quality"].get("checks", []))
+        option_checks.extend(description_rendered["quality"].get("checks", []))
+    quality_checks = list(question_rendered["quality"].get("checks", []))
+    quality_checks.extend(why_rendered["quality"].get("checks", []))
+    quality_checks.extend(recommendation_rendered["quality"].get("checks", []))
+    quality_checks.extend(option_checks)
+    user_view = {
+        "profile": question_rendered["profile"],
+        "message": question_rendered["message"],
+        "why_it_matters": why_rendered["message"],
+        "question": question_rendered["message"],
+        "options": public_options,
+        "recommendation": (
+            "Рекомендуется выбрать предложенный безопасный вариант или указать необходимые ограничения."
+            if is_ru and not recommendation_rendered["quality"]["ok"]
+            else recommendation_rendered["message"]
+        ),
+        "requires_user_decision": True,
+        "next_step": "Ответьте на вопрос или укажите ограничения." if is_ru else "Reply with your decision or constraints.",
+        "quality": {
+            "ok": True,
+            "checks": [],
+            "fallback_applied": bool(quality_checks),
+        },
+    }
+    interaction = {
         "schema": "cortex/chat-interaction/v1",
         "kind": "worker_question",
         "interaction_ref": question_ref,
@@ -1578,23 +1676,28 @@ def _chat_question_interaction(
             "A Cortex worker is paused because continuing without this decision could change scope, behavior, "
             "risk, or acceptance criteria. The same durable task and worker will resume after the answer."
         ),
-        "questions": [_chat_question_item(item) for item in questions],
+        "questions": rendered_questions,
         **({"progress": progress} if progress else {}),
         "response_instructions": (
-            "Answer in your next ordinary chat message. Name the option label or option_id when selecting an option; "
+            "Answer in your next ordinary chat message. Name the displayed option number or label when selecting an option; "
             "for multiple questions, answer each numbered question. You may describe another choice and its "
             "constraints."
         ),
         "coordinator_contract": (
-            "Render every question, its context and why it matters, every option label and description, material "
-            "trade-offs, and a visibly labelled 'LLM recommendation' naming the recommended option(s) or exact "
-            "text answer plus its rationale in the user's language as one ordinary final assistant "
-            "message. Do not call any UI, input, approval, or elicitation tool. End the turn immediately after the "
-            "message. On the user's next message, treat it as the answer unless they explicitly replace or cancel the "
-            "task; preserve the exact user text, record it against interaction_ref, and only then resume the exact "
-            "same worker."
+            "Render only user_view as one ordinary final assistant message in the user's language. Show one decision "
+            "at a time with its concrete options, trade-offs, and recommendation; never copy internal question keys, "
+            "IDs, cursors, tool instructions, or the remaining batch into user prose. Do not call any UI, input, "
+            "approval, or elicitation tool. End the turn immediately. On the next user message, preserve the exact "
+            "answer, checkpoint it against interaction_ref, then show the next decision or resume the same worker."
         ),
     }
+    interaction["user_view"] = user_view
+    interaction["internal"] = {
+        "interaction_ref": question_ref,
+        "questions": rendered_questions,
+        **({"progress": progress} if progress else {}),
+    }
+    return interaction
 
 
 def _batch_answers_from_chat(record: dict[str, Any], raw_answers: object) -> dict[str, dict[str, Any]]:
@@ -1716,6 +1819,8 @@ def _cortex_question_batch(params: dict[str, Any], batch_id: str) -> dict[str, A
             question_ref=batch_id,
             questions=unanswered,
             progress=progress,
+            user_language=str(params.get("user_language") or "en"),
+            communication_profile=str(params.get("communication_profile") or "natural"),
         ),
         "recoverable": True,
         "durable": {"batch": record},
@@ -1845,6 +1950,8 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
                 "chat_interaction": _chat_question_interaction(
                     question_ref=durable["question"]["question_id"],
                     questions=[{**durable["question"], **config, "canonical_question": question}],
+                    user_language=str(params.get("user_language") or "en"),
+                    communication_profile=str(params.get("communication_profile") or "natural"),
                 ),
                 "next_action": "Send chat_interaction as an ordinary final chat message and end the turn; wait for the user's next message.",
                 "recoverable": True,
@@ -1859,6 +1966,8 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
         "chat_interaction": _chat_question_interaction(
             question_ref=question_id or str((durable or {}).get("question", {}).get("question_id") or ""),
             questions=[{**(durable or {}).get("question", {}), **config, "canonical_question": question}],
+            user_language=str(params.get("user_language") or "en"),
+            communication_profile=str(params.get("communication_profile") or "natural"),
         ),
         "next_action": "Send chat_interaction as an ordinary final chat message and end the turn; wait for the user's next message.",
         "recoverable": True,

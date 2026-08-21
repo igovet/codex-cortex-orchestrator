@@ -264,6 +264,18 @@ separate from internal transport metadata. Before publication, check plain
 language, absence of internal identifiers and tool names, non-repetition, an
 explicit next step, and the selected profile's length/detail expectations.
 
+Natural-facing output is a strict presentation boundary. In the default
+`natural` profile, every user-visible update contains only 3–5 short steps:
+what happened, why it matters, what happens next, and—when applicable—the one
+decision required from the user. Internal protocol names, lifecycle states,
+worker identities, dispatch references, cursors, report paths, model names,
+and validation implementation details stay internal. Ask at most one clear
+question in a user-facing message. If all material uncertainty is closed and
+the plan is executable, the coordinator must recommend **Approve** explicitly;
+it may recommend **Revise** only when a concrete unresolved risk, dependency,
+or verification gap remains. Waiting for workers produces no user-facing
+heartbeat or progress message.
+
 For an activated route, `../cortex-control/SKILL.md` is the single coordinator
 core and state-machine authority. Load it completely before the first lifecycle
 call and follow its exact tool sequence, silent-wait policy, question flow,

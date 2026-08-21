@@ -54,7 +54,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             mcp_api.serve_stdio(
                 public_tools={"start_orchestration": (busy_handler, {})},
                 internal_handlers={},
-                server_version="9.2.19",
+                server_version="9.2.22",
                 instructions="test",
                 log_tool_error=log_error,
                 audience="coordinator",

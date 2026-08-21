@@ -19,7 +19,7 @@ This feature packages Cortex as a repository-local Codex plugin and validates th
 
 ## Behavior and status
 
-The current source manifest and server are intended for plugin version `9.2.19`. This
+The current source manifest and server are intended for plugin version `9.2.22`. This
 repository documentation does not assert that any user's local registration is
 installed, updated, or content-verified. The launcher validates `CORTEX_PYTHON` (or `python3`
 from `PATH` when unset), requires Python 3.11+ with `tomllib`, and executes the
@@ -85,7 +85,7 @@ on clean and existing configurations. It preserves the captured value during
 remove/add, then writes and verifies `approve`; `--check` fails when the
 effective setting is missing or weaker.
 
-The marketplace validator also enforces the machine-readable shared worker
+The marketplace validator and `scripts/cortex-prompt-lint.py` also enforce the machine-readable shared worker
 contract: explicit-opt-in skill descriptions, one strict seven-field report, worker `worker_question`,
 `get_report_template`, `record_report`, the three
 coordinator lifecycle operations, and scoped predecessor `read_worker_report`,
@@ -94,7 +94,7 @@ Memory resolution, the four profiles allowed one index refresh, and bounded
 non-looping fallback. It also rejects coordinator routing language and harvest
 specialization in selected-worker TOMLs, duplicate long prompt paragraphs,
 historical normative HTML comments, and raw task-value interpolation in the
-briefing compiler; the contract declares representative prompt byte budgets.
+briefing compiler; [prompt-contracts.json](../../../plugins/cortex/prompt-contracts.json) declares the canonical v2 ownership matrix, conditional v3 section order, JSON-only task-data boundary, legacy adapter parity, and representative prompt byte budgets. `scripts/cortex-prompt-eval.py` runs deterministic offline fixtures by default: canonical ordering, optional-mode ordering, hostile-fence/minimal-section cases, and one fixed legacy-v2/canonical-v3 pair compare SHA-256 goldens plus heading uniqueness/count, byte ceiling, fence width, assignment-only markers, and explicit deltas. These are structural metrics, not a subjective model score. `scripts/cortex-prompt-live-eval.py --live` is a separate, disabled-by-default real Codex A/B runner. It is pinned to Luna high with no fallback and scores only schema/report shape, unnecessary-question count, forbidden tool/metadata leakage, routing/retry/replay/completion signals, and output/token/time bounds; model/auth unavailability is `SKIP`/`BLOCKED`, never `PASS`.
 The compact worker schema accepts only validated
 project-relative `context_files`, automatically injects available repository
 knowledge indexes, and requires `Knowledge reviewed:` evidence. Repository
