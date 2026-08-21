@@ -59,7 +59,7 @@ COMPAT_PUBLIC_TOOL_NAMES = (
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question as an ordinary detailed chat message, or review a completed plan in chat. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses return cortex/chat-interaction/v1: render it completely in the user's language as the final assistant message, visibly name the LLM-recommended response and rationale, end the turn, and wait for the user's next ordinary message. Never call a UI/input/approval/elicitation tool and never infer approval from silence. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface a worker's durable question as an ordinary detailed chat message, or review a completed plan in chat. intent=inspect is always read-only; when its lifecycle_recovery result explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact repair scope from current state. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses return cortex/chat-interaction/v1: render it completely in the user's language as the final assistant message, visibly name the LLM-recommended response and rationale, end the turn, and wait for the user's next ordinary message. Never call a UI/input/approval/elicitation tool and never infer approval from silence. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When the response is awaiting_translation, call the returned translation_request exactly; for one question it uses answer plus answer_en, for a batch canonical_answers. Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
     "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. task_ref, dispatch_ref, and submission_id are coordinator transport fields: omit them rather than trying to translate them into worker identity. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
@@ -74,7 +74,6 @@ def build_public_schemas(
     *,
     agents: Mapping[str, Any],
     report_fields: Sequence[str],
-    max_report_items: int,
     max_work_packages: int,
     max_microtasks_per_package: int,
     max_discovery_domains: int,
@@ -109,8 +108,8 @@ def build_public_schemas(
         "additionalProperties": False,
         "description": f"Strict cortex/report/v1 object with exactly {len(report_fields)} fields. Review and close closure belongs beside this object, never inside it.",
         "properties": {
-            "summary": {"type": "string", "minLength": 1, "maxLength": 4000},
-            "findings": {"type": "array", "maxItems": max_report_items},
+            "summary": {"type": "string", "minLength": 1},
+            "findings": {"type": "array"},
             "questions": {
                 "type": "array",
                 "maxItems": 0,
@@ -118,13 +117,11 @@ def build_public_schemas(
             },
             "changed_files": {
                 "type": "array",
-                "maxItems": max_report_items,
-                "items": {"type": "string", "minLength": 1, "maxLength": 500},
+                "items": {"type": "string", "minLength": 1},
                 "description": "Safe project-relative paths only; put prose in findings or evidence.",
             },
             "tests": {
                 "type": "array",
-                "maxItems": max_report_items,
                 "description": (
                     "For implementation, QA, specialist checks, review, documentation, and close, each item must contain "
                     "exactly command, cwd, exit_code, and evidence from an executed check."
@@ -134,13 +131,12 @@ def build_public_schemas(
             "evidence": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": max_report_items,
                 "description": (
                     "Evidence plus every exact generated Predecessor review:, Knowledge reviewed:, Gate acceptance:, "
                     "Gate verification:, and close-level Task acceptance:/Task verification: marker from the briefing."
                 ),
             },
-            "uncertainty": {"type": "array", "maxItems": max_report_items},
+            "uncertainty": {"type": "array"},
         },
         "required": list(report_fields),
     }
@@ -501,7 +497,15 @@ def build_public_schemas(
             },
             "patch": {
                 "type": "object",
-                "description": "Optional RFC 7396 JSON Merge Patch limited to report, scoping, planning, gate_result, and closure. Do not combine with a complete report replacement.",
+                "additionalProperties": False,
+                "properties": {
+                    "report": {},
+                    "scoping": {},
+                    "planning": {},
+                    "gate_result": {},
+                    "closure": {},
+                },
+                "description": "Optional RFC 7396 JSON Merge Patch limited to report, scoping, planning, gate_result, and closure. It is valid only with draft_ref; do not combine it with a complete report replacement.",
             },
             "report": V3_REPORT_SCHEMA,
             "gate_result": GATE_RESULT_SCHEMA,
@@ -510,9 +514,28 @@ def build_public_schemas(
             "planning": V3_PLANNING_SCHEMA,
         },
         "required": ["project_root", "task_id", "attempt_id", "profile"],
-        "anyOf": [
-            {"required": ["draft_ref"]},
-            {"required": ["report"]},
+        "oneOf": [
+            {
+                "required": ["draft_ref"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["report"]},
+                        {"required": ["scoping"]},
+                        {"required": ["planning"]},
+                        {"required": ["gate_result"]},
+                        {"required": ["closure"]},
+                    ],
+                },
+            },
+            {
+                "required": ["report"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["draft_ref"]},
+                        {"required": ["patch"]},
+                    ],
+                },
+            },
         ],
     }
     WORKER_GET_REPORT_TEMPLATE_SCHEMA = {
@@ -614,7 +637,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect, resume, deactivate, follow_up, artifacts, lane, resource, question, prune, legacy, or maintenance; common aliases are normalized."},
+            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect (read-only), recover_inspect (explicit lifecycle repair named by inspect), resume, deactivate, follow_up, artifacts, lane, resource, question, prune, legacy, or maintenance; common aliases are normalized."},
             "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune, legacy, and maintenance omit it."},
             "reason": {"type": "string"},
             "payload": {

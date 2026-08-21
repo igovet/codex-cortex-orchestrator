@@ -133,7 +133,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.15 hardening release candidate above;
+candidate. They do not certify the 9.2.16 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -220,15 +220,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.15 source cachebuster. Historical
+The source manifest now declares the 9.2.16 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.15 release-candidate evidence status
+## 9.2.16 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.15 base version.
+source cachebuster is generated from the 9.2.16 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -237,6 +237,11 @@ candidate is committed and rerun on the exact release SHA:
 - Tracked release archive validation: **pending**.
 - Installed-plugin verification and cachebuster parity: **pending; no install
   or user `~/.codex` mutation is implied**.
+
+The 9.2.16 patch additionally ensures coordinator recovery does not ask a
+reviewer to retry an impossible resolution report, preserves honest `BLOCKED`
+markers through review and close while corrective work remains, and aligns the
+`record_report` schema branch with runtime validation.
 
 The draft scope covers governance schema v12 integrity, artifact-authoritative
 record bodies, exact scope and linear revisions, append-only status/approval
@@ -249,7 +254,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.15 source contract
+## Current 9.2.16 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both
@@ -311,9 +316,10 @@ pending full-suite or live gates.
 - Review, governance activation, governance close, and close reports require a
   canonical top-level structured `gate_result` sibling. The older `closure`
   input remains a compatibility alias for those gates but is not retained in
-  canonical report artifacts. Open P0/P1/P2
-  or blocking findings, and missing required verification, reopen the recorded
-  target gate for rework; resolved or auditable non-self waivers are retained
+  canonical report artifacts. Open P0/P1 findings, explicitly blocking open
+  findings (including a P2 with `blocking=true`), and missing required
+  verification reopen the recorded target gate for rework. Open P2 findings
+  are advisory by default; resolved or auditable non-self waivers are retained
   in SQLite rather than inferred from prose.
 - Report drafts use one private file. `get_report_template` creates a fully
   structured JSON file with mode `0600` and returns `draft_ref`, `draft_path`,
@@ -334,6 +340,12 @@ pending full-suite or live gates.
   concurrent, or another-attempt paths still fail. Every ignored side effect is retained as
   non-blocking digest evidence, with recognized conventional test/build/cache
   residue and unknown framework output classified separately.
+- Report sanitization redacts sensitive-key values but does not truncate
+  strings or list items. The complete immutable report is checked against the
+  explicit 8 MiB atomic artifact boundary; its private draft envelope allows
+  17 MiB. Cursor reads expose the complete report artifact, with 32 KiB
+  limiting only each transport page. Detailed compiled plans are supplied to
+  workers by exact artifact ref/path/SHA-256 metadata in the briefing.
 - The server-owned `resolved_user_decisions` snapshot is carried with each
   immutable report outside the worker-authored seven-field envelope. Report
   metadata and Markdown expose its count/digest and decision sources, while
@@ -399,8 +411,9 @@ pending full-suite or live gates.
   as a recoverable Cortex backup.
 - Artifact APIs return metadata pages or bounded content parts. Signed opaque
   cursors bind the reader scope, task, artifact digest, and byte position.
-  Transport never returns an unbounded report or briefing, and it preserves
-  UTF-8 boundaries even for a one-byte requested page.
+  Transport returns complete reports through successive 32 KiB pages and
+  preserves UTF-8 boundaries even for a one-byte requested page; the page
+  bound does not truncate or cap the immutable report artifact.
 - Harvest regressions require a source-backed feature census, all canonical
   project documents and links, a structured coverage matrix, behavior-complete
   feature pages, independent completeness review, and zero unexplained

@@ -1,5 +1,22 @@
 # Changelog
 
+## [9.2.16] - 2026-08-21
+
+This source-tree patch closes three recovery and contract gaps:
+
+- Coordinator recovery no longer asks a reviewer to retry an impossible
+  resolution report.
+- Review and close preserve honest `BLOCKED` markers while corrective work is
+  still required.
+- The `record_report` schema branch now matches the runtime validation branch.
+- Report intake no longer truncates report strings or list items at the former
+  64 KiB/100-item sanitization caps. Complete immutable report artifacts are
+  bounded only by the explicit 8 MiB atomic artifact boundary; private report
+  drafts allow 17 MiB for envelope headroom.
+- Report reads return the complete immutable artifact through signed cursors;
+  32 KiB is a transport-page bound only. Detailed plans are passed to workers
+  by exact artifact ref/path/SHA-256 metadata in the briefing.
+
 ## [9.2.15] - 2026-08-20
 
 This source-tree patch makes the public report boundary and external
@@ -12,6 +29,17 @@ control-plane routing recoverable without weakening ledger integrity.
 - Route an explicitly external `codex://threads/...` ledger-continuation task
   without a requested project mutation around write-required implementation
   and QA gates, while retaining those gates for actual repository changes.
+- Reject a requested inactive `record_gate` target with a retryable,
+  non-mutating `gate_mismatch` response rather than silently advancing the
+  first active gate.
+- Treat an open P2 canonical finding as advisory unless its authoritative
+  record explicitly sets `blocking=true`; P0/P1 and every explicitly blocking
+  open finding still require rework.
+- After a ledger passes the authoritative migration validator, use a bounded
+  process-local, read-only readiness probe for ordinary opens rather than
+  taking the migration lock and `BEGIN IMMEDIATE` every time.  The probe
+  rechecks database identity, SQLite schema/user markers, and migration
+  history; any drift falls back to the existing fail-closed full validator.
 
 ## [9.2.14] - 2026-08-20
 

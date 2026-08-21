@@ -86,8 +86,9 @@ authoritative state.
 Markdown and JSON are human-facing projections. Documentation and projection
 links help workers navigate prior knowledge, but consequential claims must be
 confirmed in current source, tests, schemas, migrations, or executable
-configuration. A Markdown conclusion cannot override structured findings,
-open P2 work, or server-observed close requirements.
+configuration. A Markdown conclusion cannot override blocking structured
+findings or server-observed close requirements; an open P2 is advisory unless
+its authoritative finding explicitly sets `blocking=true`.
 
 Task creation records only SQLite state and a host-private task-scoped namespace. Report,
 planning, handoff, evidence, and question parents are created only when their

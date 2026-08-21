@@ -143,9 +143,13 @@ paths forbidden above.
 4. Workers do not call lifecycle operations. A worker first reads only its
    exact briefing path, confirms the file is
    read-only and its SHA-256 equals `briefing_digest`, and stops on any
-   mismatch. That path is the sole direct-read exception below
-   the host-private Cortex state root: never list or inspect the directory, mutable state,
-   baselines, delegation packages, another briefing, or report files. If the
+   mismatch. That path, plus only the immutable user-intent and optional
+   compiled-plan paths with their exact SHA-256 values supplied in the same
+   bootstrap, are the direct-read exceptions below the host-private Cortex
+   state root. A compiled plan is a full immutable artifact; its briefing
+   projection is only a compact ref/count/digest index. Never list or inspect
+   the directory, mutable state, baselines, delegation packages, another
+   briefing, or report files. If the
    host filesystem read says this exact path is missing or unreadable, the
    worker may call `read_dispatch_briefing` with the exact project root,
    task id, attempt id, profile, dispatch ref, and digest from the bootstrap.
@@ -212,7 +216,10 @@ paths forbidden above.
    evidence but never consume a finite pipeline budget. `record_report` rereads and revalidates the
    current state, then atomically persists and deletes that same file only
    after successful persistence. The
-   worker never resends, reconstructs, or reconsiders the strict report payload. It returns only
+   worker never resends, reconstructs, or reconsiders the strict report payload.
+   Report content is redacted only for sensitive keys, checked against the
+   explicit 8 MiB atomic artifact boundary, and not truncated by list/item
+   sanitization caps; the private draft envelope allows 17 MiB. It returns only
    `REPORT_RECORDED report_ref=<value>` plus at most a
    two-sentence summary. They must never paste the report JSON into the parent
    channel. When predecessor handoffs are supplied, they review all of them and
@@ -272,7 +279,7 @@ paths forbidden above.
    inspect returns. Only a newly returned top-level dispatch authorizes rework
    after a worker is no longer resumable.
    QA, review, implementation, and corrective pipeline rework are unbounded while acceptance criteria,
-   required verification, or canonical findings
+   required verification, or blocking canonical findings
    remain unresolved. Failure counts remain durable audit/routing evidence and
    never block a new corrective dispatch. Cortex raises reasoning effort to
    `high` after one unresolved attempt, `xhigh` after two, and `max` after three
@@ -288,7 +295,9 @@ paths forbidden above.
    `report_markdown_link`. Publish that exact link once in the same main-chat
    message as a concise user-language explanation of
    `completion_update.summary` and `completion_update.next`; never publish a
-   bare link. A reread returns `publication_required=false` and must not repeat
+   bare link. Large reports are returned as the complete immutable artifact
+   through the signed cursor; 32 KiB limits only each transport page. A reread
+   returns `publication_required=false` and must not repeat
    the link or completion update. Never guess, substitute, or use the path to
    browse unrelated files. Then evaluate
    the reports against the pipeline, then call `continue_orchestration` exactly
@@ -346,6 +355,13 @@ again, replay completed dispatches, or reconstruct state from a raw
 transcript. After rehydration, continue the existing task. Publish only a newly
 authorized `report_markdown_link` with `publication_required=true`, and include
 its completion summary and next-step explanation in the same message.
+
+Inspect is a read-only snapshot, not an implicit attempt repair. It never
+expires a lease, invalidates an unusable stopped-report receipt, or creates a
+missing Markdown projection merely to render status. When its
+`lifecycle_recovery` result says recovery is required, use only the exact
+bounded server-returned recovery action; do not guess an attempt identity,
+repeat a dispatch, or treat the original inspect as permission to mutate state.
 
 ### Required post-plan approval
 
@@ -427,8 +443,10 @@ Publish it only when `publication_required=true`, once, together with the
 concise completion summary and next-step explanation. Repeated reads remain
 available for evaluation but never authorize another user-facing link. Never
 guess, substitute, or use a path to browse unrelated files.
-Inspect `available_reports` and required-plan `plan_review` expose the same
-derived path for recovery and approval review.
+Inspect `available_reports` exposes an existing derived path only when its
+optional projection is already materialized; recovery uses the exact report
+ref, and `read_worker_report` remains the publication-eligible link surface.
+Required-plan `plan_review` retains its derived path for approval review.
 
 Normal requests never carry caller-generated submission, task, wave, attempt,
 principal, thread, host-tool, host-model, or host-effort fields. Internal IDs
@@ -482,12 +500,17 @@ repairs any missing graph instead of accepting documentation as implementation
 evidence. `replan_count` is audit history, not a task-wide quota; the retained
 `replan_limit` field is compatibility metadata and never blocks a new
 evidence-backed review/remediation cycle. The facade preflights approval,
-rework, and obligation retention before recording the current gate. A legacy
+rework, and obligation retention before recording the current gate. A requested
+inactive gate is never silently substituted with the first active gate:
+`record_gate` returns the retryable, non-mutating `gate_mismatch` result with
+the requested gate and active-gate list so the coordinator can retry exactly
+the intended transition. A legacy
 partial failure that left an active current gate without a live or pending
 dispatch may use the same Planner-first resume payload; active recovery is
 rejected while any worker is still addressable. Use
-`manage_orchestration` for `inspect`, `resume`, `deactivate`, `lane`,
-`resource`, or `question`; these intents do not belong in normal wave calls.
+`manage_orchestration` for `inspect`, `recover_inspect`, `resume`,
+`deactivate`, `lane`, `resource`, or `question`; these intents do not belong
+in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
 A materially identical no-progress signature pauses autonomous correction only

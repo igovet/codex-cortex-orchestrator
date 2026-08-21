@@ -23,6 +23,7 @@ bind_symbols(
         "WRITE_REQUIRED_RESULT_GATES",
         "_predecessor_review_marker",
         "_result_contract_markers",
+        "digest_text",
         "render_profile_catalog",
         "result_contract_is_read_only",
         "safe_id",
@@ -369,7 +370,10 @@ def _expanded_host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         proof_contract = (
             "Add each proof as a separate report.evidence string: "
             + "; ".join(proof_lines)
-            + ". Use observed proof; generic or unresolved claims fail."
+            + ". Use observed proof; generic or unresolved claims fail. If this review/close gate_result is "
+            "rework, fail, or blocked, every required criterion still needs one marker, but an unmet criterion "
+            "must use the same marker with `BLOCKED` instead of `PASS` and name the specific observed blocker; "
+            "never invent PASS evidence."
         )
         return acknowledgement_contract + " " + proof_contract
 
@@ -540,6 +544,61 @@ def _bounded_strings(values: object, *, limit: int, item_chars: int) -> list[str
     return [str(item).strip()[:item_chars] for item in values if str(item).strip()][:limit]
 
 
+def _compact_plan_unit_assignment(value: object) -> dict[str, Any] | None:
+    """Project a compiled plan into a bounded dispatch-briefing reference.
+
+    The compiled unit itself is an immutable, separately materialized artifact.
+    Copying its microtasks into the worker briefing made the briefing budget an
+    accidental upper bound on a valid planner report.  The worker already has
+    an explicitly authorized, digest-bound direct read of that artifact from
+    its native bootstrap, so the briefing needs only enough metadata to prove
+    what it must read -- never a second embedded copy of the plan.
+
+    ``host_spawn_prompt`` is also used by the planner's no-write preflight,
+    where an artifact has not yet been allocated.  Preserve a small preview in
+    that case so the preflight verifies the same bounded rendering shape
+    without inventing an artifact path or digest.
+    """
+    if not isinstance(value, dict):
+        return None
+
+    microtasks = value.get("microtasks")
+    package_ids = value.get("package_ids")
+    microtask_count = (
+        int(value.get("microtask_count"))
+        if isinstance(value.get("microtask_count"), int)
+        else len(microtasks) if isinstance(microtasks, list) else 0
+    )
+    package_count = (
+        int(value.get("package_count"))
+        if isinstance(value.get("package_count"), int)
+        else len(package_ids) if isinstance(package_ids, list) else 0
+    )
+    package_ids_digest = str(value.get("package_ids_digest") or "").strip()
+    if not package_ids_digest and isinstance(package_ids, list):
+        package_ids_digest = digest_text(json.dumps(
+            [str(item) for item in package_ids],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+
+    projection = {
+        "schema": "cortex/compiled-plan-unit-ref/v1",
+        "plan_revision": str(value.get("plan_revision") or "").strip() or None,
+        "source_report_ref": str(value.get("source_report_ref") or "").strip() or None,
+        "artifact_ref": str(value.get("artifact_ref") or "").strip() or None,
+        "artifact_path": str(value.get("artifact_path") or "").strip() or None,
+        "digest_sha256": str(value.get("digest_sha256") or "").strip() or None,
+        "byte_size": value.get("byte_size") if isinstance(value.get("byte_size"), int) else None,
+        "microtask_count": max(0, microtask_count),
+        "package_count": max(0, package_count),
+        "package_ids_digest": package_ids_digest or None,
+        "read_required": True,
+    }
+    return {key: item for key, item in projection.items() if item not in (None, "")}
+
+
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     """Render the enforced compact worker contract below the configured hard budget.
 
@@ -568,7 +627,11 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "byte_size": intent.get("byte_size"),
             "read_required": True,
         },
-        "plan_unit": package.get("plan_unit") if isinstance(package.get("plan_unit"), dict) else None,
+        # The complete compiled plan is deliberately *not* embedded here.
+        # It is available only through the exact bootstrap path/digest pair;
+        # keeping this projection compact prevents plan detail from consuming
+        # the worker transport budget or being silently truncated.
+        "plan_unit": _compact_plan_unit_assignment(package.get("plan_unit")),
         "requirements": _bounded_strings(package.get("task_requirements"), limit=12, item_chars=500),
         "scope": _bounded_strings(package.get("task_scope"), limit=12, item_chars=300),
         "allowed_paths": _bounded_strings(package.get("allowed_paths"), limit=50, item_chars=300),
@@ -740,6 +803,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         f"Use attempt_id={package.get('attempt_id')!r} exactly. Then call the public `get_report_template` tool; it returns draft_path plus draft_ref. Edit that private draft and call `record_report` with this identity and draft_ref; if direct draft editing is unavailable, send one complete `report` object or a small JSON Merge Patch in `patch`; `replacement` is not a public field. For record_report, use only project_root={package.get('project_root')!r}, "
         f"task_id={package.get('task_id')!r}, attempt_id={package.get('attempt_id')!r}, profile={agent!r}, draft_ref, and optional patch/report fields. Do not send task_ref, dispatch_ref, or submission_id. "
         "The report object has exactly 7 keys: summary, findings, questions, changed_files, tests, evidence, uncertainty." + report_extra,
+        "Each generated Gate/Task acceptance or verification evidence line must be completed exactly once. For a pass, use `PASS - <concrete observed proof>`; when this review/close gate_result is rework, fail, or blocked, use `BLOCKED - <specific observed blocker>` for an unmet criterion instead of inventing PASS evidence.",
         "For review/close gate_result.failure_class use exactly one of product, infrastructure, environment, policy, or worker. A known baseline is a limitation, not a failure_class value.",
         "Outside review/close, gate_result is optional and pass uses findings=[]; corrective workers may not resolve inherited findings; never add the legacy closure alias.",
         "Include `Dispatch briefing reviewed: <briefing_digest>` in report.evidence. Correct retryable schema errors on this same attempt; invalid records consume no worker attempt. Stop only on retryable=false.",

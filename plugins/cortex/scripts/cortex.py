@@ -610,11 +610,26 @@ BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+|bearer\s+)([^\s,;]+)
 URI_CREDENTIAL_RE = re.compile(r"(?i)(://)([^/@\s]+):([^/@\s]+)(@)")
 ENV_SECRET_RE = re.compile(r"(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s]+)")
 MAX_TEXT = 4000
-MAX_REPORT_BYTES = 65536
-MAX_REPORT_ITEMS = 100
+# The report itself is an immutable, cursor-paged SQLite artifact; it must not
+# have a second product-sized quota.  Keep the same hard bound as one atomic
+# JSON document so a malformed or hostile local draft cannot exhaust process
+# memory or disk in a single operation.  The 32 KiB transport page is a read
+# concern only and never truncates canonical report content.
+MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_REPORT_BYTES = MAX_JSON_BYTES
+# A draft is an envelope around the canonical report and can carry one full
+# Planner/Scope sibling before semantic validation decides which is allowed.
+# It deliberately has headroom for both complete payloads, so a report
+# accepted at the documented boundary is not rejected merely because its
+# private draft contains envelope metadata.
+MAX_REPORT_DRAFT_BYTES = (2 * MAX_JSON_BYTES) + 1024 * 1024
 MAX_REPORTS_PER_ATTEMPT = 32
-MAX_PLANNING_BYTES = 128 * 1024
-MAX_SCOPING_BYTES = 128 * 1024
+# Planner and Scope payloads are immutable report siblings.  Keep their
+# complete content on the same technical artifact boundary rather than
+# rejecting evidence because it will later be represented by an artifact ref
+# in a compact worker briefing.
+MAX_PLANNING_BYTES = MAX_JSON_BYTES
+MAX_SCOPING_BYTES = MAX_JSON_BYTES
 MAX_DISCOVERY_DOMAINS = 8
 MAX_BRIEFING_BYTES = 128 * 1024
 MAX_WORK_PACKAGES = 32
@@ -624,7 +639,8 @@ MAX_TASK_STATE_BYTES = 8 * 1024 * 1024
 # Every ordinary JSON artifact is bounded before it replaces an existing
 # ledger file. Large manifests use the explicit, larger budget below instead
 # of silently bypassing the guard.
-MAX_JSON_BYTES = 8 * 1024 * 1024
+# ``MAX_JSON_BYTES`` is defined above because report payloads share this
+# technical atomic-persistence boundary.
 # A project manifest is intentionally larger than an individual report or
 # task-state document: it contains one bounded inventory record per project
 # entry.  Keep the read cap finite while allowing ordinary repositories to
@@ -1187,17 +1203,43 @@ def _host_project_identity(project: Path) -> dict[str, Any]:
     }
 
 
-def _record_host_project_identity(root: Path, project: Path, *, rebound_from: str | None = None) -> None:
+def _record_host_project_identity(root: Path, project: Path, *, rebound_from: str | None = None) -> bool:
+    """Persist host-project identity only when identity or rebind history changed.
+
+    ``ledger_root()`` is reached by ordinary read and lifecycle calls.  Its
+    rename-recovery identity must remain durable, but refreshing
+    ``updated_at`` on every open turns that otherwise read-oriented path into
+    an avoidable SQLite writer.  Keep the existing timestamp and payload when
+    this is the same directory identity with no new rebind provenance.
+
+    Return whether this call wrote the document so focused callers/tests can
+    distinguish an idempotent open from an actual provenance transition.
+    """
     identity = _host_project_identity(project)
     existing = db_get_global(root, _HOST_PROJECT_IDENTITY_KEY, {})
-    history = list(existing.get("history") or []) if isinstance(existing, dict) else []
+    existing_history = existing.get("history") if isinstance(existing, dict) else None
+    history = list(existing_history) if isinstance(existing_history, list) else []
     if rebound_from and rebound_from != identity["path"]:
         history.append({"from": rebound_from, "to": identity["path"], "at": now()})
+    bounded_history = history[-16:]
+
+    # Do not use a whole-document equality test here: ``updated_at`` is
+    # intentionally operational metadata, not a reason to acquire a writer
+    # lock.  A malformed/non-list history is normalized on the next genuine
+    # write instead of being treated as an equivalent provenance record.
+    if (
+        isinstance(existing, dict)
+        and all(existing.get(key) == value for key, value in identity.items())
+        and isinstance(existing_history, list)
+        and existing_history == bounded_history
+    ):
+        return False
     db_put_global(root, _HOST_PROJECT_IDENTITY_KEY, {
         **identity,
-        "history": history[-16:],
+        "history": bounded_history,
         "updated_at": now(),
     })
+    return True
 
 
 def _find_renamed_project_ledger(project: Path, target: Path) -> Path | None:
@@ -3326,7 +3368,30 @@ def _safe_project_relative_path(value: Any) -> str:
     normalized = path.as_posix()
     if normalized == ".codex/cortex" or normalized.startswith(".codex/cortex/"):
         raise ValueError("report changed_files must not include the Cortex report bus")
-    return redact(normalized, 500)
+    # A changed-file entry is canonical evidence, not a UI label.  Do not
+    # truncate it here: the enclosing report's serialized-byte boundary is
+    # the only size limit, and a shortened path would no longer identify the
+    # file the worker actually changed.
+    return redact(normalized, MAX_REPORT_BYTES)
+
+
+def sanitize_report_structured(value: Any) -> Any:
+    """Redact report data without silently discarding complete evidence.
+
+    Generic compact status payloads intentionally use ``sanitize_structured``
+    and its short strings/list prefix.  Canonical worker reports are different:
+    they are immutable evidence artifacts and are cursor-paged on reads.  They
+    retain every submitted item and all non-sensitive text, then the enclosing
+    serialized report is checked against the single technical artifact limit.
+    """
+    if isinstance(value, dict):
+        return {
+            str(key): "<REDACTED>" if SENSITIVE_KEY_RE.search(str(key)) else sanitize_report_structured(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_report_structured(item) for item in value]
+    return redact(value, MAX_REPORT_BYTES)
 
 
 def sanitize_report_payload(value: Any) -> dict[str, Any]:
@@ -3342,30 +3407,33 @@ def sanitize_report_payload(value: Any) -> dict[str, Any]:
     summary = str(value["summary"]).strip()
     if not summary:
         raise ValueError("report summary is required")
-    result: dict[str, Any] = {"summary": redact(summary, 4000)}
+    result: dict[str, Any] = {"summary": redact(summary, MAX_REPORT_BYTES)}
     for field in ("findings", "questions", "evidence", "uncertainty"):
         items = value[field]
-        if not isinstance(items, list) or len(items) > MAX_REPORT_ITEMS:
-            raise ValueError(f"report {field} must be an array with at most {MAX_REPORT_ITEMS} items")
-        result[field] = [sanitize_structured(item) for item in items]
+        if not isinstance(items, list):
+            raise ValueError(f"report {field} must be an array")
+        result[field] = [sanitize_report_structured(item) for item in items]
     tests = value["tests"]
-    if not isinstance(tests, list) or len(tests) > MAX_REPORT_ITEMS:
-        raise ValueError(f"report tests must be an array with at most {MAX_REPORT_ITEMS} items")
+    if not isinstance(tests, list):
+        raise ValueError("report tests must be an array")
     result["tests"] = []
     for item in tests:
-        sanitized_item = sanitize_structured(item)
+        sanitized_item = sanitize_report_structured(item)
         if isinstance(item, dict) and isinstance(sanitized_item, dict) and "exit_code" in item:
             sanitized_item["exit_code"] = item["exit_code"]
         result["tests"].append(sanitized_item)
     changed_files = value["changed_files"]
-    if not isinstance(changed_files, list) or len(changed_files) > MAX_REPORT_ITEMS:
-        raise ValueError(f"report changed_files must be an array with at most {MAX_REPORT_ITEMS} items")
+    if not isinstance(changed_files, list):
+        raise ValueError("report changed_files must be an array")
     result["changed_files"] = [_safe_project_relative_path(item) for item in changed_files]
     for field in ("summary", "findings", "questions", "tests", "evidence", "uncertainty"):
         require_internal_english(result[field], f"report {field}")
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")
     if len(encoded) > MAX_REPORT_BYTES:
-        raise ValueError(f"report exceeds the {MAX_REPORT_BYTES}-byte limit")
+        raise ValueError(
+            "report exceeds the maximum safe immutable JSON artifact size "
+            f"of {MAX_REPORT_BYTES} bytes"
+        )
     return result
 
 
@@ -3503,19 +3571,20 @@ def _planning_identifier(value: Any, label: str) -> str:
     return identifier
 
 
-def _planning_text(value: Any, label: str, *, maximum: int = 4000) -> str:
+def _planning_text(value: Any, label: str, *, maximum: int = MAX_JSON_BYTES) -> str:
     text = str(value or "").strip()
     if not text:
         raise ValueError(f"{label} is required")
     return redact(text, maximum)
 
 
-def _planning_string_list(value: Any, label: str, *, maximum: int = 32) -> list[str]:
+def _planning_string_list(value: Any, label: str, *, maximum: int | None = None) -> list[str]:
     if value is None:
         return []
-    if not isinstance(value, list) or len(value) > maximum:
-        raise ValueError(f"{label} must be an array with at most {maximum} items")
-    result = [_planning_text(item, f"{label} item", maximum=1000) for item in value]
+    if not isinstance(value, list) or (maximum is not None and len(value) > maximum):
+        suffix = f" with at most {maximum} items" if maximum is not None else ""
+        raise ValueError(f"{label} must be an array{suffix}")
+    result = [_planning_text(item, f"{label} item") for item in value]
     if len(result) != len(set(result)):
         raise ValueError(f"{label} items must be unique")
     return result
@@ -3563,7 +3632,7 @@ def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str
         value = {key: item for key, item in value.items() if key != "schema"}
     if not isinstance(value, dict) or set(value) != {"overview", "context_files", "discovery_domains"}:
         raise ValueError("scoping must contain exactly overview, context_files, and discovery_domains")
-    overview = _planning_text(value.get("overview"), "scoping overview", maximum=8000)
+    overview = _planning_text(value.get("overview"), "scoping overview")
     raw_context_files = value.get("context_files")
     if not isinstance(raw_context_files, list) or len(raw_context_files) > 50:
         raise ValueError("scoping context_files must be an array with at most 50 paths")
@@ -3621,7 +3690,7 @@ def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str
             )
         domain = {
             "id": domain_id,
-            "title": _planning_text(raw_domain.get("title"), "scoping discovery domain title", maximum=500),
+            "title": _planning_text(raw_domain.get("title"), "scoping discovery domain title"),
             "objective": _planning_text(raw_domain.get("objective"), "scoping discovery domain objective"),
             "paths": _planning_paths_list(raw_domain.get("paths"), "scoping discovery domain paths"),
             "context": context,
@@ -3649,7 +3718,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         value = {key: item for key, item in value.items() if key != "schema"}
     if not isinstance(value, dict) or set(value) != {"overview", "work_packages"}:
         raise ValueError("planning must contain exactly overview and work_packages")
-    overview = _planning_text(value.get("overview"), "planning overview", maximum=8000)
+    overview = _planning_text(value.get("overview"), "planning overview")
     raw_packages = value.get("work_packages")
     if not isinstance(raw_packages, list) or not raw_packages or len(raw_packages) > MAX_WORK_PACKAGES:
         raise ValueError(f"planning work_packages must contain 1..{MAX_WORK_PACKAGES} items")
@@ -3718,7 +3787,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 )
             microtasks.append({
                 "id": microtask_id,
-                "title": _planning_text(raw_microtask.get("title"), "planning microtask title", maximum=500),
+                "title": _planning_text(raw_microtask.get("title"), "planning microtask title"),
                 "objective": _planning_text(raw_microtask.get("objective"), "planning microtask objective"),
                 "profile": profile or None,
                 "allowed_paths": microtask_paths,
@@ -3737,7 +3806,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             raise ValueError(f"planning package {package_id!r} dependencies must be unique")
         packages.append({
             "id": package_id,
-            "title": _planning_text(raw_package.get("title"), "planning package title", maximum=500),
+            "title": _planning_text(raw_package.get("title"), "planning package title"),
             "objective": _planning_text(raw_package.get("objective"), "planning package objective"),
             "allowed_paths": _planning_paths_list(raw_package.get("allowed_paths"), "planning package allowed_paths"),
             "depends_on": dependencies,
@@ -4813,6 +4882,8 @@ def _validate_gate_result_report(
     state: dict[str, Any],
     attempt: dict[str, Any],
     report: dict[str, Any],
+    *,
+    gate_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail closed unless a worker proves its gate contract and any claimed writes."""
     gate = str(attempt.get("gate") or "")
@@ -4882,20 +4953,47 @@ def _validate_gate_result_report(
                 "report is stale after a material steer; add exactly " + repr(revision_marker)
                 + " after reconciling the same worker attempt"
             )
+    # A non-pass review/close result is still a useful, durable worker
+    # result.  Requiring it to describe every unmet criterion as ``PASS``
+    # made an honest blocker impossible to publish and taught workers to
+    # iterate on increasingly artificial evidence strings.  Keep the proof
+    # accounting strict, but let a non-pass envelope state the concrete
+    # blocker for an individual criterion.  ``gate_result`` has already been
+    # schema-validated by the caller before this validator runs.
+    decision = str((gate_result or {}).get("decision") or "pass")
+    allowed_marker_states = ("PASS",) if decision == "pass" else ("PASS", "BLOCKED")
     missing_markers: list[str] = []
     invalid_markers: list[str] = []
     weak_detail = ("<specific", "todo", "tbd", "unverified", "not run", "not tested", "unknown")
     for prefix, criterion in _result_contract_markers(attempt, task):
-        matching = [item for item in evidence_items if item.startswith(prefix)]
+        marker_base = prefix.removesuffix("PASS - ")
+        matching = [
+            (state, item)
+            for state in allowed_marker_states
+            for item in evidence_items
+            if item.startswith(f"{marker_base}{state} - ")
+        ]
         if not matching:
-            missing_markers.append(
+            required = (
                 "Add exactly: " + prefix
                 + "<concrete observed proof for: " + redact(criterion, 500) + ">"
+                if decision == "pass" else
+                "Add exactly one of: " + prefix
+                + "<concrete observed proof for: " + redact(criterion, 500) + ">; "
+                + marker_base + "BLOCKED - <specific observed blocker for: " + redact(criterion, 500) + ">"
             )
+            missing_markers.append(required)
             continue
-        detail = matching[0][len(prefix):].strip()
-        if not detail or any(marker in detail.lower() for marker in weak_detail):
-            invalid_markers.append(prefix.rstrip())
+        state_name, marker = matching[0]
+        marker_prefix = f"{marker_base}{state_name} - "
+        detail = marker[len(marker_prefix):].strip()
+        # A blocked criterion must name a real observed blocker.  It is not a
+        # passing assertion, so words such as "unverified" or "not run" are
+        # legitimate there when accompanied by specific context; placeholders
+        # and vague planning language remain invalid for either state.
+        forbidden = weak_detail if state_name == "PASS" else ("<replace", "<specific", "todo", "tbd", "unknown")
+        if not detail or any(marker in detail.lower() for marker in forbidden):
+            invalid_markers.append(marker_prefix.rstrip())
     if missing_markers:
         raise ValueError("result evidence is missing required contract markers: " + "; ".join(missing_markers))
     if invalid_markers:
@@ -10856,6 +10954,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         intent_raw = str(params.get("intent") or "inspect").strip().lower().replace("-", "_").replace(" ", "_")
         aliases = {
             "status": "inspect", "inspect": "inspect", "show": "inspect",
+            "recover_inspect": "recover_inspect", "recover_lifecycle": "recover_inspect",
             "resume": "resume", "retry": "resume", "continue_blocked": "resume",
             "deactivate": "deactivate", "normal": "deactivate", "stop_session": "deactivate",
             "lane": "lane", "resource": "resource", "question": "question",
@@ -10897,7 +10996,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             return _v3_task_ref_required_error(f"manage_orchestration intent '{intent}'")
         resolved = _v3_resolve_task(
             params,
-            include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "deactivate", "follow_up"},
+            include_completed=bool(str(params.get("task_ref") or "").strip()) and intent in {"inspect", "recover_inspect", "deactivate", "follow_up"},
             require_task_ref=True,
         )
         if isinstance(resolved, dict):
@@ -10954,6 +11053,17 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         }
         if intent == "inspect":
             return _v3_response(_orchestrate_inspect(common), task_ref, include_result=True)
+        if intent == "recover_inspect":
+            # Lifecycle recovery is deliberately distinct from ordinary
+            # inspection: status reads must not contend on the mutation lock
+            # or silently expire/retire attempts.  The server derives the
+            # exact repair scope from current durable state; callers cannot
+            # select attempts, receipts, or identities to mutate.
+            return _v3_response(
+                _orchestrate_inspect({**common, "payload": {"mode": "recover_lifecycle"}}),
+                task_ref,
+                include_result=True,
+            )
         normalized_payload = None
         if intent == "question":
             normalized_payload = _v3_question_management_payload(params.get("payload"))
@@ -11391,7 +11501,6 @@ ORCHESTRATE_TOOL_SCHEMA = {
 PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
     agents=AGENTS,
     report_fields=REPORT_FIELDS,
-    max_report_items=MAX_REPORT_ITEMS,
     max_work_packages=MAX_WORK_PACKAGES,
     max_microtasks_per_package=MAX_MICROTASKS_PER_PACKAGE,
     max_discovery_domains=MAX_DISCOVERY_DOMAINS,

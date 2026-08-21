@@ -19,6 +19,7 @@ from cortex_runtime import orchestration_engine
 from cortex_runtime import gate_transitions
 from cortex_runtime import mcp_api
 from cortex_runtime import reports as runtime_reports
+from cortex_runtime import delegation_service
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -1140,8 +1141,8 @@ class ControlPlaneTests(unittest.TestCase):
             any(item.get("event") == "stale_approved_recovery" for item in repaired["history"])
         )
 
-    def test_inspect_blocks_stale_stopped_planner_reports_for_fresh_planner_recovery(self):
-        """No host-attested report may be selected when its plan revision is stale."""
+    def test_explicit_inspect_recovery_blocks_stale_stopped_planner_reports(self):
+        """A stale stopped report is surfaced by inspect and repaired only explicitly."""
         with mock.patch.dict(
             os.environ,
             {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
@@ -1179,10 +1180,33 @@ class ControlPlaneTests(unittest.TestCase):
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
         })
         self.assertTrue(inspected["ok"], inspected)
-        self.assertEqual(inspected["outcome"], "blocked")
+        self.assertEqual(inspected["outcome"], "completion_pending")
         self.assertEqual(inspected["dispatches"], [])
-        self.assertEqual(inspected["result"]["reported_attempt_recovery"]["attempt_ids"], [attempt["attempt_id"]])
-        self.assertIn("fresh Planner-first dispatch", inspected["next_action"])
+        recovery_view = inspected["result"]["lifecycle_recovery"]
+        self.assertEqual(recovery_view["mode"], "read_only")
+        self.assertTrue(recovery_view["required"])
+        self.assertEqual(recovery_view["unselectable_report_attempt_ids"], [attempt["attempt_id"]])
+        self.assertEqual(recovery_view["recovery_intent"], "recover_inspect")
+        self.assertIn("recover_inspect", recovery_view["next_action"])
+        unchanged = self.task_state(task_dir)
+        self.assertEqual(unchanged["attempts"][0]["status"], "running")
+        self.assertEqual(unchanged["attempts"][0]["lifecycle_status"], "report_recorded")
+
+        recovered_inspect = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_inspect",
+        })
+        self.assertTrue(recovered_inspect["ok"], recovered_inspect)
+        self.assertEqual(recovered_inspect["outcome"], "blocked")
+        self.assertEqual(
+            recovered_inspect["result"]["reported_attempt_recovery"]["attempt_ids"],
+            [attempt["attempt_id"]],
+        )
+        self.assertEqual(
+            recovered_inspect["result"]["lifecycle_recovery"]["unselectable_report_attempt_ids"],
+            [attempt["attempt_id"]],
+        )
         blocked = self.task_state(task_dir)
         failed = blocked["attempts"][0]
         self.assertEqual(failed["status"], "failed")
@@ -1201,6 +1225,65 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(recovered["attempts"][0]["invalidated"])
         self.assertEqual(recovered["attempts"][1]["gate"], "plan")
         self.assertEqual(recovered["attempts"][1]["status"], control.AWAITING_HOST_SPAWN)
+
+    def test_read_only_inspect_never_enters_state_lock_and_explicit_recovery_is_the_writer(self):
+        started = self.v3_start("separate status inspection from lease recovery", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        lease_field = (
+            "spawn_lease_expires_at"
+            if attempt["status"] == control.AWAITING_HOST_SPAWN
+            else "worker_lease_expires_at"
+        )
+        attempt[lease_field] = "2000-01-01T00:00:00+00:00"
+        self.write_task_state(state)
+
+        inspect_request = {
+            "operation": "inspect",
+            "project_root": str(self.project),
+            "principal": state["principal"],
+            "thread_id": state["thread_id"],
+            "task_id": state["task_id"],
+        }
+        with mock.patch.object(
+            orchestration_engine,
+            "state_lock",
+            side_effect=AssertionError("read-only inspect must not acquire state_lock"),
+        ) as state_lock:
+            inspected = control.orchestrate(inspect_request)
+        state_lock.assert_not_called()
+        self.assertTrue(inspected["ok"], inspected)
+        recovery_view = inspected["result"]["lifecycle_recovery"]
+        self.assertEqual(recovery_view["mode"], "read_only")
+        self.assertTrue(recovery_view["required"])
+        self.assertEqual(recovery_view["expired_attempt_ids"], [attempt["attempt_id"]])
+        self.assertEqual(recovery_view["recovery_intent"], "recover_inspect")
+        self.assertIn("recover_inspect", recovery_view["next_action"])
+        unchanged = self.task_state(task_dir)["attempts"][0]
+        self.assertEqual(unchanged["status"], attempt["status"])
+        self.assertNotEqual(unchanged["lifecycle_status"], "needs_recovery")
+
+        recovered = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_inspect",
+        })
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["result"]["lifecycle_recovery"], {
+            "mode": "recover_lifecycle",
+            "state_changed": True,
+            "expired_attempt_ids": [attempt["attempt_id"]],
+            "unselectable_report_attempt_ids": [],
+            "required": False,
+        })
+        repaired = self.task_state(task_dir)["attempts"][0]
+        self.assertEqual(repaired["status"], "failed")
+        self.assertEqual(repaired["lifecycle_status"], "needs_recovery")
+        self.assertEqual(repaired["finalization_reason"], "lifecycle_lease_expired")
 
     def test_report_link_is_published_once_after_real_subagent_completion_with_summary(self):
         with mock.patch.dict(
@@ -2001,12 +2084,35 @@ class ControlPlaneTests(unittest.TestCase):
             "task_id": "gate-revision",
             "principal": "thread-a",
             "expected_revision": state["revision"] + 7,
-            "gate": "plan",
+            "gate": "discover",
             "outcome": "skipped",
             "skip_reason": "read-only routing test",
         })
         self.assertTrue(result["state"])
         self.assertEqual(result["revision_correction"], {"requested": state["revision"] + 7, "used": state["revision"]})
+
+    def test_record_gate_rejects_inactive_gate_without_mutating_state(self):
+        state = self.init(task_id="gate-mismatch", complexity="C1")["state"]
+        result = control.record_gate({
+            "task_id": "gate-mismatch",
+            "principal": "thread-a",
+            "expected_revision": state["revision"] + 7,
+            "gate": "plan",
+            "outcome": "passed",
+        })
+        self.assertFalse(result["recorded"])
+        self.assertTrue(result["recoverable"])
+        self.assertTrue(result["retryable"])
+        self.assertFalse(result["state_changed"])
+        self.assertEqual(result["reason"], "gate_mismatch")
+        self.assertEqual(result["requested_gate"], "plan")
+        self.assertEqual(result["active_gates"], ["discover"])
+        self.assertEqual(result["next_action"], "retry_with_active_gate")
+        self.assertEqual(result["revision_correction"], {"requested": state["revision"] + 7, "used": state["revision"]})
+        persisted = control.status({"task_id": "gate-mismatch", "principal": "thread-a"})["state"]
+        self.assertEqual(persisted["revision"], state["revision"])
+        self.assertEqual(persisted["current_gates"], ["discover"])
+        self.assertEqual(persisted["gates"], {})
 
     def test_planner_defaults_follow_complexity(self):
         simple = control.resolve_dispatch_route({
@@ -3074,8 +3180,11 @@ class ControlPlaneTests(unittest.TestCase):
             "expected_revision": delegated["state"]["revision"], "gate": "plan", "outcome": "passed",
         })
         self.assertFalse(premature["recorded"])
-        self.assertEqual(premature["next_action"], "record_evidence")
-        self.assertEqual(premature["gate_correction"], {"requested": "plan", "used": "discover"})
+        self.assertEqual(premature["reason"], "gate_mismatch")
+        self.assertEqual(premature["next_action"], "retry_with_active_gate")
+        self.assertEqual(premature["requested_gate"], "plan")
+        self.assertEqual(premature["active_gates"], ["discover"])
+        self.assertFalse(premature["state_changed"])
         confirmed = control.confirm_host_spawn({
             "task_id": "recoverable-sequence", "principal": "thread-a",
             "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
@@ -5516,25 +5625,67 @@ class ControlPlaneTests(unittest.TestCase):
         resolved_closure["decision"] = "pass"
         resolved_gate_result = dict(resolved_closure, failure_class="product")
 
-        # Simulate a corrupted predecessor projection.  A fresh reviewer may
-        # retain the historical source report, but it cannot close the issue
-        # without the *current corrective* documentation report in its own
-        # server-scoped context.
+        # Simulate a corrupted current-source dispatch. A reviewer that lacks
+        # its immutable origin report cannot repair that server-owned handoff
+        # by editing findings, so record_report must stop it and return a
+        # coordinator recovery—not a retryable report-schema correction.
         original_context = list(replacement_review["context_report_ids"])
+        replacement_review["context_report_ids"] = [
+            documentation_results[0]["report_ref"], qa_results[0]["report_ref"],
+        ]
+        self.write_task_state(current)
+        missing_origin_report, _ = self._report_for_attempt(
+            task_dir,
+            replacement_review,
+            self.v3_report("review cannot resolve a finding without its immutable origin handoff"),
+        )
+        missing_origin = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+            "report": missing_origin_report, "gate_result": resolved_gate_result,
+        })
+        self.assertFalse(missing_origin["ok"])
+        self.assertEqual(missing_origin["outcome"], "blocked")
+        self.assertEqual(missing_origin["code"], "corrective_handoff_unavailable")
+        self.assertFalse(missing_origin["retryable"])
+        self.assertIn("exact immutable origin report", missing_origin["diagnostics"][0]["message"])
+        self.assertIn("coordinator must recover", missing_origin["next_action"])
+        template = control.get_report_template({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+        })
+        self.assertTrue(template["ok"], template)
+        missing_origin_draft = control.publish_worker_report({
+            "project_root": str(self.project), "task_id": current["task_id"],
+            "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
+            "draft_ref": template["draft_ref"],
+            "patch": {"report": missing_origin_report, "gate_result": resolved_gate_result},
+        })
+        self.assertFalse(missing_origin_draft["ok"])
+        self.assertEqual(missing_origin_draft["outcome"], "blocked")
+        self.assertEqual(missing_origin_draft["code"], "corrective_handoff_unavailable")
+        self.assertFalse(missing_origin_draft["retryable"])
+
+        # The same recovery category applies when the exact origin is
+        # present but the current corrective receipt was omitted. A worker
+        # cannot manufacture that receipt either.
         replacement_review["context_report_ids"] = [review_ref]
         self.write_task_state(current)
-        rejected_report, _ = self._report_for_attempt(
+        missing_corrective_report, _ = self._report_for_attempt(
             task_dir,
             replacement_review,
             self.v3_report("review cannot prove a correction it did not receive"),
         )
-        rejected = control.publish_worker_report({
+        missing_corrective = control.publish_worker_report({
             "project_root": str(self.project), "task_id": current["task_id"],
             "attempt_id": replacement_review["attempt_id"], "profile": replacement_review["profile"],
-            "report": rejected_report, "gate_result": resolved_gate_result,
+            "report": missing_corrective_report, "gate_result": resolved_gate_result,
         })
-        self.assertFalse(rejected["ok"])
-        self.assertIn("current corrective report", rejected["diagnostics"][0]["message"])
+        self.assertFalse(missing_corrective["ok"])
+        self.assertEqual(missing_corrective["outcome"], "blocked")
+        self.assertEqual(missing_corrective["code"], "corrective_handoff_unavailable")
+        self.assertFalse(missing_corrective["retryable"])
+        self.assertIn("current corrective report", missing_corrective["diagnostics"][0]["message"])
 
         # A semantic steer must also prevent an old finding route from being
         # consumed should a damaged controller fail to supersede it first.
@@ -5891,7 +6042,9 @@ class ControlPlaneTests(unittest.TestCase):
             },
         })
         self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["code"], "report_validation_failed")
+        self.assertEqual(rejected["outcome"], "blocked")
+        self.assertEqual(rejected["code"], "corrective_handoff_unavailable")
+        self.assertFalse(rejected["retryable"])
         self.assertIn("fresh rerun of its origin gate", rejected["diagnostics"][0]["message"])
         stored = control.db_list_task_findings(self.ledger, current["task_id"])
         self.assertEqual([(item["fingerprint"], item["status"]) for item in stored], [(finding["fingerprint"], "open")])
@@ -5960,7 +6113,7 @@ class ControlPlaneTests(unittest.TestCase):
             ["report-correction"],
         )
 
-    def test_open_canonical_p2_blocks_a_textually_passing_close_and_reopens_rework(self):
+    def test_open_advisory_p2_does_not_block_a_textually_passing_close(self):
         started = self.v3_start(
             "close cannot override canonical closure debt",
             waves=[
@@ -5985,21 +6138,20 @@ class ControlPlaneTests(unittest.TestCase):
             state["task_id"],
             {
                 "fingerprint": "late-p2-001", "severity": "P2", "status": "open", "blocking": False,
-                "summary": "A canonical P2 remains open",
+                "summary": "An advisory P2 remains open",
                 "details": {"affected_paths": ["docs/features/example/index.md"]},
             },
             source={"report_id": "report-0001", "attempt_id": state["attempts"][0]["attempt_id"]},
         )
         rework = control.continue_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "step": documented["step"],
-            "results": self.v3_results(documented, self.v3_report("close textually passed despite P2")),
+            "results": self.v3_results(documented, self.v3_report("close textually passed with advisory P2")),
         })
         self.assertTrue(rework["ok"], rework)
-        self.assertEqual(rework["outcome"], "ready_to_spawn")
-        self.assertEqual(rework["dispatches"][0]["phase"], "documentation")
+        self.assertEqual(rework["outcome"], "completed")
         after = control.load_task_state_for_artifact(task_dir)
-        self.assertTrue(next(item for item in after["attempts"] if item["attempt_id"] == close_attempt["attempt_id"])["invalidated"])
-        self.assertNotEqual(after["status"], "completed")
+        self.assertFalse(next(item for item in after["attempts"] if item["attempt_id"] == close_attempt["attempt_id"]).get("invalidated", False))
+        self.assertEqual(after["status"], "completed")
 
     def test_required_verification_missing_blocks_review_and_dispatches_rework(self):
         started = self.v3_start(
@@ -6231,6 +6383,78 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(invalid["attempt_budget_consumed"])
         self.assertEqual(invalid["draft_ref"], template["draft_ref"])
         self.assertTrue(Path(template["draft_path"]).is_file())
+
+    def test_non_pass_gate_can_record_honest_blocked_contract_markers(self):
+        """A verifier must not manufacture PASS evidence just to report a blocker."""
+        started = self.v3_start(
+            "a server-owned receipt is unavailable to the verifier",
+            waves=[{"workers": [{"phase": "review"}]}],
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        task = control.load_task_definition(task_dir, state)
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+        }
+        template = control.get_report_template(identity)
+        self.assertTrue(template["ok"], template)
+        draft = json.loads(Path(template["draft_path"]).read_text(encoding="utf-8"))
+        self.assertTrue(any(
+            "<replace PASS or BLOCKED>" in item
+            for item in draft["report"]["evidence"]
+        ))
+
+        report = {
+            "summary": "Review verification is blocked because the coordinator-owned receipt is unavailable.",
+            "findings": [],
+            "questions": [],
+            "changed_files": [],
+            "tests": [{
+                "command": "python3 -m unittest focused_test",
+                "cwd": ".",
+                "exit_code": 0,
+                "evidence": "Focused verification completed successfully with zero failures.",
+            }],
+            "evidence": [control.dispatch_briefing_review_marker(attempt["briefing_digest"])],
+            "uncertainty": ["The coordinator-owned receipt is unavailable in this worker scope."],
+        }
+        for prefix, _criterion in control._result_contract_markers(attempt, task):
+            marker_base = prefix.removesuffix("PASS - ")
+            report["evidence"].append(
+                marker_base + "BLOCKED - The coordinator-owned immutable receipt is unavailable in this worker scope."
+            )
+        published = control.publish_worker_report({
+            **identity,
+            "report": report,
+            "gate_result": {
+                "decision": "blocked",
+                "failure_class": "infrastructure",
+                "findings": [{
+                    "severity": "P1",
+                    "status": "open",
+                    "blocking": True,
+                    "summary": "The required coordinator-owned receipt is unavailable to this verifier.",
+                }],
+                "verification": {
+                    "executed": ["Focused verification completed."],
+                    "not_executed": [],
+                    "required_missing": ["Coordinator-owned lifecycle receipt."],
+                    "limitations": [],
+                },
+                "workspace": {
+                    "modified": [],
+                    "untracked": [],
+                    "staged": [],
+                    "committed": "not_required",
+                },
+            },
+        })
+        self.assertTrue(published["ok"], published)
+        self.assertEqual(published["gate_decision"], "blocked")
 
     def test_unhashable_gate_result_value_returns_retryable_draft_diagnostic(self):
         """Malformed JSON must not escape record_report as an MCP exception."""
@@ -6570,12 +6794,14 @@ class ControlPlaneTests(unittest.TestCase):
             "approved",
         )
 
-    def test_v3_planner_rejects_oversized_future_dispatch_before_plan_approval(self):
-        """An overlarge compiled plan must be corrected by the same planner.
+    def test_v3_large_planner_artifact_dispatches_with_a_compact_briefing(self):
+        """A full valid plan belongs in its immutable artifact, not the prompt.
 
-        The old failure happened only after a human had approved the planning
-        report and the implementation briefing was materialized.  That left a
-        passed planner report and forced an unnecessary replan/reapproval.
+        Planner reports may legitimately contain detailed microtasks.  Their
+        implementation worker receives the exact compiled artifact path and
+        digest in its bootstrap, while Assignment data carries a bounded index
+        only.  The old preflight embedded all microtasks and rejected this
+        report before a user could approve it.
         """
         started = self.v3_start(
             "validate future worker briefing capacity before asking for approval",
@@ -6589,13 +6815,13 @@ class ControlPlaneTests(unittest.TestCase):
         task_dir = next((self.ledger / "tasks").iterdir())
         before = self.task_state(task_dir)
         planner = before["attempts"][0]
-        artifacts_before = control.db_list_artifacts(self.ledger, before["task_id"], page_size=100)[0]
         oversized = self.v3_planning()
+        detailed_objective = "x" * 30000
         oversized["work_packages"][0]["microtasks"] = [
             {
                 "id": f"oversized_{index}",
                 "title": f"Oversized implementation unit {index}",
-                "objective": "x" * 3600,
+                "objective": detailed_objective,
                 "profile": "backend_dev",
                 "allowed_paths": ["src"],
                 "acceptance_criteria": ["a" * 900],
@@ -6603,30 +6829,15 @@ class ControlPlaneTests(unittest.TestCase):
             }
             for index in range(1, 7)
         ]
-        rejected = control.publish_worker_report({
+        self.assertGreater(
+            len(json.dumps(oversized, ensure_ascii=False, sort_keys=True).encode("utf-8")),
+            128 * 1024,
+        )
+        accepted = control.publish_worker_report({
             "project_root": str(self.project), "task_id": before["task_id"],
             "attempt_id": planner["attempt_id"], "profile": planner["profile"],
             "report": self._report_with_briefing(planner, self.v3_report("oversized plan")),
             "planning": oversized,
-        })
-        self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["code"], "planner_briefing_budget_exceeded")
-        self.assertTrue(rejected["retryable"])
-        self.assertFalse(rejected["attempt_budget_consumed"])
-        self.assertIn("future implementation/backend_dev", rejected["diagnostics"][0]["message"])
-        self.assertIn(">24576", rejected["diagnostics"][0]["message"])
-        self.assertIn("retry this same planner report", rejected["diagnostics"][0]["message"])
-        after_rejection = self.task_state(task_dir)
-        self.assertEqual(after_rejection, before)
-        artifacts_after = control.db_list_artifacts(self.ledger, before["task_id"], page_size=100)[0]
-        self.assertEqual(artifacts_after, artifacts_before)
-        self.assertIsNone(control.current_planning_manifest(task_dir))
-
-        accepted = control.publish_worker_report({
-            "project_root": str(self.project), "task_id": before["task_id"],
-            "attempt_id": planner["attempt_id"], "profile": planner["profile"],
-            "report": self._report_with_briefing(planner, self.v3_report("bounded plan")),
-            "planning": self.v3_planning(),
         })
         self.assertTrue(accepted["ok"], accepted)
         held = control.continue_orchestration({
@@ -6642,6 +6853,49 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(approved["ok"], approved)
         self.assertEqual(approved["outcome"], "ready_to_spawn")
         self.assertEqual(approved["dispatches"][0]["phase"], "implementation")
+        dispatched = self.task_state(task_dir)
+        implementation = dispatched["attempts"][-1]
+        plan_path = task_dir / implementation["plan_unit_file"]
+        self.assertTrue(plan_path.is_file())
+        plan_bytes = plan_path.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(plan_bytes).hexdigest(), implementation["plan_unit_digest"],
+        )
+        compiled_plan = json.loads(plan_bytes)
+        self.assertEqual(len(compiled_plan["microtasks"]), len(oversized["work_packages"][0]["microtasks"]))
+        self.assertEqual(
+            [item["objective"] for item in compiled_plan["microtasks"]],
+            [item["objective"] for item in oversized["work_packages"][0]["microtasks"]],
+        )
+        self.assertEqual(
+            [item["acceptance_criteria"] for item in compiled_plan["microtasks"]],
+            [item["acceptance_criteria"] for item in oversized["work_packages"][0]["microtasks"]],
+        )
+        self.assertEqual(
+            [item["verification"] for item in compiled_plan["microtasks"]],
+            [item["verification"] for item in oversized["work_packages"][0]["microtasks"]],
+        )
+
+        package = control._delegation_package(task_dir, dispatched["task_id"], implementation["attempt_id"])
+        plan_ref = package["plan_unit"]
+        self.assertEqual(plan_ref["artifact_path"], str(plan_path))
+        self.assertEqual(plan_ref["digest_sha256"], implementation["plan_unit_digest"])
+        self.assertNotIn("microtasks", plan_ref)
+        self.assertNotIn("package_ids", plan_ref)
+
+        briefing_path = task_dir / implementation["briefing_file"]
+        briefing = briefing_path.read_text(encoding="utf-8")
+        self.assertLessEqual(
+            len(briefing.encode("utf-8")), control.PROMPT_BUDGETS["ordinary_briefing_hard_bytes"],
+        )
+        self.assertIn(str(plan_path), briefing)
+        self.assertIn(implementation["plan_unit_digest"], briefing)
+        self.assertNotIn(detailed_objective, briefing)
+        bootstrap = delegation_service.rehydrate_dispatch_spawn_request(
+            task_dir, control.load_task_definition(task_dir, dispatched), implementation,
+        )["message"]
+        self.assertIn(str(plan_path), bootstrap)
+        self.assertIn(implementation["plan_unit_digest"], bootstrap)
 
     def test_plan_approval_rejects_a_stale_basis_before_post_plan_dispatch(self):
         started = self.v3_start(
@@ -7580,7 +7834,10 @@ class ControlPlaneTests(unittest.TestCase):
             ),
         })
         state = self.task_state(task_dir)
-        state["bounded_large_state_fixture"] = "x" * (control.MAX_REPORT_BYTES * 5)
+        # This test exercises task-state/report-read isolation, not the
+        # report artifact policy.  Keep a sizeable fixture without coupling
+        # it to the now much larger canonical report boundary.
+        state["bounded_large_state_fixture"] = "x" * (64 * 1024 * 5)
         self.write_task_state(state)
         read = control.read_worker_report({
             "project_root": str(self.project),
@@ -7589,6 +7846,44 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(read["ok"])
         self.assertEqual(read["report"]["summary"], "large-state report remains readable")
+
+    def test_report_larger_than_legacy_64k_and_more_than_100_items_is_persisted_in_full(self):
+        """Canonical evidence is an artifact, not a compact UI payload.
+
+        This deliberately crosses both removed legacy limits.  Reading the
+        record through the artifact catalog also proves the content was not
+        silently trimmed while being sanitized for persistence.
+        """
+        started = self.v3_start("preserve a detailed independent audit", waves=[{"workers": [{"phase": "discover"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        report = self.v3_report("detailed audit evidence is retained in the immutable report artifact")
+        report["findings"] = [
+            f"Detailed audit observation {index:03d}: " + ("evidence-backed detail " * 36)
+            for index in range(128)
+        ]
+        report = self._report_with_briefing(attempt, report)
+        self.assertGreater(
+            len(json.dumps(report, ensure_ascii=False, sort_keys=True).encode("utf-8")),
+            64 * 1024,
+        )
+        published = control.publish_worker_report({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "report": report,
+        })
+        self.assertTrue(published["ok"], published)
+        record, _ = control.read_immutable_json_artifact(
+            task_dir,
+            state["task_id"],
+            f"reports/records/{published['report_ref']}.json",
+            kinds={"worker_report"},
+        )
+        self.assertEqual(record["report"]["findings"], report["findings"])
+        self.assertEqual(len(record["report"]["findings"]), 128)
 
     def test_v3_artifact_management_pages_metadata_and_streams_large_markdown(self):
         started = self.v3_start("stream task artifacts", waves=[{"workers": [{"phase": "discover"}]}])
@@ -7703,7 +7998,7 @@ class ControlPlaneTests(unittest.TestCase):
         baseline = control.load_manifest_snapshot(
             task_dir, state["initial_manifest_ref"], "test task baseline"
         )
-        baseline["policy"]["test_padding"] = "x" * (control.MAX_REPORT_BYTES * 5)
+        baseline["policy"]["test_padding"] = "x" * (64 * 1024 * 5)
         padded_ref = control.manifest_snapshot_ref(baseline)
         control.db_put_manifest_snapshot(self.ledger, padded_ref, baseline["digest"], baseline)
         state["initial_manifest_ref"] = padded_ref
@@ -8300,7 +8595,7 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(frontier, ["report-1001"])
 
-    def test_v3_inspect_recovers_report_when_native_worker_ack_is_interrupted(self):
+    def test_v3_inspect_surfaces_report_when_native_worker_ack_is_interrupted_without_projection_write(self):
         started = self.v3_start("recover persisted report", waves=[
             {"workers": [{"phase": "discover"}]},
             {"workers": [{"phase": "implementation"}]},
@@ -8331,14 +8626,18 @@ class ControlPlaneTests(unittest.TestCase):
                 "phase": "discover",
                 "profile": "explorer",
                 "summary": "persisted before native acknowledgement interruption",
-                "report_markdown_path": str(task_dir / "reports/markdown/report-0001.md"),
-                "report_markdown_link": f"[Report discover — report-0001](<{task_dir / 'reports/markdown/report-0001.md'}>)",
+                "projection_error": "worker report Markdown artifact is unavailable",
             }],
         )
+        self.assertFalse((task_dir / "reports/markdown/report-0001.md").exists())
         self.assertEqual(inspected["context_handoff"]["schema"], "cortex/context-handoff/v1")
         self.assertEqual(inspected["context_handoff"]["task_ref"], started["task_ref"])
         self.assertEqual(inspected["context_handoff"]["goal"], "recover persisted report")
         self.assertEqual(inspected["context_handoff"]["reports"][0]["report_ref"], published["report_ref"])
+        self.assertEqual(
+            inspected["context_handoff"]["reports"][0]["projection_error"],
+            "worker report Markdown artifact is unavailable",
+        )
         self.assertIn("fork_turns=none", inspected["context_handoff"]["protocol"]["hidden_dispatch"])
         self.assertIn("publication_required=true", inspected["context_handoff"]["protocol"]["report_publication"])
         self.assertIn("context_handoff", inspected["next_action"])
@@ -10035,7 +10334,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_per_attempt_report_quota_and_terminal_attempt_are_rejected(self):
         state = self.init(task_id="quotas", complexity="C2")["state"]
-        delegation = self.delegate(state, "quotas", "plan", "planner")
+        delegation = self.delegate(state, "quotas", "discover", "planner")
         original_attempt = control.MAX_REPORTS_PER_ATTEMPT
         try:
             control.MAX_REPORTS_PER_ATTEMPT = 1
@@ -10045,8 +10344,8 @@ class ControlPlaneTests(unittest.TestCase):
         finally:
             control.MAX_REPORTS_PER_ATTEMPT = original_attempt
         report = control.record_report({"task_id": "quotas", "principal": "thread-a", "attempt_id": delegation["attempt_id"], "submission_id": "one", "report": {"summary": "delegated work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused test evidence"], "uncertainty": []}})
-        evidence = control.record_evidence({"task_id": "quotas", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "plan", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "done"})
-        control.record_gate({"task_id": "quotas", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
+        evidence = control.record_evidence({"task_id": "quotas", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "discover", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "done"})
+        control.record_gate({"task_id": "quotas", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed"})
         with self.assertRaisesRegex(ValueError, "terminal"):
             self.report("quotas", delegation["attempt_id"], submission_id="late")
 
@@ -10151,7 +10450,10 @@ class ControlPlaneTests(unittest.TestCase):
         result = self.init(task_id="skip", complexity="C2")
         state = result["state"]
         with self.assertRaisesRegex(ValueError, "skip_reason"):
-            control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "gate": "plan", "outcome": "skipped"})
+            control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "gate": "discover", "outcome": "skipped"})
+        mismatch = control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "gate": "plan", "outcome": "skipped"})
+        self.assertEqual(mismatch["reason"], "gate_mismatch")
+        self.assertFalse(mismatch["state_changed"])
         with self.assertRaisesRegex(ValueError, "close gate"):
             control.update_pipeline({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "pipeline": ["plan", "discover"]})
 
@@ -10304,8 +10606,36 @@ class ControlPlaneTests(unittest.TestCase):
             ["project_root", "task_id", "attempt_id", "profile"],
         )
         self.assertEqual(
-            worker_by_name["record_report"]["inputSchema"]["anyOf"],
-            [{"required": ["draft_ref"]}, {"required": ["report"]}],
+            worker_by_name["record_report"]["inputSchema"]["oneOf"],
+            [
+                {
+                    "required": ["draft_ref"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["report"]},
+                            {"required": ["scoping"]},
+                            {"required": ["planning"]},
+                            {"required": ["gate_result"]},
+                            {"required": ["closure"]},
+                        ],
+                    },
+                },
+                {
+                    "required": ["report"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["draft_ref"]},
+                            {"required": ["patch"]},
+                        ],
+                    },
+                },
+            ],
+        )
+        patch_schema = worker_by_name["record_report"]["inputSchema"]["properties"]["patch"]
+        self.assertFalse(patch_schema["additionalProperties"])
+        self.assertEqual(
+            set(patch_schema["properties"]),
+            {"report", "scoping", "planning", "gate_result", "closure"},
         )
         self.assertIn("draft_ref", worker_by_name["record_report"]["inputSchema"]["properties"])
         self.assertIn("patch", worker_by_name["record_report"]["inputSchema"]["properties"])
@@ -10556,7 +10886,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.15")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.16")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
