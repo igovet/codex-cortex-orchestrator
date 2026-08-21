@@ -624,6 +624,13 @@ class ControlPlaneTests(unittest.TestCase):
             "exercise preopened recovery snapshot",
             waves=[{"workers": [{"phase": "discover"}]}],
         )
+        # Standalone MCP starts intentionally do not invent a host-session
+        # binding when the host has not supplied CODEX_SESSION_ID.  Simulate
+        # the documented SessionStart hook explicitly so this test exercises
+        # the caller-owned snapshot path with a deterministic identity in CI.
+        control.bind_host_session_from_hook(
+            str(self.project), started["task_ref"], "preopened-recovery-session"
+        )
         task_dir = next((self.ledger / "tasks").iterdir())
         state = control.load_task_state_for_artifact(task_dir)
         event = {
