@@ -113,6 +113,10 @@ paths forbidden above.
    matches `user_request`. Add requirements, acceptance criteria,
    scope, allowed paths, verification, budget, pause conditions, language, or
    complexity only when the user supplied them or they are established facts.
+   `task.verification` is the non-empty array of concrete authoritative checks;
+   it is not a mode selector. In particular, never add a `verification_mode`
+   task field or any other field absent from the public `start_orchestration`
+   schema: Cortex rejects unknown task fields before creating a task.
    Do not make an abstract request look decision-complete by inventing product
    intent, audience, design direction, behavior, or acceptance. Complexity
    defaults to C2 and accepts aliases. Before the one start call, verify that

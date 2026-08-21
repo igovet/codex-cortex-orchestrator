@@ -1,5 +1,19 @@
 # Changelog
 
+## [9.2.22] - 2026-08-21
+
+This source-tree patch clarifies the public start-task contract without
+weakening its fail-closed validation boundary.
+
+- State in both the public MCP description and the bundled coordinator protocol
+  that `task.verification` is the array of concrete authoritative checks, not a
+  mode selector, and that `verification_mode` is not a task field.
+- Keep unknown task fields rejected before reservation or task creation, and
+  add contract parity coverage for the public schema, coordinator skill, and
+  no-task-created negative path.
+- Align the manifest cachebuster, source validators, release markers, and
+  current-source documentation with 9.2.22.
+
 ## [9.2.21] - 2026-08-21
 
 This source-tree patch introduces Prompt Contract Architecture v2 without

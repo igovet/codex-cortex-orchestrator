@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.21 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.22 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each

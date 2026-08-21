@@ -133,7 +133,7 @@ it validates `git archive HEAD`, not the mutable worktree.
 ## Current source-tree evidence
 
 The evidence bullets below describe the previously validated 9.2.4 source
-candidate. They do not certify the 9.2.21 hardening release candidate above;
+candidate. They do not certify the 9.2.22 hardening release candidate above;
 those full-suite, live, archive, and installed-plugin result slots remain
 pending.
 
@@ -220,15 +220,15 @@ Use the fresh-plugin probe, `sync-cortex.sh --check`, and tracked-release
 verification separately for installation/package evidence. A live `SKIP`
 means the Codex runtime is unavailable and is not live evidence.
 
-The source manifest now declares the 9.2.21 source cachebuster. Historical
+The source manifest now declares the 9.2.22 source cachebuster. Historical
 9.2.4 results above remain evidence for that prior source candidate only;
 release publication and installed-plugin verification remain separate,
 explicitly requested actions.
 
-## 9.2.21 release-candidate evidence status
+## 9.2.22 release-candidate evidence status
 
 This section describes the hardening work visible in the source tree. The
-source cachebuster is generated from the 9.2.21 base version.
+source cachebuster is generated from the 9.2.22 base version.
 The following result slots remain intentionally factual placeholders until the
 candidate is committed and rerun on the exact release SHA:
 
@@ -238,7 +238,7 @@ candidate is committed and rerun on the exact release SHA:
 - Installed-plugin verification and cachebuster parity: **pending; no install
   or user `~/.codex` mutation is implied**.
 
-The 9.2.21 patch retains the 9.2.17/9.2.16 recovery guarantees, removes
+The 9.2.22 patch retains the 9.2.17/9.2.16 recovery guarantees, removes
 programmatic planner/dispatch briefing size rejection in favor of immutable
 plan-artifact references, and scopes no-progress pauses and evidence to their
 exact gate. Independent current-wave siblings remain executable, while a
@@ -248,6 +248,12 @@ Prompt Contract Architecture v2 adds deterministic `cortex-prompt-lint.py` and
 duplicate-section rejection, and the assignment data boundary. Offline evals
 do not call a model. Live evaluation remains pending unless an explicit
 no-fallback Luna-high executor is run and recorded separately.
+
+It also makes the public start contract unambiguous: `task.verification` is
+the concrete-check array, `verification_mode` is unsupported, and unknown task
+fields fail before reservation or task creation. The focused contract regression
+checks the bundled coordinator instruction, public schema and description, and
+that negative path; it is not evidence for the pending broader release gates.
 
 The draft scope covers governance schema v12 integrity, artifact-authoritative
 record bodies, exact scope and linear revisions, append-only status/approval
@@ -260,7 +266,7 @@ the required 50,000-file benchmark. A
 benchmark pass or focused local check must not be read as evidence for the
 pending full-suite or live gates.
 
-## Current 9.2.21 source contract
+## Current 9.2.22 source contract
 
 - Cortex selects `python3` from `PATH` when `CORTEX_PYTHON` is unset. An
   explicit `CORTEX_PYTHON` value must be an absolute executable path; both

@@ -124,6 +124,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_public_mcp_schemas_match_runtime_start_report_and_planning_contracts(self):
         self.assertIn("ordinary task needs non-empty task.acceptance_criteria", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
+        self.assertIn("verification_mode is not a task field", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
+        control_skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("never add a `verification_mode`", control_skill)
         self.assertIn("small JSON Merge Patch", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
         self.assertIn("atomically persists", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
         self.assertIn("temporary JSON file already filled", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["get_report_template"])
@@ -136,6 +139,23 @@ class OrchestrationInvariantTests(unittest.TestCase):
         for field in ("acceptance_criteria", "verification"):
             self.assertEqual(task_schema["properties"][field]["minItems"], 1)
             self.assertEqual(task_schema["properties"][field]["maxItems"], 100)
+        self.assertFalse(task_schema["additionalProperties"])
+        self.assertNotIn("verification_mode", task_schema["properties"])
+
+        rejected_start = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Verify the start task contract.",
+                "acceptance_criteria": ["The public task contract is unambiguous."],
+                "verification": ["Run the focused public-contract regression test."],
+                "verification_mode": "read_only",
+            },
+        })
+        self.assertFalse(rejected_start["ok"])
+        self.assertEqual(rejected_start["code"], "start_validation_failed")
+        self.assertIn("unsupported task fields: verification_mode", rejected_start["diagnostics"][0]["message"])
+        tasks_dir = self.ledger / "tasks"
+        self.assertFalse(tasks_dir.exists() and any(tasks_dir.iterdir()))
 
         test_schema = control.V3_REPORT_SCHEMA["properties"]["tests"]["items"]
         self.assertFalse(test_schema["additionalProperties"])
@@ -2032,7 +2052,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.21")
+        self.assertEqual(base_version, "9.2.22")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
