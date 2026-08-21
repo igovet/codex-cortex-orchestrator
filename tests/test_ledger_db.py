@@ -33,6 +33,16 @@ def _first_boot_in_process(root_text: str, ready: multiprocessing.Queue, start: 
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+def _hold_state_lock_in_process(root_text: str, ready: multiprocessing.Event, release: multiprocessing.Event) -> None:
+    """Hold the mutation lease so the parent can exercise bounded contention."""
+    with cortex.state_lock(
+        Path(root_text), timeout_seconds=2.0, operation="regression_hold", task_id="holder-task"
+    ):
+        ready.set()
+        if not release.wait(10):
+            raise RuntimeError("parent did not release state lock")
+
+
 class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.set_up_host_private_control_store()
@@ -89,6 +99,37 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 ledger_db, "_assert_migration_schema", side_effect=AssertionError("warm readiness must not sweep schema")
             ):
                 ledger_db.ensure_database(root)
+
+    def test_state_lock_is_bounded_and_busy_holder_metadata_excludes_owner_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            ready = multiprocessing.Event()
+            release = multiprocessing.Event()
+            holder = multiprocessing.Process(
+                target=_hold_state_lock_in_process,
+                args=(str(root), ready, release),
+            )
+            holder.start()
+            try:
+                self.assertTrue(ready.wait(5), "the child must acquire the state lock")
+                with self.assertRaises(cortex.LedgerBusyError) as raised:
+                    with cortex.state_lock(root, timeout_seconds=0.05, operation="regression_wait"):
+                        pass
+                error = raised.exception
+                self.assertEqual(error.operation, "regression_wait")
+                self.assertGreaterEqual(error.held_duration_ms, 0)
+                self.assertIsInstance(error.holder, dict)
+                self.assertEqual(error.holder.get("operation"), "regression_hold")
+                self.assertEqual(error.holder.get("task_id"), "holder-task")
+                self.assertNotIn("token", error.holder)
+            finally:
+                release.set()
+                holder.join(5)
+                if holder.is_alive():
+                    holder.terminate()
+                    holder.join(5)
+            self.assertEqual(holder.exitcode, 0)
 
     def test_ready_ledger_cache_revalidates_history_user_version_and_schema_tampering(self) -> None:
         """Warm-cache hits must fail closed instead of trusting stale authority."""
@@ -655,6 +696,45 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 connection.commit()
             with self.assertRaisesRegex(ValueError, "schema is inconsistent"):
                 ledger_db.ensure_database(root)
+
+    def test_hook_snapshot_read_helpers_reuse_supplied_read_only_connection(self) -> None:
+        """All hook readers use one bounded connection and cannot write through it."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            state = {
+                "schema": cortex.SCHEMA, "task_id": "snapshot-task", "task_number": 1,
+                "status": "active", "revision": 1, "attempts": [{
+                    "attempt_id": "attempt-1", "status": "awaiting_host_spawn",
+                    "spawn_request": {"task_name": "qa-engineer"},
+                }],
+            }
+            definition = {"schema": cortex.SCHEMA, "task_id": "snapshot-task", "created_at": "now"}
+            ledger_db.ensure_database(root)
+            ledger_db.create_task(root, definition, state, "tasks/0001-snapshot-task")
+            ledger_db.put_global(root, "operation_registry", {
+                "tasks": {"snapshot-task": {"start": {"task_ref": "public-snapshot-ref"}}},
+            })
+            fingerprint = "a" * 64
+            ledger_db.record_tool_observation(
+                root, task_id="snapshot-task", attempt_id="attempt-1", context_epoch=3,
+                fingerprint=fingerprint, tool_name="read", normalized_arguments="{}",
+                workspace_generation="workspace-1", result_digest=None, coverage="full", status="success",
+            )
+            with ledger_db.hook_snapshot(root, timeout_ms=100) as snapshot:
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                with mock.patch.object(ledger_db, "_connection", side_effect=AssertionError("opened another connection")):
+                    self.assertEqual(ledger_db.hook_snapshot_task_context(snapshot, "snapshot-task")[3], "tasks/0001-snapshot-task")
+                    self.assertEqual(ledger_db.hook_snapshot_artifact_directory(snapshot, "snapshot-task"), "tasks/0001-snapshot-task")
+                    self.assertEqual(ledger_db.hook_snapshot_task_ref(snapshot, "snapshot-task"), "public-snapshot-ref")
+                    self.assertEqual(ledger_db.hook_snapshot_operation_registry(snapshot)["tasks"]["snapshot-task"]["start"]["task_ref"], "public-snapshot-ref")
+                    self.assertEqual(ledger_db.hook_snapshot_pending_subagent(snapshot, "qa-engineer"), ["snapshot-task"])
+                    self.assertEqual(ledger_db.hook_snapshot_tool_context_epoch(snapshot, "snapshot-task"), 0)
+                    self.assertTrue(ledger_db.hook_snapshot_find_successful_tool_observation(
+                        snapshot, "snapshot-task", "attempt-1", 3, fingerprint, "workspace-1",
+                    ))
+                with self.assertRaises(sqlite3.OperationalError):
+                    snapshot.execute("DELETE FROM tasks WHERE task_id = 'snapshot-task'")
 
 
 if __name__ == "__main__":  # pragma: no cover

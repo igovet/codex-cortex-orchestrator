@@ -17,6 +17,7 @@ import cortex as control
 import cortex_hook
 from cortex_runtime import identity as worker_identity
 from cortex_runtime import mcp_api
+from cortex_runtime import briefings as runtime_briefings
 
 
 class OrchestrationInvariantTests(unittest.TestCase):
@@ -542,6 +543,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(sanitized["client_secret"], "<REDACTED>")
         self.assertEqual(sanitized["nested"]["access_token"], "<REDACTED>")
         self.assertEqual(sanitized["safe"], "visible")
+
+    def test_report_structured_preserves_json_primitives_and_nested_evidence(self):
+        sanitized = control.sanitize_report_structured({
+            "safe_values": [0, False, None, {"count": 2}],
+            "access_token": "never-store-this",
+        })
+        self.assertEqual(sanitized["safe_values"], [0, False, None, {"count": 2}])
+        self.assertEqual(sanitized["access_token"], "<REDACTED>")
 
     def test_verification_command_ids_reject_caller_execution_control(self):
         state = self.init()["state"]
@@ -1150,11 +1159,27 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 )
                 output = json.loads(completed.stdout)["hookSpecificOutput"]
                 self.assertEqual(output["hookEventName"], "PreToolUse")
-                self.assertEqual(output["permissionDecision"], "deny")
-                reason = output["permissionDecisionReason"]
-                self.assertIn("CORTEX DISPATCH FAILURE", reason)
-                self.assertIn("No worker was spawned", reason)
-                self.assertIn("Never retry an empty wait", reason)
+                self.assertNotIn("permissionDecision", output)
+                self.assertIn("CORTEX COORDINATOR WAIT ADVISORY", output["additionalContext"])
+
+        worker_event = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "owner",
+            "agent_type": "general",
+            "tool_name": "wait",
+            "tool_input": {"action": "wait", "receiver_thread_ids": []},
+        }
+        completed = subprocess.run(
+            [sys.executable, str(hook)], input=json.dumps(worker_event), text=True,
+            capture_output=True, env=os.environ.copy(), check=True,
+        )
+        output = json.loads(completed.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+        reason = output["permissionDecisionReason"]
+        self.assertIn("CORTEX DISPATCH FAILURE", reason)
+        self.assertIn("No worker was spawned", reason)
+        self.assertIn("Never retry an empty wait", reason)
 
         bare_wait = {
             "hook_event_name": "PreToolUse",
@@ -1168,8 +1193,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         output = json.loads(completed.stdout)["hookSpecificOutput"]
         self.assertEqual(output["hookEventName"], "PreToolUse")
-        self.assertEqual(output["permissionDecision"], "deny")
-        self.assertIn("CORTEX DISPATCH FAILURE", output["permissionDecisionReason"])
+        self.assertNotIn("permissionDecision", output)
+        self.assertIn("CORTEX COORDINATOR WAIT ADVISORY", output["additionalContext"])
 
         event["tool_input"]["receiver_thread_ids"] = ["child-01"]
         targeted = subprocess.run(
@@ -1784,6 +1809,24 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("COORDINATOR LOCK", hook)
         self.assertIn("never permission for direct coordinator work", hook)
 
+    def test_legacy_briefing_keeps_scalar_scope_atomic(self):
+        prompt = runtime_briefings._expanded_host_spawn_prompt(
+            "planner",
+            {
+                "task_id": "scope-atomic",
+                "gate": "plan",
+                "attempt_id": "plan-01",
+                "dispatch_ref": "dispatch-scope-atomic",
+                "project_root": "/workspace/scope-atomic",
+                "task_scope": "Текущий репозиторий",
+                "task_objective": "Preserve the task scope",
+                "task_user_request": "Preserve the task scope",
+                "objective": "Preserve the task scope",
+            },
+        )
+        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertEqual(assignment["scope"], ["Текущий репозиторий"])
+
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
         contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
         self.assertEqual(set(contract["gate_briefings"]), control.AVAILABLE_GATES)
@@ -1955,7 +1998,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.18")
+        self.assertEqual(base_version, "9.2.19")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

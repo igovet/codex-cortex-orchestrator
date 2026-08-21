@@ -128,6 +128,16 @@ the original SQLite transaction. Required dispatch briefings are an exception
 only in capability semantics: the exact private export/digest must exist before
 the native worker starts, while the canonical content remains SQLite-owned.
 
+Report intake uses a prepare/commit split. Draft parsing, report and gate
+validation, historical index loading, and content-addressed preparation happen
+outside the mutation lease; the five-second commit lease rechecks the task
+revision, SQLite draft registration, regular-file identity, and content
+SHA-256 before persisting canonical artifacts and projection jobs. Contention
+returns retryable `ledger_busy`; a changed draft returns retryable
+`stale_preparation` and preserves the draft. `CORTEX_REPORT_PREPARE_COMMIT=off`
+selects the serialized compatibility path. Rollback never invalidates existing
+immutable records or outbox jobs.
+
 Review and close decisions derive from canonical structured findings and
 server-observed verification. Open P0/P1 findings, explicitly blocking open
 findings, and missing required verification reopen the recorded gate for

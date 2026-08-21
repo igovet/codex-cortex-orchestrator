@@ -253,6 +253,17 @@ human-readable `display_name` as the native thread title.
 
 ## Runtime protocol handoff
 
+### User communication
+
+User-visible updates use the communication contract in `profiles.json`. The
+default `natural` profile favors plain language; `compact` limits updates to
+the essential result and next step; `technical` retains useful implementation
+detail. Select with `communication_profile` or `CORTEX_COMMUNICATION_PROFILE`;
+unknown values fall back to `natural`. Human-readable message types are kept
+separate from internal transport metadata. Before publication, check plain
+language, absence of internal identifiers and tool names, non-repetition, an
+explicit next step, and the selected profile's length/detail expectations.
+
 For an activated route, `../cortex-control/SKILL.md` is the single coordinator
 core and state-machine authority. Load it completely before the first lifecycle
 call and follow its exact tool sequence, silent-wait policy, question flow,

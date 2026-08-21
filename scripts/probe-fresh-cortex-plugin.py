@@ -171,7 +171,10 @@ def main() -> int:
         record_schema = tools["record_report"]["inputSchema"]
         if not {"draft_ref", "patch"}.issubset(record_schema["properties"]):
             raise SystemExit("fresh plugin probe: atomic report schema lacks draft identity or merge-patch correction")
-        if {"required": ["draft_ref"]} not in record_schema.get("anyOf", []):
+        if not any(
+            isinstance(branch, dict) and branch.get("required") == ["draft_ref"]
+            for branch in record_schema.get("oneOf", [])
+        ):
             raise SystemExit("fresh plugin probe: atomic report schema does not require a draft or report payload")
         workspace = base / "workspace"
         workspace.mkdir()

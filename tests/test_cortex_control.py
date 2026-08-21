@@ -618,6 +618,45 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertIsNone(recovered)
 
+    def test_subagent_recovery_readers_use_preopened_snapshot_without_factory(self):
+        """A caller-owned snapshot remains usable if opening another one is unavailable."""
+        started = self.v3_start(
+            "exercise preopened recovery snapshot",
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        # Standalone MCP starts intentionally do not invent a host-session
+        # binding when the host has not supplied CODEX_SESSION_ID.  Simulate
+        # the documented SessionStart hook explicitly so this test exercises
+        # the caller-owned snapshot path with a deterministic identity in CI.
+        control.bind_host_session_from_hook(
+            str(self.project), started["task_ref"], "preopened-recovery-session"
+        )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        event = {
+            "hook_event_name": "SubagentStart",
+            "agent_type": "default",
+            "model": state["attempts"][0]["expected_model"],
+        }
+        with cortex_hook.db_hook_snapshot(self.ledger) as snapshot:
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            with mock.patch.object(cortex_hook, "db_hook_snapshot", None):
+                self.assertEqual(
+                    cortex_hook.pending_task_from_subagent_start(self.ledger, event, snapshot),
+                    state["task_id"],
+                )
+
+        session_id = control._host_session_bindings(self.ledger)["tasks"].get(state["task_id"])
+        self.assertTrue(session_id)
+        with cortex_hook.db_hook_snapshot(self.ledger) as snapshot:
+            self.assertIsNotNone(snapshot)
+            assert snapshot is not None
+            with mock.patch.object(cortex_hook, "db_hook_snapshot", None):
+                context = cortex_hook._active_task_context(self.ledger, session_id, snapshot)
+                self.assertIsNotNone(context)
+                self.assertEqual(context["task_id"], state["task_id"])
+
     def test_subagent_stop_without_report_is_terminal_and_bounded(self):
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         with mock.patch.dict(
@@ -1332,6 +1371,11 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(first["publication_required"])
         self.assertEqual(first["publication_reason"], "native_worker_completed")
         self.assertEqual(first["completion_update"]["summary"], summary)
+        user_message = first["completion_update"]["user_message"]
+        self.assertEqual(user_message["message"], summary)
+        self.assertEqual(user_message["message_type"], "Task completed")
+        self.assertTrue(user_message["quality"]["ok"])
+        self.assertNotIn("report_ref", user_message["message"])
         self.assertEqual(first["completion_update"]["phase"], attempt["gate"])
         self.assertTrue(first["completion_update"]["next"].startswith("Evaluate this completed result"))
         if first["completion_update"]["remaining_phases"]:
@@ -5059,6 +5103,26 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(attempt["acceptance_criteria"], ["Facts collected"])
         self.assertEqual(attempt["verification"], ["Cite files"])
         self.assertEqual(attempt["expected_model"], "gpt-5.6-luna")
+
+    def test_v3_start_accepts_server_owned_allowed_paths_worker_field(self):
+        started = self.v3_start(
+            "explicit worker scope",
+            waves=[{"workers": [{
+                "phase": "discover",
+                "profile": "explorer",
+                "allowed_paths": ["README.md"],
+            }]}],
+        )
+        self.assertTrue(started["ok"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(state["attempts"][0]["allowed_paths"], ["README.md"])
+
+    def test_v3_worker_allowed_paths_rejects_broad_scope(self):
+        with self.assertRaisesRegex(ValueError, "explicit and non-broad"):
+            control._v3_compact_waves([
+                {"workers": [{"phase": "discover", "allowed_paths": ["."]}]},
+            ], {"objective": "narrow worker scope", "complexity": "C1"})
 
     def test_v3_planner_dispatch_stays_below_host_output_truncation_budget(self):
         request = (
@@ -10905,7 +10969,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.18")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.19")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

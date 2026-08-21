@@ -135,6 +135,7 @@ from cortex_runtime.routing import (
     resolve_dispatch_route as routing_resolve_dispatch_route,
 )
 from cortex_runtime.revision_impact import classify_revision_impact
+from cortex_runtime.communication import select_profile as select_communication_profile
 from cortex_runtime.governance import (
     GovernanceError,
     manage_governance as manage_governance_service,
@@ -187,6 +188,77 @@ SYSTEM_PROJECT_ROOTS = frozenset(
     )
 )
 _STATE_LOCK_LOCAL = threading.local()
+STATE_LOCK_TIMEOUT_SECONDS = 5.0
+_STATE_LOCK_OWNER_FILE = ".state.lock.owner.json"
+
+
+class LedgerBusyError(RuntimeError):
+    """Raised when a bounded mutation lease cannot be acquired in time."""
+
+    def __init__(self, operation: str, held_duration_ms: int, *, holder: dict[str, Any] | None = None) -> None:
+        super().__init__(f"Cortex ledger is busy during {operation}")
+        self.operation = re.sub(r"[^a-z0-9_.-]", "_", str(operation).lower())[:64] or "mutation"
+        self.held_duration_ms = max(0, min(int(held_duration_ms), 600000))
+        self.holder = dict(holder) if isinstance(holder, dict) else None
+
+
+def _state_lock_owner_path(root: Path) -> Path:
+    return root / _STATE_LOCK_OWNER_FILE
+
+
+def _read_state_lock_holder(root: Path) -> dict[str, Any] | None:
+    """Read bounded, non-secret holder metadata for a busy-lock diagnostic."""
+    path = _state_lock_owner_path(root)
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return {
+        "pid": int(value["pid"]) if isinstance(value.get("pid"), int) else None,
+        "operation": redact(value.get("operation", ""), 128) or None,
+        "task_id": redact(value.get("task_id", ""), 128) or None,
+        "acquired_at": redact(value.get("acquired_at", ""), 64) or None,
+    }
+
+
+def _write_state_lock_holder(root: Path, payload: dict[str, Any]) -> None:
+    """Best-effort atomic owner marker; lock correctness never depends on it."""
+    path = _state_lock_owner_path(root)
+    temporary: str | None = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=".state-lock-owner.", dir=str(root))
+        os.fchmod(descriptor, 0o600)
+        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        os.write(descriptor, encoded)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        temporary = None
+    except OSError:
+        pass
+    finally:
+        if 'descriptor' in locals() and descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if temporary:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+
+
+def _clear_state_lock_holder(root: Path, token: str) -> None:
+    path = _state_lock_owner_path(root)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and value.get("token") == token:
+            path.unlink()
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
 MCP_SERVER_INSTRUCTIONS = (
     "Cortex opt-in. Publish read_worker_report links only when publication_required=true, with the summary and next step. "
     "Internal workers emit English only. Lifecycle requires task_ref; no unscoped recovery. "
@@ -2459,8 +2531,21 @@ def classify_task(params: dict[str, Any]) -> dict[str, Any]:
 
 
 @contextlib.contextmanager
-def state_lock(root: Path) -> Iterator[None]:
-    """Serialize one filesystem+SQLite mutation and hold its DB transaction open."""
+def state_lock(
+    root: Path,
+    *,
+    timeout_seconds: float | None = STATE_LOCK_TIMEOUT_SECONDS,
+    operation: str = "mutation",
+    task_id: str | None = None,
+) -> Iterator[None]:
+    """Serialize one filesystem+SQLite mutation with a bounded acquisition.
+
+    Every mutation now fails fast with a retryable ``ledger_busy`` signal by
+    default.  A caller may explicitly pass ``timeout_seconds=None`` only for a
+    narrowly controlled maintenance path that already owns the process-level
+    coordination boundary.  The optional owner marker is diagnostic only and
+    never participates in lock correctness.
+    """
     # Composite tools call the existing mutation primitives while holding one
     # transaction lock.  Keep the lock re-entrant inside this MCP process while
     # retaining fcntl serialization between independent MCP processes.
@@ -2476,19 +2561,46 @@ def state_lock(root: Path) -> Iterator[None]:
             stack.pop()
         return
     lock_path = root / ".state.lock"
+    started = time.monotonic()
     with lock_path.open("a+", encoding="utf-8") as stream:
         try:
             os.chmod(lock_path, 0o600)
         except OSError:
             pass
         if fcntl is not None:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            if timeout_seconds is None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            else:
+                deadline = started + max(0.0, float(timeout_seconds))
+                while True:
+                    try:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except (BlockingIOError, OSError) as exc:
+                        if isinstance(exc, OSError) and exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise LedgerBusyError(
+                                operation,
+                                int((time.monotonic() - started) * 1000),
+                                holder=_read_state_lock_holder(root),
+                            ) from None
+                        time.sleep(min(0.01, max(0.001, deadline - time.monotonic())))
+        owner_token = secrets.token_hex(12)
+        _write_state_lock_holder(root, {
+            "pid": os.getpid(),
+            "operation": re.sub(r"[^a-z0-9_.-]", "_", str(operation).lower())[:64] or "mutation",
+            "task_id": safe_id(str(task_id)) if task_id else None,
+            "acquired_at": now(),
+            "token": owner_token,
+        })
         stack.append((root, stream))
         try:
             with db_transaction(root):
                 yield
         finally:
             stack.pop()
+            _clear_state_lock_holder(root, owner_token)
             if fcntl is not None:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
@@ -3272,6 +3384,14 @@ if REPORT_FIELDS != EXPECTED_REPORT_FIELDS:
 REPORT_FIELD_SET = frozenset(REPORT_FIELDS)
 
 
+class ReportValidationError(ValueError):
+    """A safe, structured collection of caller-correctable report problems."""
+
+    def __init__(self, diagnostics: list[dict[str, str]]) -> None:
+        self.diagnostics = diagnostics
+        super().__init__("report validation failed")
+
+
 INTENT_CLOSURE_GATES = AVAILABLE_GATES - {"scope", "discover"}
 PRODUCT_SURFACE_PATTERNS = (
     r"\blanding(?:\s+page)?\b", r"\bweb\s*site\b", r"\bhomepage\b", r"\bpage\b",
@@ -3387,6 +3507,15 @@ def sanitize_report_structured(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [sanitize_report_structured(item) for item in value]
+    # Report JSON is evidence, so JSON primitives must survive the privacy
+    # boundary with their original types.  ``redact`` stringifies values and
+    # used to turn ``false``, ``0`` and ``null`` into textual evidence (most
+    # visibly ``tests.exit_code``).  Redaction and size limits apply only to
+    # textual values; containers recurse above and primitives are immutable.
+    if isinstance(value, str):
+        return redact(value, MAX_REPORT_BYTES)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
     return redact(value, MAX_REPORT_BYTES)
 
 
@@ -3712,9 +3841,63 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     """Validate the Planner-only work-breakdown artifact without widening report/v1."""
     if persisted and isinstance(value, dict) and value.get("schema") == PLANNING_SCHEMA:
         value = {key: item for key, item in value.items() if key != "schema"}
-    if not isinstance(value, dict) or set(value) != {"overview", "work_packages"}:
-        raise ValueError("planning must contain exactly overview and work_packages")
+    allowed_top_level = {
+        "overview", "work_packages", "requirement_coverage", "recommendation",
+        "recommendation_rationale", "resolved_questions", "risks",
+    }
+    if not isinstance(value, dict) or not {"overview", "work_packages"}.issubset(value) or set(value) - allowed_top_level:
+        raise ValueError("planning must contain overview and work_packages, with only documented traceability fields")
     overview = _planning_text(value.get("overview"), "planning overview")
+    recommendation = str(value.get("recommendation") or "approve").strip().lower()
+    if recommendation not in {"approve", "revise"}:
+        raise ValueError("planning recommendation must be approve or revise")
+    recommendation_rationale = str(value.get("recommendation_rationale") or "").strip()
+    if recommendation_rationale and len(recommendation_rationale) > 4000:
+        raise ValueError("planning recommendation_rationale is too long")
+    raw_resolved_questions = value.get("resolved_questions", [])
+    if not isinstance(raw_resolved_questions, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_resolved_questions
+    ) or len(raw_resolved_questions) > 32:
+        raise ValueError("planning resolved_questions must be an array of non-empty strings")
+    resolved_questions = list(dict.fromkeys(str(item).strip() for item in raw_resolved_questions))
+    raw_risks = value.get("risks", [])
+    if not isinstance(raw_risks, list) or any(not isinstance(item, str) or not item.strip() for item in raw_risks):
+        raise ValueError("planning risks must be an array of non-empty strings")
+    risks = list(dict.fromkeys(str(item).strip() for item in raw_risks))
+    if len(risks) > 64 or any(len(item) > 2000 for item in risks):
+        raise ValueError("planning risks exceed the supported bound")
+    raw_coverage = value.get("requirement_coverage", [])
+    if not isinstance(raw_coverage, list) or len(raw_coverage) > 100:
+        raise ValueError("planning requirement_coverage must be an array with at most 100 items")
+    coverage: list[dict[str, Any]] = []
+    coverage_keys: set[str] = set()
+    for index, item in enumerate(raw_coverage, 1):
+        if not isinstance(item, dict):
+            raise ValueError(f"planning requirement_coverage[{index - 1}] must be an object")
+        unknown = sorted(set(item) - {"requirement", "plan_refs", "verification", "status"})
+        missing = sorted({"requirement", "plan_refs", "verification", "status"} - set(item))
+        if unknown or missing:
+            details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + ([] if not missing else ["missing: " + ", ".join(missing)])
+            raise ValueError(f"planning requirement_coverage[{index - 1}] is invalid (" + "; ".join(details) + ")")
+        requirement = _planning_text(item.get("requirement"), "planning coverage requirement")
+        coverage_key = " ".join(requirement.casefold().split())
+        if coverage_key in coverage_keys:
+            raise ValueError("planning requirement_coverage requirements must be unique")
+        coverage_keys.add(coverage_key)
+        refs = item.get("plan_refs")
+        if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+            raise ValueError(f"planning requirement_coverage[{index - 1}] plan_refs must be a non-empty array")
+        refs_normalized = list(dict.fromkeys(str(ref).strip() for ref in refs))
+        verification = _planning_string_list(item.get("verification"), "planning coverage verification")
+        status = str(item.get("status") or "").strip().lower()
+        if status != "covered":
+            raise ValueError(f"planning requirement_coverage[{index - 1}] status must be covered")
+        coverage.append({
+            "requirement": requirement,
+            "plan_refs": refs_normalized,
+            "verification": verification,
+            "status": "covered",
+        })
     raw_packages = value.get("work_packages")
     if not isinstance(raw_packages, list) or not raw_packages or len(raw_packages) > MAX_WORK_PACKAGES:
         raise ValueError(f"planning work_packages must contain 1..{MAX_WORK_PACKAGES} items")
@@ -3726,7 +3909,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     for index, raw_package in enumerate(raw_packages, 1):
         if not isinstance(raw_package, dict):
             raise ValueError(f"planning work_packages[{index - 1}] must be an object")
-        unknown = sorted(set(raw_package) - {"id", "title", "objective", "allowed_paths", "depends_on", "microtasks"})
+        unknown = sorted(set(raw_package) - {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "microtasks"})
         missing = sorted({"id", "title", "objective", "microtasks"} - set(raw_package))
         if unknown or missing:
             details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + ([] if not missing else ["missing: " + ", ".join(missing)])
@@ -3742,7 +3925,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         for micro_index, raw_microtask in enumerate(raw_microtasks, 1):
             if not isinstance(raw_microtask, dict):
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} must be an object")
-            allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "acceptance_criteria", "verification"}
+            allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification"}
             unknown_micro = sorted(set(raw_microtask) - allowed)
             missing_micro = sorted({"id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"} - set(raw_microtask))
             if unknown_micro or missing_micro:
@@ -3757,6 +3940,22 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 profile = canonical_profile(profile)
                 if profile not in AGENTS:
                     raise ValueError(f"planning microtask {microtask_id!r} has an unknown profile")
+            status = str(raw_microtask.get("status") or "pending").strip().lower()
+            if status not in {"pending", "ready", "running", "blocked", "completed", "skipped"}:
+                raise ValueError(f"planning microtask {microtask_id!r} has an invalid status")
+            order = raw_microtask.get("order", micro_index)
+            if isinstance(order, bool) or not isinstance(order, int) or order < 1:
+                raise ValueError(f"planning microtask {microtask_id!r} order must be a positive integer")
+            raw_gates = raw_microtask.get("gates", ["implementation"])
+            if not isinstance(raw_gates, list) or not raw_gates or any(not str(item).strip() for item in raw_gates):
+                raise ValueError(f"planning microtask {microtask_id!r} gates must be a non-empty array")
+            gates = list(dict.fromkeys(canonical_pipeline_gate(item) for item in raw_gates))
+            unknown_gates = sorted(set(gates) - AVAILABLE_GATES)
+            if unknown_gates:
+                raise ValueError(
+                    f"planning microtask {microtask_id!r} references unknown gates: "
+                    + ", ".join(unknown_gates)
+                )
             raw_dependencies = raw_microtask.get("depends_on", [])
             if not isinstance(raw_dependencies, list):
                 raise ValueError(f"planning microtask {microtask_id!r} depends_on must be an array")
@@ -3786,6 +3985,9 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 "title": _planning_text(raw_microtask.get("title"), "planning microtask title"),
                 "objective": _planning_text(raw_microtask.get("objective"), "planning microtask objective"),
                 "profile": profile or None,
+                "status": status,
+                "order": order,
+                "gates": gates,
                 "allowed_paths": microtask_paths,
                 "depends_on": dependencies,
                 "acceptance_criteria": microtask_acceptance,
@@ -3800,17 +4002,53 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         dependencies = [_planning_identifier(item, "planning package dependency") for item in raw_dependencies]
         if len(dependencies) != len(set(dependencies)):
             raise ValueError(f"planning package {package_id!r} dependencies must be unique")
+        package_status = str(raw_package.get("status") or "pending").strip().lower()
+        if package_status not in {"pending", "ready", "running", "blocked", "completed", "skipped"}:
+            raise ValueError(f"planning package {package_id!r} has an invalid status")
+        package_order = raw_package.get("order", index)
+        if isinstance(package_order, bool) or not isinstance(package_order, int) or package_order < 1:
+            raise ValueError(f"planning package {package_id!r} order must be a positive integer")
+        raw_package_gates = raw_package.get("gates", ["implementation"])
+        if not isinstance(raw_package_gates, list) or not raw_package_gates or any(not str(item).strip() for item in raw_package_gates):
+            raise ValueError(f"planning package {package_id!r} gates must be a non-empty array")
+        package_gates = list(dict.fromkeys(canonical_pipeline_gate(item) for item in raw_package_gates))
+        unknown_package_gates = sorted(set(package_gates) - AVAILABLE_GATES)
+        if unknown_package_gates:
+            raise ValueError(
+                f"planning package {package_id!r} references unknown gates: "
+                + ", ".join(unknown_package_gates)
+            )
         packages.append({
             "id": package_id,
             "title": _planning_text(raw_package.get("title"), "planning package title"),
             "objective": _planning_text(raw_package.get("objective"), "planning package objective"),
+            "status": package_status,
+            "order": package_order,
+            "gates": package_gates,
             "allowed_paths": _planning_paths_list(raw_package.get("allowed_paths"), "planning package allowed_paths"),
             "depends_on": dependencies,
             "microtasks": microtasks,
         })
     _validate_planning_dependency_graph(package_ids, {item["id"]: item["depends_on"] for item in packages}, "planning package")
     _validate_planning_dependency_graph(microtask_ids, microtask_dependencies, "planning microtask")
-    result = {"schema": PLANNING_SCHEMA, "overview": overview, "work_packages": packages}
+    valid_plan_refs = package_ids | microtask_ids
+    for coverage_index, item in enumerate(coverage, 1):
+        unknown_refs = sorted(set(item["plan_refs"]) - valid_plan_refs)
+        if unknown_refs:
+            raise ValueError(
+                f"planning requirement_coverage[{coverage_index - 1}] references unknown plan items: "
+                + ", ".join(unknown_refs)
+            )
+    result = {
+        "schema": PLANNING_SCHEMA,
+        "overview": overview,
+        "work_packages": packages,
+        "requirement_coverage": coverage,
+        "recommendation": recommendation,
+        "recommendation_rationale": recommendation_rationale,
+        "resolved_questions": resolved_questions,
+        "risks": risks,
+    }
     if len(json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")) > MAX_PLANNING_BYTES:
         raise ValueError(f"planning exceeds the {MAX_PLANNING_BYTES}-byte limit")
     return result
@@ -3833,13 +4071,136 @@ def _planning_overview_markdown(manifest: dict[str, Any]) -> str:
         dependency_text = ", ".join(package["depends_on"]) if package["depends_on"] else "none"
         lines.extend((
             f"### {package['id']}: {package['title']}", "", package["objective"], "",
+            f"Status: {package.get('status', 'pending')} | Order: {package.get('order', 1)} | Gates: {', '.join(package.get('gates') or ['implementation'])}",
             f"Dependencies: {dependency_text}", "", "Microtasks:",
         ))
         for microtask in package["microtasks"]:
             profile = f" ({microtask['profile']})" if microtask.get("profile") else ""
-            lines.append(f"- `{microtask['id']}`{profile}: {microtask['title']}")
+            lines.append(
+                f"- `{microtask['id']}`{profile} [{microtask.get('status', 'pending')}; order {microtask.get('order', 1)}; gates {', '.join(microtask.get('gates') or ['implementation'])}]: {microtask['title']}"
+            )
+        lines.append("")
+    coverage = manifest.get("requirement_coverage") or []
+    if coverage:
+        lines.extend(("## Requirement coverage", ""))
+        for item in coverage:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {item.get('requirement')}: {', '.join(str(ref) for ref in item.get('plan_refs') or [])}"
+                )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+PLAN_TRACKER_SCHEMA = "cortex/plan-tracker/v1"
+
+
+def _plan_tracker_document(
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    report_id: str,
+    planning: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the one mutable task-local execution tracker.
+
+    Immutable planner/package artifacts remain evidence. This document is the
+    live coordination surface: every package and microtask has one row with
+    ordering, dependencies, gates, acceptance, verification, and a lifecycle
+    status that save_state advances after each gate transition.
+    """
+    rows: list[dict[str, Any]] = []
+    for package in planning.get("work_packages", []):
+        if not isinstance(package, dict):
+            continue
+        package_id = str(package.get("id") or "")
+        rows.append({
+            "kind": "package",
+            "id": package_id,
+            "title": package.get("title"),
+            "objective": package.get("objective"),
+            "status": package.get("status") or "pending",
+            "order": package.get("order", 1),
+            "gates": list(package.get("gates") or ["implementation"]),
+            "depends_on": list(package.get("depends_on") or []),
+            "allowed_paths": list(package.get("allowed_paths") or []),
+            "acceptance_criteria": [],
+            "verification": [],
+            "package_id": package_id,
+        })
+        for microtask in package.get("microtasks", []):
+            if not isinstance(microtask, dict):
+                continue
+            rows.append({
+                "kind": "microtask",
+                "id": str(microtask.get("id") or ""),
+                "title": microtask.get("title"),
+                "objective": microtask.get("objective"),
+                "status": microtask.get("status") or "pending",
+                "order": microtask.get("order", 1),
+                "gates": list(microtask.get("gates") or ["implementation"]),
+                "depends_on": list(microtask.get("depends_on") or []),
+                "allowed_paths": list(microtask.get("allowed_paths") or package.get("allowed_paths") or []),
+                "acceptance_criteria": list(microtask.get("acceptance_criteria") or []),
+                "verification": list(microtask.get("verification") or []),
+                "profile": microtask.get("profile"),
+                "package_id": package_id,
+            })
+    rows.sort(key=lambda item: (int(item.get("order") or 1), 0 if item.get("kind") == "package" else 1, str(item.get("id") or "")))
+    return {
+        "schema": PLAN_TRACKER_SCHEMA,
+        "task_id": state["task_id"],
+        "revision": manifest.get("revision"),
+        "source_report_ref": report_id,
+        "source_attempt_id": attempt.get("attempt_id"),
+        "task_revision": int(state.get("task_revision") or 1),
+        "recommendation": manifest.get("recommendation", "approve"),
+        "recommendation_rationale": manifest.get("recommendation_rationale", ""),
+        "requirement_coverage": list(manifest.get("requirement_coverage") or []),
+        "resolved_questions": list(manifest.get("resolved_questions") or []),
+        "risks": list(manifest.get("risks") or []),
+        "items": rows,
+        "updated_at": now(),
+        "last_event": "plan_created",
+    }
+
+
+def _sync_plan_tracker_document(task_dir: Path, state: dict[str, Any], *, event: str, detail: str) -> None:
+    """Advance live tracker statuses from the durable gate state.
+
+    Projection failures are intentionally non-fatal to the lifecycle commit;
+    the immutable plan and state remain authoritative and the next save retries
+    the same task-scoped document update.
+    """
+    root = _task_document_root(task_dir, str(state["task_id"]))
+    tracker = db_get_task_document(root, str(state["task_id"]), "plan_tracker_current")
+    if not isinstance(tracker, dict) or tracker.get("schema") != PLAN_TRACKER_SCHEMA:
+        return
+    done = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+    active = set(active_gates(state))
+    paused = {
+        str(gate) for gate, value in (state.get("rework_pauses") or {}).items()
+        if isinstance(value, dict) and value.get("status") == "needs_user_decision"
+    }
+    for item in tracker.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        gates = {canonical_pipeline_gate(gate) for gate in item.get("gates") or []}
+        if gates and gates.issubset(done):
+            item["status"] = "completed"
+        elif gates.intersection(paused):
+            item["status"] = "blocked"
+        elif gates.intersection(active):
+            item["status"] = "running"
+        elif item.get("status") not in {"completed", "skipped"}:
+            item["status"] = "pending"
+        item["updated_at"] = now()
+    tracker["task_revision"] = int(state.get("task_revision") or tracker.get("task_revision") or 1)
+    tracker["state_revision"] = int(state.get("revision") or 0)
+    tracker["last_event"] = event
+    tracker["last_detail"] = redact(detail, 1000)
+    tracker["updated_at"] = now()
+    db_put_task_document(root, str(state["task_id"]), "plan_tracker_current", tracker)
 
 
 def materialize_planning_artifacts(
@@ -3867,6 +4228,11 @@ def materialize_planning_artifacts(
         "source_attempt_id": attempt["attempt_id"],
         "summary": report["summary"],
         "overview": planning["overview"],
+        "requirement_coverage": planning.get("requirement_coverage", []),
+        "recommendation": planning.get("recommendation", "approve"),
+        "recommendation_rationale": planning.get("recommendation_rationale", ""),
+        "resolved_questions": planning.get("resolved_questions", []),
+        "risks": planning.get("risks", []),
         "overview_artifact_path": f"planning/revisions/{revision}/overview.md",
         "work_packages": [
             {
@@ -3916,6 +4282,8 @@ def materialize_planning_artifacts(
         projection_type="planning_manifest", export_path=f"planning/revisions/{revision}/manifest.json",
     )
     db_put_task_document(root, state["task_id"], "planning_current", manifest)
+    tracker = _plan_tracker_document(state, attempt, report_id, planning, manifest)
+    db_put_task_document(root, state["task_id"], "plan_tracker_current", tracker)
     overview = _planning_overview_markdown({**manifest, "work_packages": packages})
     overview_path = str(manifest["overview_artifact_path"])
     overview_artifact = store_immutable_artifact(
@@ -3937,6 +4305,18 @@ def current_planning_manifest(task_dir: Path) -> dict[str, Any] | None:
         return None
     if value.get("schema") != PLANNING_SCHEMA:
         raise ValueError("planning manifest schema is not supported")
+    return value
+
+
+def current_plan_tracker(task_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return the single mutable task-local plan tracker, if one exists."""
+    task = load_task_definition(task_dir, state)
+    root = _task_document_root(task_dir, str(task["task_id"]))
+    value = db_get_task_document(root, str(task["task_id"]), "plan_tracker_current")
+    if value is None:
+        return None
+    if value.get("schema") != PLAN_TRACKER_SCHEMA:
+        raise ValueError("plan tracker schema is not supported")
     return value
 
 
@@ -4891,31 +5271,54 @@ def _validate_gate_result_report(
     """Fail closed unless a worker proves its gate contract and any claimed writes."""
     gate = str(attempt.get("gate") or "")
     task = load_task_definition(task_dir, state)
+    diagnostics: list[dict[str, str]] = []
     if not report.get("evidence"):
-        raise ValueError(f"{gate} result requires observed evidence")
+        diagnostics.append({
+            "code": "report_evidence_missing",
+            "path": "report.evidence",
+            "message": f"{gate} result requires observed evidence",
+            "fix": "Add concrete observed evidence without removing failed-check details.",
+        })
     briefing_receipt = _validate_dispatch_briefing_review(task_dir, state, attempt, report)
     tests = report.get("tests") or []
     if gate in EXECUTED_CHECK_RESULT_GATES and not tests:
-        raise ValueError(f"{gate} result requires at least one executed check or inspection result")
+        diagnostics.append({
+            "code": "report_tests_missing",
+            "path": "report.tests",
+            "message": f"{gate} result requires at least one executed check or inspection result",
+            "fix": "Add each executed check with command, cwd, exit_code, and observed evidence.",
+        })
     if tests:
         successful_checks = 0
         unsuccessful_checks: list[int] = []
         for index, check in enumerate(tests, 1):
             required_check_fields = {"command", "cwd", "exit_code", "evidence"}
             if not isinstance(check, dict) or set(check) != required_check_fields:
-                raise ValueError(
-                    f"{gate} result test {index} must contain exactly command, cwd, exit_code, and evidence"
-                )
+                diagnostics.append({
+                    "code": "report_test_shape_invalid",
+                    "path": f"report.tests[{index - 1}]",
+                    "message": f"{gate} result test {index} must contain exactly command, cwd, exit_code, and evidence",
+                    "fix": "Keep exactly command, cwd, exit_code, and evidence for this test item.",
+                })
+                continue
             command = str(check.get("command") or "").strip()
             cwd = str(check.get("cwd") or "").strip().replace("\\", "/")
             exit_code = check.get("exit_code")
             check_evidence = str(check.get("evidence") or "").strip()
             if len(command) < 2:
-                raise ValueError(f"{gate} result test {index} must identify the exact executed command")
+                diagnostics.append({
+                    "code": "report_test_command_invalid",
+                    "path": f"report.tests[{index - 1}].command",
+                    "message": f"{gate} result test {index} must identify the exact executed command",
+                    "fix": "Replace the command with the exact reproducible invocation that was run.",
+                })
             if re.search(r"(?<!\S)\.\.\.(?!\S)", command):
-                raise ValueError(
-                    f"{gate} result test {index} command must be the exact reproducible invocation, not a placeholder with ..."
-                )
+                diagnostics.append({
+                    "code": "report_test_command_placeholder",
+                    "path": f"report.tests[{index - 1}].command",
+                    "message": f"{gate} result test {index} command must be the exact reproducible invocation, not a placeholder with ...",
+                    "fix": "Replace ... with the complete command that was executed.",
+                })
             project_root = str(task.get("project_root") or "").replace("\\", "/")
             if cwd != project_root:
                 relative_cwd = Path(cwd)
@@ -4925,26 +5328,51 @@ def _validate_gate_result_report(
                     or "\x00" in cwd
                     or any(part in {"", ".."} for part in relative_cwd.parts)
                 ):
-                    raise ValueError(
-                        f"{gate} result test {index} cwd must be the exact project root or a safe project-relative directory"
-                    )
+                    diagnostics.append({
+                        "code": "report_test_cwd_invalid",
+                        "path": f"report.tests[{index - 1}].cwd",
+                        "message": f"{gate} result test {index} cwd must be the exact project root or a safe project-relative directory",
+                        "fix": "Use the exact project root or a safe project-relative directory.",
+                    })
             if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-                raise ValueError(f"{gate} result test {index} exit_code must be an integer")
+                diagnostics.append({
+                    "code": "report_test_exit_code_invalid",
+                    "path": f"report.tests[{index - 1}].exit_code",
+                    "message": f"{gate} result test {index} exit_code must be an integer",
+                    "fix": "Record the integer exit code observed from the command.",
+                })
             if not check_evidence:
-                raise ValueError(f"{gate} result test {index} needs a concrete observed output summary")
+                diagnostics.append({
+                    "code": "report_test_evidence_missing",
+                    "path": f"report.tests[{index - 1}].evidence",
+                    "message": f"{gate} result test {index} needs a concrete observed output summary",
+                    "fix": "Add a concise observed output summary; preserve any failure evidence.",
+                })
             if exit_code == 0:
                 successful_checks += 1
             else:
                 unsuccessful_checks.append(index)
         if gate in EXECUTED_CHECK_RESULT_GATES and not successful_checks:
-            raise ValueError(f"{gate} result requires at least one successful executed check")
+            diagnostics.append({
+                "code": "report_tests_all_failed",
+                "path": "report.tests",
+                "message": f"{gate} result requires at least one successful executed check",
+                "fix": "Preserve the failed-check evidence, rework the gate, and submit at least one successful check.",
+            })
         if unsuccessful_checks:
-            raise ValueError(
-                f"{gate} result contains unsuccessful executed check(s) at report.tests index(es): "
-                + ", ".join(str(index) for index in unsuccessful_checks)
-                + "; a completion report may contain only checks that passed. Preserve the failures and return "
-                "the report-tool error so the coordinator can rework the gate"
-            )
+            diagnostics.append({
+                "code": "worker_verification_failed",
+                "path": "report.tests",
+                "message": (
+                    f"{gate} result contains unsuccessful executed check(s) at report.tests index(es): "
+                    + ", ".join(str(index) for index in unsuccessful_checks)
+                    + "; a completion report may contain only checks that passed"
+                ),
+                "fix": "Preserve the failed checks and evidence; rework the gate, rerun them, then submit the updated results.",
+            })
+
+    if diagnostics:
+        raise ReportValidationError(diagnostics)
 
     evidence_items = [item for item in report.get("evidence", []) if isinstance(item, str)]
     started_revision = int(attempt.get("task_revision_started") or 1)
@@ -5216,6 +5644,13 @@ def save_state(task_dir: Path, state_path: Path, state: dict[str, Any], event: s
     state["revision"] += 1
     state["updated_at"] = now()
     db_update_task_state(_ledger_root_for_artifact(task_dir), state, event=event, detail=detail)
+    try:
+        _sync_plan_tracker_document(task_dir, state, event=event, detail=detail)
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        # The state transition is canonical; a mutable tracker projection is
+        # retried on the next lifecycle save and must not make a completed
+        # gate disappear because SQLite briefly rejected the secondary write.
+        pass
     append_journal_best_effort(task_dir, event, detail)
     return state
 
@@ -6253,10 +6688,10 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if not exact_user_request:
             raise ValueError("init_task requires the exact non-empty user request")
         exact_user_request_digest = digest_text(exact_user_request)
-        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "objective": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "objective": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "acceptance_criteria": [redact(item, 1000) for item in params.get("acceptance_criteria", [])][:100], "scope": [redact(item, 500) for item in params.get("scope", [])][:100], "allowed_paths": [redact(item, 500) for item in params.get("allowed_paths", [])][:100], "verification": [redact(item, 1000) for item in params.get("verification", [])][:100], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in params.get("pause_conditions", [])][:100], "plan_approval": plan_approval_policy, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "communication_profile": select_communication_profile(params), "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
         intent_artifact = store_immutable_artifact(
@@ -9274,7 +9709,7 @@ def _v3_compact_waves(
         raise ValueError("waves must be a non-empty array when supplied")
     result: list[dict[str, Any]] = []
     allowed_worker_keys = {
-        "phase", "profile", "objective", "paths", "acceptance", "verification",
+        "phase", "profile", "objective", "paths", "allowed_paths", "acceptance", "verification",
         "model", "user_requested_model", "effort", "visible", "isolated_checkout", "depends_on", "context_files",
         "strategy",
     }
@@ -9371,12 +9806,22 @@ def _v3_compact_waves(
                 spec["context_gates"] = dependencies
             for source, target in (
                 ("objective", "objective"), ("paths", "allowed_paths"),
+                ("allowed_paths", "allowed_paths"),
                 ("acceptance", "acceptance_criteria"), ("verification", "verification"),
                 ("context_files", "context_files"), ("strategy", "strategy"),
             ):
                 if source in worker:
                     if source == "context_files" and project_root is not None:
                         spec[target] = _project_knowledge_context(project_root, worker[source])[0]
+                    elif source == "allowed_paths":
+                        # Keep the canonical field server-owned: unlike the
+                        # legacy `paths` hint, the explicit field is a
+                        # validated narrow write scope and cannot broaden a
+                        # worker to the whole project.
+                        paths = _planning_paths_list(worker[source], "worker allowed_paths")
+                        if any(path in {".", "*"} for path in paths):
+                            raise ValueError("worker allowed_paths must be explicit and non-broad")
+                        spec[target] = paths
                     else:
                         spec[target] = worker[source]
             model = _v3_model(worker.get("model"))
@@ -9716,6 +10161,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "complexity", "replan_limit", "plan_approval", "initiative_ref", "governance_mode",
             "risk_triggers", "governance_triggers", "multiple_repositories", "related_tasks",
             "long_lived_lanes", "conflicting_resources", "multi_session_handoff",
+            "communication_profile",
         }
         unknown_task = sorted(set(raw_task) - allowed_task)
         if unknown_task:
@@ -9768,6 +10214,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             task.get("user_language") or language_alias,
             objective,
         )
+        task["communication_profile"] = select_communication_profile(task)
         waves = (
             _append_governance_waves(
                 _v3_compact_waves(params["waves"], task, project_root=selected_project_root),
@@ -9924,7 +10371,11 @@ def _v3_active_wave_context(
                 if attempt_id not in active_attempt_ids
             ]
     else:
-        attempt_ids = wave_attempt_ids
+        # Once the final live retry in a gate has stopped without a report,
+        # only that current non-invalidated failed slot remains addressable.
+        # Older invalidated attempt IDs stay in the immutable wave history but
+        # must not inflate the result cardinality for the retry receipt.
+        attempt_ids = [attempt_id for attempt_id in wave_attempt_ids if attempt_id in reportless_failure_ids]
     if not attempt_ids:
         attempt_ids = active_attempt_ids
     return wave, attempt_ids, expected_step
@@ -10537,13 +10988,22 @@ def _v3_prompt_plan_approval(
     prompt, title, approve_label, cancel_label, custom_label = _v3_plan_approval_copy(state, localization)
     request_id = str(approval.get("request_id") or _v3_plan_approval_request_id(state, approval))
     material_concerns = [*(review.get("findings") or []), *(review.get("uncertainty") or [])]
-    recommended_decision = "revise" if material_concerns else "approve"
+    planner_recommendation = str(review.get("recommendation") or "approve").strip().lower()
+    recommended_decision = "revise" if material_concerns or planner_recommendation == "revise" else "approve"
     recommendation_rationale = (
         "Request revision because the current plan still records material findings or uncertainty that should be "
         "resolved before implementation."
         if material_concerns else
-        "Approve because the reviewed plan defines executable work packages and verification without recording "
-        "an unresolved material concern."
+        str(
+            review.get("recommendation_rationale")
+            or (
+                "Request revision because the Planner marked the plan for revision even though no separate finding "
+                "or uncertainty was recorded."
+                if planner_recommendation == "revise" else
+                "Approve because the reviewed plan defines executable work packages and verification without "
+                "recording an unresolved material concern."
+            )
+        )
     )
     interaction = {
         "schema": "cortex/chat-interaction/v1",
@@ -10557,6 +11017,10 @@ def _v3_prompt_plan_approval(
             "work_packages": review.get("work_packages") or [],
             "verification": review.get("verification") or [],
             "risks_and_uncertainty": [*(review.get("findings") or []), *(review.get("uncertainty") or [])],
+            "risks": review.get("risks") or [],
+            "requirement_coverage": review.get("requirement_coverage") or [],
+            "resolved_questions": review.get("resolved_questions") or [],
+            "tracker": review.get("plan_tracker"),
             "remaining_phases": review.get("remaining_phases") or [],
             "report_ref": review.get("report_ref"),
             "report_markdown_link": review.get("report_markdown_link"),
@@ -10589,6 +11053,7 @@ def _v3_prompt_plan_approval(
         "llm_recommendation": {
             "choice_id": recommended_decision,
             "rationale": recommendation_rationale,
+            "planner_recommendation": planner_recommendation,
         },
         "response_instructions": (
             "Reply in your next ordinary chat message with approval, cancellation, or the exact changes you want. "
@@ -10905,6 +11370,16 @@ def _v3_active_steer(
                 "recorded_at": now(),
             }
         task_definition["task_revision"] = revision_number
+        # Keep one canonical latest-intent projection alongside the immutable
+        # revision history.  Workers and scheduling decisions must consult
+        # this projection, so a later correction (for example production ->
+        # local) cannot be shadowed by the original task objective.
+        task_definition["current_user_intent"] = canonical
+        task_definition["current_user_intent_revision"] = revision_number
+        retained_requirements = list(task_definition.get("requirements") or [])
+        if canonical not in retained_requirements:
+            retained_requirements.append(canonical)
+        task_definition["requirements"] = retained_requirements[-100:]
         task_definition.setdefault("active_steers", []).append({
             "task_revision": revision_number,
             "message_original": original,

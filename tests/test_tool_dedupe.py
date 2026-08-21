@@ -136,6 +136,35 @@ class ToolDedupeTests(unittest.TestCase):
         self.assertEqual(ledger_db.tool_context_epoch(self.ledger, "task-a", bump=True), 1)
         self.assertEqual(ledger_db.tool_context_epoch(self.ledger, "task-a"), 1)
 
+    def test_authenticated_compact_starts_bump_past_missing_and_stale_epochs(self):
+        self.assertEqual(ledger_db.tool_context_epoch(self.ledger, "task-a"), 0)
+
+        first = {"hook_event_name": "SessionStart", "source": "compact"}
+        self.assertEqual(
+            cortex_hook.bump_context_epoch_for_recovery(self.ledger, "task-a", first),
+            1,
+        )
+        self.assertEqual(first["context_epoch"], 1)
+
+        # The host may send a default/stale numeric epoch after another
+        # compaction. The durable boundary, not that advisory value, drives
+        # the read dedupe key.
+        second = {
+            "hook_event_name": "SessionStart",
+            "source": "compact",
+            "context_epoch": 0,
+        }
+        self.assertEqual(
+            cortex_hook.bump_context_epoch_for_recovery(self.ledger, "task-a", second),
+            2,
+        )
+        self.assertEqual(second["context_epoch"], 2)
+        self.assertEqual(
+            cortex_hook.context_epoch_for_tool_observation(self.ledger, "task-a", second),
+            2,
+        )
+        self.assertEqual(ledger_db.tool_context_epoch(self.ledger, "task-a"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

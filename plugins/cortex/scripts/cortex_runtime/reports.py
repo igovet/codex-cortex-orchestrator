@@ -12,6 +12,8 @@ import re
 import secrets
 import stat
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -54,6 +56,8 @@ from cortex import (
     authorize,
     authorize_principal,
     canonical_profile,
+    attempt_manifest_baseline,
+    capture_project_manifest,
     digest_text,
     dispatch_briefing_review_marker,
     ledger_root,
@@ -72,6 +76,8 @@ from cortex import (
     safe_id,
     select_project_root,
     state_lock,
+    LedgerBusyError,
+    ReportValidationError,
     store_immutable_artifact,
 )
 from cortex_runtime.projection_service import (
@@ -80,6 +86,7 @@ from cortex_runtime.projection_service import (
     repair as repair_projection_job,
     verify_job as verify_projection_job,
 )
+from cortex_runtime.communication import render as render_user_message
 from cortex_runtime.ledger_db import (
     delete_task_document as db_delete_task_document,
     fail_projection_job,
@@ -99,7 +106,104 @@ _GATE_RESULT_REQUIRED_GATES = {
 _RECORD_REPORT_COORDINATOR_TRANSPORT_FIELDS = {
     "task_ref", "dispatch_ref", "submission_id",
 }
+# The bounded prepare/commit path is the production default.  Operators can
+# disable it without changing the public report/template protocol while
+# diagnosing a rollout regression; already committed artifacts remain valid.
+REPORT_PREPARE_COMMIT_FLAG = "CORTEX_REPORT_PREPARE_COMMIT"
 _PRELOADED_REPORT_DRAFT_MARKER = object()
+_REPORT_METRICS_LOCK = threading.Lock()
+_REPORT_METRICS: dict[str, int] = {
+    "prepare_duration_ms": 0,
+    "commit_duration_ms": 0,
+    "ledger_busy": 0,
+    "stale_preparation": 0,
+    "legacy_fallback": 0,
+}
+
+
+def report_metrics_snapshot() -> dict[str, int]:
+    """Return process-local, content-free report intake counters."""
+    with _REPORT_METRICS_LOCK:
+        return dict(_REPORT_METRICS)
+
+
+def _report_metric(name: str, value: int = 1) -> None:
+    if name not in _REPORT_METRICS:
+        return
+    with _REPORT_METRICS_LOCK:
+        _REPORT_METRICS[name] += max(0, int(value))
+
+
+class StaleReportPreparationError(ValueError):
+    """Prepared report input no longer matches the worker's current draft."""
+
+
+def _report_validation_result(
+    diagnostics: list[dict[str, str]],
+    *,
+    outcome: str | None = None,
+) -> dict[str, Any]:
+    """Build the stable public shape for one or more safe validation issues."""
+    # A report containing an observed unsuccessful executed check is a real
+    # gate failure, not merely malformed input.  Keep the historical
+    # ``failed`` outcome for that case while still returning every structured
+    # diagnostic in one response.  Other caller-correctable shape/evidence
+    # problems remain retryable ``needs_correction`` responses.
+    if outcome is None:
+        diagnostic_codes = {
+            str(item.get("code") or "")
+            for item in diagnostics
+            if isinstance(item, dict)
+        }
+        # Preserve the historical failed-gate outcome only when the report
+        # actually contains an executed non-zero check.  A malformed check
+        # (for example exit_code="0") can also produce the aggregate
+        # worker_verification_failed marker, but remains a caller-correctable
+        # draft and must retain the report_draft_invalid compatibility shape.
+        shape_errors = {
+            code for code in diagnostic_codes
+            if code.startswith("report_test_")
+            and code not in {"report_tests_all_failed", "worker_verification_failed"}
+        }
+        outcome = (
+            "failed"
+            if "worker_verification_failed" in diagnostic_codes and not shape_errors
+            else "needs_correction"
+        )
+    ordered_diagnostics = sorted(
+        [item for item in diagnostics if isinstance(item, dict)],
+        key=lambda item: 0 if str(item.get("code") or "") == "worker_verification_failed" else 1,
+    )
+    # Keep the public error code stable for ordinary caller-correctable
+    # validation while returning every specific issue in diagnostics.  A real
+    # executed verification failure remains specialized so the coordinator
+    # can route rework correctly.
+    primary_code = (
+        "worker_verification_failed"
+        if any(str(item.get("code") or "") == "worker_verification_failed" for item in ordered_diagnostics)
+        else "report_validation_failed"
+    )
+    if primary_code == "worker_verification_failed":
+        next_action = (
+            "Do not omit, disguise, or relabel the failing check. If the defect is inside this worker's allowed "
+            "write scope, correct it and rerun every affected check before retrying record_report; otherwise "
+            "return this exact error and a short blocker to the coordinator so Cortex can authorize rework."
+        )
+    else:
+        next_action = (
+            "Correct every diagnostic in the existing report draft, preserving observed evidence and failed-check "
+            "details, then retry record_report on this same task and attempt."
+        )
+    return {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": False,
+        "outcome": outcome,
+        "code": primary_code,
+        "diagnostics": ordered_diagnostics,
+        "next_action": next_action,
+        "retryable": outcome == "needs_correction",
+        "attempt_budget_consumed": False,
+    }
 
 
 def _record_report_payload_type_failure() -> dict[str, Any]:
@@ -216,6 +320,73 @@ def _planning_preview_resolved_decisions(task_dir: Path, state: dict[str, Any]) 
     return selected
 
 
+def _validate_latest_intent_coverage(
+    task: dict[str, Any], planning: dict[str, Any],
+) -> None:
+    """Require a traceability row when a user changed an active task.
+
+    The immutable original request remains provenance, while the latest steer
+    is the executable intent.  Requiring an exact coverage row for every
+    retained requirement prevents a planner from silently reverting to an
+    obsolete production/local or similar route after compaction or replanning.
+    Initial plans keep the backwards-compatible compact artifact shape; once
+    a task has an active revision, the traceability contract is mandatory.
+    """
+    latest = str(task.get("current_user_intent") or "").strip()
+    revision = int(task.get("current_user_intent_revision") or 1)
+    steers = task.get("active_steers")
+    if revision <= 1 and not isinstance(steers, list):
+        return
+    requirements = list(dict.fromkeys(
+        str(item).strip() for item in [*(task.get("requirements") or []), latest]
+        if str(item).strip()
+    ))
+    if not requirements:
+        return
+    rows = planning.get("requirement_coverage") if isinstance(planning, dict) else None
+    rows = rows if isinstance(rows, list) else []
+    indexed = {
+        " ".join(str(item.get("requirement") or "").casefold().split()): item
+        for item in rows if isinstance(item, dict)
+    }
+    diagnostics: list[dict[str, str]] = []
+    package_ids = {
+        str(package.get("id"))
+        for package in planning.get("work_packages", [])
+        if isinstance(package, dict)
+    }
+    microtask_ids = {
+        str(microtask.get("id"))
+        for package in planning.get("work_packages", [])
+        if isinstance(package, dict)
+        for microtask in package.get("microtasks", [])
+        if isinstance(microtask, dict)
+    }
+    valid_refs = package_ids | microtask_ids
+    for requirement in requirements:
+        key = " ".join(requirement.casefold().split())
+        row = indexed.get(key)
+        if not isinstance(row, dict):
+            diagnostics.append({
+                "code": "planning_requirement_uncovered",
+                "path": "planning.requirement_coverage",
+                "message": "The latest user requirement has no exact traceability row: " + redact(requirement, 500),
+                "fix": "Add one coverage row with this exact requirement, the responsible package or microtask id, and its verification.",
+            })
+            continue
+        refs = [str(item).strip() for item in row.get("plan_refs") or [] if str(item).strip()]
+        missing_refs = sorted(set(refs) - valid_refs)
+        if missing_refs:
+            diagnostics.append({
+                "code": "planning_requirement_bad_reference",
+                "path": "planning.requirement_coverage.plan_refs",
+                "message": "Coverage row references unknown plan items: " + ", ".join(missing_refs),
+                "fix": "Use existing package or microtask ids from planning.work_packages.",
+            })
+    if diagnostics:
+        raise ReportValidationError(diagnostics)
+
+
 def _planning_preview_unit_ref(
     task_dir: Path,
     attempt: dict[str, Any],
@@ -259,8 +430,9 @@ def _validate_planning_dispatch_briefings(
 
     ``record_delegation`` has always defended the host boundary, but doing so
     after explicit human approval can turn a planner's valid-looking plan into
-    a forced replan.  Rendering here uses the production renderer and the
-    production hard budget, while this function performs no allocation,
+    a forced replan. Rendering here uses the production renderer and compacts
+    only target briefing content to the transport budget; immutable report and
+    planning artifacts remain complete. This function performs no allocation,
     artifact, outbox, attempt, or state mutation.
     """
     try:
@@ -753,6 +925,135 @@ def _read_private_report_draft(path: Path) -> str:
         os.close(descriptor)
 
 
+def _report_draft_file_identity(path: Path) -> dict[str, int]:
+    """Capture non-secret file identity facts for prepare/commit CAS."""
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise StaleReportPreparationError("report draft changed during preparation")
+    return {
+        "device": int(info.st_dev),
+        "inode": int(info.st_ino),
+        "size": int(info.st_size),
+        "modified_ns": int(info.st_mtime_ns),
+    }
+
+
+def _report_draft_cas(path: Path, *, expected_envelope: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Capture non-secret file identity and exact content digest for CAS."""
+    text = _read_private_report_draft(path)
+    if expected_envelope is not None:
+        try:
+            observed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise StaleReportPreparationError("report draft changed during preparation") from exc
+        if observed != expected_envelope:
+            raise StaleReportPreparationError("report draft changed during preparation")
+    identity = _report_draft_file_identity(path)
+    return {
+        **identity,
+        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def _prepare_report_validation(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    """Run read-only report validation before the mutation lease.
+
+    Result-gated reports compare the worker baseline with the current project
+    manifest.  That comparison is intentionally outside ``state_lock``: a
+    slow or large repository must not hold the project-wide mutation lease
+    while it is being hashed.  The commit phase rechecks the task revision,
+    draft registration, and draft CAS identity before trusting this prepared
+    receipt.
+    """
+    candidate = {**params, **envelope}
+    report = sanitize_report_payload(candidate.get("report"))
+    if candidate.get("planning") is not None and attempt.get("gate") == "plan":
+        planning_candidate = sanitize_planning_payload(candidate["planning"])
+        _validate_latest_intent_coverage(load_task_definition(task_dir, state), planning_candidate)
+    actor_ids = {str(candidate.get("principal") or "").strip(), str(candidate.get("profile") or "").strip()}
+    actor_ids.update(str(alias).strip() for alias in _attempt_identity_aliases(attempt))
+    actor_ids = {item for item in actor_ids if item}
+    closure = (
+        sanitize_closure_payload(candidate["closure"], actor_ids=actor_ids)
+        if candidate.get("closure") is not None else None
+    )
+    gate_result = (
+        _runtime.sanitize_gate_result_payload(candidate["gate_result"], actor_ids=actor_ids)
+        if candidate.get("gate_result") is not None else None
+    )
+    if gate_result is not None and closure is not None:
+        compatible = {key: gate_result[key] for key in ("decision", "findings", "verification", "workspace")}
+        if compatible != closure:
+            raise ValueError("gate_result and closure must describe the same review/close outcome")
+    if gate_result is None and closure is not None:
+        gate_result = {**closure, "failure_class": "product"}
+    prepared: dict[str, Any] = {
+        "report": report,
+        "gate_result": gate_result,
+        "close_validated": False,
+        "result_validation": None,
+    }
+    if candidate.get("_require_gate_validation"):
+        prepared["result_validation"] = _validate_gate_result_report(
+            task_dir,
+            state,
+            attempt,
+            report,
+            gate_result=gate_result,
+        )
+    if candidate.get("_require_close_validation"):
+        _validate_close_report(task_dir, state, attempt, report)
+        prepared["close_validated"] = True
+    return prepared
+
+
+def _revalidate_prepared_result_manifest(
+    task_dir: Path,
+    attempt: dict[str, Any],
+    prepared_result_validation: dict[str, Any],
+) -> None:
+    """Compare the prepared result receipt with the current project manifest.
+
+    Gate validation is intentionally prepared before the report mutation lease,
+    but the workspace can change while a worker is editing its draft.  A
+    prepared receipt is therefore a CAS input, not proof that the source is
+    still the one that was validated.  Re-capture only the manifest digest
+    under the commit transaction and reject a changed workspace with a
+    retryable stale-preparation result.  The baseline is immutable; checking it
+    here also protects against a corrupted or superseded attempt snapshot.
+    """
+    artifacts = prepared_result_validation.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise StaleReportPreparationError(
+            "report validation is missing its prepared manifest receipt; call get_report_template again on this attempt"
+        )
+    expected_baseline = str(artifacts.get("baseline_digest") or "").strip().lower()
+    expected_current = str(artifacts.get("current_digest") or "").strip().lower()
+    try:
+        baseline = attempt_manifest_baseline(task_dir, attempt)
+        current = capture_project_manifest(
+            Path(str(baseline["project_root"])),
+            policy=baseline.get("policy"),
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        raise StaleReportPreparationError(
+            "project manifest changed or became unavailable during report preparation; retry this same attempt"
+        ) from exc
+    if (
+        str(baseline.get("digest") or "").strip().lower() != expected_baseline
+        or str(current.get("digest") or "").strip().lower() != expected_current
+    ):
+        raise StaleReportPreparationError(
+            "project manifest changed during report preparation; call get_report_template again on this attempt"
+        )
+
+
 def _write_system_report_draft_file(draft_path: Path, envelope: dict[str, Any], *, create: bool) -> None:
     """Safely create or replace one server-owned private draft file.
 
@@ -1157,10 +1458,10 @@ def _preload_report_draft(params: dict[str, Any]) -> dict[str, Any] | None:
     draft registration still exists in the final mutation transaction.
     """
     draft_ref = str(params.get("_draft_ref") or "").strip()
-    if not draft_ref:
-        return None
     root = ledger_root(params)
-    with state_lock(root):
+    with state_lock(
+        root, timeout_seconds=5.0, operation="report_preparation", task_id=str(params.get("task_id") or "")
+    ):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         resolved = _resolve_record_report_attempt(state, params)
         if resolved.get("recorded") is False:
@@ -1172,6 +1473,22 @@ def _preload_report_draft(params: dict[str, Any]) -> dict[str, Any] | None:
             "profile": str(attempt.get("profile") or ""),
             "project_root": str(select_project_root(params)),
         }
+    if not draft_ref:
+        # Direct compatibility callers may still provide the complete report
+        # envelope instead of a worker-owned draft.  Prepare that in-memory
+        # payload outside the mutation lease as well; the commit path treats
+        # the task revision as its CAS boundary.
+        prepared = _prepare_report_validation(params, task_dir, state, attempt, {
+            key: params[key]
+            for key in ("report", "scoping", "planning", "gate_result", "closure")
+            if key in params
+        })
+        return {
+            "_marker": _PRELOADED_REPORT_DRAFT_MARKER,
+            "context": context,
+            "base_revision": int(state.get("revision") or 0),
+            "prepared": prepared,
+        }
     envelope, metadata, document_key, draft_path = _load_report_draft_file(
         root,
         task_dir,
@@ -1181,19 +1498,26 @@ def _preload_report_draft(params: dict[str, Any]) -> dict[str, Any] | None:
         profile=context["profile"],
         draft_ref=draft_ref,
     )
+    draft_identity = _report_draft_cas(draft_path, expected_envelope=envelope)
+    prepared = _prepare_report_validation(params, task_dir, state, attempt, envelope)
     return {
         "_marker": _PRELOADED_REPORT_DRAFT_MARKER,
         "context": context,
+        "base_revision": int(state.get("revision") or 0),
         "envelope": envelope,
         "metadata": metadata,
         "document_key": document_key,
         "draft_path": str(draft_path),
+        "draft_identity": draft_identity,
+        "prepared": prepared,
     }
 
 
 def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
-    with state_lock(root):
+    with state_lock(
+        root, timeout_seconds=5.0, operation="record_report_commit", task_id=str(params.get("task_id") or "")
+    ):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         resolved = _resolve_record_report_attempt(state, params)
         if resolved.get("recorded") is False:
@@ -1206,9 +1530,11 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("cannot publish a report for an invalidated or terminal attempt")
         draft_document_key = None
         draft_path = None
+        prepared_result_validation = None
+        prepared_close_validated = False
+        preloaded = params.get("_preloaded_report_draft")
         supplied_draft_ref = str(params.get("_draft_ref") or "").strip()
         if supplied_draft_ref:
-            preloaded = params.get("_preloaded_report_draft")
             expected_context = {
                 "task_id": state["task_id"],
                 "attempt_id": attempt_id,
@@ -1223,6 +1549,8 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 and isinstance(preloaded.get("metadata"), dict)
                 and isinstance(preloaded.get("document_key"), str)
                 and isinstance(preloaded.get("draft_path"), str)
+                and isinstance(preloaded.get("draft_identity"), dict)
+                and isinstance(preloaded.get("base_revision"), int)
             ):
                 # The draft bytes were read before this transaction.  Its
                 # database registration must still be exact before a report
@@ -1230,10 +1558,30 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 # therefore fails closed rather than publishing stale input.
                 draft_document_key = preloaded["document_key"]
                 persisted_metadata = db_get_task_document(root, state["task_id"], draft_document_key)
+                if int(state.get("revision") or 0) != preloaded["base_revision"]:
+                    raise StaleReportPreparationError(
+                        "task changed during report preparation; call get_report_template again on this attempt"
+                    )
                 if persisted_metadata != preloaded["metadata"]:
-                    raise ValueError(
+                    raise StaleReportPreparationError(
                         "report draft is unavailable or superseded; call get_report_template again on this attempt"
                     )
+                try:
+                    current_identity = _report_draft_cas(Path(preloaded["draft_path"]))
+                except (OSError, ValueError) as exc:
+                    raise StaleReportPreparationError(
+                        "report draft changed during preparation; call get_report_template again on this attempt"
+                    ) from exc
+                if current_identity != preloaded["draft_identity"]:
+                    raise StaleReportPreparationError(
+                        "report draft changed during preparation; call get_report_template again on this attempt"
+                    )
+                prepared = preloaded.get("prepared")
+                if isinstance(prepared, dict):
+                    candidate_validation = prepared.get("result_validation")
+                    if isinstance(candidate_validation, dict):
+                        prepared_result_validation = candidate_validation
+                    prepared_close_validated = bool(prepared.get("close_validated"))
                 draft_envelope = preloaded["envelope"]
                 draft_path = Path(preloaded["draft_path"])
             else:
@@ -1247,6 +1595,27 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                     draft_ref=supplied_draft_ref,
                 )
             params = {**params, **draft_envelope}
+        elif isinstance(preloaded, dict) and preloaded.get("_marker") is _PRELOADED_REPORT_DRAFT_MARKER:
+            expected_context = {
+                "task_id": state["task_id"],
+                "attempt_id": attempt_id,
+                "profile": str(attempt.get("profile") or ""),
+                "project_root": str(select_project_root(params)),
+            }
+            if preloaded.get("context") != expected_context or not isinstance(preloaded.get("base_revision"), int):
+                raise StaleReportPreparationError(
+                    "report preparation identity changed; retry this same report against the current task"
+                )
+            if int(state.get("revision") or 0) != preloaded["base_revision"]:
+                raise StaleReportPreparationError(
+                    "task changed during report preparation; retry this same report against the current task"
+                )
+            prepared = preloaded.get("prepared")
+            if isinstance(prepared, dict):
+                candidate_validation = prepared.get("result_validation")
+                if isinstance(candidate_validation, dict):
+                    prepared_result_validation = candidate_validation
+                prepared_close_validated = bool(prepared.get("close_validated"))
         open_questions = _open_blocking_questions(task_dir, state, attempt_id)
         if open_questions:
             refs = ", ".join(str(item["question_id"]) for item in open_questions)
@@ -1272,15 +1641,31 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("gate_result and closure must describe the same review/close outcome")
         result_validation = None
         if params.get("_require_gate_validation"):
-            result_validation = _validate_gate_result_report(
-                task_dir,
-                state,
-                attempt,
-                report,
-                gate_result=gate_result,
-            )
+            if prepared_result_validation is not None:
+                if (
+                    prepared_result_validation.get("attempt_id") != attempt_id
+                    or prepared_result_validation.get("gate") != attempt.get("gate")
+                ):
+                    raise StaleReportPreparationError(
+                        "report validation became stale during preparation; call get_report_template again on this attempt"
+                    )
+                _revalidate_prepared_result_manifest(
+                    task_dir,
+                    attempt,
+                    prepared_result_validation,
+                )
+                result_validation = prepared_result_validation
+            else:
+                result_validation = _validate_gate_result_report(
+                    task_dir,
+                    state,
+                    attempt,
+                    report,
+                    gate_result=gate_result,
+                )
         if params.get("_require_close_validation"):
-            _validate_close_report(task_dir, state, attempt, report)
+            if not prepared_close_validated:
+                _validate_close_report(task_dir, state, attempt, report)
         if is_closure_gate and gate_result is None and closure is None:
             if attempt.get("gate") in {"review", "close"}:
                 raise ValueError(
@@ -1313,6 +1698,7 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             )
         if raw_planning is not None:
             planning = sanitize_planning_payload(raw_planning, persisted=bool(supplied_draft_ref))
+            _validate_latest_intent_coverage(load_task_definition(task_dir, state), planning)
             _validate_planning_dispatch_briefings(
                 task_dir,
                 state,
@@ -1514,6 +1900,20 @@ def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
             **({"closure": closure} if closure is not None else {}),
             "content_digest": content_digest, "created_at": now(),
         }
+        # The earlier manifest check protects the expensive preparation and
+        # semantic validation phase, but it is not the commit boundary: the
+        # worker can change the checkout again while the report record is
+        # being assembled.  Re-capture the source manifest immediately before
+        # the first immutable report mutation.  A mismatch is deliberately
+        # raised before the report artifact, receipt, findings, or index can
+        # be written, so the draft remains retryable and this attempt keeps
+        # its budget.
+        if result_validation is not None:
+            _revalidate_prepared_result_manifest(
+                task_dir,
+                attempt,
+                result_validation,
+            )
         report_artifact = store_immutable_artifact(
             task_dir,
             state["task_id"],
@@ -1671,14 +2071,16 @@ def _restore_report_projections(result: dict[str, Any], params: dict[str, Any]) 
         document_key = str(cleanup["document_key"])
         draft_path = Path(str(cleanup["draft_path"]))
         _contained_path(root / "tasks", draft_path, "report draft cleanup")
-        with state_lock(root):
+        with state_lock(
+            root, timeout_seconds=5.0, operation="report_preparation", task_id=task_id
+        ):
             _delete_report_draft(
                 root,
                 task_id=task_id,
                 document_key=document_key,
                 draft_path=draft_path,
             )
-    except (KeyError, OSError, ValueError):
+    except (KeyError, OSError, ValueError, LedgerBusyError):
         # The report is already committed. A later get_report_template call
         # supersedes stale draft metadata and retries file cleanup without
         # turning successful report persistence into a worker failure.
@@ -1687,15 +2089,30 @@ def _restore_report_projections(result: dict[str, Any], params: dict[str, Any]) 
 
 def _record_report(params: dict[str, Any]) -> dict[str, Any]:
     """Preload worker-owned draft bytes before entering the atomic mutation."""
+    rollout = str(os.environ.get(REPORT_PREPARE_COMMIT_FLAG, "on")).strip().lower()
+    if rollout in {"0", "false", "off", "disabled", "legacy"}:
+        _report_metric("legacy_fallback")
+        started = time.monotonic()
+        try:
+            return _record_report_locked({key: value for key, value in params.items() if key != "_preloaded_report_draft"})
+        finally:
+            _report_metric("commit_duration_ms", int((time.monotonic() - started) * 1000))
+    prepare_started = time.monotonic()
     preloaded = params.get("_preloaded_report_draft")
     if not (
         isinstance(preloaded, dict)
         and preloaded.get("_marker") is _PRELOADED_REPORT_DRAFT_MARKER
+        and isinstance(preloaded.get("prepared"), dict)
     ):
         preloaded = _preload_report_draft(params)
+    _report_metric("prepare_duration_ms", int((time.monotonic() - prepare_started) * 1000))
     if preloaded is not None:
         params = {**params, "_preloaded_report_draft": preloaded}
-    return _record_report_locked(params)
+    commit_started = time.monotonic()
+    try:
+        return _record_report_locked(params)
+    finally:
+        _report_metric("commit_duration_ms", int((time.monotonic() - commit_started) * 1000))
 
 
 # The public callable is now a vertical-slice facade.  Its adapters retain the
@@ -1761,11 +2178,80 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "_require_gate_validation": True,
             "_require_close_validation": True,
         })
+    except StaleReportPreparationError as exc:
+        _report_metric("stale_preparation")
+        result = {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "stale_preparation",
+            "code": "stale_preparation",
+            "diagnostics": [{
+                "code": "stale_preparation",
+                "message": redact(str(exc), 1000),
+            }],
+            "retry_after_ms": 0,
+            "retryable": True,
+            "attempt_budget_consumed": False,
+            "next_action": "Keep the current draft intact, call get_report_template again for a fresh draft_ref, then retry this same attempt.",
+        }
+        draft_ref = str(params.get("_draft_ref") or params.get("draft_ref") or "").strip()
+        preloaded = params.get("_preloaded_report_draft")
+        if draft_ref:
+            result["draft_ref"] = draft_ref
+        if isinstance(preloaded, dict) and isinstance(preloaded.get("draft_path"), str):
+            result["draft_path"] = preloaded["draft_path"]
+        return result
+    except LedgerBusyError as exc:
+        _report_metric("ledger_busy")
+        result = {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "ledger_busy",
+            "code": "ledger_busy",
+            "diagnostics": [{
+                "code": "ledger_busy",
+                "message": "Cortex report commit lease is busy; retry this exact report without deleting the draft.",
+                "operation": redact(exc.operation, 64),
+                "held_duration_ms": int(exc.held_duration_ms),
+                **({"holder": exc.holder} if isinstance(exc.holder, dict) else {}),
+            }],
+            "retry_after_ms": 250,
+            "retryable": True,
+            "attempt_budget_consumed": False,
+            "next_action": "Retry record_report on this same task and attempt after retry_after_ms; keep the draft intact.",
+        }
+        draft_ref = str(params.get("_draft_ref") or params.get("draft_ref") or "").strip()
+        preloaded = params.get("_preloaded_report_draft")
+        if draft_ref:
+            result["draft_ref"] = draft_ref
+        if isinstance(preloaded, dict) and isinstance(preloaded.get("draft_path"), str):
+            result["draft_path"] = preloaded["draft_path"]
+        return result
+    except ReportValidationError as exc:
+        result = _report_validation_result(exc.diagnostics)
+        draft_ref = str(params.get("_draft_ref") or params.get("draft_ref") or "").strip()
+        preloaded = params.get("_preloaded_report_draft")
+        if draft_ref:
+            result["draft_ref"] = draft_ref
+        if isinstance(preloaded, dict) and isinstance(preloaded.get("draft_path"), str):
+            result["draft_path"] = preloaded["draft_path"]
+            result["draft_persisted"] = True
+        return result
     except (TypeError, AttributeError):
         # Do not let a missed type assertion in a deep validator turn a
         # caller-controlled JSON shape into an MCP transport failure.
         return _record_report_payload_type_failure()
     except ValueError as exc:
+        if isinstance(exc, ReportValidationError):
+            result = _report_validation_result(exc.diagnostics)
+            draft_ref = str(params.get("_draft_ref") or params.get("draft_ref") or "").strip()
+            preloaded = params.get("_preloaded_report_draft")
+            if draft_ref:
+                result["draft_ref"] = draft_ref
+            if isinstance(preloaded, dict) and isinstance(preloaded.get("draft_path"), str):
+                result["draft_path"] = preloaded["draft_path"]
+                result["draft_persisted"] = True
+            return result
         message = str(exc)
         if "blocking worker question(s) remain unanswered" in message:
             code = "blocking_question_open"
@@ -2151,7 +2637,7 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
         # task reports wait behind this read/parse/update preflight.  The
         # authoritative record path rechecks this exact registration under
         # its own transaction before it consumes the draft.
-        with state_lock(root):
+        with state_lock(root, timeout_seconds=5.0, operation="report_preparation"):
             task_dir, state, attempt, profile = _public_worker_template_context(identity)
             draft_context = {
                 "task_id": state["task_id"],
@@ -2192,6 +2678,7 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
         diagnostics.extend(_draft_placeholder_diagnostics(envelope))
         if diagnostics:
             return None, _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
+        draft_identity = _report_draft_cas(draft_path, expected_envelope=envelope)
         return {
             **identity,
             "draft_ref": draft_ref,
@@ -2203,10 +2690,12 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
                     "profile": draft_context["profile"],
                     "project_root": project_root,
                 },
+                "base_revision": int(state.get("revision") or 0),
                 "envelope": envelope,
                 "metadata": metadata,
                 "document_key": document_key,
                 "draft_path": str(draft_path),
+                "draft_identity": draft_identity,
             },
         }, None
     except (TypeError, AttributeError):
@@ -2219,6 +2708,30 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
             ),
             "fix": "Correct the malformed field in this existing draft and retry with the same draft_ref.",
         }], draft_ref=draft_ref or None, draft_path=draft_path)
+    except LedgerBusyError as exc:
+        _report_metric("ledger_busy")
+        result = {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "ledger_busy",
+            "code": "ledger_busy",
+            "diagnostics": [{
+                "code": "ledger_busy",
+                "message": "Cortex report preparation lease is busy; keep the draft intact and retry.",
+                "operation": redact(exc.operation, 64),
+                "held_duration_ms": int(exc.held_duration_ms),
+                **({"holder": exc.holder} if isinstance(exc.holder, dict) else {}),
+            }],
+            "retry_after_ms": 250,
+            "retryable": True,
+            "attempt_budget_consumed": False,
+            "next_action": "Retry this exact draft_ref after retry_after_ms; do not delete or replace the draft.",
+        }
+        if draft_ref:
+            result["draft_ref"] = draft_ref
+        if draft_path is not None:
+            result["draft_path"] = str(draft_path)
+        return None, result
     except ValueError as exc:
         message = redact(str(exc), 1000)
         return None, _draft_invalid_result([{
@@ -2344,6 +2857,11 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
         if gate == "plan" and profile == "planner":
             template["planning"] = {
                 "overview": "<replace with implementation plan overview>",
+                "recommendation": "approve",
+                "recommendation_rationale": "<replace with why this plan is ready or what remains>",
+                "requirement_coverage": [],
+                "resolved_questions": [],
+                "risks": [],
                 "work_packages": [{
                     "id": "<replace with stable_package_id>",
                     "title": "<replace with package title>",
@@ -2378,7 +2896,7 @@ def get_report_template(params: dict[str, Any]) -> dict[str, Any]:
             required_top_level.append("gate_result")
         project_root = str(select_project_root(params))
         root = ledger_root(params)
-        with state_lock(root):
+        with state_lock(root, operation="report_publication", task_id=str(state["task_id"])):
             locked_task_dir, locked_state, locked_attempt, locked_profile = _public_worker_template_context(params)
             if (
                 locked_task_dir != task_dir
@@ -2723,14 +3241,25 @@ def _report_completion_update(
         if remaining else
         "Evaluate this completed result, then ask Cortex to finalize the pipeline; no later phase remains pending."
     )
+    summary = redact(str(report.get("summary") or "Worker completed the delegated phase."), 500)
     return {
         "schema": "cortex/report-completion-update/v1",
         "report_ref": report_ref,
         "phase": phase,
         "worker": redact(str((record.get("producer") or {}).get("profile") or "worker"), 100),
-        "summary": redact(str(report.get("summary") or "Worker completed the delegated phase."), 500),
+        "summary": summary,
         "remaining_phases": remaining,
         "next": next_step,
+        # Presentation-boundary projection. Keep the structured fields above
+        # unchanged for coordinators and workers; only this field is intended
+        # for direct user-language rendering.
+        "user_message": render_user_message(
+            summary,
+            kind="completed",
+            next_step=next_step,
+            config={"communication_profile": state.get("communication_profile")},
+            metadata={"phase": phase, "remaining_phases": remaining},
+        ),
     }
 
 

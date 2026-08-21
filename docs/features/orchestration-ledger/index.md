@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The local MCP server implements the Cortex 9.2.18 `cortex/v8` task ledger plus
+The local MCP server implements the Cortex 9.2.19 `cortex/v8` task ledger plus
 the additive v12 governance ledger and public `cortex/orchestration/v5`
 lifecycle, staged waves, worker questions/reports, maintenance, governance,
 and optional execution lanes through a nine-operation v5 registry. Each
@@ -41,6 +41,22 @@ the requested and active gates, preserving the caller's transition authority.
 Open P0/P1 findings are intrinsic rework blockers. Open P2 findings are
 advisory unless their server-validated finding explicitly sets
 `blocking=true`; every explicitly blocking open finding remains a blocker.
+
+Worker report intake prepares and validates the private draft outside the
+mutation lease, then enters the final serialized commit. Lock acquisition is
+bounded to five seconds, so no ordinary operation waits indefinitely to acquire
+the lease; once acquired, canonical artifact, finding, and index writes remain
+serialized until they finish. Every other ledger mutation path uses the same
+bounded lock-acquisition default. A busy response exposes only the operation,
+duration, and non-secret holder metadata (never the private owner token). The
+commit rechecks the task revision, SQLite draft registration, regular-file
+identity, and content SHA-256 before writing canonical artifacts and projection
+jobs.
+Contention is retryable `ledger_busy`; stale input is retryable
+`stale_preparation` and never deletes the draft. Set
+`CORTEX_REPORT_PREPARE_COMMIT=off` to roll back to the serialized legacy path.
+SQLite remains authoritative; filesystem Markdown and JSON are outbox-
+materialized projections.
 
 ## Key files and dependencies
 
@@ -635,6 +651,16 @@ acknowledgement, `manage_orchestration` inspect returns the compact entry in
 `available_reports` for recovery. It includes a Desktop path only when that
 optional projection already exists; use the exact report ref with
 `read_worker_report` when a publication-eligible link is required.
+
+User-facing completion projections additionally expose `completion_update.user_message`.
+Its profile is selected from `task.communication_profile` (or
+`CORTEX_COMMUNICATION_PROFILE`) with `natural` as the fallback; `compact` and
+`technical` are supported alternatives. The projection uses human-readable
+message types, keeps transport metadata in a separate `metadata` object, and
+records quality checks for plain language, internal-metadata leakage,
+repetition, an explicit next step, and profile fit. The structured completion
+fields remain the coordinator contract and are not replaced by this
+presentation projection.
 
 Review, governance activation, governance close, and final close reports
 require a separate canonical top-level `gate_result` envelope with `decision`,
