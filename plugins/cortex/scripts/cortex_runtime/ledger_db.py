@@ -44,6 +44,24 @@ _MIGRATION_GUARD = threading.Lock()
 _MIGRATION_LOCKS: dict[str, threading.RLock] = {}
 _DATABASE_READINESS_GUARD = threading.RLock()
 _DATABASE_READINESS_CACHE_LIMIT = 128
+_HOOK_METRICS_GUARD = threading.Lock()
+_HOOK_METRICS: dict[str, int] = {
+    "hook_snapshot_miss": 0,
+    "telemetry_failure": 0,
+}
+
+
+def hook_metrics_snapshot() -> dict[str, int]:
+    """Return content-free process-local hook counters."""
+    with _HOOK_METRICS_GUARD:
+        return dict(_HOOK_METRICS)
+
+
+def _hook_metric(name: str) -> None:
+    if name not in _HOOK_METRICS:
+        return
+    with _HOOK_METRICS_GUARD:
+        _HOOK_METRICS[name] += 1
 
 
 @dataclass(frozen=True)
@@ -409,6 +427,229 @@ def _connection(root: Path, *, write: bool = False) -> Iterator[sqlite3.Connecti
             connection.commit()
     finally:
         connection.close()
+
+
+@contextlib.contextmanager
+def hook_snapshot(root: Path, *, timeout_ms: int = 100) -> Iterator[sqlite3.Connection | None]:
+    """Open one bounded, read-only snapshot for a short-lived lifecycle hook.
+
+    Hooks are observational and must never bootstrap a ledger, validate or
+    apply migrations, acquire the filesystem state lock, or wait behind a
+    report commit.  The database must already exist and advertise the current
+    schema; any missing, busy, unreadable, or incompatible database is a
+    fail-open ``None`` snapshot.  Callers may perform all of their reads while
+    this single deferred transaction is open, then the connection is closed.
+    """
+    try:
+        timeout = max(0, min(int(timeout_ms), 100))
+    except (TypeError, ValueError):
+        timeout = 100
+    path = database_path(root)
+    connection: sqlite3.Connection | None = None
+    try:
+        identity = _database_file_identity(root)
+        if identity is None:
+            _hook_metric("hook_snapshot_miss")
+            yield None
+            return
+        uri = f"{path.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=timeout / 1000.0, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute(f"PRAGMA busy_timeout = {timeout}")
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version != DATABASE_SCHEMA_VERSION:
+            _hook_metric("hook_snapshot_miss")
+            connection.close()
+            connection = None
+            yield None
+            return
+        # A single read transaction gives a consistent view across task,
+        # activation, and deduplication queries without any write lock.
+        connection.execute("BEGIN")
+    except (OSError, sqlite3.Error, ValueError):
+        _hook_metric("hook_snapshot_miss")
+        if connection is not None:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+        yield None
+        return
+    try:
+        yield connection
+    finally:
+        if connection is not None:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            connection.close()
+
+
+def hook_snapshot_global(connection: sqlite3.Connection, name: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read one global value from an already-open :func:`hook_snapshot`."""
+    row = connection.execute("SELECT payload_json FROM global_documents WHERE name = ?", (name,)).fetchone()
+    if row is None:
+        return dict(default or {})
+    return _decode_json(str(row["payload_json"]), f"global document {name}")
+
+
+def hook_snapshot_operation_registry(
+    connection: sqlite3.Connection,
+    default: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Read the durable operation registry from an existing hook snapshot."""
+    return hook_snapshot_global(connection, "operation_registry", default)
+
+
+def hook_snapshot_task_ref(connection: sqlite3.Connection, task_id: str) -> str | None:
+    """Read a task's opaque public reference without opening another snapshot."""
+    registry = hook_snapshot_operation_registry(connection)
+    tasks = registry.get("tasks")
+    record = tasks.get(task_id) if isinstance(tasks, dict) else None
+    start = record.get("start") if isinstance(record, dict) else None
+    value = start.get("task_ref") if isinstance(start, dict) else None
+    return str(value) if value is not None and str(value) else None
+
+
+def hook_snapshot_task_index(connection: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    rows = connection.execute("SELECT task_id, task_number, artifact_dir FROM tasks ORDER BY task_number").fetchall()
+    return {
+        str(row["task_id"]): {
+            "number": int(row["task_number"]),
+            "directory": Path(str(row["artifact_dir"])).name,
+            "artifact_dir": str(row["artifact_dir"]),
+        }
+        for row in rows
+    }
+
+
+def hook_snapshot_load_task(connection: sqlite3.Connection, task_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str] | None:
+    row = connection.execute(
+        "SELECT definition_json, state_json, plan_json, artifact_dir FROM tasks WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return (
+        _decode_json(str(row["definition_json"]), "task definition"),
+        _decode_json(str(row["state_json"]), "task state"),
+        _decode_json(str(row["plan_json"]), "orchestration plan") if row["plan_json"] is not None else None,
+        str(row["artifact_dir"]),
+    )
+
+
+def hook_snapshot_task_context(
+    connection: sqlite3.Connection,
+    task_id: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str] | None:
+    """Read one task's definition, state, plan, and registered artifact path."""
+    return hook_snapshot_load_task(connection, task_id)
+
+
+def hook_snapshot_artifact_directory(connection: sqlite3.Connection, task_id: str) -> str | None:
+    """Read the registered (relative) artifact directory for one task."""
+    row = connection.execute("SELECT artifact_dir FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    return None if row is None else str(row["artifact_dir"])
+
+
+def hook_snapshot_pending_subagent(
+    connection: sqlite3.Connection,
+    agent_type: str,
+    model: str = "",
+) -> list[str]:
+    """Return task ids with exactly matching, still-pending host dispatches.
+
+    This intentionally returns all matches; ambiguity is resolved by the hook
+    caller.  Keeping the query on the supplied connection means the task scan
+    and every state read share the same bounded snapshot.
+    """
+    matches: list[str] = []
+    for row in connection.execute("SELECT task_id, state_json FROM tasks ORDER BY task_number").fetchall():
+        try:
+            state = _decode_json(str(row["state_json"]), "task state")
+        except ValueError:
+            continue
+        if state.get("status") not in {"active", "blocked"}:
+            continue
+        pending = [
+            attempt for attempt in state.get("attempts", [])
+            if isinstance(attempt, dict)
+            and not attempt.get("invalidated")
+            and attempt.get("status") == "awaiting_host_spawn"
+        ]
+        if agent_type == "default":
+            candidates = [
+                attempt for attempt in pending
+                if model and str(attempt.get("expected_model") or attempt.get("selected_model") or "") == model
+            ]
+        else:
+            candidates = [
+                attempt for attempt in pending
+                if str((attempt.get("spawn_request") or {}).get("task_name") or "") == agent_type
+            ]
+        if len(candidates) == 1:
+            matches.append(str(row["task_id"]))
+    return matches
+
+
+def hook_snapshot_pending_subagent_task(
+    connection: sqlite3.Connection,
+    agent_type: str,
+    model: str = "",
+) -> list[str]:
+    """Compatibility spelling for the pending-subagent snapshot reader."""
+    return hook_snapshot_pending_subagent(connection, agent_type, model)
+
+
+def hook_snapshot_find_successful_tool_observation(
+    connection: sqlite3.Connection,
+    task_id: str,
+    attempt_id: str,
+    context_epoch: int,
+    fingerprint: str,
+    workspace_generation: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM tool_observations WHERE task_id=? AND attempt_id=? AND context_epoch=? "
+        "AND fingerprint=? AND workspace_generation=? AND coverage='full' AND status='success'",
+        (task_id, attempt_id, context_epoch, fingerprint, workspace_generation),
+    ).fetchone()
+    return row is not None
+
+
+def hook_snapshot_tool_context_epoch(connection: sqlite3.Connection, task_id: str) -> int:
+    """Read the latest durable tool-context epoch from a hook snapshot."""
+    rows = connection.execute(
+        "SELECT metadata_json FROM orchestration_trace WHERE task_id=? AND event='tool_context_epoch' ORDER BY trace_id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            value = json.loads(str(row["metadata_json"])).get("epoch")
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            continue
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return 0
+
+
+def hook_tool_context_epoch(root: Path, task_id: str, *, bump: bool = False) -> int:
+    """Read or roll a hook context epoch without migration/state-lock work."""
+    try:
+        if not bump:
+            with hook_snapshot(root) as snapshot:
+                return int(snapshot and hook_snapshot_tool_context_epoch(snapshot, task_id) or 0)
+        with _hook_write_connection(root) as connection:
+            epoch = hook_snapshot_tool_context_epoch(connection, task_id) + 1
+            connection.execute(
+                "INSERT INTO orchestration_trace(task_id,attempt_id,event,occurred_at,metadata_json) VALUES(?,?,?,?,?)",
+                (task_id, None, "tool_context_epoch", _now(), _canonical_json({"epoch": epoch})),
+            )
+            return epoch
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure" if bump else "hook_snapshot_miss")
+        return 0
 
 
 @contextlib.contextmanager
@@ -2838,6 +3079,25 @@ def find_successful_tool_observation(
     return row is not None
 
 
+def hook_find_successful_tool_observation(
+    root: Path,
+    task_id: str,
+    attempt_id: str,
+    context_epoch: int,
+    fingerprint: str,
+    workspace_generation: str,
+) -> bool:
+    """Fail-open read-only dedupe lookup for lifecycle hooks."""
+    try:
+        with hook_snapshot(root) as snapshot:
+            return bool(snapshot and hook_snapshot_find_successful_tool_observation(
+                snapshot, task_id, attempt_id, context_epoch, fingerprint, workspace_generation,
+            ))
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("hook_snapshot_miss")
+        return False
+
+
 def mark_tool_observation_duplicate(
     root: Path, task_id: str, attempt_id: str, context_epoch: int, fingerprint: str,
 ) -> bool:
@@ -2850,6 +3110,23 @@ def mark_tool_observation_duplicate(
             (_now(), task_id, attempt_id, context_epoch, fingerprint),
         )
     return cursor.rowcount == 1
+
+
+def hook_mark_tool_observation_duplicate(
+    root: Path, task_id: str, attempt_id: str, context_epoch: int, fingerprint: str,
+) -> bool:
+    """Bound the optional hook telemetry write and fail open on contention."""
+    try:
+        with _hook_write_connection(root) as connection:
+            cursor = connection.execute(
+                "UPDATE tool_observations SET repeat_count=repeat_count+1,last_seen_at=? WHERE task_id=? AND attempt_id=? "
+                "AND context_epoch=? AND fingerprint=? AND coverage='full' AND status='success'",
+                (_now(), task_id, attempt_id, context_epoch, fingerprint),
+            )
+            return cursor.rowcount == 1
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        _hook_metric("telemetry_failure")
+        return False
 
 
 def record_tool_observation(
@@ -2899,3 +3176,82 @@ def record_tool_observation(
             (observation_id, task_id, attempt_id, context_epoch, fingerprint, tool_name, normalized_arguments,
              workspace_generation, result_digest, coverage, status, now, now),
         )
+
+
+@contextlib.contextmanager
+def _hook_write_connection(root: Path) -> Iterator[sqlite3.Connection]:
+    """Open an existing ledger for at-most-100ms optional telemetry writes."""
+    identity = _database_file_identity(root)
+    if identity is None:
+        raise FileNotFoundError("Cortex database is unavailable")
+    path = database_path(root)
+    connection = sqlite3.connect(str(path), timeout=0.1, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 100")
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if version != DATABASE_SCHEMA_VERSION:
+            raise ValueError("Cortex database schema is incompatible")
+        connection.execute("BEGIN IMMEDIATE")
+        yield connection
+    except BaseException:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    else:
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def hook_record_tool_observation(
+    root: Path,
+    *,
+    task_id: str,
+    attempt_id: str,
+    context_epoch: int,
+    fingerprint: str,
+    tool_name: str,
+    normalized_arguments: str,
+    workspace_generation: str,
+    result_digest: str | None,
+    coverage: str,
+    status: str,
+) -> bool:
+    """Persist one sanitized observation without migration/state-lock work."""
+    try:
+        if not task_id or not attempt_id or context_epoch < 0:
+            raise ValueError("tool observation identity is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("tool observation fingerprint is invalid")
+        if len(normalized_arguments.encode("utf-8")) > 2048:
+            raise ValueError("tool observation arguments are too large")
+        parsed_arguments = json.loads(normalized_arguments)
+        if not isinstance(parsed_arguments, dict):
+            raise ValueError("tool observation arguments are invalid")
+        if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
+            raise ValueError("tool observation status is invalid")
+        if result_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", result_digest):
+            raise ValueError("tool observation result digest is invalid")
+        observation_id = "tool-" + hashlib.sha256(
+            f"{task_id}\0{attempt_id}\0{context_epoch}\0{fingerprint}".encode("utf-8")
+        ).hexdigest()[:48]
+        stamp = _now()
+        with _hook_write_connection(root) as connection:
+            connection.execute(
+                "INSERT INTO tool_observations(observation_id,task_id,attempt_id,context_epoch,fingerprint,tool_name,normalized_arguments,"
+                "workspace_generation,result_digest,coverage,status,first_seen_at,last_seen_at,repeat_count) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0) "
+                "ON CONFLICT(task_id,attempt_id,context_epoch,fingerprint) DO UPDATE SET "
+                "tool_name=excluded.tool_name,normalized_arguments=excluded.normalized_arguments,workspace_generation=excluded.workspace_generation,"
+                "result_digest=excluded.result_digest,coverage=excluded.coverage,status=excluded.status,last_seen_at=excluded.last_seen_at",
+                (observation_id, task_id, attempt_id, context_epoch, fingerprint, tool_name, normalized_arguments,
+                 workspace_generation, result_digest, coverage, status, stamp, stamp),
+            )
+        return True
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        _hook_metric("telemetry_failure")
+        return False

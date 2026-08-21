@@ -396,6 +396,11 @@ with optional `depends_on`.
 Cortex requires microtask IDs to be globally unique across the plan, allows
 `depends_on` to reference microtasks in another work package, rejects unknown
 references, and validates the combined microtask dependency graph as acyclic.
+Each package and microtask also carries explicit tracker fields: `status`
+(`pending`, `ready`, `running`, `blocked`, `completed`, or `skipped`), positive
+`order`, and non-empty `gates`. Omitted values default to `pending`, source
+order, and `implementation`; the compiled plan preserves these fields as the
+canonical worker-visible tracker snapshot.
 It enforces 32 packages, 32 microtasks per package, and 128 total microtasks.
 The Planner remains read-only; Cortex materializes immutable, revision-scoped
 host-private `tasks/<task>/planning/revisions/plan-<report-ref>/overview.md`

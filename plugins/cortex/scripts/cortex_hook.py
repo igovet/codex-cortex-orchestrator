@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import re
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -40,24 +41,28 @@ try:
     # the stdio server so an installed hook can still make the conservative
     # decision to emit no context if the runtime is unavailable.
     from cortex_runtime.ledger_db import (
-        artifact_path as db_task_artifact_path,
-        get_global as db_get_global,
-        load_task as db_load_task,
-        find_successful_tool_observation as db_find_successful_tool_observation,
-        mark_tool_observation_duplicate as db_mark_tool_observation_duplicate,
-        record_tool_observation as db_record_tool_observation,
-        task_index as db_task_index,
-        tool_context_epoch as db_tool_context_epoch,
+        hook_snapshot as db_hook_snapshot,
+        hook_snapshot_global as db_hook_snapshot_global,
+        hook_snapshot_load_task as db_hook_snapshot_load_task,
+        hook_snapshot_task_index as db_hook_snapshot_task_index,
+        hook_snapshot_tool_context_epoch as db_hook_snapshot_tool_context_epoch,
+        hook_snapshot_find_successful_tool_observation as db_hook_snapshot_find_successful_tool_observation,
+        hook_tool_context_epoch as db_hook_tool_context_epoch,
+        hook_find_successful_tool_observation as db_hook_find_successful_tool_observation,
+        hook_mark_tool_observation_duplicate as db_hook_mark_tool_observation_duplicate,
+        hook_record_tool_observation as db_hook_record_tool_observation,
     )
 except (ImportError, RuntimeError):  # pragma: no cover - hook remains fail-open.
-    db_task_artifact_path = None
-    db_get_global = None
-    db_load_task = None
-    db_find_successful_tool_observation = None
-    db_mark_tool_observation_duplicate = None
-    db_record_tool_observation = None
-    db_task_index = None
-    db_tool_context_epoch = None
+    db_hook_snapshot = None
+    db_hook_snapshot_global = None
+    db_hook_snapshot_load_task = None
+    db_hook_snapshot_task_index = None
+    db_hook_snapshot_tool_context_epoch = None
+    db_hook_snapshot_find_successful_tool_observation = None
+    db_hook_tool_context_epoch = None
+    db_hook_find_successful_tool_observation = None
+    db_hook_mark_tool_observation_duplicate = None
+    db_hook_record_tool_observation = None
 
 try:
     import fcntl
@@ -203,13 +208,23 @@ def session_identity(event: dict) -> str | None:
 
 def active_task(ledger: Path, session_id: str | None) -> str | None:
     """Resolve one active task from the canonical task-to-session binding."""
-    if not session_id or db_get_global is None or db_load_task is None:
+    if not session_id or db_hook_snapshot is None or db_hook_snapshot_global is None or db_hook_snapshot_load_task is None:
         return None
     try:
-        payload = db_get_global(ledger, "host_sessions", {})
-        if payload.get("schema") != HOST_SESSION_SCHEMA or not isinstance(payload.get("tasks"), dict):
-            return None
-    except (OSError, ValueError, TypeError):
+        with db_hook_snapshot(ledger) as snapshot:
+            if snapshot is None:
+                return None
+            return _active_task_from_snapshot(snapshot, session_id)
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return None
+
+
+def _active_task_from_snapshot(snapshot: sqlite3.Connection, session_id: str | None) -> str | None:
+    """Resolve an active task without opening a second SQLite snapshot."""
+    if not session_id or db_hook_snapshot_global is None or db_hook_snapshot_load_task is None:
+        return None
+    payload = db_hook_snapshot_global(snapshot, "host_sessions", {})
+    if payload.get("schema") != HOST_SESSION_SCHEMA or not isinstance(payload.get("tasks"), dict):
         return None
     active: list[str] = []
     for raw_task_id, bound_session in payload["tasks"].items():
@@ -217,16 +232,82 @@ def active_task(ledger: Path, session_id: str | None) -> str | None:
         if not task_id or bound_session != session_id:
             continue
         try:
-            loaded = db_load_task(ledger, task_id)
+            loaded = db_hook_snapshot_load_task(snapshot, task_id)
             state = loaded[1] if loaded is not None else {}
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, sqlite3.Error):
             continue
         if state.get("schema") == SCHEMA and state.get("task_id") == task_id and state.get("status") in {"active", "blocked"}:
             active.append(task_id)
     return active[0] if len(active) == 1 else None
 
 
-def pending_task_from_subagent_start(ledger: Path, event: dict) -> str | None:
+def _active_task_context(ledger: Path, session_id: str | None, snapshot: sqlite3.Connection | None = None) -> dict | None:
+    """Load task, state, artifact directory, and activation from one snapshot."""
+    if (
+        not session_id
+        or db_hook_snapshot_global is None
+        or db_hook_snapshot_load_task is None
+        or (snapshot is None and db_hook_snapshot is None)
+    ):
+        return None
+
+
+    def read(connection: sqlite3.Connection) -> dict | None:
+        task_id = _active_task_from_snapshot(connection, session_id)
+        if not task_id:
+            return None
+        loaded = db_hook_snapshot_load_task(connection, task_id)
+        if loaded is None:
+            return None
+        definition, state, plan, artifact_dir = loaded
+        if state.get("schema") != SCHEMA or state.get("task_id") != task_id:
+            return None
+        activations = db_hook_snapshot_global(connection, "activations", {})
+        active = activations.get(str(state.get("principal") or "")) if isinstance(activations, dict) else None
+        if not isinstance(active, dict) and isinstance(activations, dict):
+            # Older active tasks may have been initialized with a thread
+            # principal while activation records were keyed by that thread.
+            # Recover only an exact task-bound record; never pick an arbitrary
+            # active coordinator from the shared registry.
+            active = next(
+                (
+                    item for item in activations.values()
+                    if isinstance(item, dict) and item.get("task_id") == task_id
+                ),
+                None,
+            )
+        if not isinstance(active, dict) or active.get("schema") != SCHEMA or active.get("task_id") != task_id:
+            return None
+        return {"task_id": task_id, "loaded": loaded, "active": active}
+    try:
+        if snapshot is not None:
+            return read(snapshot)
+        with db_hook_snapshot(ledger) as connection:
+            return read(connection) if connection is not None else None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return None
+
+
+def _task_context_from_snapshot(snapshot: sqlite3.Connection, task_id: str) -> dict | None:
+    """Load an already authenticated task without rereading after a bind write."""
+    if db_hook_snapshot_load_task is None or db_hook_snapshot_global is None:
+        return None
+    loaded = db_hook_snapshot_load_task(snapshot, task_id)
+    if loaded is None:
+        return None
+    _definition, state, _plan, _artifact_dir = loaded
+    if state.get("schema") != SCHEMA or state.get("task_id") != task_id:
+        return None
+    activations = db_hook_snapshot_global(snapshot, "activations", {})
+    active = activations.get(str(state.get("principal") or "")) if isinstance(activations, dict) else None
+    if not isinstance(active, dict) and isinstance(activations, dict):
+        active = next((item for item in activations.values() if isinstance(item, dict) and item.get("task_id") == task_id), None)
+    if not isinstance(active, dict) or active.get("schema") != SCHEMA or active.get("task_id") != task_id:
+        return None
+    return {"task_id": task_id, "loaded": loaded, "active": active}
+
+
+def pending_task_from_subagent_start(ledger: Path, event: dict, snapshot: sqlite3.Connection | None = None) -> str | None:
     """Recover one exact pending dispatch when the start-tool hook was skipped.
 
     Codex treats changed Pre/PostToolUse hooks as untrusted until their content
@@ -242,57 +323,78 @@ def pending_task_from_subagent_start(ledger: Path, event: dict) -> str | None:
     model = str(event.get("model") or "").strip()
     if not agent_type:
         return None
-    if db_task_index is None or db_load_task is None:
+    # Some native hosts prefix the issued task key with ``/root/`` in
+    # SubagentStart while the durable spawn request stores the unprefixed
+    # key.  Preserve exact identity matching, but normalize this transport
+    # wrapper rather than treating an otherwise exact child as unspawned.
+    agent_type_candidates = {agent_type}
+    if agent_type.startswith("/root/") and agent_type.count("/") == 2:
+        agent_type_candidates.add(agent_type.removeprefix("/root/"))
+    if (
+        db_hook_snapshot_task_index is None
+        or db_hook_snapshot_load_task is None
+        or (snapshot is None and db_hook_snapshot is None)
+    ):
         return None
+    def read(connection: sqlite3.Connection) -> str | None:
+        index = db_hook_snapshot_task_index(connection)
+        matches: list[str] = []
+        for raw_task_id in index if isinstance(index, dict) else {}:
+            task_id = valid_task_id(raw_task_id)
+            if not task_id:
+                continue
+            try:
+                loaded = db_hook_snapshot_load_task(connection, task_id)
+                state = loaded[1] if loaded is not None else {}
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                continue
+            if state.get("schema") != SCHEMA or state.get("status") not in {"active", "blocked"}:
+                continue
+            pending = [
+                attempt for attempt in state.get("attempts", [])
+                if isinstance(attempt, dict)
+                and not attempt.get("invalidated")
+                and attempt.get("status") == "awaiting_host_spawn"
+            ]
+            if agent_type == "default":
+                candidates = [
+                    attempt for attempt in pending
+                    if model
+                    and str(attempt.get("expected_model") or attempt.get("selected_model") or "") == model
+                ]
+            else:
+                candidates = [
+                    attempt for attempt in pending
+                    if str((attempt.get("spawn_request") or {}).get("task_name") or "") in agent_type_candidates
+                ]
+            if len(candidates) == 1:
+                matches.append(task_id)
+        return matches[0] if len(matches) == 1 else None
     try:
-        index = db_task_index(ledger)
-    except (OSError, ValueError, TypeError):
+        if snapshot is not None:
+            return read(snapshot)
+        with db_hook_snapshot(ledger) as connection:
+            return read(connection) if connection is not None else None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
         return None
-    matches: list[str] = []
-    for raw_task_id in index if isinstance(index, dict) else {}:
-        task_id = valid_task_id(raw_task_id)
-        if not task_id:
-            continue
-        try:
-            loaded = db_load_task(ledger, task_id)
-            state = loaded[1] if loaded is not None else {}
-        except (OSError, ValueError, TypeError):
-            continue
-        if state.get("schema") != SCHEMA or state.get("status") not in {"active", "blocked"}:
-            continue
-        pending = [
-            attempt for attempt in state.get("attempts", [])
-            if isinstance(attempt, dict)
-            and not attempt.get("invalidated")
-            and attempt.get("status") == "awaiting_host_spawn"
-        ]
-        if agent_type == "default":
-            candidates = [
-                attempt for attempt in pending
-                if model
-                and str(attempt.get("expected_model") or attempt.get("selected_model") or "") == model
-            ]
-        else:
-            candidates = [
-                attempt for attempt in pending
-                if str((attempt.get("spawn_request") or {}).get("task_name") or "") == agent_type
-            ]
-        if len(candidates) == 1:
-            matches.append(task_id)
-    return matches[0] if len(matches) == 1 else None
 
 
-def task_ref(ledger: Path, task_id: str) -> str | None:
+def task_ref(ledger: Path, task_id: str, snapshot: sqlite3.Connection | None = None) -> str | None:
     """Resolve the public opaque ref without guessing from a task id."""
-    if db_get_global is None:
+    if db_hook_snapshot_global is None or (snapshot is None and db_hook_snapshot is None):
         return None
-    try:
-        payload = db_get_global(ledger, "operation_registry", {})
+    def read(connection: sqlite3.Connection) -> str | None:
+        payload = db_hook_snapshot_global(connection, "operation_registry", {})
         record = payload.get("tasks", {}).get(task_id) if isinstance(payload, dict) else None
         candidate = record.get("start", {}).get("task_ref") if isinstance(record, dict) else None
         candidate = str(candidate or "")
         return candidate if SAFE_ID_RE.fullmatch(candidate) else None
-    except (OSError, ValueError, TypeError):
+    try:
+        if snapshot is not None:
+            return read(snapshot)
+        with db_hook_snapshot(ledger) as connection:
+            return read(connection) if connection is not None else None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
         return None
 
 
@@ -483,21 +585,44 @@ def attempt_for_tool_observation(event: dict, state: dict) -> str:
     return "coordinator"
 
 
-def context_epoch_for_tool_observation(ledger: Path, task_id: str, event: dict) -> int:
+def context_epoch_for_tool_observation(ledger: Path, task_id: str, event: dict, snapshot: sqlite3.Connection | None = None) -> int:
     """Use a durable epoch, rolling it on an explicitly reported compaction."""
-    if db_tool_context_epoch is None:
+    if db_hook_snapshot is None or db_hook_snapshot_tool_context_epoch is None:
         return 0
     try:
         supplied = event.get("context_epoch", event.get("contextEpoch"))
         if isinstance(supplied, int) and not isinstance(supplied, bool) and supplied >= 0:
             return supplied
-        return int(db_tool_context_epoch(ledger, task_id, bump=is_context_recovery(event)))
-    except (OSError, ValueError, TypeError):
+        if is_context_recovery(event) and db_hook_tool_context_epoch is not None:
+            return int(db_hook_tool_context_epoch(ledger, task_id, bump=True))
+        if snapshot is not None:
+            return int(db_hook_snapshot_tool_context_epoch(snapshot, task_id))
+        with db_hook_snapshot(ledger) as connection:
+            return int(db_hook_snapshot_tool_context_epoch(connection, task_id)) if connection is not None else 0
+    except (OSError, ValueError, TypeError, sqlite3.Error):
         return 0
+
+
+def bump_context_epoch_for_recovery(ledger: Path, task_id: str, event: dict) -> int | None:
+    """Roll and record the durable epoch for an authenticated recovery start.
+
+    Host-provided epochs are advisory only: a missing, default, or stale value
+    must not prevent a new durable boundary.  Returning ``None`` on bounded
+    ledger failures keeps the lifecycle hook fail-open.
+    """
+    if db_hook_tool_context_epoch is None:
+        return None
+    try:
+        durable_epoch = int(db_hook_tool_context_epoch(ledger, task_id, bump=True))
+        event["context_epoch"] = durable_epoch
+        return durable_epoch
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return None
 
 
 def apply_tool_deduplication(
     event: dict, project: Path, ledger: Path, task_id: str, state: dict,
+    snapshot: sqlite3.Connection | None = None,
 ) -> dict | None:
     """Persist observations and return an advisory for duplicate full reads.
 
@@ -505,21 +630,26 @@ def apply_tool_deduplication(
     authorization failure: the host may still need to perform the read when a
     prior result was lost or the caller intentionally retries it.
     """
-    if db_record_tool_observation is None:
+    if db_hook_record_tool_observation is None:
         return None
     attempt_id = attempt_for_tool_observation(event, state)
-    epoch = context_epoch_for_tool_observation(ledger, task_id, event)
+    epoch = context_epoch_for_tool_observation(ledger, task_id, event, snapshot)
     observation = tool_observation(event, project, task_id, attempt_id, epoch)
     if observation is None:
         return None
     hook_name = str(event.get("hook_event_name") or "")
     if hook_name == "PreToolUse" and observation["cacheable"]:
         try:
-            already_read = db_find_successful_tool_observation(
-                ledger, task_id, attempt_id, epoch, observation["fingerprint"], observation["workspace_generation"],
-            )
+            if snapshot is not None and db_hook_snapshot_find_successful_tool_observation is not None:
+                already_read = db_hook_snapshot_find_successful_tool_observation(
+                    snapshot, task_id, attempt_id, epoch, observation["fingerprint"], observation["workspace_generation"],
+                )
+            else:
+                already_read = db_hook_find_successful_tool_observation(
+                    ledger, task_id, attempt_id, epoch, observation["fingerprint"], observation["workspace_generation"],
+                )
             if already_read:
-                db_mark_tool_observation_duplicate(ledger, task_id, attempt_id, epoch, observation["fingerprint"])
+                db_hook_mark_tool_observation_duplicate(ledger, task_id, attempt_id, epoch, observation["fingerprint"])
                 return {
                     "duplicate": True,
                     "tool_name": observation["tool_name"],
@@ -530,7 +660,7 @@ def apply_tool_deduplication(
     elif hook_name == "PostToolUse":
         result_digest = _bounded_digest(event.get("tool_response"))
         try:
-            db_record_tool_observation(
+            db_hook_record_tool_observation(
                 ledger,
                 task_id=task_id,
                 attempt_id=attempt_id,
@@ -656,7 +786,12 @@ def dispatch_required_context(event: dict) -> str | None:
 
 
 def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | None:
-    """Fail closed before the host waits without a successfully spawned child."""
+    """Return a worker-only denial before waiting without a spawned child.
+
+    The coordinator receives an advisory instead of a permission denial so a
+    missing target cannot deadlock the control plane. Worker identity and
+    target authorization remain fail-closed below.
+    """
     if (
         str(event.get("hook_event_name")) not in {"PreToolUse", "PostToolUse"}
         or str(event.get("tool_name")) not in {"Agent", "wait"}
@@ -704,33 +839,67 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
     )
 
 
+def coordinator_read_advisory(event: dict, state: dict | None = None) -> str | None:
+    """Advise a coordinator on safe inspection without authorizing project work."""
+    if str(event.get("hook_event_name")) != "PreToolUse":
+        return None
+    if str(event.get("tool_name") or "") not in READ_ONLY_FILE_TOOLS:
+        return None
+    agent_type = str(event.get("agent_type") or "").strip()
+    if agent_type and agent_type in PROFILES:
+        return None
+    return (
+        "CORTEX COORDINATOR READ ADVISORY: read-only project inspection is non-blocking but outside coordinator "
+        "ownership. Remain on the control plane, use the exact Cortex lifecycle and worker-report tools, and do not "
+        "infer a task, read task content, credentials, or delegated files from this hook."
+    )
+
+
 def task_directory(ledger: Path, task_id: str) -> Path:
     """Resolve the registered artifact directory from SQLite, never by scan."""
-    if db_task_artifact_path is None:
+    if db_hook_snapshot is None or db_hook_snapshot_load_task is None:
         return ledger / "tasks" / f"missing-{task_id}"
     try:
-        candidate = db_task_artifact_path(ledger, task_id)
-        # A task's artifact directory is deliberately lazy.  SQLite owns the
-        # path before any projection exists, and a lifecycle event is one of
-        # the few operations allowed to materialize it.  Do not require the
-        # directory to exist here: that would redirect the hook to a bogus
-        # ``missing-*`` path and silently suppress telemetry for new tasks.
-        if candidate is not None:
-            return reject_symlink_ancestry(candidate, "task directory")
-    except (OSError, ValueError):
+        with db_hook_snapshot(ledger) as snapshot:
+            if snapshot is None:
+                return ledger / "tasks" / f"missing-{task_id}"
+            loaded = db_hook_snapshot_load_task(snapshot, task_id)
+            if loaded is None:
+                return ledger / "tasks" / f"missing-{task_id}"
+            relative = Path(str(loaded[3]))
+            if relative.is_absolute() or ".." in relative.parts:
+                return ledger / "tasks" / f"missing-{task_id}"
+            return reject_symlink_ancestry(ledger / relative, "task directory")
+    except (OSError, ValueError, sqlite3.Error):
         pass
     return ledger / "tasks" / f"missing-{task_id}"
 
 
 def activation(ledger: Path, session_id: str | None) -> dict | None:
-    if not session_id or db_get_global is None:
+    if not session_id or db_hook_snapshot is None or db_hook_snapshot_global is None:
         return None
     try:
-        record = db_get_global(ledger, "activations", {}).get(session_id)
-        if isinstance(record, dict) and record.get("schema") == SCHEMA and record.get("coordinator") == "main" and record.get("mode") == "main-orchestrator":
-            return record
+        with db_hook_snapshot(ledger) as snapshot:
+            if snapshot is None:
+                return None
+            record = db_hook_snapshot_global(snapshot, "activations", {}).get(session_id)
+            if isinstance(record, dict) and record.get("schema") == SCHEMA and record.get("coordinator") == "main" and record.get("mode") == "main-orchestrator":
+                return record
+            return None
+    except (OSError, ValueError, TypeError, sqlite3.Error):
         return None
-    except (OSError, ValueError):
+
+
+def snapshot_task(ledger: Path, task_id: str) -> tuple[dict, dict, dict | None, str] | None:
+    """Load one task from the same bounded read-only hook snapshot."""
+    if db_hook_snapshot is None or db_hook_snapshot_load_task is None:
+        return None
+    try:
+        with db_hook_snapshot(ledger) as snapshot:
+            if snapshot is None:
+                return None
+            return db_hook_snapshot_load_task(snapshot, task_id)
+    except (OSError, ValueError, TypeError, sqlite3.Error):
         return None
 
 
@@ -787,6 +956,60 @@ def native_worker_task_name(event: dict, state: dict | None = None) -> str | Non
 def canonical_agent_name(event: dict, state: dict | None = None) -> str | None:
     """Resolve a canonical profile from a host agent or native task key."""
     return worker_identity(event, state)[0]
+
+
+def worker_context_recovery(
+    event: dict,
+    state: dict,
+    definition: dict,
+    task_dir: Path,
+) -> str:
+    """Rehydrate one worker's immutable bootstrap after host compaction.
+
+    The hook emits only artifacts already bound to the exact native attempt;
+    it never scans the ledger or reconstructs prompts from mutable state.
+    Workers still verify every supplied digest before reading.
+    """
+    profile, _display = worker_identity(event, state)
+    if not profile or not is_context_recovery(event):
+        return ""
+    candidates = {str(event.get("agent_type") or "").strip(), str(event.get("agent_id") or "").strip()}
+    matches = []
+    for attempt in state.get("attempts", []):
+        if not isinstance(attempt, dict) or str(attempt.get("profile") or attempt.get("agent") or "") != profile:
+            continue
+        aliases = {
+            str((attempt.get("spawn_request") or {}).get("task_name") or "").strip(),
+            str((attempt.get("host_spawn") or {}).get("agent_id") or "").strip(),
+            str((attempt.get("host_spawn") or {}).get("task_name") or "").strip(),
+        }
+        if aliases.intersection(candidates):
+            matches.append(attempt)
+    if len(matches) != 1:
+        return " CORTEX WORKER RECOVERY BLOCKER: exact worker attempt identity is unavailable; do not infer task context."
+    attempt = matches[0]
+    fields = []
+    for label, relative, digest in (
+        ("assignment/briefing", attempt.get("briefing_file"), attempt.get("briefing_digest")),
+        ("compiled plan unit", attempt.get("plan_unit_file"), attempt.get("plan_unit_digest")),
+        ("immutable user intent", definition.get("user_intent_artifact_path"), definition.get("user_request_digest")),
+    ):
+        raw = str(relative or "").strip()
+        sha = str(digest or "").strip().lower()
+        if not raw or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            continue
+        candidate = Path(raw)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            continue
+        fields.append(f"{label}={task_dir / candidate} (sha256={sha})")
+    if not fields:
+        return " CORTEX WORKER RECOVERY BLOCKER: immutable worker artifacts are unavailable; do not reconstruct context from transcript."
+    return (
+        " CONTEXT RECOVERY: host resumed this exact worker after compaction. "
+        f"Attempt {str(attempt.get('attempt_id') or '')!r} remains authoritative. "
+        "Re-read only these exact immutable artifacts, verify mode and SHA-256, then continue the same attempt: "
+        + "; ".join(fields) + ". Preserve the report contract and do not spawn a replacement worker."
+    )
 
 
 def hook_context(event_name: str, context: str) -> dict:
@@ -938,24 +1161,25 @@ def append_lifecycle_event(task_dir: Path, event: dict) -> None:
         os.close(lock_descriptor)
 
 
-def main() -> None:
-    try:
-        event = json.load(sys.stdin)
-    except Exception:
-        print("{}")
-        return
+def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
     try:
         project = project_directory(event)
         ledger = root(event)
         session_id = session_identity(event)
         bind_post_tool_session(event, project, session_id)
-        task_id = active_task(ledger, session_id)
+        task_context = _active_task_context(ledger, session_id, snapshot)
+        task_id = task_context.get("task_id") if task_context else None
         if not task_id and session_id and bind_host_session_from_hook is not None:
-            recovered_task_id = pending_task_from_subagent_start(ledger, event)
-            recovered_ref = task_ref(ledger, recovered_task_id) if recovered_task_id else None
-            if recovered_ref:
-                bind_host_session_from_hook(str(project), recovered_ref, session_id)
-                task_id = active_task(ledger, session_id)
+            recovered_task_id = pending_task_from_subagent_start(ledger, event, snapshot)
+            recovered_ref = task_ref(ledger, recovered_task_id, snapshot) if recovered_task_id else None
+            if recovered_task_id:
+                if recovered_ref:
+                    bind_host_session_from_hook(str(project), recovered_ref, session_id)
+                # The read snapshot is intentionally not refreshed after this
+                # bounded host-session bind.  Authorization continues from
+                # the already authenticated pre-write snapshot.
+                task_context = _task_context_from_snapshot(snapshot, recovered_task_id) if snapshot is not None else None
+                task_id = task_context.get("task_id") if task_context else None
     except Exception as exc:
         print(f"orchestration_hook warning: {type(exc).__name__}", file=sys.stderr)
         print("{}")
@@ -963,28 +1187,32 @@ def main() -> None:
     if not task_id:
         print("{}")
         return
-    task_dir = task_directory(ledger, task_id)
     try:
+        if not task_context or task_context.get("task_id") != task_id:
+            task_context = _active_task_context(ledger, session_id, snapshot)
+        if not task_context:
+            print("{}")
+            return
+        loaded = task_context.get("loaded")
+        if not isinstance(loaded, tuple) or len(loaded) != 4:
+            raise ValueError("active task snapshot is unavailable")
+        _definition, state, _plan, artifact_dir = loaded
+        relative_task_dir = Path(str(artifact_dir))
+        if relative_task_dir.is_absolute() or ".." in relative_task_dir.parts:
+            raise ValueError("task artifact directory is outside the ledger root")
+        task_dir = ledger / relative_task_dir
         task_dir = reject_symlink_ancestry(task_dir, "task directory")
-        if db_load_task is None:
-            raise RuntimeError("SQLite ledger runtime is unavailable")
-        loaded = db_load_task(ledger, task_id)
-        state = loaded[1] if loaded is not None else {}
         if state.get("schema") != SCHEMA or state.get("task_id") != task_id:
             raise ValueError("unsupported or mismatched task state")
-        if (
-            str(event.get("hook_event_name")) == "SessionStart"
-            and is_context_recovery(event)
-            and db_tool_context_epoch is not None
-        ):
-            # A host-reported compact/clear is a hard cache boundary even if
-            # it does not carry a numeric context epoch itself.
-            db_tool_context_epoch(ledger, task_id, bump=True)
         # The host-session index selects a task only when the binding is
         # unambiguous. Authorization still uses the task's unique
         # principal, so multiple tasks in one host session cannot cross-read
         # each other's activation state.
-        active = activation(ledger, str(state.get("principal") or ""))
+        # active_task already authenticated the host session against the
+        # canonical task binding. Activation records remain keyed by the
+        # task's durable coordinator principal, not by the transient native
+        # host session alias used for SubagentStart recovery.
+        active = task_context.get("active")
         if not active or active.get("task_id") != task_id:
             print("{}")
             return
@@ -1007,9 +1235,32 @@ def main() -> None:
                     event.get("model"),
                 )
                 if binding.get("bound"):
-                    refreshed = db_load_task(ledger, task_id)
-                    state = refreshed[1] if refreshed is not None else {}
-                    agent_name, display_name = worker_identity(event, state)
+                    # The worker binding is durably written by the host
+                    # adapter, but the hook deliberately keeps its original
+                    # read snapshot open.  Rehydrate identity from the exact
+                    # attempt returned by that write instead of opening a
+                    # second connection or relying on the generic
+                    # ``agent_type=default`` alias to match a named spawn.
+                    bound_attempt_id = str(binding.get("attempt_id") or "").strip()
+                    bound_attempt = next(
+                        (
+                            item for item in state.get("attempts", [])
+                            if isinstance(item, dict)
+                            and str(item.get("attempt_id") or "").strip() == bound_attempt_id
+                        ),
+                        None,
+                    )
+                    if isinstance(bound_attempt, dict):
+                        profile = str(bound_attempt.get("profile") or bound_attempt.get("agent") or "").strip()
+                        if profile in PROFILES:
+                            display_name = str(bound_attempt.get("display_name") or "").strip() or profile
+                            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ]{0,95}", display_name):
+                                display_name = profile
+                            agent_name = profile
+                        else:
+                            agent_name, display_name = worker_identity(event, state)
+                    else:
+                        agent_name, display_name = worker_identity(event, state)
                 else:
                     reason = str(binding.get("reason") or "host_binding_failed")
                     host_binding_blocker = (
@@ -1033,8 +1284,6 @@ def main() -> None:
                     session_id,
                     event.get("agent_id"),
                 )
-                refreshed = db_load_task(ledger, task_id)
-                state = refreshed[1] if refreshed is not None else {}
                 agent_name, display_name = worker_identity(event, state)
             except Exception:
                 # Lifecycle persistence is fail-open for the host. The
@@ -1053,12 +1302,19 @@ def main() -> None:
             ),
             "tool_name": str(event.get("tool_name")) if TOOL_NAME_RE.fullmatch(str(event.get("tool_name", ""))) else None,
         }
+        # A context reset is an authenticated lifecycle boundary, not a tool
+        # observation.  Roll the durable epoch here before dedupe so a
+        # SessionStart that carries no numeric epoch still invalidates stale
+        # worker read receipts.  ``apply_tool_deduplication`` reuses this
+        # value and therefore does not bump the epoch a second time.
+        if safe["hook"] == "SessionStart" and is_context_recovery(event):
+            bump_context_epoch_for_recovery(ledger, task_id, event)
         append_lifecycle_event(task_dir, safe)
-        dedupe = apply_tool_deduplication(event, project, ledger, task_id, state)
+        dedupe = apply_tool_deduplication(event, project, ledger, task_id, state, snapshot)
         if dedupe and dedupe.get("duplicate") and safe["hook"] == "PreToolUse":
             print(json.dumps(duplicate_read_advisory(dedupe.get("resource_kind")), ensure_ascii=False))
             return
-        stop_context = stopped_worker_after_wait_context(event, state, task_ref(ledger, task_id))
+        stop_context = stopped_worker_after_wait_context(event, state, task_ref(ledger, task_id, snapshot))
         if stop_context:
             print(json.dumps(hook_context("PostToolUse", stop_context), ensure_ascii=False))
             return
@@ -1072,6 +1328,13 @@ def main() -> None:
             return
         dispatch_failure_reason = empty_agent_wait_reason(event, state)
         if dispatch_failure_reason and safe["hook"] == "PreToolUse":
+            if not agent_name:
+                print(json.dumps(hook_context("PreToolUse", (
+                    "CORTEX COORDINATOR WAIT ADVISORY: no worker target was supplied. Remain idle on the "
+                    "control plane, preserve the exact task_ref, and use the pending Cortex dispatch or inspect "
+                    "route; do not infer a worker, task, or project content from this event."
+                )), ensure_ascii=False))
+                return
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -1080,13 +1343,18 @@ def main() -> None:
                 }
             }, ensure_ascii=False))
             return
+        coordinator_advisory = coordinator_read_advisory(event, state)
+        if coordinator_advisory:
+            print(json.dumps(hook_context("PreToolUse", coordinator_advisory), ensure_ascii=False))
+            return
         if dispatch_failure_reason:
             print(json.dumps(hook_context("PostToolUse", dispatch_failure_reason), ensure_ascii=False))
             return
         if safe["hook"] in {"SessionStart", "SubagentStart"} and agent_name:
+            worker_recovery = worker_context_recovery(event, state, _definition, task_dir)
             print(json.dumps(hook_context(
                 safe["hook"],
-                f"Canonical profile: {agent_name}. Worker display name: {display_name}. Preserve both exact values; do not relabel this worker. {WORKER_CONTEXT}{host_binding_blocker}",
+                f"Canonical profile: {agent_name}. Worker display name: {display_name}. Preserve both exact values; do not relabel this worker. {WORKER_CONTEXT}{worker_recovery}{host_binding_blocker}",
             ), ensure_ascii=False))
             return
         if safe["hook"] == "SessionStart":
@@ -1098,7 +1366,7 @@ def main() -> None:
                 "Remain idle while workers run; worker delay or failure is never permission for direct coordinator work."
             )
             if is_context_recovery(event):
-                public_ref = task_ref(ledger, task_id)
+                public_ref = task_ref(ledger, task_id, snapshot)
                 if public_ref:
                     context += (
                         f" CONTEXT RECOVERY: the host resumed this task after a context reset or compaction; preserve opaque task_ref={public_ref!r}. "
@@ -1120,6 +1388,25 @@ def main() -> None:
         # Hooks are telemetry-only; never inject untrusted exception text into model context.
         print(f"orchestration_hook warning: {type(exc).__name__}", file=sys.stderr)
     print("{}")
+
+
+def main() -> None:
+    try:
+        _event = json.load(sys.stdin)
+    except Exception:
+        print("{}")
+    else:
+        try:
+            _project = project_directory(_event)
+            _ledger = root(_event)
+            if db_hook_snapshot is None:
+                _run(_event, None)
+            else:
+                with db_hook_snapshot(_ledger) as _snapshot:
+                    _run(_event, _snapshot)
+        except Exception as _exc:
+            print(f"orchestration_hook warning: {type(_exc).__name__}", file=sys.stderr)
+            print("{}")
 
 
 if __name__ == "__main__":

@@ -43,3 +43,11 @@ from a raw transcript. After rehydration, continue the existing task. Publish a
 report link only when `read_worker_report.publication_required=true`, together
 with its completion summary and next-step explanation; never republish a link
 on recovery rereads.
+
+When the resumed session is a worker (`SubagentStart`/worker `SessionStart`),
+the lifecycle hook rehydrates only the exact attempt-bound immutable briefing
+(assignment), compiled plan unit, and user-intent artifact, each with its
+SHA-256 digest. The worker must verify those artifacts and continue the same
+attempt; ambiguous identity or missing artifacts is a blocker. It must not
+reconstruct assignment, plan, intent, or report contract from the transcript,
+or read the shared ledger.

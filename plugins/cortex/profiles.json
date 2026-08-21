@@ -1,5 +1,13 @@
 {
   "schema": "cortex/profile-contract/v1",
+  "communication": {
+    "default": "natural",
+    "profiles": ["natural", "compact", "technical"],
+    "selection": "config.communication_profile or CORTEX_COMMUNICATION_PROFILE; invalid values use natural",
+    "aliases": {"default": "natural", "normal": "natural", "detailed": "technical"},
+    "quality_checks": ["plain_language", "no_internal_metadata", "no_repetition", "next_step", "profile_match"],
+    "internal_metadata": "Never include transport identity, digests, ledger references, or tool names in user prose."
+  },
   "mode_overlays": {
     "harvest": {
       "planner": "For harvest/harvest-refresh, Scope defines the full source census and 2–8 non-overlapping discovery domains; Plan runs only after discovery and architecture evidence. Inventory runtime, integrations, configuration/deployment, and tests; define boundaries, writer ownership, coverage, and independent review. Missing docs/project/index.md, docs/project/conventions.md, docs/project/verification.md, docs/project/decisions.md, docs/project/gotchas.md, index links to the latter four, or docs/features/<feature>/index.md for a non-excluded feature is a structural gap; docs/features/<feature>.md is not canonical. Without a behavioral and structural zero-gap baseline, require a full scan. Harvest plan approval is automatic.",

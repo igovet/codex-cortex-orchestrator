@@ -15,6 +15,8 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from cortex_runtime.communication import render_lifecycle
+
 
 MCP_AUDIENCES = frozenset({"compat", "coordinator", "worker"})
 DEFAULT_MCP_AUDIENCE = "compat"
@@ -228,6 +230,20 @@ def build_public_schemas(
         "uniqueItems": True,
         "items": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
     }
+    PLANNING_COVERAGE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "requirement": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "plan_refs": {
+                "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 160},
+            },
+            "verification": PLANNING_STRING_LIST_SCHEMA,
+            "status": {"type": "string", "enum": ["covered"]},
+        },
+        "required": ["requirement", "plan_refs", "verification", "status"],
+    }
     PLANNING_MICROTASK_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -238,6 +254,9 @@ def build_public_schemas(
             "profile": {"type": "string", "enum": sorted(agents)},
             "allowed_paths": PLANNING_PATHS_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
+            "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
+            "order": {"type": "integer", "minimum": 1},
+            "gates": PLANNING_STRING_LIST_SCHEMA,
             "acceptance_criteria": PLANNING_STRING_LIST_SCHEMA,
             "verification": PLANNING_STRING_LIST_SCHEMA,
         },
@@ -252,6 +271,9 @@ def build_public_schemas(
             "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
             "allowed_paths": PLANNING_PATHS_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
+            "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
+            "order": {"type": "integer", "minimum": 1},
+            "gates": PLANNING_STRING_LIST_SCHEMA,
             "microtasks": {
                 "type": "array",
                 "minItems": 1,
@@ -266,6 +288,21 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "overview": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "requirement_coverage": {
+                "type": "array", "maxItems": 100, "uniqueItems": True,
+                "items": PLANNING_COVERAGE_SCHEMA,
+                "description": (
+                    "Optional traceability map. When the user changes an active task, every latest requirement "
+                    "must appear here exactly once with the plan items and verification that cover it."
+                ),
+            },
+            "recommendation": {"type": "string", "enum": ["approve", "revise"]},
+            "recommendation_rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "resolved_questions": {
+                "type": "array", "maxItems": 32, "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+            },
+            "risks": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
             "work_packages": {
                 "type": "array", "minItems": 1, "maxItems": max_work_packages,
                 "description": (
@@ -416,6 +453,7 @@ def build_public_schemas(
                     "multi_session_handoff": {"type": "boolean"},
                     "user_language": {"type": "string"},
                     "language": {"type": "string"},
+                    "communication_profile": {"type": "string", "enum": ["natural", "compact", "technical"], "default": "natural", "description": "User-facing message style. Defaults to natural; internal metadata remains separate."},
                     "complexity": {"type": ["string", "integer"], "description": "Optional C1/C2/C3 or human alias; defaults to C2."},
                     "replan_limit": {
                         "type": "integer",
@@ -756,6 +794,10 @@ def v3_response(
     include_result: bool = False,
     start_replayed: bool | None = None,
 ) -> dict[str, Any]:
+    state_summary = old.get("state_summary") if isinstance(old.get("state_summary"), dict) else {}
+    communication_profile = old.get("communication_profile") or state_summary.get("communication_profile")
+    communication_config = ({"communication_profile": communication_profile}
+                            if communication_profile else None)
     wave_label = str(old.get("wave_id") or "")
     wave_match = re.search(r"(\d+)$", wave_label)
     step = int(wave_match.group(1)) if wave_match else None
@@ -792,6 +834,10 @@ def v3_response(
             response["initiative_ref"] = old["governance"].get("initiative_ref")
             response["policy_snapshot_digest"] = old["governance"].get("policy_snapshot_digest")
             response["close_obligations"] = old["governance"].get("close_obligations", [])
+        response["user_message"] = render_lifecycle(
+            response.get("outcome"), ok=False, config=communication_config,
+            metadata={"code": response.get("code"), "recoverable": response.get("recoverable")},
+        )
         return response
     requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
     prepared_dispatches = [
@@ -1072,6 +1118,10 @@ def v3_response(
         "next_action": next_action,
         "dispatches": dispatches,
     }
+    response["user_message"] = render_lifecycle(
+        outcome, config=communication_config,
+        metadata={"outcome": outcome, "step": step},
+    )
     if outcome == "waiting_workers":
         response.update({
             "output_policy": "silent",
@@ -1296,7 +1346,28 @@ def serve_stdio(
                 sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
         except Exception as exc:
-            log_tool_error(request, request_id, line.rstrip("\n"), exc)
+            is_ledger_busy = exc.__class__.__name__ == "LedgerBusyError"
+            if not is_ledger_busy:
+                log_tool_error(request, request_id, line.rstrip("\n"), exc)
             if request_id is not None:
-                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": str(exc)}}, ensure_ascii=False) + "\n")
+                if is_ledger_busy:
+                    holder = getattr(exc, "holder", None)
+                    data = {
+                        "schema": "cortex/ledger-busy/v1",
+                        "code": "ledger_busy",
+                        "retryable": True,
+                        "retry_after_ms": 250,
+                        "operation": str(getattr(exc, "operation", "mutation")),
+                        "held_duration_ms": int(getattr(exc, "held_duration_ms", 0)),
+                    }
+                    if isinstance(holder, dict):
+                        data["holder"] = holder
+                    error = {
+                        "code": -32009,
+                        "message": "Cortex ledger is busy; retry the same operation without changing its input.",
+                        "data": data,
+                    }
+                else:
+                    error = {"code": -32602, "message": str(exc)}
+                sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}, ensure_ascii=False) + "\n")
                 sys.stdout.flush()

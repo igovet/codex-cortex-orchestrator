@@ -4,18 +4,32 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.18 release candidate
+## 9.2.19 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.18 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.19 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
-The 9.2.18 patch removes programmatic dispatch-briefing size rejection and
+The 9.2.19 patch keeps programmatic dispatch-briefing size rejection removed and
 keeps complete Planner content in digest-bound immutable artifacts. It also
 makes no-progress recovery gate-local: an unpaused current-wave sibling can
 finish, later dependency waves do not leapfrog a pause, and multi-pause
-Planner-first recovery names the exact gate to release.
+Planner-first recovery names the exact gate to release. Report preparation now
+runs outside the final commit, with task-revision, draft-identity, and
+content-digest CAS. Lock acquisition is bounded to five seconds; once acquired,
+the canonical report/artifact commit remains serialized until its writes finish.
+`ledger_busy` and `stale_preparation` are retryable and preserve the draft. The
+`CORTEX_REPORT_PREPARE_COMMIT=off` rollback flag retains the serialized legacy
+path.
+
+All other ledger mutation callers use the same bounded lock default. A busy
+response contains only operation, duration, and non-secret holder metadata;
+expected contention is not appended to the private tool-error log.
+
+Lifecycle hooks use an existing SQLite read-only snapshot and never run
+migrations or state locks. Optional telemetry writes use a 100 ms busy timeout
+and fail open; missing production telemetry does not change acceptance.
 
 The retained 9.2.17 patch makes duplicate full reads of an unchanged bundled
 Cortex skill advisory and context-aware: the read remains allowed, compaction
@@ -90,7 +104,7 @@ than a duplicated inline plan.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.18` (the current source candidate carries a cachebuster; installed builds
+  `9.2.19` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -231,7 +245,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.18 release commit only with explicit authorization.
+- Create the Cortex 9.2.19 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

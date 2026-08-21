@@ -3,7 +3,7 @@
 <!-- GENERATED:START -->
 ## Purpose
 
-The plugin wires session, subagent, and agent-tool lifecycle events to privacy-preserving telemetry and worker-context injection.
+The plugin wires session, subagent, and agent-tool lifecycle events to privacy-preserving telemetry and worker-context injection. Hook task/session lookups use one bounded read-only SQLite snapshot of an already compatible database; hooks never bootstrap migrations or acquire the project state lock. Optional observation and context-epoch writes use a 100 ms busy timeout and fail open.
 
 ## Key files and dependencies
 
@@ -28,14 +28,16 @@ after the MCP payload: the next native call must spawn the first returned
 dispatch, and waiting or another lifecycle call is forbidden until every
 authorized spawn returns a child id. This prevents a long result from leaving
 the actionable dispatch below the model's effective attention boundary.
-Before an `Agent` call, `PreToolUse` denies a targetless wait when Cortex has no
-durably bound running child, so the host cannot block indefinitely while
-claiming that a worker was dispatched. The denial is the actionable
-`CORTEX DISPATCH FAILURE` diagnostic: it says that no worker was spawned,
+Before an `Agent` call, `PreToolUse` gives the coordinator a non-blocking
+advisory for a targetless wait when Cortex has no durably bound running child;
+it never grants a guessed target or blocks the control plane. Worker identity
+and target checks still deny an empty wait with the actionable
+`CORTEX DISPATCH FAILURE` diagnostic, which says that no worker was spawned,
 requires invoking the exact pending `spawn_agent` dispatch, and forbids retrying
-an empty wait. A host wait-any representation may use an empty receiver list
-only while such a child exists. The PostToolUse form remains a compatibility
-fallback.
+an empty wait. Coordinator `Read`, `Grep`, and `Glob` calls receive the same
+non-blocking advisory and no task content, credentials, or inferred selection.
+A host wait-any representation may use an empty receiver list only while such
+a child exists. The PostToolUse form remains a compatibility fallback.
 Installing or reloading the
 plugin remains an operator action; after an install or update, start a fresh
 Codex thread so the new hook and skill paths are loaded.

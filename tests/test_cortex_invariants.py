@@ -543,6 +543,14 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(sanitized["nested"]["access_token"], "<REDACTED>")
         self.assertEqual(sanitized["safe"], "visible")
 
+    def test_report_structured_preserves_json_primitives_and_nested_evidence(self):
+        sanitized = control.sanitize_report_structured({
+            "safe_values": [0, False, None, {"count": 2}],
+            "access_token": "never-store-this",
+        })
+        self.assertEqual(sanitized["safe_values"], [0, False, None, {"count": 2}])
+        self.assertEqual(sanitized["access_token"], "<REDACTED>")
+
     def test_verification_command_ids_reject_caller_execution_control(self):
         state = self.init()["state"]
         base = {"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "gate": "discover", "summary": "negative", "verification_id": "benign_success"}
@@ -1150,11 +1158,27 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 )
                 output = json.loads(completed.stdout)["hookSpecificOutput"]
                 self.assertEqual(output["hookEventName"], "PreToolUse")
-                self.assertEqual(output["permissionDecision"], "deny")
-                reason = output["permissionDecisionReason"]
-                self.assertIn("CORTEX DISPATCH FAILURE", reason)
-                self.assertIn("No worker was spawned", reason)
-                self.assertIn("Never retry an empty wait", reason)
+                self.assertNotIn("permissionDecision", output)
+                self.assertIn("CORTEX COORDINATOR WAIT ADVISORY", output["additionalContext"])
+
+        worker_event = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "owner",
+            "agent_type": "general",
+            "tool_name": "wait",
+            "tool_input": {"action": "wait", "receiver_thread_ids": []},
+        }
+        completed = subprocess.run(
+            [sys.executable, str(hook)], input=json.dumps(worker_event), text=True,
+            capture_output=True, env=os.environ.copy(), check=True,
+        )
+        output = json.loads(completed.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+        reason = output["permissionDecisionReason"]
+        self.assertIn("CORTEX DISPATCH FAILURE", reason)
+        self.assertIn("No worker was spawned", reason)
+        self.assertIn("Never retry an empty wait", reason)
 
         bare_wait = {
             "hook_event_name": "PreToolUse",
@@ -1168,8 +1192,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         output = json.loads(completed.stdout)["hookSpecificOutput"]
         self.assertEqual(output["hookEventName"], "PreToolUse")
-        self.assertEqual(output["permissionDecision"], "deny")
-        self.assertIn("CORTEX DISPATCH FAILURE", output["permissionDecisionReason"])
+        self.assertNotIn("permissionDecision", output)
+        self.assertIn("CORTEX COORDINATOR WAIT ADVISORY", output["additionalContext"])
 
         event["tool_input"]["receiver_thread_ids"] = ["child-01"]
         targeted = subprocess.run(
@@ -1955,7 +1979,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.18")
+        self.assertEqual(base_version, "9.2.19")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",

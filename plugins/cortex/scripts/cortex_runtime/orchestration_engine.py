@@ -109,6 +109,7 @@ bind_symbols(
         "cortex_question",
         "create_lane",
         "current_planning_manifest",
+        "current_plan_tracker",
         "db_get_classification",
         "db_get_operation",
         "db_list_task_findings",
@@ -242,6 +243,7 @@ def _orchestrate_summary(state: dict[str, Any]) -> dict[str, Any]:
         "status": state.get("status"),
         "revision": state.get("revision"),
         "complexity": state.get("complexity"),
+        "communication_profile": state.get("communication_profile") or "natural",
         "current_gates": active_gates(state),
         "completed_gates": list(state.get("completed_gates", [])),
         "skipped_gates": list(state.get("skipped_gates", [])),
@@ -644,22 +646,22 @@ def _wave_for_gates(plan: dict[str, Any], gates: list[str]) -> dict[str, Any] | 
     for wave in plan.get("waves", []):
         wave_gates = set(wave.get("gates", []))
         if wave_gates == gate_set:
+            # Keep the canonical plan object authoritative. The executable
+            # subset is a durable projection of the current gate state; it is
+            # never represented by copying and mutating a detached wave.
+            wave["executable_gates"] = [gate for gate in wave.get("gates", []) if gate in gate_set]
+            wave.pop("partial_parallel_wave", None)
             return wave
         if gate_set and gate_set < wave_gates:
             # A parallel sibling may have completed (or be independently
             # paused for no-progress) while another gate still needs a retry.
-            # Preserve the original wave identity but dispatch only the
-            # remaining executable delegation(s); requiring exact equality
-            # here stranded valid partial parallel waves.
-            return {
-                **wave,
-                "gates": [gate for gate in wave.get("gates", []) if gate in gate_set],
-                "delegations": [
-                    delegation for delegation in wave.get("delegations", [])
-                    if delegation.get("gate") in gate_set
-                ],
-                "partial_parallel_wave": True,
-            }
+            # Preserve the original wave identity and full gate list. The
+            # current executable subset is recorded on that same canonical
+            # wave, so restart/inspect/replan retain completed siblings and
+            # the source wave cannot be marked complete prematurely.
+            wave["executable_gates"] = [gate for gate in wave.get("gates", []) if gate in gate_set]
+            wave["partial_parallel_wave"] = True
+            return wave
     return None
 
 
@@ -842,6 +844,14 @@ def _compiled_implementation_spec(
                 "title": item["title"],
                 "objective": item["objective"],
                 "profile": item.get("profile"),
+                # The compiled plan is the canonical living tracker snapshot
+                # consumed by implementation workers.  Runtime status starts
+                # at the Planner-declared value and is advanced by lifecycle
+                # receipts; order and gates remain explicit rather than being
+                # inferred from prompt text.
+                "status": item.get("status") or "pending",
+                "order": item.get("order", index),
+                "gates": item.get("gates") or ["implementation"],
                 "allowed_paths": item.get("allowed_paths") or [],
                 "depends_on": item.get("depends_on") or [],
                 "acceptance_criteria": item.get("acceptance_criteria") or [],
@@ -1085,6 +1095,7 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
     wave = _wave_for_gates(plan, current_gates)
     if wave is None:
         raise ValueError("orchestrate plan has no wave for the current gates")
+    executable_gates = list(wave.get("executable_gates") or current_gates)
     task_definition = load_task_definition(task_dir, state)
     retired_failures = False
     for attempt in state.get("attempts", []):
@@ -1111,8 +1122,11 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
     rework_corrective_report_ids = _active_rework_corrective_report_ids(
         _ledger_root_for_artifact(task_dir), state,
     )
-    effective_delegations = list(wave["delegations"])
-    if current_gates == ["implementation"]:
+    effective_delegations = [
+        spec for spec in wave["delegations"]
+        if str(spec.get("gate") or "") in executable_gates
+    ]
+    if executable_gates == ["implementation"]:
         compiled = _compiled_implementation_spec(task_dir, state, wave)
         if compiled is not None:
             effective_delegations = [compiled]
@@ -1172,13 +1186,27 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             + rework_corrective_report_ids
             + _transitive_context_frontier(state, context_report_ids)
         ))
+        plan_feedback = str(_plan_approval(state).get("feedback") or "").strip()
+        if spec.get("gate") == "plan":
+            latest_intent = str(
+                task_definition.get("current_user_intent")
+                or task_definition.get("user_request")
+                or task_definition.get("objective")
+                or ""
+            ).strip()
+            latest_revision = int(task_definition.get("current_user_intent_revision") or 1)
+            authoritative = (
+                f"Authoritative latest user intent (revision {latest_revision}): {latest_intent}. "
+                "Preserve every earlier requirement unless this revision explicitly supersedes it. "
+                "Do not restore an older environment, verification route, or deployment target from the original request. "
+                "Return requirement_coverage rows for every retained requirement and recommend approve only when "
+                "material questions and uncertainties are resolved."
+            )
+            plan_feedback = "\n\n".join(item for item in (plan_feedback, authoritative) if item)
         delegated = record_delegation({
             **params,
             **spec,
-            **(
-                {"plan_feedback": _plan_approval(state).get("feedback")}
-                if spec.get("gate") == "plan" and _plan_approval(state).get("feedback") else {}
-            ),
+            **({"plan_feedback": plan_feedback} if plan_feedback else {}),
             "context_report_ids": context_report_ids,
             "task_id": state["task_id"],
             "expected_revision": observed["state"]["revision"],
@@ -1192,7 +1220,9 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             dict(delegated["spawn_request"]),
         ))
     wave["status"] = "active"
-    wave["attempt_ids"] = [item[0]["attempt_id"] for item in prepared_attempts]
+    wave["executable_gates"] = list(executable_gates)
+    prior_attempt_ids = [str(item) for item in wave.get("attempt_ids") or [] if str(item).strip()]
+    wave["attempt_ids"] = list(dict.fromkeys(prior_attempt_ids + [item[0]["attempt_id"] for item in prepared_attempts]))
     _write_orchestrate_plan(task_dir, plan)
     save_state(task_dir, task_dir / "state.sqlite", state, "orchestrate_wave", wave["wave_id"])
     spawn_requests = [
@@ -1997,6 +2027,7 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
     record, _ = _pre_recorded_report(task_dir, state, planner_attempt["attempt_id"], report_ref)
     report = sanitize_report_payload(record.get("report"))
     manifest = current_planning_manifest(task_dir)
+    tracker = current_plan_tracker(task_dir, state)
     artifact_summary = None
     work_package_details: list[dict[str, Any]] = []
     verification_summary: list[str] = []
@@ -2008,6 +2039,7 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
             # always persist an explicit immutable revision-scoped path.
             "overview_path": manifest.get("overview_artifact_path") or "planning/overview.md",
             "revision": manifest.get("revision"),
+            "tracker_ref": "sqlite:task_documents/plan_tracker_current",
             "work_packages": [
                 {
                     "id": package.get("id"), "title": package.get("title"),
@@ -2072,6 +2104,27 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
         "findings": [redact(item, 1000) for item in report.get("findings", [])][:12],
         "uncertainty": [redact(item, 1000) for item in report.get("uncertainty", [])][:12],
         "remaining_phases": list(active_gates(state)),
+        "recommendation": (manifest or {}).get("recommendation", "approve"),
+        "recommendation_rationale": redact((manifest or {}).get("recommendation_rationale", ""), 2400),
+        "requirement_coverage": list((manifest or {}).get("requirement_coverage") or [])[:100],
+        "resolved_questions": list((manifest or {}).get("resolved_questions") or [])[:32],
+        "risks": [redact(item, 1000) for item in (manifest or {}).get("risks", [])][:64],
+        "plan_tracker": (
+            {
+                "revision": tracker.get("revision"),
+                "items": [
+                    {
+                        "id": item.get("id"), "kind": item.get("kind"),
+                        "status": item.get("status"), "order": item.get("order"),
+                        "gates": list(item.get("gates") or []),
+                        "depends_on": list(item.get("depends_on") or []),
+                        "title": item.get("title"),
+                    }
+                    for item in tracker.get("items", []) if isinstance(item, dict)
+                ],
+            }
+            if isinstance(tracker, dict) else None
+        ),
         **({"planning_artifacts": artifact_summary} if artifact_summary else {}),
     }
 
@@ -3046,6 +3099,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 results=params.get("completions"),
             )
         current_wave = _wave_for_gates(plan, active_gates(state))
+        executable_gates = list(current_wave.get("executable_gates") or current_wave.get("gates", [])) if current_wave else []
         requested_wave_id = safe_id(str(params.get("wave_id", "")))
         if current_wave is None or current_wave.get("wave_id") != requested_wave_id:
             prior_wave = next((wave for wave in plan.get("waves", []) if wave.get("wave_id") == requested_wave_id), None)
@@ -3088,12 +3142,12 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         # current retry contract.
         expected_attempt_ids = set(
             item["attempt_id"] for item in state.get("attempts", [])
-            if item.get("gate") in current_wave["gates"]
+            if item.get("gate") in executable_gates
             and not item.get("invalidated")
             and item.get("status") not in TERMINAL_ATTEMPT_STATUSES
         ) if current_wave.get("partial_parallel_wave") else set(current_wave.get("attempt_ids") or [
             item["attempt_id"] for item in state.get("attempts", [])
-            if item.get("gate") in current_wave["gates"] and not item.get("invalidated")
+            if item.get("gate") in executable_gates and not item.get("invalidated")
         ])
         provided_attempt_ids = {safe_id(str(item.get("attempt_id", ""))) for item in completions if isinstance(item, dict)}
         if len(provided_attempt_ids) != len(completions):
@@ -3117,7 +3171,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             future_preview, _ = _normalize_orchestrate_waves(
                 params["future_waves"], task, plan.get("host_capabilities") or {}, str(params["project_root"])
             )
-            prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(current_wave["gates"])
+            prospective_completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", [])) | set(executable_gates)
             requested_future_gates = {gate for wave in future_preview for gate in wave["gates"]}
             _validate_pending_implementation_retained(
                 state,
@@ -3170,7 +3224,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             receipts[safe_id(str(completion["attempt_id"]))] = receipt
         _apply_next_retry_strategies(current_wave, state, completions)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "attempts_completed", attempt_ids=sorted(provided_attempt_ids))
-        if state.get("require_delegation") and not state.get("reassessment_receipts") and "close" in current_wave["gates"]:
+        if state.get("require_delegation") and not state.get("reassessment_receipts") and "close" in executable_gates:
             reassessed = reassess_pipeline({
                 **params,
                 "task_id": task_id,
@@ -3190,7 +3244,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         }
         no_progress_pauses = _active_no_progress_pauses(state)
         newly_paused_gates: list[str] = []
-        for gate in list(current_wave["gates"]):
+        for gate in list(executable_gates):
             if gate in state.get("completed_gates", []) or gate in state.get("skipped_gates", []):
                 continue
             gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
@@ -3328,9 +3382,13 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     + "; other executable gates remain active"
                 ),
             )
-        current_wave["status"] = "completed" if state.get("status") != "blocked" else "blocked"
+        original_gates = list(current_wave.get("gates", []))
+        terminal_gates = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+        all_original_terminal = all(gate in terminal_gates for gate in original_gates)
+        current_wave["status"] = "completed" if all_original_terminal else ("blocked" if state.get("status") == "blocked" else "active")
+        current_wave["executable_gates"] = list(active_gates(state))
         _write_orchestrate_plan(task_dir, plan)
-        _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=current_wave["gates"])
+        _checkpoint_orchestrate_transaction(transaction_path, transaction, "gates_recorded", gates=original_gates)
         # A coordinator may discover a bounded defect in the final close
         # report and explicitly reintroduce documentation/review/close. The
         # close gate transitions the task to completed before this replacement
@@ -3792,7 +3850,13 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
     context_handoff = _context_handoff(task_dir, state, task, plan)
     lifecycle_recovery = {
         "mode": mode,
-        "state_changed": bool(expired_attempt_ids or recovered_attempt_ids),
+        # Read-only inspection derives expired/unselectable attempts from the
+        # snapshot but never persists those observations. Only the explicit
+        # recovery mode may truthfully report a durable state transition.
+        "state_changed": (
+            bool(expired_attempt_ids or recovered_attempt_ids)
+            if mode == _INSPECT_MODE_RECOVER_LIFECYCLE else False
+        ),
         "expired_attempt_ids": expired_attempt_ids,
         "unselectable_report_attempt_ids": (
             recovered_attempt_ids
