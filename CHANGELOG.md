@@ -1,5 +1,13 @@
 # Changelog
 
+## [9.2.17] - 2026-08-21
+
+This source-tree patch makes bundled skill-read deduplication advisory and
+context-aware. Repeated full reads of an unchanged Cortex skill in one context
+are surfaced as a diagnostic without blocking the read; compaction or a new
+context epoch permits the read again. Host-internal UI skill loads remain
+outside the project-tool hook's accounting boundary.
+
 ## [9.2.16] - 2026-08-21
 
 This source-tree patch closes three recovery and contract gaps:
@@ -16,6 +24,9 @@ This source-tree patch closes three recovery and contract gaps:
 - Report reads return the complete immutable artifact through signed cursors;
   32 KiB is a transport-page bound only. Detailed plans are passed to workers
   by exact artifact ref/path/SHA-256 metadata in the briefing.
+- The duplicate-read hook now recognizes installed Cortex `SKILL.md` files,
+  which sit outside project roots, and gives a skill-specific same-context
+  advisory without blocking valid retries or compaction reloads.
 
 ## [9.2.15] - 2026-08-20
 

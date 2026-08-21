@@ -68,6 +68,9 @@ SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 SCHEMA = "cortex/v8"
 HOST_SESSION_SCHEMA = "cortex/host-sessions/v1"
 PROFILE_CONTRACT = Path(__file__).resolve().parents[1] / "profiles.json"
+# Bundled skills are outside a dispatched project root, but they are still
+# immutable plugin-owned files that can safely participate in read dedupe.
+CORTEX_SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 
 def profile_names() -> set[str]:
@@ -340,6 +343,23 @@ def _normalised_file_path(project: Path, value: object) -> tuple[Path, str] | No
     return resolved, relative.as_posix()
 
 
+def _owned_cortex_skill_path(value: object) -> tuple[Path, str] | None:
+    """Return a regular bundled ``SKILL.md`` without accepting arbitrary paths."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 4096 or "\x00" in raw:
+        return None
+    try:
+        root = CORTEX_SKILLS_ROOT.resolve(strict=True)
+        resolved = Path(raw).resolve(strict=True)
+        relative = resolved.relative_to(root)
+        info = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if relative.name != "SKILL.md" or not stat.S_ISREG(info.st_mode):
+        return None
+    return resolved, f"cortex-skill/{relative.as_posix()}"
+
+
 def _safe_range_descriptor(tool_input: dict) -> tuple[dict, bool]:
     """Keep numeric ranges useful while hashing opaque cursors and values."""
     values: dict[str, object] = {}
@@ -370,6 +390,10 @@ def tool_observation(event: dict, project: Path, task_id: str, attempt_id: str, 
     tool_input = _event_tool_input(event)
     raw_path = next((tool_input.get(key) for key in ("file_path", "path", "filename") if tool_input.get(key)), None)
     path_info = _normalised_file_path(project, raw_path)
+    resource_kind = "project_file"
+    if path_info is None:
+        path_info = _owned_cortex_skill_path(raw_path)
+        resource_kind = "cortex_skill" if path_info is not None else "external_or_unknown"
     normalised_path = path_info[1] if path_info else ""
     ranges, has_range = _safe_range_descriptor(tool_input)
     raw_query = next((tool_input.get(key) for key in ("query", "pattern", "search_query") if tool_input.get(key) is not None), None)
@@ -420,6 +444,7 @@ def tool_observation(event: dict, project: Path, task_id: str, attempt_id: str, 
         "workspace_generation": workspace_generation,
         "coverage": "full" if cacheable else "noncacheable",
         "cacheable": cacheable,
+        "resource_kind": resource_kind,
     }
 
 
@@ -495,7 +520,11 @@ def apply_tool_deduplication(
             )
             if already_read:
                 db_mark_tool_observation_duplicate(ledger, task_id, attempt_id, epoch, observation["fingerprint"])
-                return {"duplicate": True, "tool_name": observation["tool_name"]}
+                return {
+                    "duplicate": True,
+                    "tool_name": observation["tool_name"],
+                    "resource_kind": observation.get("resource_kind"),
+                }
         except (OSError, ValueError, TypeError):
             return None
     elif hook_name == "PostToolUse":
@@ -519,17 +548,23 @@ def apply_tool_deduplication(
     return None
 
 
-def duplicate_read_advisory() -> dict[str, object]:
+def duplicate_read_advisory(resource_kind: object = None) -> dict[str, object]:
     """Return a non-blocking PreToolUse hint for an already observed Read."""
+    message = (
+        "CORTEX SKILL READ ADVISORY: this exact bundled skill already loaded successfully "
+        "in this context epoch. Reuse the loaded skill; do not reload it unless the first read was truncated, "
+        "the skill changed, or a distinct unread range is required. This read remains allowed when the prior "
+        "result is unavailable or an intentional retry is necessary."
+        if resource_kind == "cortex_skill" else
+        "CORTEX TOOL DEDUPLICATION ADVISORY: an unchanged small full-file read "
+        "already succeeded in this context epoch. Reusing the prior result may "
+        "be faster, but this read remains allowed if the result is unavailable "
+        "or the caller intentionally retries it."
+    )
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "additionalContext": (
-                "CORTEX TOOL DEDUPLICATION ADVISORY: an unchanged small full-file read "
-                "already succeeded in this context epoch. Reusing the prior result may "
-                "be faster, but this read remains allowed if the result is unavailable "
-                "or the caller intentionally retries it."
-            ),
+            "additionalContext": message,
         }
     }
 
@@ -1021,7 +1056,7 @@ def main() -> None:
         append_lifecycle_event(task_dir, safe)
         dedupe = apply_tool_deduplication(event, project, ledger, task_id, state)
         if dedupe and dedupe.get("duplicate") and safe["hook"] == "PreToolUse":
-            print(json.dumps(duplicate_read_advisory(), ensure_ascii=False))
+            print(json.dumps(duplicate_read_advisory(dedupe.get("resource_kind")), ensure_ascii=False))
             return
         stop_context = stopped_worker_after_wait_context(event, state, task_ref(ledger, task_id))
         if stop_context:

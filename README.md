@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.16-7c3aed" alt="Cortex 9.2.16" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.17-7c3aed" alt="Cortex 9.2.17" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,6 +691,14 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
+### 9.2.17 skill-read deduplication advisory release
+
+This source-tree patch makes duplicate full reads of an unchanged bundled
+Cortex skill advisory and context-aware. A repeated read in the same context
+is recorded for diagnosis but remains allowed; compaction or a new context
+epoch permits a fresh read. Host-internal UI skill loads are outside the
+project-tool hook's accounting boundary.
+
 ### 9.2.16 coordinator recovery and report-contract hardening release
 
 This source-tree patch closes three recovery and contract gaps. Coordinator
@@ -778,7 +786,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.16 cachebuster and full release/live results
+exact 9.2.17 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.

@@ -4,12 +4,17 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.16 release candidate
+## 9.2.17 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.16 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.17 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
+
+The 9.2.17 patch makes duplicate full reads of an unchanged bundled Cortex
+skill advisory and context-aware: the read remains allowed, compaction or a
+new context epoch permits it again, and host-internal UI skill loads remain
+outside the project-tool hook boundary.
 
 The 9.2.16 patch additionally ensures coordinator recovery does not ask a
 reviewer to retry an impossible resolution report, preserves honest `BLOCKED`
@@ -79,7 +84,7 @@ just to fit transport limits.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.16` (the current source candidate carries a cachebuster; installed builds
+  `9.2.17` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -220,7 +225,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.16 release commit only with explicit authorization.
+- Create the Cortex 9.2.17 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or
