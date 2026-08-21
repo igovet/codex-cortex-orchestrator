@@ -21,7 +21,6 @@ import cortex as _runtime
 from cortex import (
     AGENTS,
     AWAITING_HOST_SPAWN,
-    MAX_BRIEFING_BYTES,
     MAX_REPORTS_PER_ATTEMPT,
     PUBLIC_ORCHESTRATION_SCHEMA,
     REPORT_FIELDS,
@@ -100,6 +99,7 @@ _GATE_RESULT_REQUIRED_GATES = {
 _RECORD_REPORT_COORDINATOR_TRANSPORT_FIELDS = {
     "task_ref", "dispatch_ref", "submission_id",
 }
+_PRELOADED_REPORT_DRAFT_MARKER = object()
 
 
 def _record_report_payload_type_failure() -> dict[str, Any]:
@@ -299,9 +299,6 @@ def _validate_planning_dispatch_briefings(
         _planning_preview_compiled_unit(planning)
     )
     mode = "harvest" if _runtime._is_knowledge_harvest_task(task) else "ordinary"
-    hard_key = "harvest_briefing_hard_bytes" if mode == "harvest" else "ordinary_briefing_hard_bytes"
-    hard_budget = int(_runtime.PROMPT_BUDGETS[hard_key])
-
     for wave in waves[plan_index + 1:]:
         delegations = [item for item in wave.get("delegations", []) if isinstance(item, dict)]
         for spec in delegations:
@@ -314,9 +311,11 @@ def _validate_planning_dispatch_briefings(
             )
             if gate == "implementation":
                 agent = compiled_agent
-                objective = "Execute the approved Planner microtasks in dependency order: " + "; ".join(
-                    f"{item['id']}: {item['title']}" for item in compiled_unit["microtasks"]
-                )
+                # Keep preflight byte-for-byte aligned with the real
+                # plan-backed dispatch.  The detailed work breakdown lives
+                # solely in the immutable compiled-plan artifact, not in the
+                # future worker's transport envelope.
+                objective = "Execute the approved immutable Planner plan in dependency order."
                 allowed_paths, acceptance, verification = compiled_paths, compiled_acceptance, compiled_verification
                 # The full compiled unit is persisted as an immutable
                 # artifact only after this report passes validation.  Never
@@ -342,7 +341,7 @@ def _validate_planning_dispatch_briefings(
                 "profile": agent,
                 "mode": mode,
                 "objective": redact(objective, 4000),
-                "selection_reason": redact(spec.get("selection_reason") or "Planner briefing-budget preflight.", 1000),
+                "selection_reason": redact(spec.get("selection_reason") or "Planner dispatch-reference preflight.", 1000),
                 "strategy": redact(spec.get("strategy") or "default", 1000),
                 "depends_on_phases": [redact(item, 64) for item in spec.get("context_gates", [])],
                 "user_intent": {
@@ -371,26 +370,11 @@ def _validate_planning_dispatch_briefings(
                 "intent_clarification_required": bool(task.get("intent_clarification_required")),
                 "intent_clarification_reason": redact(task.get("intent_clarification_reason", ""), 500) or None,
             }
-            try:
-                rendered = _runtime.host_spawn_prompt(agent, package)
-            except ValueError as exc:
-                raise ValueError(
-                    "planner dispatch briefing budget rejected before persistence for "
-                    f"future {gate}/{agent}: {exc}. This is a runtime briefing-template problem, not an "
-                    "instruction to remove planner evidence; preserve the complete plan and return the diagnostic "
-                    "to the coordinator."
-                ) from exc
-            byte_size = len(rendered.encode("utf-8"))
-            if byte_size > hard_budget:
-                # Defensive parity guard if the renderer's own contract ever
-                # changes: never let the review gate accept a plan that the
-                # real dispatcher would reject.
-                raise ValueError(
-                    "planner dispatch briefing budget rejected before persistence for "
-                    f"future {gate}/{agent}: {byte_size}>{hard_budget} ({hard_key}). The plan is retained as an "
-                    "immutable artifact, so return this runtime-template diagnostic to the coordinator rather than "
-                    "discarding planning evidence."
-                )
+            # Render once for schema/profile parity with the real dispatcher.
+            # Compactness is guidance, never a report-acceptance gate: a
+            # complete Planner artifact must persist and the worker reads its
+            # exact digest-bound plan reference rather than an inline copy.
+            _runtime.host_spawn_prompt(agent, package)
 
 
 def _semantic_task_revision(state: dict[str, Any]) -> int:
@@ -1074,95 +1058,194 @@ def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
     }
 
 
+def _resolve_record_report_attempt(
+    state: dict[str, Any], params: dict[str, Any],
+) -> dict[str, Any]:
+    """Authorize and bind a report to one current attempt.
+
+    The binding is deliberately reusable by the draft preflight below.  That
+    preflight takes a short, authorized snapshot under ``state_lock`` and
+    reads the private worker draft after releasing the project-wide lock.  The
+    mutation repeats this resolver after reacquiring the lock, so a changed
+    attempt, identity, or draft registration can never be committed from a
+    stale snapshot.
+    """
+    raw_attempt_id = str(params.get("attempt_id") or "").strip()
+    candidate_attempt_id = safe_id(raw_attempt_id) if raw_attempt_id else ""
+    supplied_identity = str(params.get("principal") or params.get("thread_id") or "").strip()
+    identity_candidates = []
+    if supplied_identity:
+        for item in state.get("attempts", []):
+            if item.get("invalidated") or item.get("status") not in {"running", AWAITING_HOST_SPAWN}:
+                continue
+            aliases = _attempt_identity_aliases(item)
+            if supplied_identity in aliases:
+                identity_candidates.append(item)
+    principal_correction = None
+    try:
+        authorize(state, params)
+    except ValueError as exc:
+        candidate_attempt = _attempt(state, candidate_attempt_id) if candidate_attempt_id else None
+        if not candidate_attempt and len(identity_candidates) == 1:
+            candidate_attempt = identity_candidates[0]
+            candidate_attempt_id = candidate_attempt["attempt_id"]
+        worker_aliases = set()
+        if candidate_attempt:
+            worker_aliases.update(_attempt_identity_aliases(candidate_attempt))
+        if "different principal" not in str(exc) or not supplied_identity or not identity_candidates:
+            raise
+        if candidate_attempt and supplied_identity not in worker_aliases:
+            raise
+        # A native worker may identify itself by its exact canonical profile.
+        # It can publish only for its own active attempt; all task mutations
+        # remain bound to the coordinator principal.
+        authorize(state, {
+            "principal": state.get("principal"),
+            "thread_id": state.get("thread_id"),
+            "project_root": str(select_project_root(params)),
+        })
+        principal_correction = {"requested": supplied_identity, "used": state.get("principal")}
+    current_wave = active_gates(state)
+    if not candidate_attempt_id:
+        eligible = [
+            item for item in state.get("attempts", [])
+            if item.get("gate") in current_wave
+            and item.get("status") in {"running", AWAITING_HOST_SPAWN}
+            and not item.get("invalidated")
+        ]
+        if len(identity_candidates) > 1:
+            return {
+                "recorded": False,
+                "reason": "delegation_attempt_required",
+                "candidate_attempt_ids": [item["attempt_id"] for item in identity_candidates],
+                "next_action": "retry_record_report_with_attempt_id",
+                "recoverable": True,
+                "principal_correction": principal_correction,
+                "state": state,
+            }
+        if len(identity_candidates) == 1:
+            candidate_attempt_id = identity_candidates[0]["attempt_id"]
+        elif len(eligible) == 1:
+            candidate_attempt_id = eligible[0]["attempt_id"]
+        else:
+            return {
+                "recorded": False,
+                "reason": "delegation_attempt_required",
+                "candidate_attempt_ids": [item["attempt_id"] for item in identity_candidates or eligible],
+                "next_action": "retry_record_report_with_attempt_id",
+                "recoverable": True,
+                "principal_correction": principal_correction,
+                "state": state,
+            }
+    attempt_id = safe_id(candidate_attempt_id)
+    attempt = _attempt(state, attempt_id)
+    return {
+        "attempt_id": attempt_id,
+        "attempt": attempt,
+        "host_confirmation_pending": attempt.get("status") == AWAITING_HOST_SPAWN,
+        "principal_correction": principal_correction,
+    }
+
+
+def _preload_report_draft(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Read a private report draft without retaining the project mutation lock.
+
+    Drafts can be large and are worker-authored filesystem input.  Holding the
+    project-wide state lock while reading and parsing one starves unrelated
+    task reports.  We bind the draft to an authorized attempt in a brief
+    snapshot, read it after releasing the lock, then validate that the exact
+    draft registration still exists in the final mutation transaction.
+    """
+    draft_ref = str(params.get("_draft_ref") or "").strip()
+    if not draft_ref:
+        return None
+    root = ledger_root(params)
+    with state_lock(root):
+        _, task_dir, state = load_state(str(params["task_id"]), params)
+        resolved = _resolve_record_report_attempt(state, params)
+        if resolved.get("recorded") is False:
+            return None
+        attempt = resolved["attempt"]
+        context = {
+            "task_id": state["task_id"],
+            "attempt_id": resolved["attempt_id"],
+            "profile": str(attempt.get("profile") or ""),
+            "project_root": str(select_project_root(params)),
+        }
+    envelope, metadata, document_key, draft_path = _load_report_draft_file(
+        root,
+        task_dir,
+        project_root=context["project_root"],
+        task_id=context["task_id"],
+        attempt_id=context["attempt_id"],
+        profile=context["profile"],
+        draft_ref=draft_ref,
+    )
+    return {
+        "_marker": _PRELOADED_REPORT_DRAFT_MARKER,
+        "context": context,
+        "envelope": envelope,
+        "metadata": metadata,
+        "document_key": document_key,
+        "draft_path": str(draft_path),
+    }
+
+
 def _record_report_locked(params: dict[str, Any]) -> dict[str, Any]:
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
-        raw_attempt_id = str(params.get("attempt_id") or "").strip()
-        candidate_attempt_id = safe_id(raw_attempt_id) if raw_attempt_id else ""
-        supplied_identity = str(params.get("principal") or params.get("thread_id") or "").strip()
-        identity_candidates = []
-        if supplied_identity:
-            for item in state.get("attempts", []):
-                if item.get("invalidated") or item.get("status") not in {"running", AWAITING_HOST_SPAWN}:
-                    continue
-                aliases = _attempt_identity_aliases(item)
-                if supplied_identity in aliases:
-                    identity_candidates.append(item)
-        principal_correction = None
-        try:
-            authorize(state, params)
-        except ValueError as exc:
-            candidate_attempt = _attempt(state, candidate_attempt_id) if candidate_attempt_id else None
-            if not candidate_attempt and len(identity_candidates) == 1:
-                candidate_attempt = identity_candidates[0]
-                candidate_attempt_id = candidate_attempt["attempt_id"]
-            worker_aliases = set()
-            if candidate_attempt:
-                worker_aliases.update(_attempt_identity_aliases(candidate_attempt))
-            if "different principal" not in str(exc) or not supplied_identity or not identity_candidates:
-                raise
-            if candidate_attempt and supplied_identity not in worker_aliases:
-                raise
-            # A native worker may identify itself by its exact canonical
-            # profile.  It can publish only for its own active attempt; all
-            # task mutations remain bound to the coordinator principal.
-            authorize(state, {
-                "principal": state.get("principal"),
-                "thread_id": state.get("thread_id"),
-                "project_root": str(select_project_root(params)),
-            })
-            principal_correction = {"requested": supplied_identity, "used": state.get("principal")}
-        current_wave = active_gates(state)
-        if not candidate_attempt_id:
-            eligible = [
-                item for item in state.get("attempts", [])
-                if item.get("gate") in current_wave
-                and item.get("status") in {"running", AWAITING_HOST_SPAWN}
-                and not item.get("invalidated")
-            ]
-            if len(identity_candidates) > 1:
-                return {
-                    "recorded": False,
-                    "reason": "delegation_attempt_required",
-                    "candidate_attempt_ids": [item["attempt_id"] for item in identity_candidates],
-                    "next_action": "retry_record_report_with_attempt_id",
-                    "recoverable": True,
-                    "principal_correction": principal_correction,
-                    "state": state,
-                }
-            if len(identity_candidates) == 1:
-                candidate_attempt_id = identity_candidates[0]["attempt_id"]
-            elif len(eligible) == 1:
-                candidate_attempt_id = eligible[0]["attempt_id"]
-            else:
-                return {
-                    "recorded": False,
-                    "reason": "delegation_attempt_required",
-                    "candidate_attempt_ids": [item["attempt_id"] for item in identity_candidates or eligible],
-                    "next_action": "retry_record_report_with_attempt_id",
-                    "recoverable": True,
-                    "principal_correction": principal_correction,
-                    "state": state,
-                }
-        attempt_id = safe_id(candidate_attempt_id)
-        attempt = _attempt(state, attempt_id)
-        host_confirmation_pending = attempt.get("status") == AWAITING_HOST_SPAWN
+        resolved = _resolve_record_report_attempt(state, params)
+        if resolved.get("recorded") is False:
+            return resolved
+        attempt_id = resolved["attempt_id"]
+        attempt = resolved["attempt"]
+        host_confirmation_pending = resolved["host_confirmation_pending"]
+        principal_correction = resolved["principal_correction"]
         if attempt.get("invalidated") or attempt.get("status") not in {"running", AWAITING_HOST_SPAWN}:
             raise ValueError("cannot publish a report for an invalidated or terminal attempt")
         draft_document_key = None
         draft_path = None
         supplied_draft_ref = str(params.get("_draft_ref") or "").strip()
         if supplied_draft_ref:
-            draft_envelope, _draft_metadata, draft_document_key, draft_path = _load_report_draft_file(
-                root,
-                task_dir,
-                project_root=str(select_project_root(params)),
-                task_id=state["task_id"],
-                attempt_id=attempt_id,
-                profile=str(attempt.get("profile") or ""),
-                draft_ref=supplied_draft_ref,
-            )
+            preloaded = params.get("_preloaded_report_draft")
+            expected_context = {
+                "task_id": state["task_id"],
+                "attempt_id": attempt_id,
+                "profile": str(attempt.get("profile") or ""),
+                "project_root": str(select_project_root(params)),
+            }
+            if (
+                isinstance(preloaded, dict)
+                and preloaded.get("_marker") is _PRELOADED_REPORT_DRAFT_MARKER
+                and preloaded.get("context") == expected_context
+                and isinstance(preloaded.get("envelope"), dict)
+                and isinstance(preloaded.get("metadata"), dict)
+                and isinstance(preloaded.get("document_key"), str)
+                and isinstance(preloaded.get("draft_path"), str)
+            ):
+                # The draft bytes were read before this transaction.  Its
+                # database registration must still be exact before a report
+                # can consume it; a superseding template or changed attempt
+                # therefore fails closed rather than publishing stale input.
+                draft_document_key = preloaded["document_key"]
+                persisted_metadata = db_get_task_document(root, state["task_id"], draft_document_key)
+                if persisted_metadata != preloaded["metadata"]:
+                    raise ValueError(
+                        "report draft is unavailable or superseded; call get_report_template again on this attempt"
+                    )
+                draft_envelope = preloaded["envelope"]
+                draft_path = Path(preloaded["draft_path"])
+            else:
+                draft_envelope, _draft_metadata, draft_document_key, draft_path = _load_report_draft_file(
+                    root,
+                    task_dir,
+                    project_root=expected_context["project_root"],
+                    task_id=state["task_id"],
+                    attempt_id=attempt_id,
+                    profile=expected_context["profile"],
+                    draft_ref=supplied_draft_ref,
+                )
             params = {**params, **draft_envelope}
         open_questions = _open_blocking_questions(task_dir, state, attempt_id)
         if open_questions:
@@ -1602,12 +1685,25 @@ def _restore_report_projections(result: dict[str, Any], params: dict[str, Any]) 
         return
 
 
+def _record_report(params: dict[str, Any]) -> dict[str, Any]:
+    """Preload worker-owned draft bytes before entering the atomic mutation."""
+    preloaded = params.get("_preloaded_report_draft")
+    if not (
+        isinstance(preloaded, dict)
+        and preloaded.get("_marker") is _PRELOADED_REPORT_DRAFT_MARKER
+    ):
+        preloaded = _preload_report_draft(params)
+    if preloaded is not None:
+        params = {**params, "_preloaded_report_draft": preloaded}
+    return _record_report_locked(params)
+
+
 # The public callable is now a vertical-slice facade.  Its adapters retain the
 # established mutation code while exposing explicit ports for its eventual
 # repository-level replacement; both public module paths keep the same result
 # protocol and object identity through this direct alias.
 _RECORD_REPORT_FACADE = build_compatibility_facade(
-    mutation=_record_report_locked,
+    mutation=_record_report,
     restore_projections=_restore_report_projections,
 )
 record_report = _RECORD_REPORT_FACADE.record_report
@@ -1623,10 +1719,14 @@ def list_task_reports(params: dict[str, Any]) -> dict[str, Any]:
 def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
     """Run the shared public report adapter as one atomic validation and persistence operation."""
     try:
-        unknown = sorted(set(params) - {
+        allowed = {
             "project_root", "task_id", "attempt_id", "profile", "report", "scoping", "planning",
             "gate_result", "closure", "draft_ref",
-        })
+        }
+        preloaded = params.get("_preloaded_report_draft")
+        if isinstance(preloaded, dict) and preloaded.get("_marker") is _PRELOADED_REPORT_DRAFT_MARKER:
+            allowed.add("_preloaded_report_draft")
+        unknown = sorted(set(params) - allowed)
         if unknown:
             raise _unsupported_record_report_fields_error(unknown)
         for field in ("project_root", "task_id", "attempt_id", "profile"):
@@ -1652,6 +1752,7 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
             "gate_result": params.get("gate_result"),
             "closure": params.get("closure"),
             "_draft_ref": draft_ref,
+            **({"_preloaded_report_draft": preloaded} if "_preloaded_report_draft" in allowed else {}),
             "_require_predecessor_review": True,
             "_require_knowledge_review": True,
             "_require_harvest_manifest": True,
@@ -1702,14 +1803,6 @@ def _publish_worker_report(params: dict[str, Any]) -> dict[str, Any]:
                 "report.evidence as one string item, then retry record_report on this same attempt. If another "
                 "caller-correctable validation diagnostic is returned, correct it and retry again without ending "
                 "the worker or changing the attempt."
-            )
-        elif "planner dispatch briefing budget rejected before persistence" in message:
-            code = "planner_briefing_budget_exceeded"
-            outcome = "needs_correction"
-            next_action = (
-                "Shorten the named future dispatch's planning work packages, microtask objectives, acceptance "
-                "criteria, or verification text and retry this same planner report. The rejected plan was not "
-                "persisted, did not consume the worker attempt, and did not require user reapproval."
             )
         elif "dispatch briefing" in message:
             code = "dispatch_briefing_invalid"
@@ -2052,43 +2145,70 @@ def _prepare_draft_for_record(params: dict[str, Any]) -> tuple[dict[str, Any] | 
             "attempt_id": safe_id(str(params["attempt_id"])),
             "profile": canonical_profile(params["profile"]),
         }
+        # Bind the capability under the short mutation lock, then release it
+        # before touching worker-authored draft bytes.  Slow editors, network
+        # home directories, or a large Planner draft must not make unrelated
+        # task reports wait behind this read/parse/update preflight.  The
+        # authoritative record path rechecks this exact registration under
+        # its own transaction before it consumes the draft.
         with state_lock(root):
             task_dir, state, attempt, profile = _public_worker_template_context(identity)
-            envelope, _metadata, _document_key, draft_path = _load_report_draft_file(
-                root,
-                task_dir,
-                project_root=project_root,
-                task_id=state["task_id"],
-                attempt_id=attempt["attempt_id"],
-                profile=profile,
-                draft_ref=draft_ref,
-            )
-            payload_fields = _REPORT_DRAFT_PAYLOAD_FIELDS & set(params)
-            patch = params.get("patch")
-            if patch is not None and payload_fields:
-                raise ValueError("patch must not be combined with a complete report envelope replacement")
-            if patch is not None:
-                if not isinstance(patch, dict):
-                    raise ValueError("patch must be one JSON Merge Patch object")
-                unknown_patch = sorted(set(patch) - _REPORT_DRAFT_PAYLOAD_FIELDS)
-                if unknown_patch:
-                    raise ValueError(
-                        "patch may change only report, scoping, planning, gate_result, or closure: "
-                        + ", ".join(unknown_patch)
-                    )
-                envelope = _merge_patch(envelope, patch)
-                _write_report_draft_file(draft_path, envelope)
-            elif payload_fields:
-                if "report" not in payload_fields:
-                    raise ValueError("a complete draft replacement requires report")
-                envelope = {**identity, **{field: params[field] for field in payload_fields}}
-                _write_report_draft_file(draft_path, envelope)
+            draft_context = {
+                "task_id": state["task_id"],
+                "attempt_id": attempt["attempt_id"],
+                "profile": profile,
+            }
+        envelope, metadata, document_key, draft_path = _load_report_draft_file(
+            root,
+            task_dir,
+            project_root=project_root,
+            task_id=draft_context["task_id"],
+            attempt_id=draft_context["attempt_id"],
+            profile=draft_context["profile"],
+            draft_ref=draft_ref,
+        )
+        payload_fields = _REPORT_DRAFT_PAYLOAD_FIELDS & set(params)
+        patch = params.get("patch")
+        if patch is not None and payload_fields:
+            raise ValueError("patch must not be combined with a complete report envelope replacement")
+        if patch is not None:
+            if not isinstance(patch, dict):
+                raise ValueError("patch must be one JSON Merge Patch object")
+            unknown_patch = sorted(set(patch) - _REPORT_DRAFT_PAYLOAD_FIELDS)
+            if unknown_patch:
+                raise ValueError(
+                    "patch may change only report, scoping, planning, gate_result, or closure: "
+                    + ", ".join(unknown_patch)
+                )
+            envelope = _merge_patch(envelope, patch)
+            _write_report_draft_file(draft_path, envelope)
+        elif payload_fields:
+            if "report" not in payload_fields:
+                raise ValueError("a complete draft replacement requires report")
+            envelope = {**identity, **{field: params[field] for field in payload_fields}}
+            _write_report_draft_file(draft_path, envelope)
 
-            diagnostics = _draft_shape_diagnostics(envelope)
-            diagnostics.extend(_draft_placeholder_diagnostics(envelope))
-            if diagnostics:
-                return None, _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
-            return {**identity, "draft_ref": draft_ref}, None
+        diagnostics = _draft_shape_diagnostics(envelope)
+        diagnostics.extend(_draft_placeholder_diagnostics(envelope))
+        if diagnostics:
+            return None, _draft_invalid_result(diagnostics, draft_ref=draft_ref, draft_path=draft_path)
+        return {
+            **identity,
+            "draft_ref": draft_ref,
+            "_preloaded_report_draft": {
+                "_marker": _PRELOADED_REPORT_DRAFT_MARKER,
+                "context": {
+                    "task_id": draft_context["task_id"],
+                    "attempt_id": draft_context["attempt_id"],
+                    "profile": draft_context["profile"],
+                    "project_root": project_root,
+                },
+                "envelope": envelope,
+                "metadata": metadata,
+                "document_key": document_key,
+                "draft_path": str(draft_path),
+            },
+        }, None
     except (TypeError, AttributeError):
         return None, _draft_invalid_result([{
             "code": "report_validation_failed",
@@ -2374,7 +2494,7 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("dispatch briefing must remain a regular non-symlink file")
         if stat.S_IMODE(info.st_mode) & 0o222:
             raise ValueError("dispatch briefing lost immutable read-only permissions")
-        briefing = _read_private_text(briefing_path, "dispatch briefing", max_bytes=MAX_BRIEFING_BYTES)
+        briefing = _read_private_text(briefing_path, "dispatch briefing", max_bytes=None)
         actual_digest = hashlib.sha256(briefing.encode("utf-8")).hexdigest()
         if actual_digest != briefing_digest:
             raise ValueError("immutable dispatch briefing digest changed after dispatch")

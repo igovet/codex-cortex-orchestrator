@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.17-7c3aed" alt="Cortex 9.2.17" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.18-7c3aed" alt="Cortex 9.2.18" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,6 +691,15 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
+### 9.2.18 orchestration recovery hardening release
+
+This source-tree patch removes dispatch-briefing size rejection from report
+acceptance and dispatch preparation: complete plans remain immutable artifacts
+addressed by ref/path/SHA-256, while briefings carry only compact guidance.
+It also scopes no-progress retries to the failed gate, so an unpaused sibling
+in the current parallel wave can finish. Multi-gate recovery remains
+Planner-first and releases only the explicitly named paused gate.
+
 ### 9.2.17 skill-read deduplication advisory release
 
 This source-tree patch makes duplicate full reads of an unchanged bundled
@@ -772,10 +781,14 @@ cannot call either recovery phase.
 Corrective work remains open-ended while acceptance or findings require work,
 but a repeated materially identical no-progress signature pauses autonomous
 retries for an explicit user strategy without producing a false pass. The
-pause can be released only by a Planner-first recovery whose downstream
-pipeline, strategy, or verification contract materially changes, or whose
-Planner wave names a class-matched infrastructure/environment remediation;
-free-text reason prose is retained only as audit evidence. Material steer
+pause belongs only to its failed gate: unpaused siblings in the same parallel
+wave continue, while later dependent waves do not leapfrog it. A finding from
+another gate cannot reset or alter its repeat signature. The pause can be
+released only by a Planner-first recovery whose downstream pipeline, strategy,
+or verification contract materially changes, or whose Planner wave names a
+class-matched infrastructure/environment remediation; when multiple gates are
+paused, recovery explicitly names the one gate to release. Free-text reason
+prose is retained only as audit evidence. Material steer
 classifies the earliest affected gate and invalidates downstream proof;
 worker questions are bound to task/plan revision and strategy generation.
 Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
@@ -786,7 +799,7 @@ terminal close. CI runs the 50,000-file manifest benchmark and requires
 is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
-exact 9.2.17 cachebuster and full release/live results
+exact 9.2.18 cachebuster and full release/live results
 remain pending until the release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.
@@ -886,11 +899,12 @@ unsafe, non-database, or cross-filesystem legacy state fails closed.
 Ordinary opens preserve an already-matching host-project identity without
 rewriting its metadata; an identity or rename-provenance change remains a
 durable control-plane transition.
-Briefing size is validated when the immutable briefing is saved, before native
-dispatch: the bootstrap is capped at 1.5 KiB, ordinary briefings target 16 KiB
-soft and reject above 24 KiB hard, and harvest briefings target 18 KiB soft and
-reject above 28 KiB hard. Oversize rejection leaves the current plan intact;
-it does not silently regenerate a new plan merely to fit transport limits.
+Briefings have non-blocking compactness targets: 1.5 KiB for the bootstrap,
+16 KiB for ordinary work, and 18 KiB for harvest work. They are template
+guidance, not dispatch or Planner-report validators. Full plans remain
+immutable artifacts, and plan-backed implementation briefings carry only an
+exact digest-bound reference; cursor paging handles transport without asking a
+planner to shorten evidence.
 New tasks use pipeline contract v2; active v1 tasks without that field resume
 their persisted pipeline unchanged.
 
