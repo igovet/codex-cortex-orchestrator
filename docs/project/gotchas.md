@@ -372,7 +372,11 @@ brief, context files, and at most eight validated domains.
   exact skill or file path is read at most once per turn; only explicit
   truncation/pagination, a post-read edit, or a distinct unread range permits
   another read. Reuse captured evidence for later lifecycle calls and
-  decisions.
+  decisions. When Desktop exposes a bundled Cortex `SKILL.md` load as a
+  generic `Read`, the hook recognizes that exact installed skill and returns a
+  non-blocking duplicate-read advisory in the same context epoch. The host UI
+  owns skill-load rendering and may still show distinct agent/turn loads; an
+  advisory never denies a legitimate retry or post-compaction reload.
 - A native child that stops before publishing a report or durable question is
   terminal, not follow-up-resumable. After one `manage_orchestration` inspect,
   submit exactly one failed continuation with the stopped attempt's
