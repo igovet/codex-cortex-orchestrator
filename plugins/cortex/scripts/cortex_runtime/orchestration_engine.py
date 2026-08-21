@@ -641,7 +641,26 @@ def _load_orchestrate_plan(task_dir: Path, state: dict[str, Any]) -> dict[str, A
 
 def _wave_for_gates(plan: dict[str, Any], gates: list[str]) -> dict[str, Any] | None:
     gate_set = set(gates)
-    return next((wave for wave in plan.get("waves", []) if set(wave.get("gates", [])) == gate_set), None)
+    for wave in plan.get("waves", []):
+        wave_gates = set(wave.get("gates", []))
+        if wave_gates == gate_set:
+            return wave
+        if gate_set and gate_set < wave_gates:
+            # A parallel sibling may have completed (or be independently
+            # paused for no-progress) while another gate still needs a retry.
+            # Preserve the original wave identity but dispatch only the
+            # remaining executable delegation(s); requiring exact equality
+            # here stranded valid partial parallel waves.
+            return {
+                **wave,
+                "gates": [gate for gate in wave.get("gates", []) if gate in gate_set],
+                "delegations": [
+                    delegation for delegation in wave.get("delegations", [])
+                    if delegation.get("gate") in gate_set
+                ],
+                "partial_parallel_wave": True,
+            }
+    return None
 
 
 def _predecessor_context_report_ids(
@@ -835,9 +854,11 @@ def _compiled_implementation_spec(
         **base,
         "gate": "implementation",
         "agent": agent,
-        "objective": "Execute the approved Planner microtasks in dependency order: " + "; ".join(
-            f"{item['id']}: {item['title']}" for item in ordered
-        ),
+        # The exact work breakdown is a digest-bound immutable artifact.  Do
+        # not repeat its titles (or any other plan content) in this field:
+        # ``objective`` reaches the worker briefing and would otherwise bloat
+        # the transport with a second copy of the plan.
+        "objective": "Execute the approved immutable Planner plan in dependency order.",
         "selection_reason": (
             f"Compiled from approved plan revision {revision}; selected {agent} from microtask profiles while "
             "preventing deployment-only routing from owning application-code changes."
@@ -1589,9 +1610,11 @@ def _validate_no_progress_recovery_plan(
     state: dict[str, Any],
     plan: dict[str, Any],
     future_waves: object,
+    *,
+    pause: dict[str, Any] | None = None,
 ) -> None:
     """Require a real recovery decision before releasing a paused retry loop."""
-    pause = state.get("rework_pause") if isinstance(state.get("rework_pause"), dict) else None
+    pause = pause or (state.get("rework_pause") if isinstance(state.get("rework_pause"), dict) else None)
     if not pause or pause.get("status") != "needs_user_decision":
         return
     if not isinstance(future_waves, list) or not future_waves or not _is_singleton_recovery_planner(future_waves[0]):
@@ -2231,23 +2254,40 @@ def _corrective_evidence(
     A changed workspace, verification contract, result, or strategy starts a
     fresh run; it is not treated as a no-progress loop.
     """
+    # Corrective liveness is owned by the gate being retried.  A finding from
+    # a sibling verifier is useful task evidence, but must never reset or
+    # advance this gate's circuit-breaker signature.
     finding_fingerprints = {
         str(item.get("fingerprint") or "").strip()
         for item in unresolved_rework
         if isinstance(item, dict) and str(item.get("fingerprint") or "").strip()
     }
-    for rework in (state.get("closure_rework") or {}).values():
-        if not isinstance(rework, dict) or rework.get("status") != "rework_required":
+    for source_gate, rework in (state.get("closure_rework") or {}).items():
+        if (
+            source_gate != gate
+            or not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+        ):
             continue
         finding_fingerprints.update(
             str(item).strip() for item in rework.get("finding_fingerprints") or [] if str(item).strip()
         )
     try:
-        finding_fingerprints.update(
-            str(item.get("fingerprint") or "").strip()
-            for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
-            if isinstance(item, dict) and str(item.get("fingerprint") or "").strip()
-        )
+        for item in db_list_task_findings(root, state["task_id"], include_resolved=False):
+            if not isinstance(item, dict) or not str(item.get("fingerprint") or "").strip():
+                continue
+            sources = item.get("source_evidence")
+            origin_gate = next(
+                (
+                    str(source.get("gate") or "")
+                    for source in sources
+                    if isinstance(source, dict) and source.get("transition") == "opened"
+                    and str(source.get("gate") or "")
+                ),
+                "",
+            ) if isinstance(sources, list) else ""
+            if origin_gate == gate:
+                finding_fingerprints.add(str(item["fingerprint"]).strip())
     except (OSError, ValueError):
         # A liveness safeguard must never turn an unavailable diagnostic
         # projection into a synthetic gate decision.  The remaining immutable
@@ -2320,6 +2360,42 @@ def _corrective_evidence(
     # identity calculated immediately above.
     evidence["reason_audit_digest"] = digest_text(json.dumps(raw_reasons, ensure_ascii=False, sort_keys=True))
     return evidence
+
+
+def _active_no_progress_pauses(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return the durable gate-scoped no-progress pauses, including legacy state."""
+    raw = state.get("rework_pauses")
+    pauses = {
+        str(gate): dict(pause)
+        for gate, pause in raw.items()
+        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+        and str(gate).strip()
+    } if isinstance(raw, dict) else {}
+    legacy = state.get("rework_pause")
+    if not pauses and isinstance(legacy, dict) and legacy.get("status") == "needs_user_decision":
+        gate = str(legacy.get("gate") or "").strip()
+        if gate:
+            pauses[gate] = dict(legacy)
+    return pauses
+
+
+def _store_no_progress_pauses(state: dict[str, Any], pauses: dict[str, dict[str, Any]]) -> None:
+    """Persist gate-scoped pauses with a read-compatible singular projection."""
+    active = {
+        str(gate): dict(pause)
+        for gate, pause in pauses.items()
+        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+    }
+    if active:
+        state["rework_pauses"] = active
+    else:
+        state.pop("rework_pauses", None)
+    # Existing control stores and diagnostics expect the one-pause shape. Do
+    # not publish an ambiguous alias when several independent gates are held.
+    if len(active) == 1:
+        state["rework_pause"] = next(iter(active.values()))
+    else:
+        state.pop("rework_pause", None)
 
 
 def _record_corrective_progress(
@@ -3005,7 +3081,17 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 spawn_requests=prepared["spawn_requests"],
                 plan=plan,
             )
-        expected_attempt_ids = set(current_wave.get("attempt_ids") or [
+        # A partial parallel retry deliberately retains the source wave's
+        # identity, whose historical ``attempt_ids`` include siblings that
+        # already completed. Derive the expected live slots from durable
+        # attempts in that case instead of treating those stale ids as the
+        # current retry contract.
+        expected_attempt_ids = set(
+            item["attempt_id"] for item in state.get("attempts", [])
+            if item.get("gate") in current_wave["gates"]
+            and not item.get("invalidated")
+            and item.get("status") not in TERMINAL_ATTEMPT_STATUSES
+        ) if current_wave.get("partial_parallel_wave") else set(current_wave.get("attempt_ids") or [
             item["attempt_id"] for item in state.get("attempts", [])
             if item.get("gate") in current_wave["gates"] and not item.get("invalidated")
         ])
@@ -3102,7 +3188,8 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             for item in completions
             if isinstance(item, dict)
         }
-        no_progress_pause: dict[str, Any] | None = None
+        no_progress_pauses = _active_no_progress_pauses(state)
+        newly_paused_gates: list[str] = []
         for gate in list(current_wave["gates"]):
             if gate in state.get("completed_gates", []) or gate in state.get("skipped_gates", []):
                 continue
@@ -3208,27 +3295,38 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     "rework_progress",
                     f"{gate}: recorded corrective evidence for outcome {outcome}",
                 )
-                if pause is not None and no_progress_pause is None:
-                    no_progress_pause = pause
+                if pause is not None:
+                    no_progress_pauses[gate] = pause
+                    newly_paused_gates.append(gate)
         state, semantic_rework = _apply_pending_revision_impact(params, task_dir, state, plan)
-        if no_progress_pause is not None and not semantic_rework:
-            # Retain the failed gate exactly as recorded.  Blocking here only
-            # stops automatic dispatch; it deliberately does not claim that
-            # the product failed or that the findings were resolved.
-            state["status"] = "blocked"
-            state["rework_pause"] = no_progress_pause
-            state["blocked_reason"] = (
-                "automatic corrective dispatch paused after "
-                f"{no_progress_pause['consecutive_identical_iterations']} materially identical "
-                f"{no_progress_pause['failure_class']} failures at gate {no_progress_pause['gate']}; "
-                + str(no_progress_pause["required_recovery"])
-            )
+        if newly_paused_gates and not semantic_rework:
+            # Retain every failed gate exactly as recorded, but do not turn a
+            # local retry circuit breaker into a task-wide stop.  `active_gates`
+            # excludes only these paused gates, so siblings and independent
+            # later waves remain executable.  The task blocks only once no
+            # unpaused gate remains anywhere in the current pipeline.
+            _store_no_progress_pauses(state, no_progress_pauses)
+            if not active_gates(state):
+                state["status"] = "blocked"
+                paused_gates = sorted(no_progress_pauses)
+                state["blocked_reason"] = (
+                    "automatic corrective dispatch paused all remaining executable gates: "
+                    + ", ".join(paused_gates)
+                    + "; submit a Planner-first recovery for the intended paused gate"
+                )
+            else:
+                state["status"] = "active"
+                state.pop("blocked_reason", None)
+            sync_current_wave(state)
             save_state(
                 task_dir,
                 task_dir / "state.sqlite",
                 state,
                 "no_progress_pause",
-                state["blocked_reason"],
+                (
+                    "paused no-progress retries for gate(s) " + ", ".join(sorted(set(newly_paused_gates)))
+                    + "; other executable gates remain active"
+                ),
             )
         current_wave["status"] = "completed" if state.get("status") != "blocked" else "blocked"
         _write_orchestrate_plan(task_dir, plan)
@@ -3772,8 +3870,19 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             "active task recovery is allowed only when the current wave has no live or pending worker dispatch"
         )
     closure_rework = state.get("closure_rework") if isinstance(state.get("closure_rework"), dict) else {}
-    no_progress_pause = state.get("rework_pause") if isinstance(state.get("rework_pause"), dict) else None
-    if no_progress_pause and no_progress_pause.get("status") == "needs_user_decision" and params.get("future_waves") is None:
+    no_progress_pauses = _active_no_progress_pauses(state)
+    requested_rework_gate = str(params.get("rework_gate") or "").strip()
+    if requested_rework_gate and requested_rework_gate not in no_progress_pauses:
+        raise ValueError("resume rework gate is not a currently paused no-progress gate")
+    if len(no_progress_pauses) > 1 and not requested_rework_gate:
+        raise ValueError(
+            "multiple no-progress gates are paused; resume must name the intended rework gate"
+        )
+    no_progress_pause = (
+        no_progress_pauses.get(requested_rework_gate)
+        if requested_rework_gate else next(iter(no_progress_pauses.values()), None)
+    )
+    if no_progress_pause and params.get("future_waves") is None:
         raise ValueError(
             "automatic corrective dispatch is paused after materially identical failures; resume requires an explicit "
             "Planner-first recovery plan with a different strategy or environment remediation"
@@ -3815,7 +3924,9 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             plan.get("host_capabilities") or {},
             str(params["project_root"]),
         )
-        _validate_no_progress_recovery_plan(state, plan, normalized_recovery)
+        _validate_no_progress_recovery_plan(
+            state, plan, normalized_recovery, pause=no_progress_pause,
+        )
     if params.get("future_waves") is not None:
         state, plan = _replace_future_orchestrate_waves(
             params, task_dir, state, plan, params["future_waves"]
@@ -3828,7 +3939,8 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             resumed_pause = {**no_progress_pause, "resumed_at": now(), "resume_reason": redact(params.get("reason") or "", 1000)}
             state.setdefault("rework_pause_history", []).append(resumed_pause)
             state["rework_pause_history"] = state["rework_pause_history"][-32:]
-            state.pop("rework_pause", None)
+            no_progress_pauses.pop(str(no_progress_pause.get("gate") or requested_rework_gate), None)
+            _store_no_progress_pauses(state, no_progress_pauses)
         save_state(
             task_dir,
             task_dir / "state.sqlite",

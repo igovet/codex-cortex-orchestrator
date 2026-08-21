@@ -26,7 +26,7 @@ bind_symbols(
         "AWAITING_HOST_SPAWN",
         "DOCUMENTATION_EVIDENCE_KINDS",
         "PROFILES",
-        "PROMPT_BUDGETS",
+        "PROMPT_COMPACTION_GUIDANCE",
         "QUESTION_SCHEMA",
         "REWORK_EFFORT_BY_PRIOR_FAILURES",
         "REWORK_TERRA_AFTER_FAILURES",
@@ -372,7 +372,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         resolved_user_decisions_digest = digest_text(json.dumps(
             all_resolved_user_decisions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ))
-        # Keep the immutable briefing below its hard transport ceiling. Every
+        # Keep the immutable briefing compact by reference. Every
         # predecessor report carries the complete task-wide list; this compact
         # projection covers recent decisions even when a replacement attempt
         # starts before its predecessor managed to publish a report.
@@ -560,17 +560,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         ) or None
         full_briefing = host_spawn_prompt(agent, package)
         briefing_bytes = len(full_briefing.encode("utf-8"))
-        prompt_budget_key = (
-            "harvest_briefing_hard_bytes" if package["mode"] == "harvest"
-            else "ordinary_briefing_hard_bytes"
-        )
-        prompt_budget = int(PROMPT_BUDGETS[prompt_budget_key])
-        if briefing_bytes > prompt_budget:
-            raise ValueError(
-                f"dispatch briefing exceeds {prompt_budget_key}: {briefing_bytes}>{prompt_budget}"
-            )
         package["briefing_bytes"] = briefing_bytes
-        package["briefing_hard_budget_bytes"] = prompt_budget
+        package["briefing_compaction_target_bytes"] = int(PROMPT_COMPACTION_GUIDANCE[
+            "harvest_briefing_target_bytes" if package["mode"] == "harvest"
+            else "ordinary_briefing_target_bytes"
+        ])
         spawn_requested_at = now()
         spawn_lease_expires_at = (
             datetime.now(timezone.utc) + timedelta(minutes=10)

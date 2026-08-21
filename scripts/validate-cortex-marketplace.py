@@ -111,8 +111,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.17":
-        fail("plugin manifest must identify cortex at release version 9.2.17")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.18":
+        fail("plugin manifest must identify cortex at release version 9.2.18")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -231,15 +231,13 @@ def main() -> int:
         "effort_by_prior_failures": {"1": "high", "2": "xhigh", "3+": "max"},
     }:
         fail("shared worker contract must define unbounded rework with model/effort escalation")
-    prompt_budgets = shared.get("prompt_budgets")
-    if prompt_budgets != {
-        "bootstrap_hard_bytes": 1500,
-        "ordinary_briefing_soft_bytes": 16384,
-        "ordinary_briefing_hard_bytes": 24576,
-        "harvest_briefing_soft_bytes": 18432,
-        "harvest_briefing_hard_bytes": 28672,
+    prompt_compaction_guidance = shared.get("prompt_compaction_guidance")
+    if prompt_compaction_guidance != {
+        "bootstrap_target_bytes": 1500,
+        "ordinary_briefing_target_bytes": 16384,
+        "harvest_briefing_target_bytes": 18432,
     }:
-        fail("shared worker contract must define the canonical prompt budgets")
+        fail("shared worker contract must define the canonical prompt compaction guidance")
     mode_overlays = profile_contract.get("mode_overlays")
     expected_harvest_profiles = {
         "planner", "explorer", "architect", "technical_writer", "code_reviewer", "build_verification",

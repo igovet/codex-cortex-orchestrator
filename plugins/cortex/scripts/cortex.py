@@ -267,7 +267,7 @@ MODE_OVERLAYS = PROFILE_CONTRACT.get("mode_overlays", {})
 SHARED_WORKER_CONTRACT = PROFILE_CONTRACT.get("shared_worker_contract", {})
 CODEBASE_MEMORY_REFRESH_PROFILES = set(SHARED_WORKER_CONTRACT.get("codebase_memory_refresh_profiles", []))
 RETRY_POLICY = SHARED_WORKER_CONTRACT.get("retry_policy", {})
-PROMPT_BUDGETS = SHARED_WORKER_CONTRACT.get("prompt_budgets", {})
+PROMPT_COMPACTION_GUIDANCE = SHARED_WORKER_CONTRACT.get("prompt_compaction_guidance", {})
 if (
     SHARED_WORKER_CONTRACT.get("repository_intelligence")
     != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
@@ -297,12 +297,10 @@ if (
         "planner", "explorer", "architect", "technical_writer", "code_reviewer", "build_verification"
     }
     or not all(isinstance(value, str) and value.strip() for value in MODE_OVERLAYS["harvest"].values())
-    or PROMPT_BUDGETS != {
-        "bootstrap_hard_bytes": 1500,
-        "ordinary_briefing_soft_bytes": 16384,
-        "ordinary_briefing_hard_bytes": 24576,
-        "harvest_briefing_soft_bytes": 18432,
-        "harvest_briefing_hard_bytes": 28672,
+    or PROMPT_COMPACTION_GUIDANCE != {
+        "bootstrap_target_bytes": 1500,
+        "ordinary_briefing_target_bytes": 16 * 1024,
+        "harvest_briefing_target_bytes": 18 * 1024,
     }
 ):
     raise RuntimeError("bundled Cortex shared worker contract is invalid")
@@ -2571,11 +2569,9 @@ def write_text_immutable(path: Path, text: str) -> str:
     transaction step failed; different content for the same path fails closed.
     """
     payload = text.encode("utf-8")
-    if len(payload) > MAX_BRIEFING_BYTES:
-        raise ValueError("dispatch briefing is oversized")
     path = _reject_symlink_ancestry(path, "dispatch briefing", allow_missing_leaf=True)
     if path.exists():
-        existing = _read_private_text(path, "dispatch briefing", max_bytes=MAX_BRIEFING_BYTES)
+        existing = _read_private_text(path, "dispatch briefing", max_bytes=None)
         if existing != text:
             raise ValueError("immutable dispatch briefing already exists with different content")
     else:
@@ -4241,9 +4237,16 @@ def _resolved_user_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict
     return decisions
 
 
-def _read_private_text(path: Path, label: str, *, max_bytes: int) -> str:
-    """Read one bounded private regular UTF-8 file without following links."""
-    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+def _read_private_text(path: Path, label: str, *, max_bytes: int | None) -> str:
+    """Read one private regular UTF-8 file without following links.
+
+    ``None`` is reserved for immutable dispatch briefings. Their public
+    transport is cursor-paged, so they must not acquire a second hidden
+    persistence/read quota after they have been accepted for dispatch.
+    """
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
+    ):
         raise ValueError(f"{label} size limit is invalid")
     path = _reject_symlink_ancestry(path, label)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -4252,7 +4255,7 @@ def _read_private_text(path: Path, label: str, *, max_bytes: int) -> str:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise ValueError(f"{label} must be a regular file")
-        if info.st_size > max_bytes:
+        if max_bytes is not None and info.st_size > max_bytes:
             raise ValueError(f"{label} is oversized")
         chunks: list[bytes] = []
         size = 0
@@ -4261,7 +4264,7 @@ def _read_private_text(path: Path, label: str, *, max_bytes: int) -> str:
             if not chunk:
                 break
             size += len(chunk)
-            if size > max_bytes:
+            if max_bytes is not None and size > max_bytes:
                 raise ValueError(f"{label} is oversized")
             chunks.append(chunk)
         return b"".join(chunks).decode("utf-8")
@@ -4849,7 +4852,7 @@ def _validate_dispatch_briefing_review(
         raise ValueError("dispatch briefing must remain a regular non-symlink file")
     if stat.S_IMODE(info.st_mode) & 0o222:
         raise ValueError("dispatch briefing lost immutable read-only permissions")
-    content = _read_private_text(briefing_path, "dispatch briefing", max_bytes=MAX_BRIEFING_BYTES)
+    content = _read_private_text(briefing_path, "dispatch briefing", max_bytes=None)
     actual_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     if actual_digest != expected_digest:
         raise ValueError("immutable dispatch briefing digest changed after dispatch")
@@ -5223,13 +5226,36 @@ def next_gate(state: dict[str, Any]) -> str | None:
 
 
 def active_gates(state: dict[str, Any]) -> list[str]:
-    """Return the unfinished gates in the first executable parallel wave."""
+    """Return the unfinished, unpaused gates in the first executable wave.
+
+    A no-progress pause belongs to one corrective gate, not to the task.  A
+    sibling in the same parallel wave (and later independent waves) must keep
+    running while that gate awaits a Planner-backed recovery decision.  The
+    legacy singular ``rework_pause`` remains readable for ledgers written
+    before gate-scoped pauses were introduced.
+    """
     done = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+    pauses = state.get("rework_pauses")
+    paused = {
+        str(gate)
+        for gate, pause in pauses.items()
+        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+    } if isinstance(pauses, dict) else set()
+    legacy_pause = state.get("rework_pause")
+    if not paused and isinstance(legacy_pause, dict) and legacy_pause.get("status") == "needs_user_decision":
+        gate = str(legacy_pause.get("gate") or "").strip()
+        if gate:
+            paused.add(gate)
     groups = state.get("parallel_groups") or [[gate] for gate in state["current_pipeline"]]
     for group in groups:
-        pending = [gate for gate in group if gate not in done]
-        if pending:
-            return pending
+        unfinished = [gate for gate in group if gate not in done]
+        if not unfinished:
+            continue
+        pending = [gate for gate in unfinished if gate not in paused]
+        # Waves are sequential dependency boundaries. A paused gate may not
+        # let a later wave leapfrog it, but its unpaused siblings are still
+        # independently executable in this wave.
+        return pending
     return []
 
 
@@ -7673,7 +7699,7 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
     allowed_top_level = {
         "operation", "submission_id", "project_root", "principal", "thread_id",
         "task", "task_id", "wave_id", "waves", "host_capabilities", "completions", "payload",
-        "gate_outcomes", "future_waves", "allow_rework", "reason",
+        "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate",
     }
     for key in sorted(set(params) - allowed_top_level):
         diagnostics.append(_request_diagnostic(key, "unsupported orchestrate parameter", "a documented orchestrate parameter"))
@@ -11122,6 +11148,11 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     project_root=select_project_root(params),
                 )
                 recovery["allow_rework"] = True
+                if raw_recovery.get("rework") is not None:
+                    requested_rework = canonical_pipeline_gate(str(raw_recovery["rework"]).strip())
+                    if requested_rework not in AVAILABLE_GATES:
+                        raise ValueError("resume recovery rework must name a supported gate")
+                    recovery["rework_gate"] = requested_rework
             old = orchestrate({
                 **common,
                 "operation": intent,

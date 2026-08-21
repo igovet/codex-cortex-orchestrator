@@ -514,12 +514,17 @@ in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
 A materially identical no-progress signature pauses autonomous correction only
-after the configured repeat limit. Recovery must begin with one singleton
-Planner wave and materially change the failed pipeline, strategy, or
-verification contract. An infrastructure/environment pause may instead name a
-class-matched remediation in the Planner wave. A partial baseline or current
-manifest is diagnostic evidence only and cannot authorize read-only mutation
-reconciliation, a handoff, or terminal close.
+after the configured repeat limit, and only for the failed gate. Unpaused
+siblings in that same ordered parallel wave remain executable; a later wave
+cannot leapfrog the paused dependency. Findings and corrective routes from a
+different gate do not alter the failed gate's signature. Recovery must begin
+with one singleton Planner wave and materially change the failed pipeline,
+strategy, or verification contract. An infrastructure/environment pause may
+instead name a class-matched remediation in the Planner wave. If multiple
+gates are paused, `manage_orchestration(intent="resume")` names the intended
+gate with `payload.rework`; it releases no other paused gate. A partial
+baseline or current manifest is diagnostic evidence only and cannot authorize
+read-only mutation reconciliation, a handoff, or terminal close.
 
 The question intent accepts only the worker's exact `question_ref` on the
 normal path and resolves all durable identity internally. It returns a

@@ -349,13 +349,14 @@ brief, context files, and at most eight validated domains.
   Host spawn prompts use one JSON-serialized, explicitly untrusted assignment
   envelope; do not interpolate task-controlled values as Markdown or protocol
   headings. `start_orchestration.next_action` is serialized before dispatch
-  payloads. Representative prompt budgets are 1,500 bytes for the compact
-  native bootstrap, 16/24 KiB for ordinary briefings, and 18/28 KiB for
-  harvest briefings (soft/hard). Ordinary uses the top of the recommended
-  14–16 KiB soft and 20–24 KiB hard ranges; the harvest overlay uses the
-  expanded 16–18 KiB soft and 24–28 KiB hard ranges. The validator also
-  rejects long duplicate prompt paragraphs and tests adversarial assignment
-  data. A worker is not sent until native
+  payloads. Prompt compactness targets are 1,500 bytes for the compact native
+  bootstrap, 16 KiB for ordinary briefings, and 18 KiB for harvest briefings.
+  They guide template design only: a dispatch or Planner report is never
+  rejected for crossing a prompt-size threshold. Full Planner content remains
+  in immutable artifacts, while the implementation briefing carries only an
+  exact digest-bound reference. The validator also rejects long duplicate
+  prompt paragraphs and tests adversarial assignment data. A worker is not
+  sent until native
   `spawn_agent` returns a child id; empty dispatch announcements or waits are
   forbidden, and a synchronous `PreToolUse` hook denies a targetless wait
   before it can block. Native failure is a blocker. The native
@@ -745,10 +746,16 @@ and v8 ledger. They are not caller-facing request envelopes.
 - The no-progress circuit breaker groups materially identical outcomes from
   canonical findings, manifest/result digests, verification, strategy, and
   failure class; free-text `reason` prose is retained only through an audit
-  digest. After the repeat limit, recovery must begin with one Planner wave and
+  digest. It is gate-local: another gate's finding cannot change the
+  signature, and an unpaused sibling in the current parallel wave continues.
+  Later waves remain dependency-ordered and cannot leapfrog a paused gate.
+  After the repeat limit, recovery must begin with one Planner wave and
   materially change pipeline, strategy, or verification, unless that Planner
-  wave names a class-matched infrastructure/environment remediation.
-- Recovery is bounded. Invalid gate proof is recorded as a recovery event, and
-  repeated failures for the same gate/mode eventually block the task with an
-  explicit handoff/resume action. Use the same submission id only for an
-  identical replay; use a new id for a corrected payload.
+  wave names a class-matched infrastructure/environment remediation. When
+  several gates are paused, resume names its exact target with
+  `payload.rework` and leaves the others paused.
+- Recovery is bounded per gate. Invalid gate proof is recorded as a recovery
+  event, and repeated failures pause that gate; the task becomes blocked only
+  when the current ordered wave has no other executable gate. Use the same
+  submission id only for an identical replay; use a new id for a corrected
+  payload.
