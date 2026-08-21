@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.22-7c3aed" alt="Cortex 9.2.22" />
+        <img src="https://img.shields.io/badge/Cortex-9.2.23-7c3aed" alt="Cortex 9.2.23" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
@@ -691,13 +691,15 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.22 start-contract clarification
+### 9.2.23 inaccessible-worker recovery
 
-The public start-task contract now explicitly distinguishes the required
-`task.verification` array of concrete authoritative checks from a mode setting:
-`verification_mode` is not a supported task field. Cortex continues to reject
-unknown task fields before reserving or creating a task; coordinators correct
-the payload and retry rather than attempting task recovery.
+When a host loses an exact native worker identity without delivering its
+`SubagentStop` event, a host-proven identity-unavailable response from a
+targeted wait now moves only that persisted child through the existing
+reportless-stop recovery path. Timeouts, transport and generic failures,
+ambiguous multi-target failures, and errors for any other identity leave the
+worker active and never authorize a replacement. The host response itself is
+not stored in task state or shown in coordinator context.
 
 ### 9.2.21 prompt-contract and dispatch-authority release
 
@@ -853,7 +855,7 @@ is completion-pending rather than live: Cortex requires an explicit
 receipt-attested report selection, refuses stale Planner revisions, and falls
 back to a fresh Planner-first recovery when none can be safely consumed. The
 historical 9.2.18 cachebuster and release/live result slots belong to that
-prior candidate. Current 9.2.22 release evidence remains pending until the
+prior candidate. Current 9.2.23 release evidence remains pending until the
 release commit is validated. The
 repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
 for runtime, release workflow, scripts, tests, and documentation changes.

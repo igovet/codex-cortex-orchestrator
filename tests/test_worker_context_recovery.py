@@ -47,6 +47,52 @@ class WorkerContextRecoveryTests(unittest.TestCase):
         )
         self.assertIn("exact worker attempt identity is unavailable", context)
 
+    def test_unavailable_wait_requires_explicit_single_target_host_proof(self):
+        state = {
+            "attempts": [{
+                "status": "running",
+                "host_spawn": {"agent_id": "native-worker-1"},
+            }]
+        }
+        base = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "wait",
+            "tool_input": {"receiver_thread_ids": ["native-worker-1"]},
+        }
+        proven = cortex_hook.unavailable_wait_target_ids(
+            {**base, "tool_response": {"is_error": True, "error": {"code": "agent_not_found"}}},
+            state,
+        )
+        self.assertEqual(proven, ["native-worker-1"])
+
+        # A transient/generic failure and an unscoped multi-target result do
+        # not prove that this exact child ended, so both remain non-terminal.
+        self.assertEqual(
+            cortex_hook.unavailable_wait_target_ids(
+                {**base, "tool_response": {"is_error": True, "error": {"code": "transport_error"}}},
+                state,
+            ),
+            [],
+        )
+        self.assertEqual(
+            cortex_hook.unavailable_wait_target_ids(
+                {**base, "tool_response": {"is_error": True, "error": "agent temporarily unavailable"}},
+                state,
+            ),
+            [],
+        )
+        self.assertEqual(
+            cortex_hook.unavailable_wait_target_ids(
+                {
+                    **base,
+                    "tool_input": {"receiver_thread_ids": ["native-worker-1", "native-worker-2"]},
+                    "tool_response": {"is_error": True, "error": {"code": "agent_not_found"}},
+                },
+                state,
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

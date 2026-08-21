@@ -73,6 +73,15 @@ submit the exact failed result, and explicitly forbids a corrective
 retry. Corrective dispatch remains unbounded while acceptance or findings
 require work; Cortex raises effort through `high`, `xhigh`, and `max`, and
 selects Terra for eligible ordinary work after two prior failures.
+If compaction loses the native `SubagentStop`, a failed targeted wait can still
+prove that one exact persisted child no longer exists. The hook accepts only a
+host identity-unavailable result for a single explicit target (or a
+multi-target result that names the affected target), then applies the same
+terminal reportless-stop transition and recovery instruction. Generic tool
+errors, timeouts, transport failures, ambiguous multi-target errors, and
+unrelated target ids remain non-terminal: Cortex keeps the worker running and
+does not authorize a replacement. The raw host response is neither persisted
+in lifecycle telemetry nor injected into coordinator context.
 If more than one active task shares a host session, Cortex removes the session's
 lookup entry until only one active task remains; the hook never guesses which
 task should receive recovery context. Completing one of the ambiguous tasks
@@ -107,8 +116,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
   tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_subagent_stop_is_terminal_and_non_resumable \
   tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry \
   tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_mixed_wave_reportless_stop_keeps_failed_slot_addressable \
-  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_repeated_reportless_stops_remain_unbounded_and_raise_effort \
+  tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_repeated_identical_reportless_stops_pause_for_user_recovery \
   tests.test_cortex_control.ControlPlaneTests.test_post_wait_stop_context_directs_terminal_failure \
+  tests.test_cortex_control.ControlPlaneTests.test_post_wait_unavailable_exact_child_becomes_terminal_recovery \
   tests.test_cortex_invariants.OrchestrationInvariantTests.test_agent_hook_rejects_empty_wait_as_unspawned_dispatch
 ```
 

@@ -29,7 +29,11 @@ relative step as the authoritative recovery snapshot. Reconcile
 those exact still-unstarted requests. Treat `active_workers[].host_agent_id` as
 the exact persisted native wait targets; never respawn them. A host wait-any
 form may omit explicit targets only while one of those bound workers is
-running. Treat `stopped_workers` as non-waitable: consume their persisted
+running. If an exact targeted wait receives a host identity-unavailable proof,
+the `PostToolUse` hook retires only that child as a terminal reportless stop;
+inspect it once, then use its exact failed continuation. A timeout, transport
+failure, generic error, or ambiguous multi-target error does not prove a child
+ended and never authorizes a replacement. Treat `stopped_workers` as non-waitable: consume their persisted
 report refs, surface durable question refs, or submit their exact failed result
 to `continue_orchestration` with its `worker` slot, `status`, `reason`, and
 the matching stopped-worker `dispatch_ref` so Cortex applies rework to that

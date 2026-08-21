@@ -97,6 +97,23 @@ CORTEX_START_TOOLS = {"mcp__cortex__start_orchestration", "mcp__cortex__manage_o
 CORTEX_REPORT_TOOL = "mcp__cortex__read_worker_report"
 READ_ONLY_FILE_TOOLS = {"Read", "Grep", "Glob"}
 CACHEABLE_FILE_READ_TOOLS = {"Read"}
+WAIT_TARGET_KEYS = (
+    "receiver_thread_ids", "receiverThreadIds", "agent_ids", "agentIds",
+    "thread_ids", "threadIds", "targets", "ids",
+)
+# These are host-level, identity-specific outcomes, not generic wait failures.
+# A timeout, transport failure, or arbitrary error might leave the native child
+# live, so it must never authorize retirement of a running attempt.
+UNAVAILABLE_WAIT_ERROR_CODES = {
+    "agent_not_found", "agent_unavailable", "agent_terminated", "agent_stopped",
+    "thread_not_found", "thread_unavailable", "thread_terminated",
+    "task_not_found", "task_unavailable", "session_not_found", "session_unavailable",
+}
+UNAVAILABLE_WAIT_ERROR_TEXT = re.compile(
+    r"\b(?:agent|thread|task|session|worker|target)\b[^\n]{0,160}"
+    r"\b(?:not[ -]?found|does not exist|no longer exists|terminated|stopped)\b",
+    re.IGNORECASE,
+)
 WORKER_CONTEXT = (
     "You are an internal worker, never user-facing. Stay within delegated ownership and allowed paths; "
     "All internal worker communication, progress updates, Cortex tool arguments, reports, questions, findings, handoffs, and native final responses must be in English. "
@@ -560,6 +577,92 @@ def tool_call_failed(event: dict) -> bool:
     return False
 
 
+def _wait_target_ids(event: dict) -> list[str]:
+    """Return bounded, explicit native wait targets without inferring aliases."""
+    tool_input = _event_tool_input(event)
+    targets: list[str] = []
+    for key in WAIT_TARGET_KEYS:
+        value = tool_input.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            candidate = str(item or "").strip()
+            if candidate and len(candidate) <= 256 and candidate not in targets:
+                targets.append(candidate)
+    return targets
+
+
+def _unavailable_wait_error(event: dict) -> tuple[bool, str]:
+    """Recognize only a bounded host proof that a wait target is gone.
+
+    Hook payloads are host-controlled and may contain private diagnostics.  The
+    predicate retains no response text: it accepts an enumerated error code or
+    a narrowly scoped identity-unavailable phrase, and callers emit only the
+    stable Cortex recovery reason.
+    """
+    if not tool_call_failed(event):
+        return False, ""
+    response = event.get("tool_response")
+    try:
+        rendered = json.dumps(response, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return False, ""
+    if len(rendered.encode("utf-8")) > MAX_TOOL_RESPONSE_BYTES:
+        return False, ""
+    codes: set[str] = set()
+    queue: list[object] = [response]
+    visited = 0
+    while queue and visited < 64:
+        value = queue.pop(0)
+        visited += 1
+        if isinstance(value, dict):
+            for key in ("code", "error_code", "errorCode"):
+                candidate = str(value.get(key) or "").strip().lower().replace("-", "_")
+                if candidate:
+                    codes.add(candidate)
+            queue.extend(value.get(key) for key in ("error", "result", "structuredContent", "content") if key in value)
+        elif isinstance(value, list):
+            queue.extend(value[:8])
+        elif isinstance(value, str) and len(value.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES:
+            try:
+                queue.append(json.loads(value))
+            except (json.JSONDecodeError, TypeError):
+                pass
+    if codes.intersection(UNAVAILABLE_WAIT_ERROR_CODES):
+        return True, rendered.lower()
+    return bool(UNAVAILABLE_WAIT_ERROR_TEXT.search(rendered)), rendered.lower()
+
+
+def unavailable_wait_target_ids(event: dict, state: dict | None = None) -> list[str]:
+    """Return running child ids that a failed host wait proved unavailable.
+
+    A code that does not name a target may be used only for a single exact
+    target.  In a multi-target wait, each retired child must be named by the
+    host response; otherwise the event is deliberately non-terminal.
+    """
+    if (
+        str(event.get("hook_event_name")) != "PostToolUse"
+        or str(event.get("tool_name")) not in {"Agent", "wait"}
+    ):
+        return []
+    targets = _wait_target_ids(event)
+    unavailable, response_text = _unavailable_wait_error(event)
+    if not unavailable or not targets:
+        return []
+    if len(targets) == 1:
+        candidates = targets
+    else:
+        candidates = [target for target in targets if target.lower() in response_text]
+    running_ids = {
+        str((attempt.get("host_spawn") or {}).get("agent_id") or "").strip()
+        for attempt in (state or {}).get("attempts", [])
+        if isinstance(attempt, dict)
+        and not attempt.get("invalidated")
+        and attempt.get("status") == "running"
+    }
+    return [target for target in candidates if target in running_ids]
+
+
 def attempt_for_tool_observation(event: dict, state: dict) -> str:
     """Bind observations to an exact worker attempt, or the coordinator lane."""
     candidates = {
@@ -806,11 +909,7 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
         or tool_input.get("command")
         or ""
     ).strip().lower()
-    target_keys = (
-        "receiver_thread_ids", "receiverThreadIds", "agent_ids", "agentIds",
-        "thread_ids", "threadIds", "targets", "ids",
-    )
-    present_targets = [tool_input.get(key) for key in target_keys if key in tool_input]
+    present_targets = [tool_input.get(key) for key in WAIT_TARGET_KEYS if key in tool_input]
     # The dedicated ``wait`` host tool is inherently wait-shaped even when
     # the host sends an empty input object.  Without this branch a failed
     # spawn could fall through as an ordinary tool call and allow an
@@ -1290,6 +1389,43 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
                 # warning remains private and the next inspect call will
                 # expose any still-running inconsistency.
                 print("orchestration_hook warning: SubagentStop persistence failed", file=sys.stderr)
+        # A native child can become unreachable after compaction without a
+        # corresponding SubagentStop event.  When the host itself returns an
+        # exact, identity-specific unavailable result for a persisted wait
+        # target, use the same terminal reportless-stop transition.  Generic
+        # wait errors remain observational: they do not prove that a child is
+        # gone and must not authorize a duplicate replacement dispatch.
+        if (
+            str(event.get("hook_event_name")) == "PostToolUse"
+            and finalize_host_worker_stop_from_hook is not None
+        ):
+            for unavailable_worker_id in unavailable_wait_target_ids(event, state):
+                try:
+                    finalized = finalize_host_worker_stop_from_hook(
+                        str(project), task_id, session_id, unavailable_worker_id,
+                    )
+                except Exception:
+                    # The hook is telemetry/recovery assistance only.  Do not
+                    # surface host response text or turn a persistence failure
+                    # into an inferred child lifecycle transition.
+                    print("orchestration_hook warning: unavailable wait persistence failed", file=sys.stderr)
+                    continue
+                if finalized.get("outcome") != "native_worker_stopped_without_report":
+                    continue
+                # ``state`` is the authenticated pre-write snapshot. Update
+                # only the exact entry needed for the static post-wait
+                # recovery instruction below; durable state remains the
+                # authoritative saved transition from the finalizer.
+                for attempt in state.get("attempts", []):
+                    if not isinstance(attempt, dict):
+                        continue
+                    if str((attempt.get("host_spawn") or {}).get("agent_id") or "") != unavailable_worker_id:
+                        continue
+                    attempt["status"] = "failed"
+                    attempt["lifecycle_status"] = "needs_recovery"
+                    attempt["host_stop_outcome"] = "native_worker_stopped_without_report"
+                    attempt["host_resumable"] = False
+                    break
         safe = {
             "at": datetime.now(timezone.utc).isoformat(),
             "hook": str(event.get("hook_event_name")) if str(event.get("hook_event_name")) in HOOK_NAMES else "unknown",

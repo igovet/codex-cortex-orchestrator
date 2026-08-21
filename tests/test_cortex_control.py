@@ -639,6 +639,87 @@ class ControlPlaneTests(unittest.TestCase):
         bindings = control._host_session_bindings(self.ledger)
         self.assertEqual(bindings["tasks"][state["task_id"]], "host-recovered-session")
 
+    def test_post_wait_unavailable_exact_child_becomes_terminal_recovery(self):
+        """A proven absent native target must not pin the task for its lease."""
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "recover a native worker that the host can no longer address",
+                waves=[{"workers": [{"phase": "discover"}]}],
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        parent_session = "host-unavailable-session"
+        worker_id = "native.Unavailable:01"
+        self.assertTrue(
+            control.bind_host_session_from_hook(
+                str(self.project), started["task_ref"], parent_session,
+            )["bound"]
+        )
+        bound = control.bind_host_worker_from_hook(
+            str(self.project), state["task_id"], parent_session, "default",
+            worker_id, attempt["expected_model"],
+        )
+        self.assertTrue(bound["bound"], bound)
+
+        failed_wait = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({
+                "hook_event_name": "PostToolUse",
+                "session_id": parent_session,
+                "cwd": str(self.project),
+                "tool_name": "wait",
+                "tool_input": {"receiver_thread_ids": [worker_id]},
+                "tool_response": {"is_error": True, "error": {"code": "agent_not_found"}},
+            }),
+            text=True,
+            capture_output=True,
+            env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+            check=True,
+        )
+        hook_payload = json.loads(failed_wait.stdout)
+        context = hook_payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("CORTEX WAIT RECOVERY", context)
+        self.assertIn("status='failed'", context)
+        self.assertNotIn("agent_not_found", context)
+
+        after_wait = control.load_task_state_for_artifact(task_dir)
+        stopped = after_wait["attempts"][0]
+        self.assertEqual(stopped["status"], "failed")
+        self.assertEqual(stopped["lifecycle_status"], "needs_recovery")
+        self.assertEqual(stopped["host_stop_outcome"], "native_worker_stopped_without_report")
+        self.assertFalse(stopped["host_resumable"])
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"], inspected)
+        self.assertEqual(inspected["context_handoff"]["active_workers"], [])
+        stopped_worker = inspected["context_handoff"]["stopped_workers"][0]
+        self.assertEqual(stopped_worker["dispatch_ref"], attempt["dispatch_ref"])
+        self.assertEqual(stopped_worker["failure_reason"], "native_worker_stopped_without_report")
+
+        retried = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{
+                "status": "failed",
+                "reason": "native_worker_stopped_without_report",
+                "dispatch_ref": attempt["dispatch_ref"],
+            }],
+        })
+        self.assertTrue(retried["ok"], retried)
+        self.assertEqual(retried["outcome"], "ready_to_spawn")
+        self.assertEqual(retried["dispatches"][0]["phase"], "discover")
+
     def test_subagent_start_recovery_fails_closed_for_ambiguous_generic_workers(self):
         first = self.v3_start(
             "first pending worker for ambiguity",
@@ -11160,7 +11241,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.22")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.23")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

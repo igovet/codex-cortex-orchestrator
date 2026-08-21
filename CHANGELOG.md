@@ -1,5 +1,21 @@
 # Changelog
 
+## [9.2.23] - 2026-08-21
+
+This source-tree patch prevents a host-proven lost native worker from pinning
+the Cortex task ledger until its lease expires.
+
+- Treat only an exact targeted wait's identity-unavailable result as the
+  existing terminal reportless-stop transition, then require the normal failed
+  continuation before any corrective dispatch.
+- Keep timeouts, transport/generic failures, ambiguous multi-target results,
+  and unrelated identities non-terminal; no such result authorizes a worker
+  replacement.
+- Preserve the host diagnostic boundary: response text is neither persisted in
+  lifecycle telemetry nor injected into coordinator context.
+- Align the manifest cachebuster, source validators, and current-contract
+  documentation with 9.2.23.
+
 ## [9.2.22] - 2026-08-21
 
 This source-tree patch clarifies the public start-task contract without

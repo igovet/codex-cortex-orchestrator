@@ -163,6 +163,13 @@ paths forbidden above.
    target list only while Cortex has a bound running child; otherwise it is
    denied as an unspawned dispatch. If a native call is unavailable or fails,
    stop with that blocker; otherwise wait only for bound children.
+   A failed targeted wait is terminal only when the host explicitly proves the
+   exact persisted child is unavailable. The lifecycle hook then records the
+   same reportless-stop recovery state; inspect once and submit its exact
+   failed result before Cortex returns any replacement dispatch. Never treat a
+   timeout, transport/generic error, ambiguous multi-target error, or an error
+   for another child as proof that a worker ended, and never quote raw host
+   error text into task state or chat.
 4. Workers do not call lifecycle operations. A worker first reads only its
    exact briefing path, confirms the file is
    read-only and its SHA-256 equals `briefing_digest`, and stops on any
@@ -378,6 +385,11 @@ handoff itself is descriptive, not spawn authority. Never respawn entries in
 The documented `SubagentStart` hook binds each native child id/model to the
 exact returned dispatch identity before project work (`agent_type` is
 `default` for dynamic workers), so inspect can distinguish those states.
+When such an exact targeted wait returns a host identity-unavailable proof,
+the `PostToolUse` hook retires only that bound child as a reportless terminal
+stop. Inspect then exposes it in `stopped_workers` for one failed continuation;
+generic or ambiguous wait failures leave it active and do not authorize a
+replacement.
 If a running attempt has no child id, fail closed instead of spawning or
 waiting without a target. Do not call `start_orchestration`
 again, replay completed dispatches, or reconstruct state from a raw
