@@ -1,5 +1,19 @@
 # Changelog
 
+## [9.2.18] - 2026-08-21
+
+This source-tree patch closes report and corrective-orchestration liveness
+gaps without weakening ledger integrity.
+
+- Remove programmatic planner/dispatch briefing size rejection. Complete plans
+  remain immutable digest-bound artifacts; briefings carry compact guidance and
+  references rather than a second inline plan copy.
+- Scope no-progress evidence and pauses to the failed gate. Unpaused siblings
+  in the current parallel wave can continue, while later dependency waves do
+  not leapfrog an unresolved paused gate.
+- Require an explicit paused-gate target for multi-pause Planner-first
+  recovery, preserving every other gate's pause and provenance.
+
 ## [9.2.17] - 2026-08-21
 
 This source-tree patch makes bundled skill-read deduplication advisory and

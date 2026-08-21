@@ -5158,6 +5158,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(invalid_size["retryable"])
         self.assertFalse(invalid_size["attempt_budget_consumed"])
         self.assertIn("never justify ending the worker", invalid_size["next_action"])
+
         denied = control.read_dispatch_briefing({
             "project_root": str(self.project),
             "task_id": state["task_id"],
@@ -5198,6 +5199,17 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertEqual(missing["code"], "report_evidence_incomplete")
         self.assertIn("Dispatch briefing reviewed:", missing["diagnostics"][0]["message"])
+
+    def test_immutable_dispatch_briefing_has_no_hidden_size_rejection(self):
+        """Cursor paging, not a file quota, bounds large briefing transport."""
+        briefing_path = self.base / "large-dispatch.briefing.md"
+        content = "x" * (control.MAX_BRIEFING_BYTES + 1)
+        digest = control.write_text_immutable(briefing_path, content)
+        self.assertEqual(hashlib.sha256(content.encode("utf-8")).hexdigest(), digest)
+        self.assertEqual(
+            control._read_private_text(briefing_path, "dispatch briefing", max_bytes=None),
+            content,
+        )
 
     def test_v3_record_report_rejects_tampered_immutable_briefing(self):
         started = self.v3_start(
@@ -6820,14 +6832,14 @@ class ControlPlaneTests(unittest.TestCase):
         oversized["work_packages"][0]["microtasks"] = [
             {
                 "id": f"oversized_{index}",
-                "title": f"Oversized implementation unit {index}",
+                "title": f"Oversized implementation unit {index} " + ("t" * 4000),
                 "objective": detailed_objective,
                 "profile": "backend_dev",
                 "allowed_paths": ["src"],
-                "acceptance_criteria": ["a" * 900],
-                "verification": ["v" * 900],
+                "acceptance_criteria": [f"acceptance-{index}-" + ("a" * 900)],
+                "verification": [f"verification-{index}-" + ("v" * 900)],
             }
-            for index in range(1, 7)
+            for index in range(1, 17)
         ]
         self.assertGreater(
             len(json.dumps(oversized, ensure_ascii=False, sort_keys=True).encode("utf-8")),
@@ -6863,18 +6875,14 @@ class ControlPlaneTests(unittest.TestCase):
         )
         compiled_plan = json.loads(plan_bytes)
         self.assertEqual(len(compiled_plan["microtasks"]), len(oversized["work_packages"][0]["microtasks"]))
-        self.assertEqual(
-            [item["objective"] for item in compiled_plan["microtasks"]],
-            [item["objective"] for item in oversized["work_packages"][0]["microtasks"]],
-        )
-        self.assertEqual(
-            [item["acceptance_criteria"] for item in compiled_plan["microtasks"]],
-            [item["acceptance_criteria"] for item in oversized["work_packages"][0]["microtasks"]],
-        )
-        self.assertEqual(
-            [item["verification"] for item in compiled_plan["microtasks"]],
-            [item["verification"] for item in oversized["work_packages"][0]["microtasks"]],
-        )
+        source_microtasks = {
+            item["id"]: item for item in oversized["work_packages"][0]["microtasks"]
+        }
+        for compiled in compiled_plan["microtasks"]:
+            source = source_microtasks[compiled["id"]]
+            self.assertEqual(compiled["objective"], source["objective"])
+            self.assertEqual(compiled["acceptance_criteria"], source["acceptance_criteria"])
+            self.assertEqual(compiled["verification"], source["verification"])
 
         package = control._delegation_package(task_dir, dispatched["task_id"], implementation["attempt_id"])
         plan_ref = package["plan_unit"]
@@ -6885,12 +6893,23 @@ class ControlPlaneTests(unittest.TestCase):
 
         briefing_path = task_dir / implementation["briefing_file"]
         briefing = briefing_path.read_text(encoding="utf-8")
-        self.assertLessEqual(
-            len(briefing.encode("utf-8")), control.PROMPT_BUDGETS["ordinary_briefing_hard_bytes"],
+        # This plan would have produced a briefing above the former 24 KiB
+        # hard cap if titles, paths, criteria, and verification had been
+        # copied from the plan. Its complete artifact persists and dispatches
+        # without a planner retry; the worker receives only the exact ref.
+        self.assertGreater(
+            sum(len(item["title"]) + len(item["acceptance_criteria"][0]) + len(item["verification"][0])
+                for item in oversized["work_packages"][0]["microtasks"]),
+            24 * 1024,
         )
         self.assertIn(str(plan_path), briefing)
         self.assertIn(implementation["plan_unit_digest"], briefing)
         self.assertNotIn(detailed_objective, briefing)
+        self.assertNotIn("Oversized implementation unit", briefing)
+        assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
+        self.assertNotIn("allowed_paths", assignment)
+        self.assertNotIn("gate_acceptance_criteria", assignment)
+        self.assertNotIn("gate_verification", assignment)
         bootstrap = delegation_service.rehydrate_dispatch_spawn_request(
             task_dir, control.load_task_definition(task_dir, dispatched), implementation,
         )["message"]
@@ -10886,7 +10905,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.17")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "9.2.18")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

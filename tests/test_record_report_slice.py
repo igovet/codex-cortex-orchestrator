@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tests.cortex_test_support import HostPrivateControlStoreTestMixin
@@ -152,6 +155,129 @@ class RecordReportSliceTests(HostPrivateControlStoreTestMixin, unittest.TestCase
                 jobs = list_projection_jobs(ledger, task_id="slice-task", limit=20)
                 projection_types = {job["projection_type"] for job in jobs}
                 self.assertTrue({"report_json", "report_receipt", "report_markdown"}.issubset(projection_types))
+            finally:
+                if old_project is None:
+                    os.environ.pop("CORTEX_PROJECT_ROOT", None)
+                else:
+                    os.environ["CORTEX_PROJECT_ROOT"] = old_project
+
+    def test_slow_draft_read_does_not_hold_project_lock_for_an_independent_report(self):
+        """A worker editor must not stall report persistence for another task.
+
+        Draft bytes are intentionally read before the short authoritative
+        state-lock transaction.  The final transaction still serializes each
+        task's report index and immutable artifacts, preserving the existing
+        same-task exactly-once boundary.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "project"
+            project.mkdir()
+            old_project = os.environ.get("CORTEX_PROJECT_ROOT")
+            os.environ["CORTEX_PROJECT_ROOT"] = str(project)
+            try:
+                scope = {"project_root": str(project)}
+
+                def worker_draft(task_id: str) -> dict:
+                    owner = f"owner-{task_id}"
+                    control.activate_orchestration({
+                        **scope, "user_command": "/cortex", "principal": owner, "thread_id": owner,
+                    })
+                    classified = control.classify_task({**scope, "complexity": "C1", "requirements": [], "principal": owner})
+                    created = control.init_task({
+                        **scope, "task_id": task_id, "objective": task_id, "complexity": "C1",
+                        "classification_id": classified["classification_id"], "requirements": [],
+                        "principal": owner, "thread_id": owner,
+                    })
+                    observed = control.status({**scope, "task_id": task_id, "principal": owner})
+                    delegated = control.record_delegation({
+                        **scope, "task_id": task_id, "principal": owner, "expected_revision": created["state"]["revision"],
+                        "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer",
+                        "task_kind": "discover", "risk": "low", "objective": "inspect", "ownership": "Read-only discovery",
+                        "allowed_paths": ["."], "acceptance_criteria": ["Report findings"], "verification": ["Cite inspected paths"],
+                    })
+                    control.confirm_host_spawn({
+                        **scope, "task_id": task_id, "principal": owner, "expected_revision": delegated["state"]["revision"],
+                        "attempt_id": delegated["attempt_id"], "host_agent_id": f"{task_id}-worker",
+                        "host_task_name": delegated["spawn_request"]["task_name"], "host_model": delegated["spawn_request"]["model"],
+                    })
+                    identity = {
+                        **scope, "task_id": task_id, "attempt_id": delegated["attempt_id"], "profile": "explorer",
+                    }
+                    template = control.get_report_template(identity)
+                    self.assertTrue(template["ok"], template)
+                    draft_path = Path(template["draft_path"])
+                    envelope = json.loads(draft_path.read_text(encoding="utf-8"))
+                    envelope["report"].update({
+                        "summary": f"{task_id} report",
+                        "findings": [], "questions": [], "changed_files": [], "tests": [],
+                        "evidence": [
+                            envelope["report"]["evidence"][0],
+                            "Gate acceptance 1: PASS - Report findings observed.",
+                            "Gate verification 1: PASS - Cite inspected paths observed.",
+                        ],
+                        "uncertainty": [],
+                    })
+                    reports._write_report_draft_file(draft_path, envelope)
+                    return {**identity, "draft_ref": template["draft_ref"]}
+
+                first = worker_draft("slow-draft")
+                second = worker_draft("independent-draft")
+                slow_read_started = threading.Event()
+                permit_slow_read = threading.Event()
+                independent_done = threading.Event()
+                results: dict[str, dict] = {}
+                failures: list[tuple[str, BaseException]] = []
+                original_read = reports._read_private_report_draft
+                delayed_once = False
+                delayed_lock = threading.Lock()
+
+                def slow_read(path: Path) -> str:
+                    nonlocal delayed_once
+                    with delayed_lock:
+                        delay = not delayed_once
+                        delayed_once = True
+                    if delay:
+                        slow_read_started.set()
+                        if not permit_slow_read.wait(timeout=5):
+                            raise TimeoutError("test did not release slow draft reader")
+                    return original_read(path)
+
+                def publish(name: str, payload: dict, done: threading.Event | None = None) -> None:
+                    try:
+                        results[name] = control.publish_worker_report(payload)
+                    except BaseException as exc:  # pragma: no cover - asserted below.
+                        failures.append((name, exc))
+                    finally:
+                        if done is not None:
+                            done.set()
+
+                with mock.patch.object(reports, "_read_private_report_draft", side_effect=slow_read):
+                    slow_thread = threading.Thread(target=publish, args=("slow", first))
+                    slow_thread.start()
+                    self.assertTrue(slow_read_started.wait(timeout=2), "slow draft read did not start")
+                    independent_thread = threading.Thread(
+                        target=publish, args=("independent", second, independent_done),
+                    )
+                    independent_thread.start()
+                    self.assertTrue(
+                        independent_done.wait(timeout=2),
+                        "independent task report waited for another task's draft filesystem read",
+                    )
+                    permit_slow_read.set()
+                    slow_thread.join(timeout=5)
+                    independent_thread.join(timeout=5)
+
+                self.assertFalse(failures)
+                self.assertTrue(results["slow"]["ok"], results["slow"])
+                self.assertTrue(results["independent"]["ok"], results["independent"])
+                self.assertEqual(
+                    [item["report_id"] for item in control.list_task_reports({**scope, "task_id": "slow-draft", "principal": "owner-slow-draft"})["reports"]],
+                    ["report-0001"],
+                )
+                self.assertEqual(
+                    [item["report_id"] for item in control.list_task_reports({**scope, "task_id": "independent-draft", "principal": "owner-independent-draft"})["reports"]],
+                    ["report-0001"],
+                )
             finally:
                 if old_project is None:
                     os.environ.pop("CORTEX_PROJECT_ROOT", None)

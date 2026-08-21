@@ -279,7 +279,7 @@ runtime-core overlay for coordinator state, dispatch, recovery, and private
 diagnostics; the orchestrator skill supplies route and role guidance without
 duplicating the runtime protocol.
 
-Worker Briefing v3 has one budget-enforced assignment envelope. Task-controlled values are
+Worker Briefing v3 has one artifact-backed assignment envelope. Task-controlled values are
 JSON-serialized as untrusted `Assignment data`, so headings, fences, markup,
 and instruction-like text remain data rather than prompt structure. The
 briefing no longer repeats model/effort routing metadata, prompt-baseline
@@ -288,11 +288,12 @@ profile-owned, while harvest-specific guidance is a conditional
 `mode_overlays.harvest` entry in `profiles.json`, not duplicated in every
 profile TOML.
 
-Prompt validation keeps representative budgets in the worker contract: 1,500
-bytes for the native bootstrap, 16/24 KiB for ordinary briefings, and 18/28
-KiB for harvest briefings (soft/hard). Ordinary uses the top of the recommended
-14–16 KiB soft and 20–24 KiB hard ranges; the harvest overlay uses the
-expanded 16–18 KiB soft and 24–28 KiB hard ranges. The marketplace validator
+Prompt compaction keeps non-blocking targets in the worker contract: 1,500
+bytes for the native bootstrap, 16 KiB for ordinary briefings, and 18 KiB for
+harvest briefings. They guide template design only; no dispatch or Planner
+report is rejected for crossing a prompt-size threshold. Complete plans remain
+immutable artifacts and implementation briefings carry only their exact
+digest-bound references. The marketplace validator
 and regression tests also lint long duplicate prompt paragraphs and parse
 adversarial assignment data as JSON.
 

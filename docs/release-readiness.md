@@ -4,17 +4,23 @@ This document records the repository-side gates for a public Cortex release.
 It does not claim that a commit, tag, remote, catalog submission, or catalog
 approval exists.
 
-## 9.2.17 release candidate
+## 9.2.18 release candidate
 
 This is a source-tree hardening candidate, not a published release. Its source
-cachebuster is generated from the 9.2.17 base version. Full-suite, live-governance,
+cachebuster is generated from the 9.2.18 base version. Full-suite, live-governance,
 tracked archive, and installed-plugin results are recorded separately; no
 plugin installation or user `~/.codex` mutation is implied by this section.
 
-The 9.2.17 patch makes duplicate full reads of an unchanged bundled Cortex
-skill advisory and context-aware: the read remains allowed, compaction or a
-new context epoch permits it again, and host-internal UI skill loads remain
-outside the project-tool hook boundary.
+The 9.2.18 patch removes programmatic dispatch-briefing size rejection and
+keeps complete Planner content in digest-bound immutable artifacts. It also
+makes no-progress recovery gate-local: an unpaused current-wave sibling can
+finish, later dependency waves do not leapfrog a pause, and multi-pause
+Planner-first recovery names the exact gate to release.
+
+The retained 9.2.17 patch makes duplicate full reads of an unchanged bundled
+Cortex skill advisory and context-aware: the read remains allowed, compaction
+or a new context epoch permits it again, and host-internal UI skill loads
+remain outside the project-tool hook boundary.
 
 The 9.2.16 patch additionally ensures coordinator recovery does not ask a
 reviewer to retry an impossible resolution report, preserves honest `BLOCKED`
@@ -70,12 +76,12 @@ explicitly external `codex://threads/...` ledger-continuation task without a
 requested project mutation omits write-required implementation and QA gates;
 any explicit repository mutation preserves the standard implementation route.
 
-Worker Briefing v3 budgets are enforced when the immutable briefing is saved:
-the compact native bootstrap is capped at 1.5 KiB, ordinary briefings use a
-16 KiB soft target and 24 KiB hard ceiling, and harvest briefings use an
-18 KiB soft target and 28 KiB hard ceiling. A briefing that exceeds its hard
-ceiling is rejected before dispatch, so the planner is not silently rebuilt
-just to fit transport limits.
+Worker Briefing v3 compaction targets remain prompt guidance: the native
+bootstrap should stay compact, ordinary briefings target 16 KiB, and harvest
+briefings target 18 KiB. They are not programmatic report-acceptance or
+dispatch-rejection budgets. Complete Planner detail is retained in immutable
+digest-bound artifacts and workers receive their exact ref/path/SHA-256 rather
+than a duplicated inline plan.
 
 ## Package contract
 
@@ -84,7 +90,7 @@ just to fit transport limits.
 - Root development scripts, tests, and documentation support the package but
   are not duplicate installable agent or skill sources.
 - The plugin and MCP server versions must match the release contract
-  `9.2.17` (the current source candidate carries a cachebuster; installed builds
+  `9.2.18` (the current source candidate carries a cachebuster; installed builds
   may carry a different cachebuster).
 - Runtime selection is fail-closed: set `CORTEX_PYTHON` to one absolute
   executable path for Python 3.11+ with `tomllib`, or leave it unset to resolve
@@ -225,7 +231,7 @@ local plugin update and are not claimed.
 
 ## External release gates
 
-- Create the Cortex 9.2.17 release commit only with explicit authorization.
+- Create the Cortex 9.2.18 release commit only with explicit authorization.
 - Rerun `python3 scripts/verify-cortex-release.py --require-tracked` against the
   real committed tree; an unborn `HEAD` is a release blocker.
 - Verify any optional public manifest metadata against the current official or

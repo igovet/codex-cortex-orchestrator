@@ -2,16 +2,16 @@
 
 ## Supported versions
 
-Security fixes are prepared for the current `9.2.17` source line. The public
+Security fixes are prepared for the current `9.2.18` source line. The public
 contract is `cortex/orchestration/v5` and the durable ledger remains
 SQLite `cortex/v8`. New tasks use pipeline contract v2. Existing active tasks
 without that field are treated as v1 and resume their persisted pipeline; they
 are not silently migrated or replayed.
 
-The 9.2.17 source candidate retains the 9.2.16 stopped-report recovery
-integrity and adds advisory, context-aware duplicate skill-read diagnostics;
-host-internal UI skill loads remain outside the project-tool hook boundary.
-Its exact source cachebuster is generated from the 9.2.17 base version;
+The 9.2.18 source candidate retains stopped-report and duplicate-skill-read
+recovery integrity, removes briefing size rejection while preserving immutable
+artifact transport, and scopes no-progress pauses to their exact gate. Its
+exact source cachebuster is generated from the 9.2.18 base version;
 tracked-release and installed-plugin parity remain separate gates, and this
 source-tree note is not a publication or installation claim.
 The 9.2.16 source candidate retains stopped-report recovery integrity, private

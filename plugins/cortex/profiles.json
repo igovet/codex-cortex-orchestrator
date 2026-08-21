@@ -49,12 +49,10 @@
       "terra_after_failed_attempts": 2,
       "effort_by_prior_failures": {"1":"high","2":"xhigh","3+":"max"}
     },
-    "prompt_budgets": {
-      "bootstrap_hard_bytes": 1500,
-      "ordinary_briefing_soft_bytes": 16384,
-      "ordinary_briefing_hard_bytes": 24576,
-      "harvest_briefing_soft_bytes": 18432,
-      "harvest_briefing_hard_bytes": 28672
+    "prompt_compaction_guidance": {
+      "bootstrap_target_bytes": 1500,
+      "ordinary_briefing_target_bytes": 16384,
+      "harvest_briefing_target_bytes": 18432
     },
     "required_report_fields": [
       "summary",
