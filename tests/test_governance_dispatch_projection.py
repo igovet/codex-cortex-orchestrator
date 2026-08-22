@@ -6,12 +6,14 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins" / "cortex" / "scripts"))
 
 import cortex  # noqa: E402,F401
-from cortex_runtime import briefings, delegation_service  # noqa: E402
+from cortex_runtime import briefings, canonical_json, delegation_service  # noqa: E402
 
 
 class GovernanceDispatchProjectionTests(unittest.TestCase):
@@ -77,7 +79,11 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
                 "required_floor": "full",
                 "promotion_window_days": 90,
             },
-            "policy_snapshot_digest": "c" * 64,
+            "policy_snapshot_digest": canonical_json.digest({
+                "schema": "cortex/governance-policy/v1",
+                "required_floor": "full",
+                "promotion_window_days": 90,
+            }),
             "manifest_ref": "manifest-plan-05",
             "manifest_digest": "d" * 64,
             "current_pipeline": ["governance_activation", "plan", "implementation", "qa", "governance_close", "close"],
@@ -91,7 +97,10 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
         self.assertNotIn("SERVER-OWNED GOVERNANCE PROJECTION IS INCOMPLETE", prompt)
         assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
         self.assertEqual(assignment["governance_context"]["manifest_ref"], "manifest-plan-05")
-        self.assertEqual(assignment["governance_context"]["policy_snapshot_digest"], "c" * 64)
+        self.assertEqual(
+            assignment["governance_context"]["policy_snapshot_digest"],
+            canonical_json.digest(assignment["governance_context"]["policy_snapshot"]),
+        )
 
     def test_plan_05_missing_policy_snapshot_requires_a_durable_question(self) -> None:
         governance = self._complete_governance()
@@ -124,7 +133,11 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
             self.assertEqual(projection["effective_mode"], "full", gate)
             self.assertEqual(projection["manifest_ref"], "manifest-plan-05", gate)
             self.assertEqual(projection["manifest_digest"], "d" * 64, gate)
-            self.assertEqual(projection["policy_snapshot_digest"], "c" * 64, gate)
+            self.assertEqual(
+                projection["policy_snapshot_digest"],
+                canonical_json.digest(projection["policy_snapshot"]),
+                gate,
+            )
             self.assertEqual(projection["current_pipeline"][-2:], ["governance_close", "close"], gate)
 
     def test_dispatch_projection_is_present_for_required_modes_only(self) -> None:
@@ -134,7 +147,7 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
             "governance": {
                 "effective_mode": "light",
                 "policy_snapshot": {"required_floor": "full"},
-                "policy_snapshot_digest": "e" * 64,
+                "policy_snapshot_digest": canonical_json.digest({"required_floor": "full"}),
             },
         }
         task = {"governance": state["governance"]}
@@ -150,6 +163,17 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
             manifest_ref="manifest-minimal", manifest_digest="0" * 64,
         )
         self.assertIsNone(minimal)
+
+    def test_dispatch_projection_rejects_digest_for_different_json_scalar_types(self) -> None:
+        governance = self._complete_governance()
+        governance["policy_snapshot"]["promotion_window_days"] = "90"
+        with pytest.raises(ValueError, match="policy_snapshot_digest"):
+            delegation_service._governance_dispatch_projection(
+                {"governance": governance},
+                {"governance": governance, "current_pipeline": ["plan"]},
+                manifest_ref="manifest-plan-05",
+                manifest_digest="d" * 64,
+            )
 
 
 if __name__ == "__main__":

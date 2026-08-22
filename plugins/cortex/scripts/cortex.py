@@ -150,6 +150,7 @@ from cortex_runtime.governance import (
     manage_governance as manage_governance_service,
     resolve_governance,
 )
+from cortex_runtime import canonical_json
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback; atomic replace still applies.
@@ -1249,9 +1250,7 @@ def stable_project_id(project: Path) -> str:
         "device": int(info.st_dev),
         "inode": int(info.st_ino),
     }
-    return "p-" + hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return "p-" + canonical_json.digest(identity)
 
 
 _HOST_PROJECT_IDENTITY_KEY = "host_project_identity"
@@ -1763,7 +1762,7 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
         "at": budget["at"],
     }
     digest_payload: Any = {"entries": entries, "partial_manifest": partial_descriptor} if budget["partial"] else entries
-    encoded = json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    encoded = canonical_json.dumps(digest_payload)
     if policy is None:
         active_policy["gitignore_rules"] = discovered_rules
     active_policy["effective_ignored_roots"] = sorted(Path(*parts).as_posix() for parts in ignored_roots)
@@ -1859,14 +1858,14 @@ def manifest_snapshot_ref(manifest: dict[str, Any]) -> str:
     # ``manifest.digest`` deliberately fingerprints project entries only.  A
     # snapshot must also pin the frozen ignore policy and root, otherwise two
     # captures could have the same entries but different reconciliation scope.
-    snapshot_digest = digest_text(json.dumps({
+    snapshot_digest = digest_text(canonical_json.dumps({
         "schema": manifest.get("schema"),
         "project_root": manifest.get("project_root"),
         "policy": manifest.get("policy"),
         "entries": manifest.get("entries"),
         "entry_count": manifest.get("entry_count"),
         "manifest_digest": manifest_digest,
-    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    }))
     return f"{MANIFEST_SNAPSHOT_PREFIX}{snapshot_digest}"
 
 
@@ -2315,7 +2314,7 @@ def classify_task(params: dict[str, Any]) -> dict[str, Any]:
             "classification_id": receipt_id,
             "activation_key": key,
             "complexity": result["complexity"],
-            "requirements_digest": digest_text(json.dumps(normalized_requirements, sort_keys=True)),
+            "requirements_digest": digest_text(canonical_json.dumps(normalized_requirements)),
             # The receipt is the authoritative classification contract.  Keep
             # the bounded task requirements here so init_task need not ask the
             # coordinator to reproduce a second, byte-identical copy.
@@ -3024,6 +3023,13 @@ def sanitize_structured(value: Any) -> Any:
         return {str(key): "<REDACTED>" if SENSITIVE_KEY_RE.search(str(key)) else sanitize_structured(item) for key, item in value.items()}
     if isinstance(value, list):
         return [sanitize_structured(item) for item in value]
+    # Preserve JSON scalar types.  Governance policy snapshots are hashed
+    # before they enter init_task; stringifying numeric values here would make
+    # the persisted snapshot differ from the server-owned digest.  Unknown
+    # Python objects still get the historical string representation so this
+    # helper remains safe for incidental host metadata.
+    if value is None or isinstance(value, (bool, int)) or (isinstance(value, float) and math.isfinite(value)):
+        return value
     return redact(value, 2000)
 
 
@@ -3925,8 +3931,7 @@ def _plan_tracker_document(
 
 def planning_payload_digest(value: Any) -> str:
     """Return the stable digest used by same-attempt planning repair."""
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return "sha256:" + canonical_json.digest(value)
 
 
 def planning_rejected_draft_document(
@@ -4198,7 +4203,7 @@ def materialize_planning_payload(
                 kind="planning_revision",
                 title=f"{revision}:package:{package_id}",
                 mime_type="application/json",
-                content=json.dumps(package_record, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                content=canonical_json.dumps(package_record),
                 export_path=package_path,
             )
             next(summary for summary in summaries if summary["id"] == package_id)["artifact_ref"] = metadata["artifact_ref"]
@@ -4332,7 +4337,7 @@ def _question_payload(params: dict[str, Any]) -> tuple[str, Any, bool, dict[str,
     require_internal_english(config["options"], "worker question options")
     require_internal_english(config["recommendation"], "worker question recommendation")
     require_internal_english(config["recommended_answer"], "worker question recommended_answer")
-    digest = digest_text(json.dumps({"question": sanitized_question, "context": context, "blocking": blocking, "config": config}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    digest = digest_text(canonical_json.dumps({"question": sanitized_question, "context": context, "blocking": blocking, "config": config}))
     return sanitized_question, context, blocking, config, digest
 
 
@@ -4443,9 +4448,8 @@ def _resolved_user_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict
             "answer_option_ids": [safe_id(str(item)) for item in record.get("answer_option_ids") or []],
             "answered_at": record.get("answered_at"),
         }
-        decision["decision_digest"] = digest_text(json.dumps(
+        decision["decision_digest"] = digest_text(canonical_json.dumps(
             {key: decision[key] for key in ("source_type", "source_ref", "question_key", "question_en", "answer_en", "answer_option_ids")},
-            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ))
         decisions.append(decision)
 
@@ -4479,9 +4483,8 @@ def _resolved_user_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict
                 "answer_option_ids": [safe_id(str(item)) for item in answer.get("answer_option_ids") or []],
                 "answered_at": answer.get("answered_at") or batch.get("answered_at"),
             }
-            decision["decision_digest"] = digest_text(json.dumps(
+            decision["decision_digest"] = digest_text(canonical_json.dumps(
                 {key: decision[key] for key in ("source_type", "source_ref", "question_key", "question_en", "answer_en", "answer_option_ids")},
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             ))
             decisions.append(decision)
     decisions.sort(key=lambda item: (str(item.get("answered_at") or ""), item["source_ref"], item["question_key"]))
@@ -6163,11 +6166,11 @@ def status(params: dict[str, Any]) -> dict[str, Any]:
     root, task_dir, state = load_state(str(params["task_id"]), params)
     authorize_principal(state, params)
     task = load_task_definition(task_dir, state)
-    receipt_id = "status-" + digest_text(json.dumps({
+    receipt_id = "status-" + digest_text(canonical_json.dumps({
         "task_id": state["task_id"],
         "principal": state.get("principal", "local"),
         "revision": state["revision"],
-    }, sort_keys=True))[:24]
+    }))[:24]
     active = activation_record(root, {"thread_id": state.get("thread_id"), "principal": state.get("principal")}, state["task_id"])
     return {"task": task, "state": state, "active": bool(active), "status_receipt": receipt_id, "ledger_root": str(root)}
 
@@ -6259,11 +6262,11 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
         authorize(current_state, params)
         current_wave = active_gates(current_state)
         staged: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        status_receipt = "status-" + digest_text(json.dumps({
+        status_receipt = "status-" + digest_text(canonical_json.dumps({
             "task_id": current_state["task_id"],
             "principal": current_state.get("principal", "local"),
             "revision": current_state["revision"],
-        }, sort_keys=True))[:24]
+        }))[:24]
         observed = {
             "task": load_task_definition(task_dir, current_state),
             "state": current_state,
@@ -6889,7 +6892,7 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "attempt_result_ref": attempt_result_ref,
         "kind": kind,
         "summary": redact(summary),
-        "digest": redact(params.get("digest", ""), 256) or digest_text(json.dumps(execution, sort_keys=True) if execution else params.get("command", summary)),
+        "digest": redact(params.get("digest", ""), 256) or digest_text(canonical_json.dumps(execution) if execution else params.get("command", summary)),
         "command": redact(params.get("command", ""), 1000),
         "argv": [redact(item, 500) for item in execution.get("argv", [])],
         "cwd": execution.get("cwd"),
@@ -6907,7 +6910,7 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "independent_reviewer": bool(params.get("independent_reviewer")) if "independent_reviewer" in params else None,
         "created_at": now(),
     }
-    canonical_content = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical_content = canonical_json.dumps(evidence)
     artifact = store_immutable_artifact(
         task_dir,
         state["task_id"],
@@ -7167,7 +7170,7 @@ def _record_commit_gate_recovery(
     """Persist bounded fast-path failures so a bad adapter cannot hang a task."""
     gate = str(params.get("gate") or primary_gate(state) or "unknown")
     reason = redact(error, 1000)
-    failure_key = digest_text(json.dumps({"gate": gate, "mode": mode, "error": reason}, sort_keys=True))
+    failure_key = digest_text(canonical_json.dumps({"gate": gate, "mode": mode, "error": reason}))
     events = state.setdefault("recovery_events", [])
     previous = [
         item for item in events
@@ -11111,7 +11114,7 @@ def _v3_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]
         "task_id": str(state.get("task_id") or ""),
         "pending_basis": pending_basis,
     }
-    return "plan-approval-" + digest_text(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))[:32]
+    return "plan-approval-" + digest_text(canonical_json.dumps(seed))[:32]
 
 
 PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str, str]] = {

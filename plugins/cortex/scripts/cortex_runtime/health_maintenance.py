@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cortex_runtime import ledger_db
+from cortex_runtime import canonical_json, ledger_db
 from cortex_runtime.ledger_db import DATABASE_NAME, DATABASE_SCHEMA_VERSION
 
 try:
@@ -315,7 +315,7 @@ def _bundle_manifest(*, database: Path, governance_key: Path) -> dict[str, Any]:
 def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     _write_private_bytes(
         path,
-        (json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8"),
+        (canonical_json.dumps(manifest) + "\n").encode("utf-8"),
         "Cortex backup manifest",
     )
 

@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cortex_runtime import canonical_json
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows uses the process-local guard.
@@ -116,7 +118,7 @@ def _now() -> str:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return canonical_json.dumps(value)
 
 
 def _bounded_document_json(value: Any, *, label: str) -> str:

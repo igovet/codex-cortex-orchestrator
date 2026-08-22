@@ -159,6 +159,44 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(delegation_lists["allowed_paths"], ["plugins/cortex"])
 
+    def test_init_task_preserves_governance_snapshot_types_and_digest(self):
+        """Persisted governance must hash the exact server-owned JSON snapshot."""
+        self.activate()
+        classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
+        snapshot = {
+            "schema": "cortex/governance-policy/v1",
+            "required_floor": "full",
+            "promotion_window_days": 90,
+            "promotion_threshold_scopes": 3,
+        }
+        governance_context = {
+            "schema": "cortex/governance/v1",
+            "requested_mode": "auto",
+            "effective_mode": "full",
+            "policy_snapshot": snapshot,
+            "policy_snapshot_digest": hashlib.sha256(
+                json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        }
+        created = control.init_task({
+            "task_id": "governance-digest-types",
+            "user_request": "preserve governance digest types",
+            "complexity": "C1",
+            "classification_id": classified["classification_id"],
+            "principal": "thread-a",
+            "governance": governance_context,
+        })
+        persisted = control.db_load_task(self.ledger, created["task_id"])[0]["governance"]
+        persisted_snapshot = persisted["policy_snapshot"]
+        self.assertIs(type(persisted_snapshot["promotion_window_days"]), int)
+        self.assertIs(type(persisted_snapshot["promotion_threshold_scopes"]), int)
+        self.assertEqual(
+            persisted["policy_snapshot_digest"],
+            hashlib.sha256(
+                json.dumps(persisted_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        )
+
     def test_oversized_requirements_round_trip_before_classify_and_init_persistence(self):
         self.activate()
         requirement = " ".join(
