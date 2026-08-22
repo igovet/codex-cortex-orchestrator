@@ -746,6 +746,91 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(governance_close["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in governance_close["dispatches"]], ["governance_close"])
 
+    def test_completed_child_recovery_set_survives_compaction_before_read(self) -> None:
+        """A compacted coordinator can recover the exact data needed to continue.
+
+        This deliberately drops the in-memory ``state``/``attempt`` variables after
+        a worker has durably completed, then takes the normal inspect/recovery route.
+        The assertion is scoped to the continuation contract: identity, canonical
+        result reference, lifecycle, result digest/workspace facts, receipts, and
+        the server-owned step/results object.  It does not require exposing every
+        historical AttemptEvent to the coordinator.
+        """
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Persist one completed child and recover its continuation after compaction.",
+                "complexity": "C1",
+                "acceptance_criteria": ["The completed child remains readable after inspect recovery."],
+                "verification": ["Read the canonical result and continue from the server-owned continuation."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "implementation", "profile": "backend_dev"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        task_dir, state, attempt = self._active_attempt()
+        self.assertEqual(attempt["gate"], "implementation")
+        self._read_briefing(state, attempt)
+        self._read_predecessors(state, attempt, str(started["task_ref"]))
+        result_ref = self._complete_strict(state, attempt, "Implementation completed before coordinator compaction.")
+
+        # Simulate the coordinator's post-summary boundary by discarding the
+        # pre-compaction Python objects and asking the server for a fresh snapshot.
+        del task_dir, state, attempt
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"], inspected)
+        handoff = inspected["context_handoff"]
+        recovered = next(
+            item for item in handoff["completed_results"]
+            if item.get("attempt_result_ref") == result_ref
+        )
+        self.assertEqual(recovered["phase"], "implementation")
+        self.assertEqual(recovered["profile"], "backend_dev")
+        # The state handoff records the pre-continuation server phase.  The
+        # canonical result itself is COMPLETED; the attempt projection remains
+        # result_finalized until the coordinator consumes its continuation.
+        self.assertEqual(recovered["lifecycle_status"], "result_finalized")
+        self.assertTrue(recovered["attempt_id"])
+        self.assertTrue(recovered["dispatch_ref"])
+        # Inspect may replay the still-issued dispatch envelope, but it must
+        # replay the same identity rather than manufacture a replacement.
+        self.assertEqual(len(inspected["dispatches"]), 1)
+        self.assertEqual(inspected["dispatches"][0]["dispatch_ref"], recovered["dispatch_ref"])
+
+        read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": result_ref,
+        })
+        self.assertTrue(read["ok"], read)
+        view = read["result_view"]
+        self.assertEqual(view["attempt_result_ref"], result_ref)
+        self.assertEqual(view["lifecycle_status"], "COMPLETED")
+        self.assertEqual(view["result"]["status"], "completed")
+        self.assertEqual(view["result"]["unresolved"], [])
+        self.assertTrue(view["result"].get("workspace_observation"))
+        self.assertIn("content_digest", view)
+        receipts = attempt_protocol.attempt_receipts(
+            self.ledger, task_id=handoff["task_id"], attempt_id=recovered["attempt_id"],
+        )
+        self.assertIsNotNone(receipts["briefing_receipt"])
+
+        continuation = read.get("continuation")
+        self.assertIsInstance(continuation, dict, read)
+        assert isinstance(continuation, dict)
+        self.assertEqual(continuation["task_id"], handoff["task_id"])
+        self.assertEqual(continuation["results"], [{"attempt_result_ref": result_ref}])
+        advanced = self._continue_from_server_continuation(started, continuation)
+        self.assertEqual(advanced["outcome"], "ready_to_spawn")
+        self.assertEqual([item["phase"] for item in advanced["dispatches"]], ["documentation"])
+
     def test_default_c2_chain_materializes_dynamic_briefings_through_documentation(self) -> None:
         """Every default C2 successor keeps the exact identity/handoff contract.
 
