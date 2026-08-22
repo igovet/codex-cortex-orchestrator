@@ -130,6 +130,7 @@ from cortex_runtime.ledger_db import (
     finalize_prunes as db_finalize_prunes,
     fail_prune as db_fail_prune,
 )
+from cortex_runtime.validation import ValidationFailure
 from cortex_runtime.routing import (
     profile_can_own_gate as routing_profile_can_own_gate,
     profiles_for_gate as routing_profiles_for_gate,
@@ -149,7 +150,6 @@ from cortex_runtime.governance import (
     manage_governance as manage_governance_service,
     resolve_governance,
 )
-from cortex_runtime.validation import ValidationFailure
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback; atomic replace still applies.
@@ -7631,6 +7631,167 @@ def _request_diagnostic(path: str, message: str, expected: str | None = None) ->
     return diagnostic
 
 
+def _validation_next_action(
+    operation: str,
+    diagnostics: list[dict[str, Any]],
+    *,
+    task_ref: str | None = None,
+    project_root: str | None = None,
+) -> str:
+    """Give a caller-correctable validation error an executable repair.
+
+    ``COORDINATOR_LOCK`` is an internal routing instruction, not a repair
+    contract.  Returning it for malformed user/tool input caused workers to
+    retry with guessed fields and exposed implementation-only policy text in
+    the visible transcript.  Validation responses therefore name the same
+    public tool, its required identity, and the complete value/rule set.
+    """
+    suffix = (
+        " Correct every listed diagnostic in this same request before retrying; "
+        "do not apply a partial mutation or invent additional fields."
+    )
+    paths = [str(item.get("path")) for item in diagnostics if isinstance(item, dict) and item.get("path")]
+    path_text = f" Fix these exact paths first: {', '.join(paths)}." if paths else ""
+    if operation in {"manage_orchestration", "management_failed", "manage_orchestration_validation_failed"}:
+        identity = (
+            f" Keep task_ref={task_ref!r} and the same project_root." if task_ref else
+            " Include the exact project_root and task_ref returned by Cortex."
+        )
+        if project_root:
+            identity = f" Keep project_root={project_root!r}" + (f" and task_ref={task_ref!r}." if task_ref else ".")
+        return (
+            "Retry manage_orchestration with the same intent and corrected payload."
+            + identity
+            + " For resume, payload must be {future_waves: [{workers: [{phase, profile, objective, "
+              "allowed_paths, acceptance, verification, depends_on, context_files, context_result_refs, "
+              "strategy, model, user_requested_model, effort, visible, isolated_checkout}]}], rework?}; "
+              f"supported canonical phases are: {', '.join(sorted(AVAILABLE_GATES))}. "
+              "Use one canonical phase per wave; put parallel owners of one phase in the same wave; "
+              "depends_on may name only completed or earlier waves."
+            + path_text
+            + suffix
+        )
+    if operation in {"complete_attempt", "record_attempt_event", "repair_planning", "read_worker_result", "read_dispatch_briefing", "worker_question"}:
+        tool_fields = {
+            "complete_attempt": "status, summary, findings, decisions_needed, unresolved, claims, planning, or PATCH fields base_payload_digest and patches",
+            "record_attempt_event": "event_type, payload, and optional event_key",
+            "repair_planning": "base_payload_digest and non-empty diagnostic-scoped patches only",
+            "read_worker_result": "attempt_result_ref plus the exact task_ref and worker identity fields from the dispatch",
+            "read_dispatch_briefing": "the exact task_id, attempt_id, profile, dispatch_ref, briefing_digest, and optional cursor",
+            "worker_question": "action, question/options or the exact returned question_ref",
+        }[operation]
+        return (
+            f"Retry {operation} on the same attempt. Correct the exact diagnostic paths listed in diagnostics; "
+            f"send only the documented fields ({tool_fields})."
+            + path_text + suffix
+        )
+    return f"Correct every listed diagnostic and retry the same {operation} call without changing unrelated fields." + path_text + suffix
+
+
+def _validation_contract(
+    operation: str,
+    diagnostics: list[dict[str, Any]],
+    *,
+    task_ref: str | None = None,
+    project_root: str | None = None,
+) -> dict[str, Any]:
+    """Return machine-readable field schemas beside human diagnostics."""
+    contract: dict[str, Any] = {
+        "schema": "cortex/validation-error/v1",
+        "operation": operation,
+        "diagnostics_are_complete": True,
+        "retry": {"same_call": True, "preserve_valid_fields": True, "replacement_worker_authorized": False},
+        "invalid_paths": [item.get("path") for item in diagnostics if isinstance(item, dict) and item.get("path")],
+    }
+    if operation in {"manage_orchestration", "management_failed", "manage_orchestration_validation_failed"}:
+        contract["request_schema"] = {
+            "tool": "manage_orchestration",
+            "type": "object",
+            "required": ["intent", "project_root"],
+            "properties": {
+                "intent": {"type": "string", "enum": ["inspect", "recover_inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts"]},
+                "project_root": {"type": "string", "format": "absolute-path"},
+                "task_ref": {"type": "string", "description": "the exact current Cortex task_ref"},
+                "reason": {"type": "string"},
+                "payload": {"type": "object"},
+                "payload.future_waves": {
+                    "type": "array",
+                    "items": {"type": "object", "required": ["workers"], "properties": {"workers": {"type": "array"}}},
+                },
+                "payload.future_waves[].workers[].phase": {
+                    "type": "string",
+                    "enum": sorted(AVAILABLE_GATES),
+                    "aliases": {key: value for key, value in sorted(PIPELINE_GATE_ALIASES.items())},
+                },
+                "payload.future_waves[].workers[].profile": {
+                    "type": "string",
+                    "enum": sorted(AGENTS),
+                    "rule": "profile must own the selected phase",
+                },
+                "payload.future_waves[].workers[].depends_on": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(AVAILABLE_GATES)},
+                    "rule": "only completed or earlier-wave phases",
+                },
+            },
+        }
+        contract["request_schema"]["conditional_requirements"] = {
+            "task_scoped_intents": {
+                "if": {"properties": {"intent": {"enum": ["inspect", "recover_inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "artifacts"]}}},
+                "then": {"required": ["task_ref"]},
+                "description": "prune and maintenance are project-scoped and omit task_ref",
+            }
+        }
+        contract["repair"] = {
+            "tool": "manage_orchestration",
+            "intent": "resume",
+            "arguments": {
+                "project_root": project_root,
+                "task_ref": task_ref,
+                "reason": "<concise reason>",
+                "payload": {"future_waves": "<same array with every listed path corrected>"},
+            },
+            "apply_all_diagnostics_atomically": True,
+        }
+    else:
+        # Start/continue and the worker-facing coordinator tools use the same
+        # public JSON Schema advertised through MCP.  Returning that exact
+        # schema in a validation receipt lets the caller repair the submitted
+        # fields without reconstructing the rest of the request.
+        registry = globals().get("PUBLIC_SCHEMA_REGISTRY")
+        public_schema = registry.get(operation) if isinstance(registry, dict) else None
+        if isinstance(public_schema, dict):
+            contract["request_schema"] = {"tool": operation, **public_schema}
+    return contract
+
+
+def _enrich_validation_diagnostics(
+    operation: str,
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach the public field schema and received value to boundary errors."""
+    registry = globals().get("PUBLIC_SCHEMA_REGISTRY")
+    schema = registry.get(operation) if isinstance(registry, dict) else None
+    if not isinstance(schema, dict):
+        return diagnostics
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    enriched: list[dict[str, Any]] = []
+    for item in diagnostics:
+        diagnostic = dict(item) if isinstance(item, dict) else {"message": str(item)}
+        path = str(diagnostic.get("path") or "$")
+        top = path[2:] if path.startswith("$.") else path
+        top = top.split(".", 1)[0].split("[", 1)[0]
+        field_schema = properties.get(top)
+        if not isinstance(field_schema, dict):
+            field_schema = {"type": "object", "properties": properties}
+        diagnostic.setdefault("received", None)
+        diagnostic.setdefault("expected", field_schema)
+        diagnostic.setdefault("field_schema", field_schema)
+        diagnostic.setdefault("fix", f"Correct {path} according to field_schema and retry {operation} with unrelated fields unchanged.")
+        enriched.append(diagnostic)
+    return enriched
+
+
 def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, Any]]:
     """Validate the complete public facade envelope before any ledger write.
 
@@ -7787,7 +7948,60 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
     """Internal engine facade retained for v5 lifecycle composition."""
     from cortex_runtime.orchestration_engine import orchestrate as _orchestrate
 
-    return _orchestrate(params)
+    response = _orchestrate(params)
+    # The compatibility facade still uses the historical orchestration
+    # envelope internally, but malformed caller input must receive the same
+    # actionable validation contract as the fresh public tools.  Keep this
+    # projection at the boundary so the engine's atomic transaction behavior
+    # remains unchanged.
+    if (
+        isinstance(response, dict)
+        and not response.get("ok")
+        and response.get("code") == "orchestrate_validation_failed"
+    ):
+        diagnostics = response.get("diagnostics") if isinstance(response.get("diagnostics"), list) else []
+        enriched: list[dict[str, Any]] = []
+        for raw in diagnostics:
+            item = dict(raw) if isinstance(raw, dict) else {"message": str(raw)}
+            path = str(item.get("path") or "request")
+            if "json_pointer" not in item:
+                item["json_pointer"] = "/" + "/".join(
+                    part for part in re.sub(r"\[(\d+)\]", r".\1", path).split(".") if part
+                )
+            item.setdefault("received", None)
+            item.setdefault("expected", "a value accepted by the advertised orchestrate schema")
+            item.setdefault("field_schema", {})
+            item.setdefault("fix", f"Correct only {path} in the same orchestrate request.")
+            enriched.append(item)
+        operation = str(params.get("operation") or "")
+        task_ref = str(response.get("task_ref") or response.get("task_id") or params.get("task_id") or "") or None
+        project_root = str(params.get("project_root") or "") or None
+        result = dict(response)
+        result["schema"] = "cortex/validation-error/v1"
+        result["outcome"] = "needs_correction"
+        result["diagnostics"] = enriched
+        result["validation"] = _validation_contract("orchestrate", enriched, task_ref=task_ref, project_root=project_root)
+        result["validation"]["request_schema"] = {"tool": "orchestrate", **ORCHESTRATE_TOOL_SCHEMA}
+        result["retry"] = {
+            "same_call": True,
+            "same_attempt": True,
+            "same_task_ref": bool(task_ref),
+            "replacement_worker_authorized": False,
+            "partial_mutation": False,
+        }
+        result["next_action"] = {
+            "tool": "orchestrate",
+            "operation": operation,
+            "arguments": {
+                key: params.get(key)
+                for key in ("operation", "submission_id", "project_root", "principal", "thread_id", "task_id", "wave_id")
+                if params.get(key) is not None
+            },
+            "invalid_paths": [item.get("path") for item in enriched if item.get("path")],
+            "instruction": "Correct every listed path in the same request, preserve every valid field, retry once with the same identity, and do not create a replacement worker.",
+        }
+        return result
+    return response
 
 
 # These helpers remain importable for the v5 projection and compaction module,
@@ -7867,15 +8081,21 @@ V3_STATUS_ALIASES = {
 
 
 def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None, diagnostics: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    diagnostic_list = diagnostics or [{"code": code, "message": redact(message, 1000)}]
     result = {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
         "outcome": outcome,
         "code": code,
-        "diagnostics": diagnostics or [{"code": code, "message": redact(message, 1000)}],
+        "diagnostics": diagnostic_list,
         "dispatches": [],
-        "next_action": f"{COORDINATOR_LOCK} {redact(message, 1000)}",
+        "next_action": (
+            _validation_next_action(code, diagnostic_list)
+            if diagnostics else f"{COORDINATOR_LOCK} {redact(message, 1000)}"
+        ),
     }
+    if diagnostics:
+        result["validation"] = _validation_contract(code, diagnostic_list)
     if candidates is not None:
         result["candidates"] = candidates
     return result
@@ -7893,22 +8113,36 @@ def _v3_envelope_error(
     code = {
         "start_orchestration": "start_validation_failed",
     }.get(operation, f"{operation}_validation_failed")
+    complete_diagnostics = _enrich_validation_diagnostics(operation, diagnostics)
     result = _v3_error(
         code,
         "request failed envelope validation",
-        diagnostics=diagnostics,
+        diagnostics=complete_diagnostics,
     )
     if task_ref:
         result["task_ref"] = task_ref
+    result["next_action"] = _validation_next_action(
+        operation,
+        complete_diagnostics,
+        task_ref=task_ref,
+    )
+    result["validation"] = _validation_contract(
+        operation,
+        complete_diagnostics,
+        task_ref=task_ref,
+    )
+    result["retryable"] = True
+    result["attempt_budget_consumed"] = False
+    result["worker_replacement_authorized"] = False
     return result
 
 
 def _v3_collect_fields(params: Any, allowed: set[str], *, operation: str) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     if not isinstance(params, dict):
-        return [{"code": f"{operation}_validation_failed", "path": "request", "message": "request must be an object"}]
+        return [{"code": f"{operation}_validation_failed", "path": "request", "message": "request must be an object", "received": params, "expected": "object"}]
     for key in sorted(set(params) - allowed):
-        diagnostics.append({"code": f"{operation}_validation_failed", "path": key, "message": "unsupported field"})
+        diagnostics.append({"code": f"{operation}_validation_failed", "path": key, "message": "unsupported field", "received": params.get(key)})
     return diagnostics
 
 
@@ -9259,8 +9493,157 @@ def _v3_compact_waves(
     project_root: Path | None = None,
     allow_visible_threads: bool = False,
 ) -> list[dict[str, Any]]:
+    # Validate the whole compact wave envelope before the mutating compiler
+    # starts.  The compiler below intentionally remains strict, but this pass
+    # prevents the caller from discovering one bad phase/profile/dependency per
+    # retry.  All diagnostics are independent and no ledger state is touched.
+    wave_diagnostics: list[dict[str, Any]] = []
+
+    def wave_diag(
+        path: str,
+        message: str,
+        expected: str | None = None,
+        *,
+        received: Any = None,
+        field_schema: dict[str, Any] | None = None,
+    ) -> None:
+        item: dict[str, Any] = {
+            "code": "management_failed",
+            "phase": "payload",
+            "path": path,
+            "message": redact(message, 1000),
+            "fix": "Correct this field in the same manage_orchestration request; do not resend unrelated fields.",
+        }
+        if expected:
+            item["expected"] = redact(expected, 1000)
+        if received is not None:
+            item["received"] = received
+        if field_schema is not None:
+            item["field_schema"] = field_schema
+        wave_diagnostics.append(item)
+
     if not isinstance(raw_waves, list) or not raw_waves:
         raise ValueError("waves must be a non-empty array when supplied")
+    seen_phases: dict[str, tuple[int, str]] = {}
+    available_context_gates = set(completed_gates or set())
+    for wave_index, raw_wave in enumerate(raw_waves, 1):
+        wave_path = f"future_waves[{wave_index - 1}]"
+        if not isinstance(raw_wave, dict) or set(raw_wave) != {"workers"}:
+            wave_diag(wave_path, "wave must contain only workers", "{workers: [...]}")
+            continue
+        workers = raw_wave.get("workers")
+        if not isinstance(workers, list) or not workers or len(workers) > 32:
+            wave_diag(f"{wave_path}.workers", "workers must contain 1..32 worker objects", "an array of 1..32 worker objects")
+            continue
+        wave_gates: set[str] = set()
+        for worker_index, worker in enumerate(workers, 1):
+            worker_path = f"{wave_path}.workers[{worker_index - 1}]"
+            if not isinstance(worker, dict):
+                wave_diag(worker_path, "worker must be an object", "{phase, profile, ...}")
+                continue
+            raw_phase = str(worker.get("phase") or "").strip()
+            if not raw_phase:
+                wave_diag(f"{worker_path}.phase", "phase is required", f"one of: {', '.join(sorted(AVAILABLE_GATES))}")
+                continue
+            gate = canonical_pipeline_gate(raw_phase)
+            if gate not in AVAILABLE_GATES:
+                aliases = difflib.get_close_matches(gate, sorted(AVAILABLE_GATES | set(PIPELINE_GATE_ALIASES)), n=3)
+                suggestion = f"; try {', '.join(aliases)}" if aliases else ""
+                wave_diag(
+                    f"{worker_path}.phase",
+                    f"unknown worker phase {raw_phase!r}{suggestion}",
+                    f"canonical phase or alias; supported canonical phases: {', '.join(sorted(AVAILABLE_GATES))}",
+                    received=raw_phase,
+                    field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES), "aliases": {key: value for key, value in sorted(PIPELINE_GATE_ALIASES.items())}},
+                )
+            else:
+                previous = seen_phases.get(gate)
+                if previous is not None and previous[0] != wave_index:
+                    wave_diag(
+                        f"{worker_path}.phase",
+                        f"waves repeat canonical phase {gate!r}: {previous[1]!r} and {raw_phase!r} normalize to the same phase",
+                        "put multiple owners of one phase in the same wave",
+                        received=raw_phase,
+                        field_schema={"type": "string", "enum": sorted(AVAILABLE_GATES), "rule": "one canonical phase per wave; parallel owners share a wave"},
+                    )
+                seen_phases.setdefault(gate, (wave_index, raw_phase))
+                wave_gates.add(gate)
+                raw_profile = str(worker.get("profile") or "").strip()
+                if raw_profile:
+                    normalized_profile = raw_profile.lower().replace("-", "_").replace(" ", "_")
+                    try:
+                        profile = canonical_profile(raw_profile)
+                    except ValueError:
+                        profile = normalized_profile
+                    # Generic implementation labels are an intentional
+                    # boundary alias: the compiler resolves them through the
+                    # task-aware implementation router.  The aggregate
+                    # preflight must accept the same aliases as the compiler,
+                    # otherwise a valid payload is rejected before routing
+                    # (notably ``implementer``/``developer``).
+                    generic_implementation_profile = normalized_profile in V3_AUTOMATIC_IMPLEMENTATION_PROFILE_ALIASES
+                    if generic_implementation_profile and gate != "implementation":
+                        wave_diag(
+                            f"{worker_path}.profile",
+                            f"generic worker profile {raw_profile!r} is valid only for the implementation phase",
+                            "omit profile for the canonical phase owner, or use the generic profile only with phase 'implementation'",
+                            received=raw_profile,
+                            field_schema={
+                                "type": "string",
+                                "enum": sorted(AGENTS | set(PROFILE_ALIASES) | V3_AUTOMATIC_IMPLEMENTATION_PROFILE_ALIASES),
+                                "rule": "developer/implementation/implementer/implementation_agent are implementation-only aliases",
+                            },
+                        )
+                    elif not generic_implementation_profile and profile not in AGENTS:
+                        suggestions = difflib.get_close_matches(profile, sorted(AGENTS | set(PROFILE_ALIASES)), n=3)
+                        wave_diag(
+                            f"{worker_path}.profile",
+                            f"unknown worker profile {raw_profile!r}" + (f"; try {', '.join(suggestions)}" if suggestions else ""),
+                            "a supported Cortex worker profile",
+                            received=raw_profile,
+                            field_schema={"type": "string", "enum": sorted(AGENTS | set(PROFILE_ALIASES) | V3_AUTOMATIC_IMPLEMENTATION_PROFILE_ALIASES)},
+                        )
+                    elif not generic_implementation_profile and not profile_can_own_gate(profile, gate):
+                        supported = PROFILES[profile].get("gates", []) or ["implementation"]
+                        wave_diag(
+                            f"{worker_path}.profile",
+                            f"worker profile {profile!r} cannot own phase {gate!r}",
+                            f"a profile owning {gate!r}; supported phase(s) for {profile!r}: {', '.join(supported)}",
+                            received=raw_profile,
+                            field_schema={"type": "string", "enum": sorted(AGENTS), "rule": f"profile must own phase {gate}"},
+                        )
+            raw_dependencies = worker.get("depends_on")
+            if raw_dependencies is not None:
+                dependency_path = f"{worker_path}.depends_on"
+                if not isinstance(raw_dependencies, list) or len(raw_dependencies) > len(AVAILABLE_GATES):
+                    wave_diag(dependency_path, "depends_on must be an array of prerequisite phases", "an array of supported phase names")
+                else:
+                    dependencies = [canonical_pipeline_gate(item) for item in raw_dependencies]
+                    unknown_dependencies = sorted(set(dependencies) - AVAILABLE_GATES)
+                    if unknown_dependencies:
+                        wave_diag(
+                            dependency_path,
+                            "worker depends_on contains unknown phases: " + ", ".join(unknown_dependencies),
+                            f"only: {', '.join(sorted(AVAILABLE_GATES))}",
+                            received=raw_dependencies,
+                            field_schema={"type": "array", "items": {"type": "string", "enum": sorted(AVAILABLE_GATES)}},
+                        )
+                    # Do not report a second cross-field error for an unknown
+                    # dependency.  Basic enum validation owns that field
+                    # first; only known phases can be checked for ordering.
+                    unavailable = sorted((set(dependencies) & AVAILABLE_GATES) - available_context_gates)
+                    if unavailable:
+                        wave_diag(
+                            dependency_path,
+                            "worker depends_on may reference only completed or earlier-wave phases: " + ", ".join(unavailable),
+                            "completed or earlier-wave phases only",
+                            received=raw_dependencies,
+                            field_schema={"type": "array", "items": {"type": "string", "enum": sorted(AVAILABLE_GATES)}, "rule": "completed or earlier-wave phases only"},
+                        )
+        available_context_gates.update(wave_gates)
+    if wave_diagnostics:
+        raise ValidationFailure(wave_diagnostics)
+
     result: list[dict[str, Any]] = []
     allowed_worker_keys = {
         "phase", "profile", "objective", "paths", "allowed_paths", "acceptance", "verification",
@@ -11524,15 +11907,140 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
         return response
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
-        error = _v3_error("management_failed", exc)
+        collected = getattr(exc, "diagnostics", None)
+        diagnostics = collected if isinstance(collected, list) and collected else [{
+            "code": "management_failed",
+            "phase": "management",
+            "message": redact(str(exc), 1000),
+        }]
+        error = _v3_error("management_failed", "management request validation failed", diagnostics=diagnostics)
+        error["retryable"] = True
+        error["attempt_budget_consumed"] = False
+        error["worker_replacement_authorized"] = False
+        error["next_action"] = _validation_next_action(
+            "manage_orchestration",
+            diagnostics,
+            task_ref=resolved_task_ref,
+            project_root=str(params.get("project_root") or "") or None,
+        )
+        error["validation"] = _validation_contract(
+            "manage_orchestration",
+            diagnostics,
+            task_ref=resolved_task_ref,
+            project_root=str(params.get("project_root") or "") or None,
+        )
         if resolved_task_ref:
             error["task_ref"] = resolved_task_ref
         return error
 
 
+def _manage_governance_input_diagnostics(params: Any) -> list[dict[str, Any]]:
+    """Collect caller-correctable governance form errors before any ledger read/write.
+
+    This is deliberately a pure boundary check.  Its paths and field schemas
+    mirror the public MCP contract so a client can apply one correction pass,
+    rather than discovering one malformed field per retry.
+    """
+    schema = MANAGE_GOVERNANCE_SCHEMA if isinstance(globals().get("MANAGE_GOVERNANCE_SCHEMA"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    allowed = set(properties) or {
+        "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof",
+        "previous_coordinator_recovery_proof", "task_ref", "capability_generation", "submission_id", "entity",
+        "initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "task_id",
+        "lane_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "status", "evidence",
+        "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref",
+        "record_type", "content", "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref",
+        "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint", "findings", "threshold", "window_days",
+        "limit", "offset", "proposal_ref", "trigger", "reason",
+    }
+    diagnostics: list[dict[str, Any]] = []
+    if not isinstance(params, dict):
+        return [{
+            "code": "manage_governance_validation_failed", "path": "request", "json_pointer": "",
+            "message": "request must be an object", "received": params, "expected": "object",
+            "field_schema": {"type": "object", "additionalProperties": False},
+            "fix": "Submit one JSON object matching the manage_governance input schema.",
+        }]
+    for key in sorted(set(params) - allowed):
+        diagnostics.append({
+            "code": "manage_governance_validation_failed", "path": key, "json_pointer": f"/{key}",
+            "message": "unsupported field", "received": params.get(key),
+            "expected": "one of the fields declared by manage_governance",
+            "field_schema": {"type": "object", "additionalProperties": False},
+            "fix": f"Remove field {key!r} and retry without mutating other fields.",
+        })
+    def add_required(path: str, message: str) -> None:
+        field = path.rsplit(".", 1)[-1]
+        diagnostics.append({
+            "code": "manage_governance_validation_failed", "path": path, "json_pointer": "/" + path.replace(".", "/"),
+            "message": message, "received": params.get(field), "expected": "a non-empty value",
+            "field_schema": dict(properties.get(field) or {"type": "string", "minLength": 1}),
+            "fix": f"Set {path} to a valid value from the published manage_governance schema.",
+        })
+    action = params.get("action")
+    action_schema = dict(properties.get("action") or {"type": "string", "minLength": 1})
+    actions = list(action_schema.get("enum") or [])
+    if not isinstance(action, str) or not action.strip():
+        diagnostics.append({
+            "code": "manage_governance_validation_failed", "path": "action", "json_pointer": "/action",
+            "message": "action is required", "received": action, "expected": actions,
+            "field_schema": action_schema,
+            "fix": "Set action to one of the enum values in diagnostics.expected, then retry the same request.",
+        })
+    elif actions and action.strip().lower().replace("-", "_") not in actions:
+        diagnostics.append({
+            "code": "manage_governance_validation_failed", "path": "action", "json_pointer": "/action",
+            "message": "action is not supported", "received": action, "expected": actions,
+            "field_schema": action_schema,
+            "fix": "Replace action with one enum value listed in diagnostics.expected.",
+        })
+    if not isinstance(params.get("project_root"), str) or not str(params.get("project_root") or "").strip():
+        add_required("project_root", "project_root is required")
+    normalized_action = str(action or "").strip().lower().replace("-", "_")
+    required_by_action = {
+        "create_initiative": ("title", "goal"),
+        "create_record": ("record_type", "content"), "record_create": ("record_type", "content"),
+        "add_dependency": ("source_type", "source_ref", "target_type", "target_ref", "dependency_type"),
+        "dependency": ("source_type", "source_ref", "target_type", "target_ref", "dependency_type"),
+        "request_exception": ("trigger", "reason"), "exception_request": ("trigger", "reason"),
+    }
+    for field in required_by_action.get(normalized_action, ()):
+        value = params.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            add_required(field, f"{field} is required for action {normalized_action}")
+    if normalized_action in CAPABILITY_RECOVERY_ACTIONS:
+        for field in ("task_ref", "principal", "thread_id", "coordinator_capability"):
+            value = params.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                add_required(field, f"{field} is required for recovery action {normalized_action}")
+    return diagnostics
+
+
+def _manage_governance_validation_error(params: Any) -> dict[str, Any]:
+    diagnostics = _manage_governance_input_diagnostics(params)
+    result = _v3_envelope_error("manage_governance", diagnostics)
+    result["schema"] = "cortex/validation-error/v1"
+    result["outcome"] = "needs_correction"
+    result["code"] = "manage_governance_validation_failed"
+    result["next_action"] = (
+        "Correct every listed diagnostics.path using its diagnostics.field_schema and diagnostics.expected, "
+        "preserve all valid fields, then retry manage_governance once with the same request scope. "
+        "No ledger mutation was performed."
+    )
+    result["validation"] = {
+        "schema": "cortex/validation-error/v1", "diagnostics_are_complete": True,
+        "apply_all_diagnostics_atomically": True, "retry_same_request": True,
+        "patch_paths": [item.get("json_pointer") for item in diagnostics if item.get("json_pointer")],
+    }
+    return result
+
+
 def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
     """Expose the additive v11 governance ledger without widening lifecycle calls."""
     try:
+        preflight = _manage_governance_input_diagnostics(params)
+        if preflight:
+            return _manage_governance_validation_error(params)
         governance_allowed = {
             "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof", "previous_coordinator_recovery_proof", "entity", "initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content", "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref", "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint", "findings", "threshold", "window_days", "proposal_ref", "trigger", "reason", "limit", "offset", "task_ref", "capability_generation", "submission_id",
         }
@@ -11799,7 +12307,7 @@ ORCHESTRATE_DELEGATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "gate": {"type": "string", "minLength": 1},
+        "gate": {"type": "string", "minLength": 1, "enum": sorted(AVAILABLE_GATES | set(PIPELINE_GATE_ALIASES))},
         "agent": {"type": "string", "enum": sorted(AGENTS)},
         "task_kind": {"type": "string"},
         "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]},
@@ -11862,13 +12370,40 @@ ORCHESTRATE_COMPLETION_SCHEMA = {
     },
     "required": ["attempt_id", "host_tool", "host_agent_id", "host_task_name", "host_model", "host_reasoning_effort", "status"],
 }
+ORCHESTRATE_PAYLOAD_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "command": {"type": "string", "enum": ["ask", "answer", "list", "updates", "inspect", "claim", "release", "status"]},
+        "question_ref": {"type": "string", "minLength": 1},
+        "question_id": {"type": "string", "minLength": 1},
+        "answer": {},
+        "answer_en": {"type": "string", "minLength": 1},
+        "canonical_answers": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+        "decision": {"type": "string", "enum": ["prompt", "approve", "cancel", "revise"]},
+        "feedback": {"type": "string"},
+        "request_id": {"type": "string", "minLength": 1},
+        "resource": {"type": "string", "minLength": 1},
+        "resource_ref": {"type": "string", "minLength": 1},
+        "lane_id": {"type": "string", "minLength": 1},
+        "lane": {"type": "string", "minLength": 1},
+        "scope": {"type": "string"},
+        "user_message": {"type": "string"},
+        "message_en": {"type": "string"},
+        "canonical_en": {"type": "string"},
+        "localized_question": {"type": "string"},
+        "localized_header": {"type": "string"},
+        "localized_options": {"type": "array", "items": QUESTION_OPTION_SCHEMA},
+        "localized_custom_label": {"type": "string"},
+    },
+}
 ORCHESTRATE_TOOL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
         "operation": {"type": "string", "enum": sorted(ORCHESTRATE_OPERATIONS)},
         "submission_id": {"type": "string", "description": "Required for every mutating operation; identical retries are replayed exactly."},
-        "project_root": {"type": "string", "minLength": 1, "description": "Absolute project workspace. Cortex derives its opaque host-private control state from this path; callers cannot select a ledger directory."},
+        "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Absolute project workspace. Cortex derives its opaque host-private control state from this path; callers cannot select a ledger directory."},
         "principal": {"type": "string", "minLength": 1},
         "thread_id": {"type": "string"},
         "task_id": {"type": "string"},
@@ -11878,10 +12413,10 @@ ORCHESTRATE_TOOL_SCHEMA = {
         "host_capabilities": {**ORCHESTRATE_HOST_CAPABILITIES_SCHEMA, "description": "Start-only native model catalogs plus the optional confirmed spawn_agent_default_model."},
         "completions": {"type": "array", "minItems": 1, "items": ORCHESTRATE_COMPLETION_SCHEMA, "description": "Advance-only host completions with canonical attempt_result_ref values created by complete_attempt."},
         "gate_outcomes": {"type": "object", "description": "Optional explicit gate outcome overrides for advance."},
-        "future_waves": {"type": "array", "items": {"type": "object"}, "description": "Optional replacement for not-yet-started waves during advance."},
+        "future_waves": {"type": "array", "minItems": 1, "items": ORCHESTRATE_WAVE_SCHEMA, "description": "Optional complete replacement for not-yet-started waves during advance. Every wave contains explicit delegations; unknown nested fields are rejected before lifecycle mutation."},
         "allow_rework": {"type": "boolean", "default": False},
         "reason": {"type": "string"},
-        "payload": {"type": "object", "description": "Operation-specific lane, resource, or question command payload."},
+        "payload": {**ORCHESTRATE_PAYLOAD_SCHEMA, "description": "Operation-specific lane, resource, or question payload. Use only the fields documented here."},
     },
     "required": ["operation", "project_root"],
 }
@@ -11891,6 +12426,8 @@ PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
     max_microtasks_per_package=MAX_MICROTASKS_PER_PACKAGE,
     max_discovery_domains=MAX_DISCOVERY_DOMAINS,
     question_option_schema=QUESTION_OPTION_SCHEMA,
+    available_gates=AVAILABLE_GATES,
+    pipeline_gate_aliases=PIPELINE_GATE_ALIASES,
 )
 START_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["start_orchestration"]
 CONTINUE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["continue_orchestration"]

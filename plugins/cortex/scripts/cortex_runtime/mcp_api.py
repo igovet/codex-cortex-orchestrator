@@ -109,8 +109,20 @@ def build_public_schemas(
     max_microtasks_per_package: int,
     max_discovery_domains: int,
     question_option_schema: dict[str, Any],
+    available_gates: set[str] | None = None,
+    pipeline_gate_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build the nine fresh public contracts independently of handlers."""
+    # The runtime supplies these from its authoritative contract.  Keeping a
+    # small fallback makes this registry independently importable in schema
+    # tooling and tests, while the installed facade never relies on it.
+    canonical_gates = set(available_gates or {
+        "scope", "plan", "discover", "architecture", "database_architecture",
+        "implementation", "qa", "security", "performance", "accessibility",
+        "ux", "review", "documentation", "close", "governance_activation",
+        "governance_close",
+    })
+    gate_aliases = dict(pipeline_gate_aliases or {})
     EXECUTED_TEST_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -275,6 +287,7 @@ def build_public_schemas(
             "phase": {
                 "type": "string",
                 "minLength": 1,
+                "enum": sorted(canonical_gates | set(gate_aliases)),
                 "description": (
                     "Canonical phase: scope, plan, discover, architecture, database_architecture, implementation, qa, "
                     "security, performance, accessibility, ux, review, documentation, governance_activation, "
@@ -317,7 +330,7 @@ def build_public_schemas(
             "depends_on": {
                 "type": "array",
                 "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1},
+                "items": {"type": "string", "minLength": 1, "enum": sorted(canonical_gates)},
                 "description": (
                     "Optional exact prerequisite phases whose verified AttemptResults this worker must receive. "
                     "Omit to receive every completed predecessor result; use an empty list only when the worker "
@@ -369,7 +382,7 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
             "task": {
                 "type": "object",
                 "additionalProperties": False,
@@ -442,7 +455,7 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
             "task_ref": {"type": "string", "description": "Exact opaque task reference returned by start_orchestration; required for every continuation."},
             "step": {"type": "integer", "minimum": 1, "description": "Relative step returned by the preceding Cortex response; enables safe idempotent replay without a wave identifier."},
             "results": {
@@ -480,7 +493,7 @@ def build_public_schemas(
         "additionalProperties": False,
         "description": "Append one lossless semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned; content volume is advisory in prompts only.",
         "properties": {
-            "project_root": {"type": "string", "minLength": 1},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
@@ -510,7 +523,7 @@ def build_public_schemas(
             "or semantic fields during repair."
         ),
         "properties": {
-            "project_root": {"type": "string", "minLength": 1},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
@@ -597,7 +610,7 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
@@ -649,7 +662,7 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every result read."},
             "attempt_result_ref": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
@@ -661,7 +674,7 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
@@ -678,12 +691,81 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect (read-only), recover_inspect (explicit lifecycle repair named by inspect), resume, deactivate, follow_up, artifacts, lane, resource, question, prune, or maintenance."},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Exact absolute project workspace."},
+            "intent": {
+                "type": "string",
+                "enum": [
+                    "inspect", "recover_inspect", "resume", "deactivate", "lane", "resource",
+                    "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts",
+                ],
+                "description": "Canonical management operation. Convenience aliases are not part of the public contract; use the enum value exactly.",
+            },
             "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune and maintenance omit it."},
             "reason": {"type": "string"},
             "payload": {
                 "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "future_waves": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Resume/rework waves. Each item is a complete FutureWave object; invalid fields are reported by their exact nested path.",
+                        "items": V3_WAVE_SCHEMA,
+                    },
+                    "rework": {"type": "boolean", "default": False},
+                    "command": {"type": "string", "enum": ["ask", "answer", "list", "updates", "inspect"]},
+                    "question_ref": {"type": "string", "minLength": 1},
+                    "answer": {},
+                    "answer_en": {"type": "string", "minLength": 1},
+                    "canonical_answers": {
+                        "type": "object", "additionalProperties": {"type": "string", "minLength": 1},
+                    },
+                    "decision": {"type": "string", "enum": ["prompt", "approve", "cancel", "revise"]},
+                    "feedback": {"type": "string"},
+                    "request_id": {"type": "string", "minLength": 1},
+                    "localized_prompt": {"type": "string"},
+                    "localized_title": {"type": "string"},
+                    "localized_approve": {"type": "string"},
+                    "localized_cancel": {"type": "string"},
+                    "localized_question": {"type": "string", "minLength": 1},
+                    "localized_header": {"type": "string"},
+                    "localized_options": {"type": "array", "items": question_option_schema},
+                    "localized_custom_label": {"type": "string"},
+                    "source_task_ref": {"type": "string", "minLength": 1},
+                    "user_request": {"type": "string", "minLength": 1},
+                    "requirements": {"type": "array", "items": {"type": "string"}},
+                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                    "scope": {"type": "array", "items": {"type": "string"}},
+                    "allowed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                    "budget": {"type": "string"},
+                    "pause_conditions": {"type": "array", "items": {"type": "string"}},
+                    "user_language": {"type": "string"},
+                    "language": {"type": "string"},
+                    "complexity": {"type": ["string", "integer"]},
+                    "replan_limit": {"type": "integer", "minimum": 0},
+                    "plan_approval": {"type": "string", "enum": ["auto", "required"]},
+                    "result_refs": {"type": "array", "uniqueItems": True, "items": {"type": "string", "minLength": 1}},
+                    "question": {"type": "string", "minLength": 1},
+                    "header": {"type": "string"},
+                    "options": {"type": "array", "items": question_option_schema},
+                    "multiple": {"type": "boolean"},
+                    "custom_label": {"type": "string"},
+                    "context": {},
+                    "source_result_refs": {
+                        "type": "array", "uniqueItems": True,
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                    "action": {"type": "string", "enum": ["health", "checkpoint", "backup", "verify_backup_restore", "optimize", "vacuum", "reconcile_projections"]},
+                    "confirmation": {"type": "string"},
+                    "full_confirmation": {"type": "string"},
+                    "older_than_days": {"type": "integer", "minimum": 0},
+                    "mode": {"type": "string", "enum": ["recover_lifecycle"]},
+                    "artifacts": {"type": "array", "items": {"type": "object"}},
+                    "cursor": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1},
+                },
                 "description": (
                     "Rare-operation payload. For intent=plan_approval, decision=prompt returns a detailed "
                     "cortex/chat-interaction/v1 plan summary with approve, revise, and cancel meanings plus an explicit "
@@ -704,7 +786,28 @@ def build_public_schemas(
                 ),
             },
         },
-        "required": ["project_root"],
+        "required": ["project_root", "intent"],
+        "allOf": [
+            {
+                "if": {
+                    "properties": {
+                        "intent": {"enum": [
+                            "inspect", "recover_inspect", "resume", "deactivate", "lane", "resource",
+                            "question", "plan_approval", "follow_up", "steer", "artifacts",
+                        ]},
+                    },
+                    "required": ["intent"],
+                },
+                "then": {"required": ["task_ref"]},
+            },
+            {
+                "if": {
+                    "properties": {"intent": {"enum": ["prune", "maintenance"]}},
+                    "required": ["intent"],
+                },
+                "then": {"not": {"required": ["task_ref"]}},
+            },
+        ],
     }
     MANAGE_GOVERNANCE_SCHEMA = {
         "type": "object",
@@ -712,7 +815,16 @@ def build_public_schemas(
         "description": "Dedicated governance surface for initiatives, dependency graph integrity, append-only records, snapshots, exceptions, and approval-only promotion proposals.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "action": {"type": "string", "minLength": 1, "description": "Explicit governance action such as create_initiative, add_dependency, create_record, snapshot, approve_promotion, recover_coordinator_capability, or acknowledge_coordinator_recovery."},
+            "action": {"type": "string", "minLength": 1, "enum": [
+                "create", "create_initiative", "inspect", "inspect_initiative",
+                "link_task", "link", "link_record", "record_link",
+                "add_dependency", "dependency", "transition", "transition_initiative",
+                "create_record", "record_create", "revise_record", "record_revise", "revise",
+                "inspect_record", "record_inspect", "history", "list_records", "snapshot", "snapshot_inspect",
+                "request_exception", "exception_request", "evaluate_promotion", "promotion_evaluate", "promotion_inspect",
+                "approve_promotion", "promotion_approve", "approve", "reject_promotion", "promotion_reject", "reject",
+                "recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"
+            ], "description": "Canonical governance action. Use only one enum value; aliases are accepted only where explicitly listed by this schema."},
             "principal": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator principal; when omitted, Cortex derives it from the capability."},
             "thread_id": {"type": "string", "minLength": 1, "description": "Optional server-bound coordinator thread/session identity; provide it together with principal or omit both."},
             "coordinator_capability": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque short-lived task-scoped server-issued capability returned by a successful start_orchestration or recovery delivery. Only its SHA-256 verifier and non-secret server-owned claims are durable. Never persist it or include it in worker briefings. It is required for normal governance actions and, with the replacement proof, for acknowledge_coordinator_recovery."},
@@ -766,6 +878,28 @@ def build_public_schemas(
             "reason": {"type": "string"},
         },
         "required": ["project_root", "action"],
+        "allOf": [
+            {
+                "if": {"properties": {"action": {"enum": ["recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"]}}, "required": ["action"]},
+                "then": {"required": ["task_ref", "principal", "thread_id", "coordinator_capability"]}
+            },
+            {
+                "if": {"properties": {"action": {"enum": ["create_initiative"]}}, "required": ["action"]},
+                "then": {"required": ["title", "goal"]}
+            },
+            {
+                "if": {"properties": {"action": {"enum": ["create_record", "record_create"]}}, "required": ["action"]},
+                "then": {"required": ["record_type", "content"]}
+            },
+            {
+                "if": {"properties": {"action": {"enum": ["add_dependency", "dependency"]}}, "required": ["action"]},
+                "then": {"required": ["source_type", "source_ref", "target_type", "target_ref", "dependency_type"]}
+            },
+            {
+                "if": {"properties": {"action": {"enum": ["request_exception", "exception_request"]}}, "required": ["action"]},
+                "then": {"required": ["trigger", "reason"]}
+            }
+        ],
     }
 
     return {

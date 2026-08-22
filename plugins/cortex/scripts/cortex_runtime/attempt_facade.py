@@ -14,11 +14,116 @@ from typing import Any
 import cortex as _runtime
 
 from cortex_runtime import attempt_protocol
+from cortex_runtime.validation import ValidationFailure
 
 
 _CLOSURE_GATES = {"review", "governance_activation", "governance_close", "close"}
 _ACTIVE_ATTEMPT_STATUSES = {_runtime.AWAITING_HOST_SPAWN, "running"}
 _PUBLIC_IDENTITY_FIELDS = {"project_root", "task_id", "attempt_id", "profile"}
+
+
+# Keep the worker-facing error contract next to the worker-facing adapters.
+# The runtime's orchestration validator has a richer plan schema, but these
+# tools must still describe their own envelope when a worker submits malformed
+# JSON.  In particular, an unknown-field error is useful only when the caller
+# can see the complete allowed property set and the received value.
+_FACADE_FIELDS: dict[str, dict[str, Any]] = {
+    "complete_attempt": {
+        "type": "object",
+        "required": sorted(_PUBLIC_IDENTITY_FIELDS | {"status", "summary"}),
+        "properties": {
+            field: {"type": "string"} for field in sorted(_PUBLIC_IDENTITY_FIELDS | {"status", "summary"})
+        } | {
+            "findings": {"type": "array"}, "decisions_needed": {"type": "array"},
+            "unresolved": {"type": "array"}, "claims": {"type": "array"},
+            "planning": {"type": "object"}, "base_payload_digest": {"type": "string"},
+            "patches": {"type": "array", "items": {"type": "object", "required": ["op", "path", "value"]}},
+        },
+    },
+    "record_attempt_event": {
+        "type": "object", "required": sorted(_PUBLIC_IDENTITY_FIELDS | {"event_type", "payload"}),
+        "properties": {
+            field: {"type": "string"} for field in sorted(_PUBLIC_IDENTITY_FIELDS | {"event_type"})
+        } | {"payload": {}, "event_key": {"type": "string"}},
+    },
+    "repair_planning": {
+        "type": "object", "required": sorted(_PUBLIC_IDENTITY_FIELDS | {"base_payload_digest", "patches"}),
+        "properties": {
+            field: {"type": "string"} for field in sorted(_PUBLIC_IDENTITY_FIELDS | {"base_payload_digest"})
+        } | {"patches": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["op", "path", "value"]}}},
+    },
+    "read_worker_result": {
+        "type": "object", "required": ["project_root", "task_ref", "attempt_result_ref"],
+        "properties": {
+            "project_root": {"type": "string", "format": "absolute-path"},
+            "task_ref": {"type": "string"}, "attempt_result_ref": {"type": "string"},
+            "attempt_id": {"type": "string"}, "profile": {"type": "string"},
+        },
+    },
+}
+
+
+def _facade_schema(operation: str) -> dict[str, Any]:
+    """Use the exact MCP schema once the runtime registry is initialized."""
+    registry = getattr(_runtime, "PUBLIC_SCHEMA_REGISTRY", None)
+    schema = registry.get(operation) if isinstance(registry, dict) else None
+    return schema if isinstance(schema, dict) else _FACADE_FIELDS[operation]
+
+
+def _json_pointer(path: object) -> str:
+    """Convert the public diagnostic path to an RFC 6901 pointer."""
+    raw = str(path or "$")
+    if raw.startswith("/"):
+        return raw
+    if raw == "$":
+        return ""
+    raw = raw[2:] if raw.startswith("$.") else raw.lstrip(".")
+    parts: list[str] = []
+    for segment in raw.replace("]", "").replace("[", ".").split("."):
+        if segment:
+            parts.append(segment.replace("~", "~0").replace("/", "~1"))
+    return "/" + "/".join(parts)
+
+
+def _facade_validation_failure(operation: str, params: Mapping[str, Any], fields: Sequence[str]) -> ValidationFailure:
+    schema = _facade_schema(operation)
+    diagnostics = []
+    for field in fields:
+        path = f"$.{field}"
+        diagnostics.append({
+            "code": f"{operation}_invalid",
+            "phase": "payload",
+            "path": path,
+            "json_pointer": _json_pointer(path),
+            "message": f"unsupported {operation} field {field!r}",
+            "received": params.get(field),
+            "expected": "omit this field; use only the documented properties below",
+            "field_schema": schema,
+            "fix": f"Remove {path} and retry {operation} with the same valid fields.",
+        })
+    return ValidationFailure(diagnostics)
+
+
+def _facade_required_failure(operation: str, params: Mapping[str, Any]) -> ValidationFailure | None:
+    """Collect missing required properties before any context lookup or write."""
+    schema = _facade_schema(operation)
+    diagnostics: list[dict[str, Any]] = []
+    for field in schema.get("required", []):
+        value = params.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            path = f"$.{field}"
+            diagnostics.append({
+                "code": f"{operation}_invalid",
+                "phase": "payload",
+                "path": path,
+                "json_pointer": _json_pointer(path),
+                "message": f"required field {field!r} is missing or empty",
+                "received": value,
+                "expected": schema.get("properties", {}).get(field, {"type": "string"}),
+                "field_schema": schema,
+                "fix": f"Provide {path} using the exact value from the worker briefing, then retry {operation}.",
+            })
+    return ValidationFailure(diagnostics) if diagnostics else None
 
 
 def _coordinator_continuation(
@@ -143,8 +248,18 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
     message = _runtime.redact(str(exc), 1000)
     code = "attempt_finalization_pending" if finalization else f"{operation}_invalid"
     collected = getattr(exc, "diagnostics", None)
-    diagnostics = collected if isinstance(collected, list) and collected else [{"code": code, "message": message}]
-    return {
+    diagnostics = collected if isinstance(collected, list) and collected else [{"code": code, "path": "$", "message": message}]
+    # Do not leak the coordinator-only routing lock for caller-correctable
+    # worker payloads.  The shared runtime helper supplies a concrete retry
+    # operation; its contract is supplemented with the exact tool schema.
+    for item in diagnostics:
+        if isinstance(item, dict) and not finalization:
+            if item.get("path"):
+                item.setdefault("json_pointer", _json_pointer(item["path"]))
+            item.setdefault("phase", "payload")
+            item.setdefault("fix", f"Correct {item.get('path', '$')} and retry {operation} on the same attempt.")
+            item.setdefault("field_schema", _facade_schema(operation) if operation in _FACADE_FIELDS else {"type": "object"})
+    result = {
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
         "outcome": "finalization_pending" if finalization else "needs_correction",
@@ -157,9 +272,22 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
             "Retry complete_attempt on this same completed attempt; Cortex retained the canonical AttemptResult and events. "
             "Do not spawn, request, or authorize a replacement worker."
             if finalization else
-            f"Correct only the named {operation} field and retry this same attempt."
+            _runtime._validation_next_action(operation, diagnostics)
+            if hasattr(_runtime, "_validation_next_action") else
+            f"Correct every listed diagnostic path in the same {operation} request and retry this same attempt."
         ),
     }
+    if not finalization:
+        result["validation"] = {
+            "schema": "cortex/validation-error/v1",
+            "operation": operation,
+            "diagnostics_are_complete": True,
+            "request_schema": _facade_schema(operation) if operation in _FACADE_FIELDS else {"type": "object"},
+            "invalid_paths": [item.get("path") for item in diagnostics if isinstance(item, dict) and item.get("path")],
+            "invalid_json_pointers": [item.get("json_pointer") for item in diagnostics if isinstance(item, dict) and item.get("json_pointer") is not None],
+            "retry": {"same_call": True, "preserve_valid_fields": True, "replacement_worker_authorized": False},
+        }
+    return result
 
 
 def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) -> dict[str, Any]:
@@ -183,6 +311,11 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
         "patch_paths": _runtime.planning_diagnostic_patch_paths(diagnostics),
         "preserve_other_fields": True,
         "replacement_worker_authorized": False,
+        "coordinator_must_not": [
+            "regenerate or resend the full planning object",
+            "perform project inspection or edits",
+            "spawn, request, or authorize a replacement worker",
+        ],
         "instruction": (
             "Use complete_attempt on this same attempt with base_payload_digest and JSON patches only. "
             "Use planning_repair.patch_paths as the RFC6901 JSON Pointer path source. "
@@ -190,10 +323,10 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
         ),
     }
     response["next_action"] = (
-        "Retry complete_attempt on this same planner attempt using the returned base_payload_digest and "
-        "patches whose paths are copied from planning_repair.patch_paths. Do not regenerate or resend unrelated "
-        "planning fields; do not spawn "
-        "a replacement worker."
+        "Call repair_planning on this same planner attempt with base_payload_digest copied exactly from "
+        "the rejected draft and patches containing only the returned planning_repair.patch_paths. "
+        "Do not resend the full planning object, inspect or modify the project, or spawn/request/authorize "
+        "a replacement worker; the server preserves every valid rejected-draft field."
     )
     return response
 
@@ -204,7 +337,10 @@ def record_attempt_event(params: dict[str, Any]) -> dict[str, Any]:
         allowed = _PUBLIC_IDENTITY_FIELDS | {"event_type", "payload", "event_key"}
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported record_attempt_event fields: " + ", ".join(unknown))
+            raise _facade_validation_failure("record_attempt_event", params, unknown)
+        required_failure = _facade_required_failure("record_attempt_event", params)
+        if required_failure:
+            raise required_failure
         project, _task_dir, state, attempt, profile = _worker_context(params)
         if attempt.get("status") not in _ACTIVE_ATTEMPT_STATUSES:
             raise ValueError("attempt event stream is closed")
@@ -376,7 +512,10 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported complete_attempt fields: " + ", ".join(unknown))
+            raise _facade_validation_failure("complete_attempt", params, unknown)
+        required_failure = _facade_required_failure("complete_attempt", params)
+        if required_failure:
+            raise required_failure
         project, task_dir, state, attempt, profile = _worker_context(params)
         if "base_payload_digest" in params or "patches" in params:
             return repair_planning(params)
@@ -588,7 +727,10 @@ def repair_planning(params: dict[str, Any]) -> dict[str, Any]:
         allowed = _PUBLIC_IDENTITY_FIELDS | {"base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported repair_planning fields: " + ", ".join(unknown))
+            raise _facade_validation_failure("repair_planning", params, unknown)
+        required_failure = _facade_required_failure("repair_planning", params)
+        if required_failure:
+            raise required_failure
         project, task_dir, state, attempt, profile = _worker_context(params)
         if profile != "planner" or str(attempt.get("gate") or "") != "plan":
             raise ValueError("repair_planning is supported only for planner attempts on the plan gate")
@@ -658,7 +800,10 @@ def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
         allowed = {"project_root", "task_ref", "attempt_result_ref", "attempt_id", "profile"}
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported read_worker_result fields: " + ", ".join(unknown))
+            raise _facade_validation_failure("read_worker_result", params, unknown)
+        required_failure = _facade_required_failure("read_worker_result", params)
+        if required_failure:
+            raise required_failure
         resolved = _runtime._v3_resolve_task(params, require_task_ref=True)
         if isinstance(resolved, dict):
             return resolved
