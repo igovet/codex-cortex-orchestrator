@@ -1,5 +1,13 @@
 # Changelog
 
+## [10.0.3] - 2026-08-22
+
+### Fixed
+
+- Require every native worker to be closed only after its canonical result was
+  read and successfully consumed by the server continuation, before any
+  successor dispatch.
+
 ## [10.0.2] - 2026-08-22
 
 This patch closes terminal replay and live-evaluation gaps found by the
