@@ -8,6 +8,7 @@ HandoffCompiler projection rather than a generic predecessor result body.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -24,7 +25,7 @@ if str(SCRIPTS) not in sys.path:
 from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
 import cortex as control  # noqa: E402
-from cortex_runtime import attempt_protocol, mcp_api  # noqa: E402
+from cortex_runtime import attempt_protocol, delegation_service, mcp_api  # noqa: E402
 
 
 class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
@@ -516,11 +517,106 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             recovered_again["result"]["lifecycle_recovery"],
         )
 
-    def test_public_successor_briefing_and_compaction_use_bounded_target_handoffs(self) -> None:
+    def test_consumed_continuation_receipts_cannot_be_replanned_with_new_future_waves(self) -> None:
+        """A completed worker result is a one-use continuation receipt.
+
+        This mirrors the production failure mode where a coordinator received
+        a successful step-2 response, then repeatedly retried that exact
+        result with successively edited ``future_waves`` to reduce context.
+        The second request must be a stable fail-closed stop and must leave
+        both the pipeline and the next worker untouched.
+        """
         started = control.start_orchestration({
             "project_root": str(self.project),
             "task": {
-                "user_request": "Implement and independently verify a bounded handoff seam.",
+                "user_request": "Prove a consumed discovery result cannot be replanned.",
+                "acceptance_criteria": ["A completed result advances exactly one wave."],
+                "verification": ["Reject a changed replan that reuses the same result receipt."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "discover", "profile": "explorer"}]},
+                {"workers": [{"phase": "implementation", "profile": "backend_dev", "depends_on": ["discover"]}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        _task_dir, state, attempt = self._active_attempt()
+        self._read_briefing(state, attempt)
+        result_ref = self._complete_strict(state, attempt, "Discovery completed exactly once.")
+        read = self._read_current_continuation(started, result_ref)
+        continuation = read["continuation"]
+        assert isinstance(continuation, dict)
+        # Model the durable, post-commit receipt while deliberately retaining
+        # the same active relative step.  This is the pathological recovery
+        # shape from the stopped live thread: the old step is still presented
+        # as active after a prior server acceptance, so a changed replan must
+        # not consume its canonical result a second time.
+        original = {
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": continuation["step"],
+            "results": continuation["results"],
+        }
+        request_digest = control._orchestrate_request_digest({
+            key: value for key, value in original.items() if key != "task_ref"
+        })
+        control._v3_store_continue(
+            original,
+            str(state["task_id"]),
+            request_digest,
+            {"ok": True, "outcome": "ready_to_spawn", "dispatches": []},
+        )
+
+        _before_dir, before = self._task_state()
+        before_snapshot = json.loads(json.dumps(before))
+        reused = {
+            **original,
+            "reason": "Try to reduce the next briefing after the result was already consumed.",
+            "future_waves": [{
+                "workers": [{
+                    "phase": "review",
+                    "profile": "code_reviewer",
+                    "objective": "This proposal must never be applied from a consumed receipt.",
+                    "paths": ["tests"],
+                    "acceptance": ["The reused receipt is rejected before replan."],
+                    "verification": ["Observe the stable fail-closed diagnostic."],
+                    "depends_on": ["discover"],
+                }],
+            }],
+        }
+        rejected = control.continue_orchestration(reused)
+        rejected_again = control.continue_orchestration(reused)
+        for response in (rejected, rejected_again):
+            self.assertFalse(response["ok"], response)
+            self.assertEqual(response["code"], "continue_receipts_already_consumed")
+            self.assertEqual(response["outcome"], "blocked")
+            self.assertEqual(response["task_ref"], started["task_ref"])
+            self.assertFalse(response["retryable"])
+            self.assertEqual(response["dispatches"], [])
+            self.assertIn("manage_orchestration intent=inspect", response["next_action"])
+        self.assertEqual(rejected["diagnostics"], rejected_again["diagnostics"])
+        self.assertEqual(rejected["next_action"], rejected_again["next_action"])
+        self.assertEqual(self._task_state()[1], before_snapshot)
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"], inspected)
+        handoff = inspected["result"]["context_handoff"]
+        self.assertEqual(handoff["task_ref"], started["task_ref"])
+        self.assertEqual(handoff["task_id"], continuation["task_id"])
+        self.assertEqual(
+            [item["dispatch_ref"] for item in handoff["pending_dispatches"]],
+            [item["dispatch_ref"] for item in started["dispatches"]],
+        )
+
+    def test_public_successor_briefing_and_compaction_preserve_target_handoffs(self) -> None:
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Implement and independently verify a lossless handoff seam.",
                 "acceptance_criteria": ["The requested observable outcome is completed end to end."],
                 "verification": ["Run the production handoff integration test."],
                 "plan_approval": "auto",
@@ -553,9 +649,9 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         task_dir, state, backend = self._active_attempt()
         backend_package = control._delegation_package(task_dir, str(state["task_id"]), str(backend["attempt_id"]))
         self.assertEqual(backend_package["predecessor_results"][0]["semantic_source"], "attempt_result")
-        self.assertEqual(backend_package["predecessor_selection"]["limit"], 16)
+        self.assertFalse(backend_package["predecessor_selection"].get("truncated", False))
         self.assertNotIn("unexpected_fallback_refs", backend_package["predecessor_selection"])
-        self.assertLess(backend_package["briefing_bytes"], 16 * 1024)
+        self.assertGreater(backend_package["briefing_bytes"], 0)
         self._read_briefing(state, backend)
         self._read_predecessors(state, backend, str(started["task_ref"]))
         check = control.record_worker_attempt_event({
@@ -657,6 +753,66 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(recovery_handoff["change_inventory"], review_handoff["change_inventory"])
         self.assertNotIn("worker_body", json.dumps(recovery_handoff).lower())
 
+    def test_oversized_discover_successor_briefing_is_materialized_without_rejection(self) -> None:
+        """A large fresh-v3 successor remains dispatchable after Discover.
+
+        The host sees only the short bootstrap; the worker reads the immutable
+        briefing.  Consequently an advisory prompt-size target must not turn a
+        completed Discover receipt into a missing successor dispatch.  This
+        uses real public continuation state rather than a hand-authored prompt
+        and verifies the materialized bytes, digest, bootstrap capability,
+        task contract, and predecessor handoff.
+        """
+        requirements = [
+            f"Requirement {index}: " + ("lossless-successor-context-" * 35)
+            for index in range(8)
+        ]
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Continue a large Discover handoff without a backend prompt-size rejection.",
+                "complexity": "C2",
+                "requirements": requirements,
+                "acceptance_criteria": ["The complete successor briefing is materialized."],
+                "verification": ["Read its digest-bound dispatch artifact through the scoped worker protocol."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "discover", "profile": "explorer"}]},
+                {"workers": [{"phase": "implementation", "profile": "backend_dev", "depends_on": ["discover"]}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        _task_dir, state, discover = self._active_attempt()
+        self._read_briefing(state, discover)
+        discover_summary = "Discover completed before its large successor dispatch: " + ("predecessor-evidence-" * 1_200)
+        discover_ref = self._complete_strict(state, discover, discover_summary)
+        successor_response = self._continue(started, discover_ref, self.project)
+        self.assertTrue(successor_response["ok"], successor_response)
+
+        task_dir, state, successor = self._active_attempt()
+        self.assertEqual(successor["gate"], "implementation")
+        package = control._delegation_package(task_dir, str(state["task_id"]), str(successor["attempt_id"]))
+        self.assertGreater(package["briefing_bytes"], 14_500)
+        briefing_path = task_dir / str(successor["briefing_file"])
+        materialized = briefing_path.read_text(encoding="utf-8")
+        self.assertEqual(len(materialized.encode("utf-8")), package["briefing_bytes"])
+        self.assertEqual(hashlib.sha256(materialized.encode("utf-8")).hexdigest(), successor["briefing_digest"])
+        bootstrap = str(delegation_service.rehydrate_dispatch_spawn_request(
+            task_dir, control.load_task_definition(task_dir, state), successor,
+        )["message"])
+        self.assertIn("read_dispatch_briefing", bootstrap)
+        self.assertIn(str(successor["briefing_digest"]), bootstrap)
+        self.assertIn(str(briefing_path), bootstrap)
+
+        assignment = self._assignment(successor_response)
+        self.assertIn(requirements[0], "".join(assignment["requirements"]))
+        self.assertEqual(assignment["task_contract"]["digest_sha256"], package["task_contract"]["digest_sha256"])
+        self.assertEqual(assignment["handoff"]["predecessor_result_refs"], [discover_ref])
+        self.assertEqual(assignment["handoff"]["relevant_predecessor_conclusions"], [discover_summary])
+        self._read_briefing(state, successor)
+        self._read_predecessors(state, successor, str(started["task_ref"]))
+
     def test_full_c3_documentation_continuation_is_server_derived_and_strict(self) -> None:
         """The hidden governance waves cannot make a parent infer Documentation's step."""
         result_ref_schema = (
@@ -745,6 +901,24 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         governance_close = self._continue_from_server_continuation(current, continuation)
         self.assertEqual(governance_close["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in governance_close["dispatches"]], ["governance_close"])
+
+        # A coordinator that lost the accepted response must not replay the
+        # consumed step while trying to reconstruct the next wave.  The
+        # public receipt is terminal and explicitly forbids artifact/rework
+        # requests; otherwise a model can loop on continue(step=3).
+        stale = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": current["task_ref"],
+            "step": continuation["step"],
+            "results": continuation["results"],
+            "reason": "stale retry after accepted continuation",
+        })
+        self.assertFalse(stale["ok"], stale)
+        self.assertEqual(stale["code"], "continue_validation_failed")
+        self.assertFalse(stale["retryable"])
+        self.assertEqual(stale["stop_reason"], "stale_relative_step")
+        self.assertIn("Do not call continue_orchestration again", stale["next_action"])
+        self.assertIn("do not request artifacts", stale["next_action"])
 
     def test_completed_child_recovery_set_survives_compaction_before_read(self) -> None:
         """A compacted coordinator can recover the exact data needed to continue.
@@ -873,7 +1047,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             package = control._delegation_package(
                 self._task_state()[0], str(state["task_id"]), str(attempt["attempt_id"]),
             )
-            self.assertLessEqual(package["briefing_bytes"], 14_500)
+            self.assertGreater(package["briefing_bytes"], 14_500)
             assignment = self._assignment(current)
             identity = assignment["worker_identity"]
             self.assertEqual(identity["task_id"], state["task_id"])
@@ -990,8 +1164,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         )
         segments = package["task_requirements"]
         self.assertTrue(segments)
-        self.assertLessEqual(max(map(len, segments)), 600)
-        self.assertEqual("".join(segments), requirement)
+        self.assertEqual(segments, [requirement])
 
         # The first result is immutable and the successor can acknowledge its
         # briefing and predecessor independently without replacement work.

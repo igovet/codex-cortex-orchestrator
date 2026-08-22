@@ -38,16 +38,13 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 DATABASE_NAME = "cortex.db"
 DATABASE_SCHEMA_VERSION = 15
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
-# A UTF-8 scalar can use up to four bytes.  Public transports normalize tiny
-# requested pages to this floor so every successful text page can be both
-# complete UTF-8 and strictly bounded by its advertised effective maximum.
-ARTIFACT_TRANSPORT_MIN_BYTES = 4
-ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
+# Paging is optional caller framing, not a server-side content quota.  A
+# UTF-8-safe page may exceed an extremely small caller request by one scalar.
+ARTIFACT_TRANSPORT_MIN_BYTES = 1
+ARTIFACT_TRANSPORT_MAX_BYTES = None
 ARTIFACT_CURSOR_MAX_CHARS = 4096
 # Mutable documents are coordination metadata, never an artifact transport.
-# Bound each durable value before acquiring a write connection so rejection
-# cannot partially update an existing document (or a pruning transaction).
-MAX_DURABLE_DOCUMENT_BYTES = 256 * 1024
+# Strict JSON and atomic writes preserve integrity without a size quota.
 MAX_DURABLE_DOCUMENT_KEY_BYTES = 160
 MAX_TOOL_OBSERVATION_NAME_BYTES = 128
 MAX_TOOL_OBSERVATION_GENERATION_BYTES = 256
@@ -123,13 +120,7 @@ def _canonical_json(value: Any) -> str:
 
 
 def _bounded_document_json(value: Any, *, label: str) -> str:
-    """Serialize one mutable document without allowing post-write overflow.
-
-    This deliberately does not reuse the general ``_canonical_json`` helper:
-    durable documents are an ingress boundary and must reject non-finite JSON
-    values as well as oversized UTF-8 encodings.  Callers invoke it before
-    opening a write transaction.
-    """
+    """Serialize one mutable document as strict JSON without a size quota."""
     try:
         encoded = json.dumps(
             value,
@@ -140,8 +131,7 @@ def _bounded_document_json(value: Any, *, label: str) -> str:
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be strict JSON") from exc
-    if len(encoded) > MAX_DURABLE_DOCUMENT_BYTES:
-        raise ValueError(f"{label} exceeds the {MAX_DURABLE_DOCUMENT_BYTES}-byte limit")
+    del label
     return encoded.decode("utf-8")
 
 
@@ -153,11 +143,12 @@ def _bounded_document_key(value: Any, *, label: str) -> str:
     return value
 
 
-def _bounded_observation_text(value: Any, *, label: str, maximum: int) -> str:
+def _bounded_observation_text(value: Any, *, label: str, maximum: int | None = None) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ValueError(f"tool observation {label} is invalid")
-    if len(value.encode("utf-8")) > maximum:
-        raise ValueError(f"tool observation {label} exceeds the {maximum}-byte limit")
+    # Observation metadata is canonical SQLite content too. ``maximum`` is
+    # retained only for adapter-call compatibility; it never rejects text.
+    del maximum
     return value
 
 
@@ -2529,33 +2520,27 @@ def read_artifact_range(
     artifact_ref: str,
     *,
     byte_offset: int = 0,
-    max_bytes: int = 16 * 1024,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Return one exact, UTF-8-safe range within the advertised byte bound.
+    """Return one exact, UTF-8-safe range.
 
     The cursor offset is always a byte offset into the canonical immutable
-    blob.  Text pages never split a UTF-8 scalar.  Requests below
-    :data:`ARTIFACT_TRANSPORT_MIN_BYTES` are normalized to that UTF-8-safe
-    floor, so the returned page never exceeds the effective transport bound.
+    blob. Text pages never split a UTF-8 scalar. ``max_bytes`` is an optional
+    caller-selected page size; omitting it reads every remaining exact byte.
     """
     if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
         raise ValueError("SQLite artifact byte offset is invalid")
-    if (
-        isinstance(max_bytes, bool)
-        or not isinstance(max_bytes, int)
-        or not 1 <= max_bytes <= ARTIFACT_TRANSPORT_MAX_BYTES
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1
     ):
-        raise ValueError(
-            "SQLite artifact max_bytes must be from "
-            f"1 through {ARTIFACT_TRANSPORT_MAX_BYTES}"
-        )
+        raise ValueError("SQLite artifact max_bytes must be a positive integer when supplied")
     metadata = get_artifact_metadata(root, task_id, artifact_ref)
     if metadata is None:
         raise ValueError("SQLite artifact is unavailable for the selected task")
     if byte_offset > metadata["byte_size"]:
         raise ValueError("SQLite artifact byte offset is invalid")
     remaining_offset = byte_offset
-    effective_max_bytes = max(ARTIFACT_TRANSPORT_MIN_BYTES, max_bytes)
+    effective_max_bytes = max_bytes if max_bytes is not None else int(metadata["byte_size"]) - byte_offset
     budget = effective_max_bytes
     text_parts: list[str] = []
     blob_parts: list[bytes] = []
@@ -2612,11 +2597,12 @@ def read_artifact_range(
             while end > start and data[end] & 0b11000000 == 0b10000000:
                 end -= 1
             if end == start:
-                # The remaining budget cannot contain one complete scalar.
-                # Stop this page before the scalar rather than exceeding the
-                # transport ceiling.  The next server-issued cursor starts at
-                # this same scalar and its normalized floor guarantees progress.
-                break
+                # A caller page preference is not a backend quota. Preserve
+                # the first complete scalar rather than reject/stall.
+                scalar_end = start + 1
+                while scalar_end < len(data) and data[scalar_end] & 0b11000000 == 0b10000000:
+                    scalar_end += 1
+                end = scalar_end
         piece = data[start:end]
         if is_text:
             text_parts.append(piece.decode("utf-8"))
@@ -2624,7 +2610,7 @@ def read_artifact_range(
             blob_parts.append(piece)
         budget -= len(piece)
         remaining_offset = 0
-        if budget == 0:
+        if budget <= 0:
             break
     delivered = effective_max_bytes - budget
     next_offset = byte_offset + delivered
@@ -3414,8 +3400,6 @@ def record_tool_observation(
         raise ValueError("tool observation identity is invalid")
     if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         raise ValueError("tool observation fingerprint is invalid")
-    if len(normalized_arguments.encode("utf-8")) > 2048:
-        raise ValueError("tool observation arguments are too large")
     try:
         parsed_arguments = json.loads(normalized_arguments)
     except json.JSONDecodeError as exc:
@@ -3501,8 +3485,6 @@ def hook_record_tool_observation(
             raise ValueError("tool observation identity is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
             raise ValueError("tool observation fingerprint is invalid")
-        if len(normalized_arguments.encode("utf-8")) > 2048:
-            raise ValueError("tool observation arguments are too large")
         parsed_arguments = json.loads(normalized_arguments)
         if not isinstance(parsed_arguments, dict):
             raise ValueError("tool observation arguments are invalid")

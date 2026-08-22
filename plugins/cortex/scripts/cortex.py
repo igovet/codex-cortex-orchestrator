@@ -73,7 +73,6 @@ from cortex_runtime.mcp_api import (
     v3_response as render_v3_response,
 )
 from cortex_runtime.ledger_db import (
-    ARTIFACT_TRANSPORT_MAX_BYTES,
     DATABASE_SCHEMA_VERSION,
     all_lanes as db_all_lanes,
     artifact_path as db_task_artifact_path,
@@ -383,6 +382,7 @@ if (
         "bootstrap_target_bytes": 1500,
         "ordinary_briefing_target_bytes": 16 * 1024,
         "harvest_briefing_target_bytes": 18 * 1024,
+        "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
     }
 ):
     raise RuntimeError("bundled Cortex shared worker contract is invalid")
@@ -689,25 +689,10 @@ SENSITIVE_RE = re.compile(r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?t
 BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+|bearer\s+)([^\s,;]+)")
 URI_CREDENTIAL_RE = re.compile(r"(?i)(://)([^/@\s]+):([^/@\s]+)(@)")
 ENV_SECRET_RE = re.compile(r"(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s]+)")
+# These numeric names are retained as prompt/test guidance values only.  They
+# are never used to reject, truncate, or omit canonical task content.
 MAX_TEXT = 4000
-# ``ContextCompiler`` is deliberately strict about the durable task-domain
-# shape: it accepts at most 100 requirements and each requirement must be no
-# longer than 600 characters.  Requirements enter the ledger through several
-# public/control-plane paths, so keep the ingress invariant beside the common
-# text-array normalizer instead of relying on a later briefing compilation to
-# discover it.
-MAX_CANONICAL_REQUIREMENTS = 100
-MAX_CANONICAL_REQUIREMENT_LENGTH = 600
-# The result itself is an immutable, cursor-paged SQLite artifact; it must not
-# have a second product-sized quota.  Keep the same hard bound as one atomic
-# JSON document so a malformed or hostile local draft cannot exhaust process
-# memory or disk in a single operation.  The 32 KiB transport page is a read
-# concern only and never truncates canonical result content.
 MAX_JSON_BYTES = 8 * 1024 * 1024
-# Planner and Scope payloads are immutable result siblings.  Keep their
-# complete content on the same technical artifact boundary rather than
-# rejecting evidence because it will later be represented by an artifact ref
-# in a compact worker briefing.
 MAX_PLANNING_BYTES = MAX_JSON_BYTES
 MAX_SCOPING_BYTES = MAX_JSON_BYTES
 MAX_DISCOVERY_DOMAINS = 8
@@ -716,19 +701,7 @@ MAX_WORK_PACKAGES = 32
 MAX_MICROTASKS_PER_PACKAGE = 32
 MAX_MICROTASKS_PER_PLAN = 128
 MAX_TASK_STATE_BYTES = 8 * 1024 * 1024
-# Every ordinary JSON artifact is bounded before it replaces an existing
-# ledger file. Large manifests use the explicit, larger budget below instead
-# of silently bypassing the guard.
-# ``MAX_JSON_BYTES`` is defined above because result payloads share this
-# technical atomic-persistence boundary.
-# A project manifest is intentionally larger than an individual result or
-# task-state document: it contains one bounded inventory record per project
-# entry.  Keep the read cap finite while allowing ordinary repositories to
-# complete handoff and reconciliation.
 MAX_MANIFEST_BYTES = 64 * 1024 * 1024
-# Compact inspect/recovery handoffs retain only the newest summaries.  Worker
-# dispatches use scoped result refs instead of embedding these summaries, so
-# predecessor grants are bounded by the task's result inventory instead.
 MAX_CONTEXT_RESULTS = 8
 # This bounds only repeated failures inside the private atomic commit adapter;
 # it is not a pipeline, QA, gate, worker, or rework-attempt budget.
@@ -928,9 +901,10 @@ TRACKER_POLICY = {
     "special_files": "record type and metadata without reading content",
     "gitignore": "honor directory and file patterns from .gitignore, including negation",
     "manifest_limits": {
-        "max_entries": 100000,
-        "max_hashed_bytes": 2147483648,
-        "max_seconds": 30,
+        "mode": "prompt_only_advisory",
+        "max_entries": None,
+        "max_hashed_bytes": None,
+        "max_seconds": None,
     },
 }
 READ_ONLY_EPHEMERAL_REASON_PREFIXES = (
@@ -993,8 +967,9 @@ def normalize_routing_id(value: Any, field: str = "routing id") -> str:
 
 def redact(value: object, limit: int | None = MAX_TEXT) -> str:
     text = str(value or "")
-    if limit is not None:
-        text = text[:limit]
+    # Redaction protects secrets; it is never a content-size policy.  Keep
+    # complete non-sensitive data in canonical artifacts and records.
+    del limit
     text = AUTHORIZATION_RE.sub(lambda match: f"{match.group(1)}<REDACTED>", text)
     text = BEARER_RE.sub(lambda match: f"{match.group(1)}<REDACTED>", text)
     text = URI_CREDENTIAL_RE.sub(r"\1<REDACTED>@", text)
@@ -1008,72 +983,21 @@ def normalize_init_text_list(value: object, field: str, *, item_limit: int = 100
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{field} must be a current canonical text array")
-    return [item.strip() for item in value][:item_limit]
-
-
-def _atomize_requirement_text(value: str) -> list[str]:
-    """Split one redacted requirement without discarding any of its text.
-
-    A task requirement is a typed ContextDomain record, not a display field.
-    Its compiler boundary is 600 characters.  Prefer a whitespace boundary so
-    natural-language clauses stay intact where possible.  Keep a selected
-    whitespace boundary in the preceding atom and preserve leading/trailing
-    whitespace too: ``ContextCompiler`` applies its own display-time strip,
-    but durable normalization must be byte-stable when a receipt is consumed
-    again.  No user text is discarded and the resulting atoms are idempotent.
-    A single unbroken token is split at the hard boundary because there is no
-    meaning-preserving word boundary available.
-    """
-    text = value
-    atoms: list[str] = []
-    while len(text) > MAX_CANONICAL_REQUIREMENT_LENGTH:
-        window = text[:MAX_CANONICAL_REQUIREMENT_LENGTH]
-        split_at = max(window.rfind(" "), window.rfind("\t"), window.rfind("\n"), window.rfind("\r"))
-        # Include the selected separator in the prior atom.  That makes
-        # ``''.join(atoms)`` reconstruct the complete redacted input and,
-        # unlike lstrip/rstrip normalization, remains stable when init_task
-        # revalidates a persisted classification receipt.
-        end = split_at + 1 if split_at > 0 else MAX_CANONICAL_REQUIREMENT_LENGTH
-        atom = text[:end]
-        if not atom.strip():
-            # Defensive fallback for pathological whitespace-only windows.
-            end = MAX_CANONICAL_REQUIREMENT_LENGTH
-            atom = text[:end]
-        atoms.append(atom)
-        text = text[end:]
-    if text.strip():
-        atoms.append(text)
-    return atoms
+    del item_limit
+    return [item.strip() for item in value]
 
 
 def normalize_task_requirements(value: object) -> list[str]:
     """Return the only persistable representation of ``task.requirements``.
 
-    Oversized requirements are atomized *before* they reach classification,
-    receipts, or task definitions.  No text is truncated: explicit secret
-    redaction remains the existing safety policy, while all non-sensitive
-    normalized text is retained in order.  If the complete content cannot fit
-    in ContextCompiler's fixed 100x600 domain, reject it at ingress rather
-    than persisting a task which will later become uncontinuable.
+    No backend size or item count defines the canonical task domain.  Prompt
+    guidance may request concise requirements, but durable input stays intact.
     """
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError("requirements must be a current canonical text array")
-    atoms: list[str] = []
-    for item in value:
-        # Do not use redact's ordinary display limit here.  Atomization is the
-        # bounded storage policy and must see the entire user-supplied value.
-        # In particular, do not strip an existing atom: init_task revalidates
-        # immutable receipts and must preserve the split separator exactly.
-        atoms.extend(_atomize_requirement_text(redact(item, limit=None)))
-        if len(atoms) > MAX_CANONICAL_REQUIREMENTS:
-            raise ValueError(
-                "requirements exceed the bounded canonical task domain "
-                f"({MAX_CANONICAL_REQUIREMENTS} items of {MAX_CANONICAL_REQUIREMENT_LENGTH} characters); "
-                "split the work into separate tasks"
-            )
-    return atoms
+    return [redact(item, limit=None) for item in value]
 
 
 def require_internal_english(value: object, label: str) -> None:
@@ -1743,10 +1667,16 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
     detected_roots: dict[str, str] = {}
     detected_ignored_entries: dict[str, dict[str, Any]] = {}
     started_at = time.monotonic()
-    limit_values = active_policy.get("manifest_limits") if isinstance(active_policy.get("manifest_limits"), dict) else {}
-    max_entries = max(1, int(limit_values.get("max_entries", 100000)))
-    max_hashed_bytes = max(1, int(limit_values.get("max_hashed_bytes", 2147483648)))
-    max_seconds = max(1, int(limit_values.get("max_seconds", 30)))
+    # Legacy limit values remain inside the recorded policy for prompt/UI
+    # compatibility only.  A manifest is canonical data: never stop walking
+    # because of entry count, cumulative bytes, or elapsed time.
+    max_entries = None
+    # File-content volume is not a backend admission rule. Keep the legacy
+    # policy value only in diagnostic metadata for older ledgers; every
+    # non-ignored regular file is hashed and represented in the canonical
+    # manifest regardless of its size.
+    max_hashed_bytes = None
+    max_seconds = None
     budget = {"hashed_bytes": 0, "cache_hits": 0, "partial": False, "reason": None, "at": None}
     frozen_rules = list(active_policy.get("gitignore_rules", [])) if policy is not None else []
     if policy is not None:
@@ -1812,20 +1742,11 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
                         detected_roots[ignored_path] = reason
                 continue
             rel = Path(*parts).as_posix()
-            if len(entries) >= max_entries:
-                budget.update({"partial": True, "reason": "entry_limit", "at": rel})
-                return
-            if time.monotonic() - started_at >= max_seconds:
-                budget.update({"partial": True, "reason": "time_limit", "at": rel})
-                return
             if stat.S_ISLNK(mode):
                 entries[rel] = {"kind": "symlink", "target": os.readlink(path), "mode": stat.S_IMODE(mode)}
             elif is_directory:
                 walk(path, parts, rules)
             elif stat.S_ISREG(mode):
-                if budget["hashed_bytes"] + int(info.st_size) > max_hashed_bytes:
-                    budget.update({"partial": True, "reason": "hashed_byte_limit", "at": rel})
-                    return
                 record = _manifest_file(path, info)
                 if record.pop("digest_cache_hit", False):
                     budget["cache_hits"] += 1
@@ -1862,7 +1783,7 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
             "elapsed_ms": int((time.monotonic() - started_at) * 1000),
             "limits": {
                 "max_entries": max_entries,
-                "max_hashed_bytes": max_hashed_bytes,
+                "max_hashed_bytes": None,
                 "max_seconds": max_seconds,
             },
         },
@@ -2514,12 +2435,9 @@ def write_text_atomic(path: Path, text: str) -> None:
 
 
 def _json_text(value: Any, *, label: str, max_bytes: int) -> str:
-    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
-        raise ValueError(f"{label} size limit is invalid")
-    text = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-    if len(text.encode("utf-8")) > max_bytes:
-        raise ValueError(f"{label} is oversized")
-    return text
+    """Serialize complete JSON for an atomic write without a byte quota."""
+    del label, max_bytes
+    return json.dumps(value, ensure_ascii=False, indent=2) + "\n"
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -3094,7 +3012,7 @@ def sanitize_structured(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): "<REDACTED>" if SENSITIVE_KEY_RE.search(str(key)) else sanitize_structured(item) for key, item in value.items()}
     if isinstance(value, list):
-        return [sanitize_structured(item) for item in value[:100]]
+        return [sanitize_structured(item) for item in value]
     return redact(value, 2000)
 
 
@@ -3361,25 +3279,21 @@ def _planning_identifier(value: Any, label: str) -> str:
 def _planning_text(value: Any, label: str, *, maximum: int = MAX_JSON_BYTES) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{label} must be a string")
-    # Do not use ``redact(..., maximum)`` here: its character-count truncation
-    # could make a hostile Unicode payload appear acceptable only after a
-    # planner/scope worker had already produced it.  Planning and scoping are
-    # durable JSON ingress, so enforce the advertised bound in UTF-8 bytes
-    # without silently dropping semantic content.
+    # Prompt prose can recommend concise planning input, but canonical planner
+    # and scope artifacts do not enforce a backend content-volume quota.
+    del maximum
     text = redact(value, None).strip()
     if not text:
         raise ValueError(f"{label} is required")
-    if len(text.encode("utf-8")) > maximum:
-        raise ValueError(f"{label} exceeds the {maximum}-byte limit")
     return text
 
 
 def _planning_string_list(value: Any, label: str, *, maximum: int | None = None) -> list[str]:
     if value is None:
         return []
-    if not isinstance(value, list) or (maximum is not None and len(value) > maximum):
-        suffix = f" with at most {maximum} items" if maximum is not None else ""
-        raise ValueError(f"{label} must be an array{suffix}")
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array")
+    del maximum
     result = [_planning_text(item, f"{label} item") for item in value]
     if len(result) != len(set(result)):
         raise ValueError(f"{label} items must be unique")
@@ -3389,8 +3303,8 @@ def _planning_string_list(value: Any, label: str, *, maximum: int | None = None)
 def _planning_paths_list(value: Any, label: str) -> list[str]:
     if value is None:
         return ["."]
-    if not isinstance(value, list) or not value or len(value) > 50:
-        raise ValueError(f"{label} must be a non-empty array with at most 50 paths")
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty array")
     paths = ["." if str(item).strip() == "." else _safe_project_relative_path(item) for item in value]
     if len(paths) != len(set(paths)):
         raise ValueError(f"{label} paths must be unique")
@@ -3430,8 +3344,8 @@ def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str
         raise ValueError("scoping must contain exactly overview, context_files, and discovery_domains")
     overview = _planning_text(value.get("overview"), "scoping overview")
     raw_context_files = value.get("context_files")
-    if not isinstance(raw_context_files, list) or len(raw_context_files) > 50:
-        raise ValueError("scoping context_files must be an array with at most 50 paths")
+    if not isinstance(raw_context_files, list):
+        raise ValueError("scoping context_files must be an array")
     context_files = [_safe_project_relative_path(item) for item in raw_context_files]
     if len(context_files) != len(set(context_files)):
         raise ValueError("scoping context_files must be unique")
@@ -3439,9 +3353,8 @@ def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str
     if (
         not isinstance(raw_domains, list)
         or not raw_domains
-        or len(raw_domains) > MAX_DISCOVERY_DOMAINS
     ):
-        raise ValueError(f"scoping discovery_domains must contain 1..{MAX_DISCOVERY_DOMAINS} items")
+        raise ValueError("scoping discovery_domains must be a non-empty array")
     domains: list[dict[str, Any]] = []
     domain_ids: set[str] = set()
     dependency_graph: dict[str, list[str]] = {}
@@ -3503,8 +3416,6 @@ def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str
         "context_files": context_files,
         "discovery_domains": domains,
     }
-    if len(json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")) > MAX_SCOPING_BYTES:
-        raise ValueError(f"scoping exceeds the {MAX_SCOPING_BYTES}-byte limit")
     return result
 
 
@@ -3553,23 +3464,23 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     if recommendation not in {"approve", "revise"}:
         raise ValueError("planning recommendation must be approve or revise")
     recommendation_rationale = str(value.get("recommendation_rationale") or "").strip()
-    if recommendation_rationale and len(recommendation_rationale.encode("utf-8")) > 4000:
-        raise ValueError("planning recommendation_rationale is too long")
+    # Recommendation prose is canonical planning data. Prompt compactness is
+    # advisory only; do not reject a valid rationale because of its byte size.
     raw_resolved_questions = value.get("resolved_questions", [])
     if not isinstance(raw_resolved_questions, list) or any(
         not isinstance(item, str) or not item.strip() for item in raw_resolved_questions
-    ) or len(raw_resolved_questions) > 32:
+    ):
         raise ValueError("planning resolved_questions must be an array of non-empty strings")
     resolved_questions = list(dict.fromkeys(str(item).strip() for item in raw_resolved_questions))
     raw_risks = value.get("risks", [])
     if not isinstance(raw_risks, list) or any(not isinstance(item, str) or not item.strip() for item in raw_risks):
         raise ValueError("planning risks must be an array of non-empty strings")
     risks = list(dict.fromkeys(str(item).strip() for item in raw_risks))
-    if len(risks) > 64 or any(len(item.encode("utf-8")) > 2000 for item in risks):
-        raise ValueError("planning risks exceed the supported bound")
+    # Keep the structural list/cardinality contract, but preserve each risk
+    # string losslessly regardless of its rendered byte size.
     raw_coverage = value.get("requirement_coverage", [])
-    if not isinstance(raw_coverage, list) or len(raw_coverage) > 100:
-        raise ValueError("planning requirement_coverage must be an array with at most 100 items")
+    if not isinstance(raw_coverage, list):
+        raise ValueError("planning requirement_coverage must be an array")
     coverage: list[dict[str, Any]] = []
     coverage_keys: set[str] = set()
     for index, item in enumerate(raw_coverage, 1):
@@ -3600,8 +3511,8 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             "status": "covered",
         })
     raw_packages = value.get("work_packages")
-    if not isinstance(raw_packages, list) or not raw_packages or len(raw_packages) > MAX_WORK_PACKAGES:
-        raise ValueError(f"planning work_packages must contain 1..{MAX_WORK_PACKAGES} items")
+    if not isinstance(raw_packages, list) or not raw_packages:
+        raise ValueError("planning work_packages must be a non-empty array")
     packages: list[dict[str, Any]] = []
     package_ids: set[str] = set()
     microtask_ids: set[str] = set()
@@ -3620,8 +3531,8 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             raise ValueError("planning package ids must be unique")
         package_ids.add(package_id)
         raw_microtasks = raw_package.get("microtasks")
-        if not isinstance(raw_microtasks, list) or not raw_microtasks or len(raw_microtasks) > MAX_MICROTASKS_PER_PACKAGE:
-            raise ValueError(f"planning package {package_id!r} must contain 1..{MAX_MICROTASKS_PER_PACKAGE} microtasks")
+        if not isinstance(raw_microtasks, list) or not raw_microtasks:
+            raise ValueError(f"planning package {package_id!r} must contain a non-empty microtasks array")
         microtasks: list[dict[str, Any]] = []
         for micro_index, raw_microtask in enumerate(raw_microtasks, 1):
             if not isinstance(raw_microtask, dict):
@@ -3695,8 +3606,6 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 "verification": microtask_verification,
             })
         total_microtasks += len(microtasks)
-        if total_microtasks > MAX_MICROTASKS_PER_PLAN:
-            raise ValueError(f"planning may contain at most {MAX_MICROTASKS_PER_PLAN} microtasks")
         raw_dependencies = raw_package.get("depends_on", [])
         if not isinstance(raw_dependencies, list):
             raise ValueError(f"planning package {package_id!r} depends_on must be an array")
@@ -3750,8 +3659,6 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         "resolved_questions": resolved_questions,
         "risks": risks,
     }
-    if len(json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")) > MAX_PLANNING_BYTES:
-        raise ValueError(f"planning exceeds the {MAX_PLANNING_BYTES}-byte limit")
     return result
 
 
@@ -4039,8 +3946,8 @@ def question_bus_paths(task_dir: Path) -> dict[str, Path]:
 def _question_options(value: object) -> list[dict[str, str]]:
     if value in (None, "", []):
         return []
-    if not isinstance(value, list) or len(value) > 32:
-        raise ValueError("question options must be a list with at most 32 choices")
+    if not isinstance(value, list):
+        raise ValueError("question options must be a list")
     options: list[dict[str, str]] = []
     for item in value:
         if isinstance(item, str):
@@ -4416,7 +4323,7 @@ def _project_knowledge_context(project_root: Path, explicit: object) -> tuple[li
     for item in [*indexes, *supplied]:
         if item and item not in merged:
             merged.append(item)
-    return merged[:50], indexes
+    return merged, indexes
 
 
 
@@ -4464,8 +4371,8 @@ def _required_task_result_contract(task: dict[str, Any]) -> tuple[list[str], lis
         value = task.get(field)
         if value is None:
             return []
-        if not isinstance(value, list) or len(value) > 100:
-            raise ValueError(f"task.{field} must be an array with at most 100 non-empty strings")
+        if not isinstance(value, list):
+            raise ValueError(f"task.{field} must be an array of non-empty strings")
         cleaned = [str(item).strip() for item in value if isinstance(item, str) and str(item).strip()]
         if len(cleaned) != len(value):
             raise ValueError(f"task.{field} must contain only non-empty strings")
@@ -7096,7 +7003,7 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         if state["status"] == "completed":
             raise ValueError("completed task cannot be reassessed")
         task = load_task_definition(task_dir, state)
-        signals = [redact(item, 500) for item in params.get("signals", [])][:50]
+        signals = [redact(item, 500) for item in params.get("signals", [])]
         decision = str(params.get("decision", "")).strip()
         reason = redact(params.get("reason", ""), 2000)
         if state.get("require_delegation") and decision not in {"unchanged", "updated", "stop"}:
@@ -7269,7 +7176,7 @@ def handoff(params: dict[str, Any]) -> dict[str, Any]:
                 "active_host_checkpoint_attempt_ids": active_host_checkpoints,
                 "state": state,
             }
-        completed = [redact(item, 1000) for item in params.get("completed", [])][:100]
+        completed = [redact(item, 1000) for item in params.get("completed", [])]
         next_action = redact(params.get("next_action", ""), 4000)
         if not completed or not next_action:
             raise ValueError("handoff requires non-empty completed and next_action")
@@ -7293,7 +7200,7 @@ def handoff(params: dict[str, Any]) -> dict[str, Any]:
                 "state": state,
             }
         name = safe_id(str(params.get("name", f"handoff-{state['revision'] + 1}")))
-        payload = {"schema": SCHEMA, "task_id": state["task_id"], "created_at": now(), "source_revision": state["revision"], "gate": primary_gate(state), "completed": completed, "files": [redact(item, 500) for item in files], "file_manifest_receipt": receipt, "decisions": [redact(item, 2000) for item in params.get("decisions", [])][:100], "risks": [redact(item, 2000) for item in params.get("risks", [])][:100], "next_action": next_action}
+        payload = {"schema": SCHEMA, "task_id": state["task_id"], "created_at": now(), "source_revision": state["revision"], "gate": primary_gate(state), "completed": completed, "files": [redact(item, 500) for item in files], "file_manifest_receipt": receipt, "decisions": [redact(item, 2000) for item in params.get("decisions", [])], "risks": [redact(item, 2000) for item in params.get("risks", [])], "next_action": next_action}
         path = task_dir / "handoffs" / f"{name}.json"
         write_json(path, payload)
         artifact = store_immutable_artifact(
@@ -7614,6 +7521,29 @@ def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candi
     }
     if candidates is not None:
         result["candidates"] = candidates
+    return result
+
+
+def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    """Turn a stale/foreign continuation into a terminal coordinator receipt.
+
+    A coordinator that loses the response after a successful continuation may
+    retry the old relative step.  Treating that diagnostic as an ordinary
+    correctable input invites a model to repeat ``continue`` (and often to
+    invent artifacts or replacement waves).  The active task is already
+    server-owned, so this class of error must be fail-closed: no retry, no
+    recovery payload, and no project operation.
+    """
+    result = dict(error)
+    result["outcome"] = "blocked"
+    result["retryable"] = False
+    result["stop_reason"] = reason
+    result["next_action"] = (
+        f"{COORDINATOR_LOCK} STOP. This continuation is stale or belongs to a different task state. "
+        "Do not call continue_orchestration again with this step/results, do not request artifacts, "
+        "do not add future_waves, and do not spawn a replacement worker. Result the blocker; only a "
+        "fresh server lifecycle response may authorize a later action."
+    )
     return result
 
 
@@ -9050,10 +8980,9 @@ def _v3_compact_waves(
                 raw_result_refs = worker["context_result_refs"]
                 if (
                     not isinstance(raw_result_refs, list)
-                    or len(raw_result_refs) > 32
                     or any(not isinstance(item, str) or not item.strip() for item in raw_result_refs)
                 ):
-                    raise ValueError("worker context_result_refs must be a non-empty-string array of at most 32 items")
+                    raise ValueError("worker context_result_refs must be a non-empty-string array")
                 result_refs = [safe_id(item.strip()) for item in raw_result_refs]
                 if len(result_refs) != len(set(result_refs)):
                     raise ValueError("worker context_result_refs must be unique")
@@ -9317,6 +9246,84 @@ def _v3_compact_continue_replay(response: dict[str, Any]) -> dict[str, Any]:
         "were invoked, call manage_orchestration with intent inspect once and invoke only still-awaiting dispatches."
     )
     return compact
+
+
+def _v3_continue_receipt_digest(params: dict[str, Any]) -> str:
+    """Identify the consumed result slots independently of a replan proposal.
+
+    A successful continuation consumes the current wave's exact canonical
+    result/dispatch receipts.  ``future_waves`` and ``reason`` describe a
+    *possible successor*; they must never let a coordinator consume the same
+    worker result again merely by changing the proposed successor pipeline.
+    Keep this distinct from the full request digest, which is still used for
+    lossless replay of the original public response.
+    """
+    slots: list[dict[str, Any]] = []
+    raw_results = params.get("results")
+    if isinstance(raw_results, list):
+        for index, raw in enumerate(raw_results, 1):
+            if not isinstance(raw, dict):
+                # Validation owns malformed result entries.  This placeholder
+                # only makes the guard deterministic before that validation.
+                slots.append({"slot": index, "invalid": True})
+                continue
+            worker = raw.get("worker")
+            slot = worker if type(worker) is int else index
+            slots.append({
+                "slot": slot,
+                "attempt_result_ref": str(raw.get("attempt_result_ref") or "").strip() or None,
+                "dispatch_ref": str(raw.get("dispatch_ref") or "").strip() or None,
+            })
+    return _orchestrate_request_digest({
+        "step": params.get("step"),
+        # Ordering is not semantic once each slot is explicit.  Sorting also
+        # closes an avoidable replay bypass for reordered parallel receipts.
+        "slots": sorted(slots, key=lambda item: (str(item.get("slot")), str(item))),
+    })
+
+
+def _v3_consumed_continue_error(task_ref: str) -> dict[str, Any]:
+    """Return a deterministic, non-mutating stop for reused wave receipts."""
+    result = _v3_error(
+        "continue_receipts_already_consumed",
+        "the submitted canonical result receipts were already consumed for this task wave; "
+        "Cortex will not replan or dispatch from them again",
+        outcome="blocked",
+    )
+    result["task_ref"] = task_ref
+    result["retryable"] = False
+    result["recovery"] = "inspect_exact_task"
+    result["next_action"] = (
+        f"{COORDINATOR_LOCK} Do not retry continue_orchestration with changed future_waves, reason, "
+        "or reformatted results. Call manage_orchestration intent=inspect once with this exact task_ref "
+        "and use only the server-returned current step/results or pending dispatches."
+    )
+    return result
+
+
+def _v3_consumed_continue_replay(
+    params: dict[str, Any],
+    task_id: str,
+    task_ref: str,
+) -> dict[str, Any] | None:
+    """Fail closed when a prior successful continue already consumed receipts.
+
+    The registry is deliberately keyed by task plus relative step/result slots,
+    not by the full public request.  Exact request replays remain handled by
+    ``last_continue`` before this guard; a changed future-wave proposal gets a
+    stable stop instead of a second state mutation.
+    """
+    receipt_digest = _v3_continue_receipt_digest(params)
+    record = _operation_registry(ledger_root(params)).get("tasks", {}).get(task_id, {})
+    consumed = record.get("consumed_continue_receipts") if isinstance(record, dict) else None
+    if not isinstance(consumed, list):
+        return None
+    if any(
+        isinstance(item, dict) and item.get("receipt_digest") == receipt_digest
+        for item in consumed
+    ):
+        return _v3_consumed_continue_error(task_ref)
+    return None
 
 
 def _v3_start_reservation(
@@ -9725,6 +9732,25 @@ def _v3_store_continue(params: dict[str, Any], task_id: str, request_digest: str
                 "response": _v3_compact_continue_replay(response),
                 "completed_at": now(),
             }
+            # A full request digest deliberately includes replan input, but a
+            # worker receipt is single-use.  Persist a separate bounded
+            # consumption record so a coordinator cannot submit the exact
+            # same wave result again with a different reason/future_waves.
+            receipt_digest = _v3_continue_receipt_digest(params)
+            consumed = task_record.setdefault("consumed_continue_receipts", [])
+            if not any(
+                isinstance(item, dict) and item.get("receipt_digest") == receipt_digest
+                for item in consumed
+            ):
+                consumed.append({
+                    "receipt_digest": receipt_digest,
+                    "step": params.get("step"),
+                    "consumed_at": now(),
+                })
+                task_record["consumed_continue_receipts"] = [
+                    item for item in consumed[-128:]
+                    if isinstance(item, dict)
+                ]
         _write_operation_registry(root, registry)
 
 
@@ -9851,6 +9877,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             return completed_replay
         resolved = _v3_resolve_task(params, require_task_ref=True)
         if isinstance(resolved, dict):
+            if resolved.get("code") in {"unknown_task_ref", "no_active_task", "task_unavailable", "task_ref_required"}:
+                return _v3_continue_stop(resolved, reason="task_identity_or_lifecycle_mismatch")
             return resolved
         task_dir, state, task, task_ref = resolved
         resolved_task_ref = task_ref
@@ -9863,6 +9891,13 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 "with intent=plan_approval before continuing"
             )
         _, attempt_ids, _ = _v3_active_wave_context(params, task_dir, state)
+        # Check the current relative step before the receipt-consumption
+        # guard.  A stale prior step has its own terminal diagnostic; the
+        # single-use receipt guard handles the pathological case where a
+        # replacement plan retains the same numeric relative step.
+        consumed_replay = _v3_consumed_continue_replay(params, state["task_id"], task_ref)
+        if consumed_replay is not None:
+            return consumed_replay
         open_questions = [
             item for item in _open_blocking_questions(task_dir, state)
             if item.get("attempt_id") in set(attempt_ids)
@@ -10035,6 +10070,8 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
         error = _v3_error("continue_validation_failed", exc)
+        if str(exc).startswith("continue step must match the active relative step"):
+            return _v3_continue_stop(error, reason="stale_relative_step")
         if resolved_task_ref:
             error["task_ref"] = resolved_task_ref
         return error
@@ -10515,8 +10552,8 @@ def _v3_follow_up_payload(value: object) -> dict[str, Any]:
     if not user_request:
         raise ValueError("follow_up payload.user_request must preserve the exact corrective user request")
     result_refs = value.get("result_refs", [])
-    if not isinstance(result_refs, list) or len(result_refs) > 32:
-        raise ValueError("follow_up payload.result_refs must be an array of at most 32 source result refs")
+    if not isinstance(result_refs, list):
+        raise ValueError("follow_up payload.result_refs must be an array of source result refs")
     normalized_refs = [safe_id(str(item)) for item in result_refs]
     if not all(normalized_refs) or len(normalized_refs) != len(set(normalized_refs)):
         raise ValueError("follow_up payload.result_refs must contain unique non-empty source result refs")

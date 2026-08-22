@@ -159,13 +159,13 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(delegation_lists["allowed_paths"], ["plugins/cortex"])
 
-    def test_oversized_requirements_are_atomized_before_classify_and_init_persistence(self):
+    def test_oversized_requirements_round_trip_before_classify_and_init_persistence(self):
         self.activate()
         requirement = " ".join(
             f"requirement-{index}: preserve the complete durable requirement text across classification and task initialization"
             for index in range(32)
         )
-        self.assertGreater(len(requirement), control.MAX_CANONICAL_REQUIREMENT_LENGTH)
+        self.assertGreater(len(requirement), 600)
 
         classified = control.classify_task({
             "complexity": "C2",
@@ -174,37 +174,28 @@ class ControlPlaneTests(unittest.TestCase):
         })
         receipt = control.db_get_classification(self.ledger, classified["classification_id"])
         self.assertIsNotNone(receipt)
-        self.assertGreater(len(receipt["requirements"]), 1)
-        self.assertTrue(all(
-            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
-            for item in receipt["requirements"]
-        ))
-        self.assertEqual("".join(receipt["requirements"]), requirement)
+        self.assertEqual(receipt["requirements"], [requirement])
         self.assertEqual(
             control.normalize_task_requirements(receipt["requirements"]),
             receipt["requirements"],
         )
 
         created = control.init_task({
-            "task_id": "atomized-requirements",
-            "user_request": "persist atomized requirements without blocking continuation",
+            "task_id": "lossless-requirements",
+            "user_request": "persist lossless requirements without blocking continuation",
             "classification_id": classified["classification_id"],
             "principal": "thread-a",
         })
         task = self.task_definition(self.ledger / "tasks" / created["task_directory"])
         self.assertEqual(task["requirements"], receipt["requirements"])
-        self.assertEqual("".join(task["requirements"]), requirement)
-        self.assertTrue(all(
-            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
-            for item in task["requirements"]
-        ))
+        self.assertEqual(task["requirements"], [requirement])
 
-    def test_v3_start_atomizes_oversized_requirements_before_dispatch(self):
+    def test_v3_start_preserves_oversized_requirements_before_dispatch(self):
         requirement = " ".join(
             f"dispatch requirement {index} must remain complete and bounded in the canonical ledger domain"
             for index in range(36)
         )
-        self.assertGreater(len(requirement), control.MAX_CANONICAL_REQUIREMENT_LENGTH)
+        self.assertGreater(len(requirement), 600)
 
         started = self.v3_start(
             "start a task with an oversized requirement",
@@ -215,14 +206,9 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(started["dispatches"])
         task_dir = next((self.ledger / "tasks").iterdir())
         task = self.task_definition(task_dir)
-        self.assertGreater(len(task["requirements"]), 1)
-        self.assertEqual("".join(task["requirements"]), requirement)
-        self.assertTrue(all(
-            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
-            for item in task["requirements"]
-        ))
+        self.assertEqual(task["requirements"], [requirement])
 
-    def test_init_task_repairs_an_oversized_preexisting_receipt_before_persistence(self):
+    def test_init_task_preserves_an_oversized_preexisting_receipt_before_persistence(self):
         self.activate()
         requirement = " ".join(
             f"receipt requirement {index} remains a complete bounded task-domain value"
@@ -235,8 +221,8 @@ class ControlPlaneTests(unittest.TestCase):
         })
         receipt = control.db_get_classification(self.ledger, classified["classification_id"])
         self.assertIsNotNone(receipt)
-        # Model a receipt written before this ingress invariant existed.  Init
-        # must not turn it into a ledger task which only fails on continue.
+        # Model a persisted classification receipt. Init must preserve it,
+        # not rewrite it into backend-sized atoms.
         receipt["requirements"] = [requirement]
         control.db_put_classification(self.ledger, receipt)
 
@@ -247,21 +233,18 @@ class ControlPlaneTests(unittest.TestCase):
             "principal": "thread-a",
         })
         task = self.task_definition(self.ledger / "tasks" / created["task_directory"])
-        self.assertGreater(len(task["requirements"]), 1)
-        self.assertEqual("".join(task["requirements"]), requirement)
-        self.assertTrue(all(
-            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
-            for item in task["requirements"]
-        ))
+        self.assertEqual(task["requirements"], [requirement])
 
-    def test_unrepresentable_requirements_fail_at_classification_before_a_task_is_created(self):
+    def test_many_oversized_requirements_are_classified_without_a_backend_quota(self):
         self.activate()
-        with self.assertRaisesRegex(ValueError, "exceed the bounded canonical task domain"):
-            control.classify_task({
-                "complexity": "C1",
-                "requirements": ["x" * 601 for _ in range(51)],
-                "principal": "thread-a",
-            })
+        classified = control.classify_task({
+            "complexity": "C1",
+            "requirements": ["x" * 601 for _ in range(51)],
+            "principal": "thread-a",
+        })
+        receipt = control.db_get_classification(self.ledger, classified["classification_id"])
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["requirements"], ["x" * 601 for _ in range(51)])
         self.assertEqual(list((self.ledger / "tasks").iterdir()), [])
 
     def test_init_task_rejects_non_string_items_in_text_lists(self):
@@ -3752,7 +3735,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(compact[0]["delegations"][0]["dispatch_mode"], "visible_thread")
 
 
-    def test_v3_planner_dispatch_stays_below_host_output_truncation_budget(self):
+    def test_v3_planner_dispatch_preserves_full_briefing_and_advisory_volume_guidance(self):
         request = (
             "$cortex:orchestrator harvest\nRun a source-backed full knowledge harvest for this small repository as a "
             "C1 task. Use the normal harvest pipeline and do not request plan approval because this is a harvest "
@@ -3766,9 +3749,11 @@ class ControlPlaneTests(unittest.TestCase):
         prompt = self.briefing_from_response(started)
         bootstrap = started["dispatches"][0]["arguments"]["message"]
         serialized = json.dumps(started, ensure_ascii=False, separators=(",", ":"))
-        # Keep a reserve below the native host truncation boundary; merely
-        # fitting 16 KiB would make minor policy edits transport-unsafe.
-        self.assertLess(len(prompt.encode("utf-8")), 15_000)
+        # Prompt volume is worker guidance only.  The backend must preserve
+        # and materialize the complete immutable briefing rather than reject
+        # a valid assignment at an arbitrary transport threshold.
+        self.assertGreater(len(prompt.encode("utf-8")), 15_000)
+        self.assertIn("Prompt volume targets are advisory worker guidance only", prompt)
         self.assertLess(len(bootstrap.encode("utf-8")), 1_500)
         self.assertLess(len(serialized.encode("utf-8")), 8_000)
         self.assertLess(serialized.index("NEXT REQUIRED ACTION"), serialized.index("Cortex worker"))
@@ -3843,7 +3828,7 @@ class ControlPlaneTests(unittest.TestCase):
                 })
             prompt = control.host_spawn_prompt(profile, package)
             if gate == "governance_close":
-                self.assertLessEqual(len(prompt.encode("utf-8")), 14_500)
+                self.assertIn("Prompt volume targets are advisory worker guidance only", prompt)
                 assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
                 self.assertEqual(assignment["handoff"]["target"]["gate"], gate)
                 self.assertEqual(assignment["handoff"]["schema"], "cortex/handoff-projection/v1")
@@ -4462,7 +4447,7 @@ class ControlPlaneTests(unittest.TestCase):
 
 
 
-    def test_scoping_domains_reject_duplicates_cycles_overflow_and_incomplete_criteria(self):
+    def test_scoping_domains_reject_duplicates_cycles_and_incomplete_criteria_but_preserve_large_sets(self):
         base = self.v3_scoping()
         self.assertEqual(control.sanitize_scoping_payload(base)["schema"], control.SCOPING_SCHEMA)
 
@@ -4471,13 +4456,12 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unique"):
             control.sanitize_scoping_payload(duplicate)
 
-        overflow = dict(base)
-        overflow["discovery_domains"] = [
+        large_set = dict(base)
+        large_set["discovery_domains"] = [
             {**dict(base["discovery_domains"][0]), "id": f"domain_{index}", "title": f"Domain {index}"}
-            for index in range(control.MAX_DISCOVERY_DOMAINS + 1)
+            for index in range(24)
         ]
-        with self.assertRaisesRegex(ValueError, "1..8"):
-            control.sanitize_scoping_payload(overflow)
+        self.assertEqual(len(control.sanitize_scoping_payload(large_set)["discovery_domains"]), 24)
 
         cycle = dict(base)
         first = {**dict(base["discovery_domains"][0]), "id": "first", "depends_on": ["second"]}
@@ -4491,17 +4475,15 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verification"):
             control.sanitize_scoping_payload(incomplete)
 
-    def test_planning_and_scoping_reject_oversized_unicode_before_lossy_normalization(self):
-        """Text limits are encoded-byte limits; emoji must not bypass them."""
+    def test_planning_and_scoping_preserve_oversized_unicode_without_lossy_normalization(self):
+        """Planning/scoping payloads remain lossless; prompt volume is advisory."""
         oversized = "🙂" * (control.MAX_JSON_BYTES // len("🙂".encode("utf-8")) + 1)
         planning = self.v3_planning()
         planning["overview"] = oversized
-        with self.assertRaisesRegex(ValueError, "planning overview exceeds"):
-            control.sanitize_planning_payload(planning)
+        self.assertEqual(control.sanitize_planning_payload(planning)["overview"], oversized)
         scoping = self.v3_scoping()
         scoping["overview"] = oversized
-        with self.assertRaisesRegex(ValueError, "scoping overview exceeds"):
-            control.sanitize_scoping_payload(scoping)
+        self.assertEqual(control.sanitize_scoping_payload(scoping)["overview"], oversized)
 
 
 
@@ -4544,8 +4526,8 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertTrue(tiny["ok"], tiny)
         self.assertEqual(tiny["requested_max_bytes"], 1)
-        self.assertEqual(tiny["effective_max_bytes"], 4)
-        self.assertTrue(tiny["max_bytes_normalized"])
+        self.assertEqual(tiny["effective_max_bytes"], 1)
+        self.assertFalse(tiny["max_bytes_normalized"])
         self.assertLessEqual(tiny["returned_bytes"], tiny["effective_max_bytes"])
         oversized = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
@@ -4555,9 +4537,9 @@ class ControlPlaneTests(unittest.TestCase):
             },
         })
         self.assertTrue(oversized["ok"], oversized)
-        self.assertTrue(oversized["max_bytes_normalized"])
+        self.assertFalse(oversized["max_bytes_normalized"])
         self.assertEqual(oversized["requested_max_bytes"], control.MAX_BRIEFING_BYTES)
-        self.assertEqual(oversized["effective_max_bytes"], control.ARTIFACT_TRANSPORT_MAX_BYTES)
+        self.assertEqual(oversized["effective_max_bytes"], control.MAX_BRIEFING_BYTES)
         denied = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
             "payload": {"action": "read", "artifact_ref": artifact["artifact_ref"], "cursor": first["next_cursor"] + "x"},
@@ -4583,8 +4565,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(first["ok"], first)
         self.assertFalse(first["complete"])
         self.assertEqual(first["requested_max_bytes"], 1)
-        self.assertEqual(first["effective_max_bytes"], 4)
-        self.assertTrue(first["max_bytes_normalized"])
+        self.assertEqual(first["effective_max_bytes"], 1)
+        self.assertFalse(first["max_bytes_normalized"])
         self.assertLessEqual(first["returned_bytes"], first["effective_max_bytes"])
         self.assertNotIn("briefing_receipt", first)
         events = attempt_protocol.list_attempt_events(
@@ -4650,46 +4632,37 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(result["recorded"])
         handoff.assert_called_once()
 
-    def test_json_write_budget_rejects_before_replacing_existing_file(self):
+    def test_json_write_preserves_large_content_before_replacing_existing_file(self):
         path = self.base / "bounded.json"
         path.write_text("sentinel\n", encoding="utf-8")
         original_limit = control.MAX_JSON_BYTES
         try:
             control.MAX_JSON_BYTES = 128
-            with self.assertRaisesRegex(ValueError, r"JSON document 'bounded\.json' is oversized"):
-                control.write_json(path, {"padding": "x" * 512})
+            control.write_json(path, {"padding": "x" * 512})
         finally:
             control.MAX_JSON_BYTES = original_limit
-        self.assertEqual(path.read_text(encoding="utf-8"), "sentinel\n")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["padding"], "x" * 512)
 
-    def test_oversized_baseline_is_rejected_before_task_directory_creation(self):
+    def test_oversized_baseline_is_materialized_before_task_directory_creation(self):
         self.activate()
         classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
-        baseline = {
-            "schema": control.TRACKER_POLICY["schema"],
-            "project_root": str(self.project),
-            "policy": {},
-            "entries": {},
-            "entry_count": 0,
-            "digest": "digest",
-            "captured_at": control.now(),
-            "padding": "x" * 512,
-        }
+        baseline = control.capture_project_manifest(self.project)
+        baseline["padding"] = "x" * 512
         original_limit = control.MAX_MANIFEST_BYTES
         try:
             control.MAX_MANIFEST_BYTES = 128
             with mock.patch.object(control, "capture_project_manifest", return_value=baseline):
-                with self.assertRaisesRegex(ValueError, "baseline manifest is oversized"):
-                    control.init_task({
-                        "task_id": "oversized-baseline",
-                        "user_request": "reject oversized baseline",
-                        "complexity": "C1",
-                        "classification_id": classified["classification_id"],
-                        "principal": "thread-a",
-                    })
+                result = control.init_task({
+                    "task_id": "oversized-baseline",
+                    "user_request": "accept oversized baseline",
+                    "complexity": "C1",
+                    "classification_id": classified["classification_id"],
+                    "principal": "thread-a",
+                })
         finally:
             control.MAX_MANIFEST_BYTES = original_limit
-        self.assertEqual(list((self.ledger / "tasks").iterdir()), [])
+        self.assertTrue(result["created"])
+        self.assertEqual(control.db_load_task(self.ledger, "oversized-baseline")[1]["task_id"], "oversized-baseline")
 
 
 
@@ -5652,7 +5625,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "10.0.6")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "10.0.7")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

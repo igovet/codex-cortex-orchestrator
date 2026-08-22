@@ -27,7 +27,7 @@ operations listed above.
 
 `AttemptResult` contains only worker semantic data: `status`, `summary`,
 `findings`, `decisions_needed`, `unresolved`, and optional typed `claims`.
-`AttemptEvent` is an append-only bounded stream for findings, decision
+`AttemptEvent` is an append-only lossless stream for findings, decision
 evidence, blockers, verification observations, progress, and notes.
 
 The lifecycle is:
@@ -54,13 +54,13 @@ observations.
 
 ## Context and handoff
 
-`ContextCompiler` builds a bounded dispatch context from canonical task intent,
+`ContextCompiler` builds a complete dispatch context from canonical task intent,
 requirements, constraints, decisions, acceptance and verification criteria,
 assigned scope, allowed paths, validated predecessor result references, and
 server observations. `HandoffCompiler` produces target-specific projections:
 implementation receives scope and requirements, QA receives changed files and
 verification needs, and review receives the change inventory and open
-findings. Raw worker payloads are never used as an unbounded universal handoff.
+findings. Raw worker payloads are never used as a mutable universal handoff.
 
 ## Projection boundary
 

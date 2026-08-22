@@ -8,11 +8,6 @@ import cortex as _runtime
 
 MAX_ARTIFACT_PAGE_SIZE = 50
 DEFAULT_ARTIFACT_PAGE_SIZE = 20
-DEFAULT_ARTIFACT_READ_BYTES = 16 * 1024
-# Keep a text page large enough for one complete UTF-8 scalar.  This lets the
-# lower storage transport keep its strict effective-byte ceiling without
-# returning a broken fragment or stalling on a four-byte scalar.
-MIN_ARTIFACT_READ_BYTES = 4
 
 
 def _payload(params: dict[str, Any]) -> dict[str, Any]:
@@ -54,7 +49,11 @@ def manage_task_artifacts(
     state: dict[str, Any],
     task_ref: str,
 ) -> dict[str, Any]:
-    """List metadata or stream one immutable artifact without large MCP results."""
+    """List metadata or read one exact immutable artifact.
+
+    Paging remains available when a caller explicitly chooses it; the runtime
+    never imposes a content-size cap or silently normalizes a requested read.
+    """
     payload = _payload(params)
     action = str(payload.get("action") or "list").strip().lower()
     if action not in {"list", "metadata", "read"}:
@@ -110,15 +109,14 @@ def manage_task_artifacts(
             "task_ref": task_ref,
             "artifact": metadata,
             "read_cursor": _read_cursor(root, metadata, byte_offset=0),
-            "next_action": "Use the opaque read_cursor to request a bounded artifact part; its digest and task scope are checked on every read.",
+            "next_action": "Use the opaque read_cursor to request the next artifact part; its digest and task scope are checked on every read.",
         }
 
-    requested_max_bytes = payload.get("max_bytes", DEFAULT_ARTIFACT_READ_BYTES)
-    if isinstance(requested_max_bytes, bool) or not isinstance(requested_max_bytes, int):
-        raise ValueError("artifact max_bytes must be an integer")
-    if requested_max_bytes < 1:
-        raise ValueError("artifact max_bytes must be at least 1")
-    max_bytes = max(MIN_ARTIFACT_READ_BYTES, min(requested_max_bytes, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES))
+    requested_max_bytes = payload.get("max_bytes")
+    if requested_max_bytes is not None and (
+        isinstance(requested_max_bytes, bool) or not isinstance(requested_max_bytes, int) or requested_max_bytes < 1
+    ):
+        raise ValueError("artifact max_bytes must be a positive integer when supplied")
     byte_offset = 0
     if "cursor" in payload:
         decoded = _cursor(root, cursor=payload["cursor"], expected={
@@ -129,7 +127,7 @@ def manage_task_artifacts(
         if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
             raise ValueError("artifact read cursor offset is invalid")
     part = _runtime.db_read_artifact_range(
-        root, task_id, artifact_ref, byte_offset=byte_offset, max_bytes=max_bytes,
+        root, task_id, artifact_ref, byte_offset=byte_offset, max_bytes=requested_max_bytes,
     )
     result = {
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
@@ -137,14 +135,13 @@ def manage_task_artifacts(
         "outcome": "artifact_part",
         "task_ref": task_ref,
         "requested_max_bytes": requested_max_bytes,
-        "effective_max_bytes": max_bytes,
-        "max_bytes_normalized": max_bytes != requested_max_bytes,
+        "effective_max_bytes": requested_max_bytes,
+        "max_bytes_normalized": False,
         **part,
     }
     if part["next_byte_offset"] is not None:
         result["next_cursor"] = _read_cursor(root, metadata, byte_offset=part["next_byte_offset"])
     result["next_action"] = (
-        "If complete is false, use next_cursor with the same artifact_ref to fetch only the next bounded part; "
-        "max_bytes is safely normalized to the UTF-8-safe server range."
+        "If complete is false, use next_cursor with the same artifact_ref to fetch the next exact part."
     )
     return result

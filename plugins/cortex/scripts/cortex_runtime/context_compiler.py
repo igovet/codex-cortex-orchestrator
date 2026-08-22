@@ -1,10 +1,11 @@
-"""Compile bounded worker context from canonical Cortex state.
+"""Compile worker context from canonical Cortex state.
 
 This module deliberately has no dependency on the MCP facade, exported files, or
 worker-authored transport shape. Callers pass the already-authoritative task,
 attempt, receipt, and semantic-result records that they loaded from SQLite.
 The result is safe to embed in an immutable dispatch briefing, but is not a
-new source of task truth.
+new source of task truth. Prompt volume recommendations are advisory; this
+compiler never rejects, clips, or drops canonical content because of bytes.
 """
 from __future__ import annotations
 
@@ -14,10 +15,8 @@ from typing import Any
 
 
 CONTEXT_SCHEMA = "cortex/compiled-worker-context/v1"
-# These are projection budgets, never validity limits for a durable task.
-# A task is allowed to contain more text than a native worker prompt.  The
-# full fact remains in its immutable task-contract artifact; this compiler
-# emits only a deterministic, explicitly marked view for the current worker.
+# These names remain as prompt-authoring hints for callers that want to choose
+# a concise presentation. They are not backend validity or storage limits.
 MAX_TEXT = 1_200
 MAX_OBJECTIVE = 2_400
 MAX_ITEMS = 12
@@ -106,12 +105,7 @@ def _domain_values(value: object, *, label: str, limit: int, item_limit: int) ->
     # Do not use a prompt cardinality limit as a ledger validity limit.  The
     # returned domain is projected later with a source reference.
     del limit
-    result: list[str] = []
-    for raw in values:
-        text = _domain_text(raw, label=label, limit=item_limit)
-        if text not in result:
-            result.append(text)
-    return tuple(result)
+    return tuple(_domain_text(raw, label=label, limit=item_limit) for raw in values)
 
 
 def _validated_requirement(value: object) -> str:
@@ -131,52 +125,25 @@ def _validated_requirement(value: object) -> str:
 
 
 def _requirement_segments(text: str, *, item_limit: int = MAX_REQUIREMENT_ITEM) -> tuple[str, ...]:
-    """Split requirement text deterministically without truncation.
-
-    A preferred split is the latest sentence/clause boundary within the item
-    limit, then the latest word boundary, and finally a hard character split
-    for one unbroken token.  Whitespace at a selected word boundary remains in
-    the preceding segment, so ``"".join(segments) == text``.  This gives
-    recovery code an exact no-loss invariant even for Unicode input and for
-    atomized records that carry a split separator at their boundary.
-    """
-    if len(text) <= item_limit:
-        return (text,)
-
-    segments: list[str] = []
-    remaining = text
-    while len(remaining) > item_limit:
-        word_boundaries = [
-            index + 1
-            for index, character in enumerate(remaining[:item_limit])
-            if character.isspace()
-        ]
-        semantic_boundaries = [
-            boundary
-            for boundary in word_boundaries
-            if remaining[:boundary].rstrip().endswith((".", "!", "?", ";", ":"))
-        ]
-        boundary = max(semantic_boundaries or word_boundaries or [item_limit])
-        segments.append(remaining[:boundary])
-        remaining = remaining[boundary:]
-    segments.append(remaining)
-    return tuple(segments)
+    """Keep one canonical requirement as one complete semantic record."""
+    del item_limit
+    return (text,)
 
 
 def _domain_requirements(value: object) -> tuple[str, ...]:
-    """Return fresh typed requirement records, repairing only legacy length."""
+    """Return every canonical requirement as one unchanged typed record."""
     if value is None:
         return ()
     if not isinstance(value, list):
         raise ValueError("canonical requirements must be an array of strings")
     records: list[str] = []
-    seen: set[str] = set()
     for raw in value:
         text = _validated_requirement(raw)
-        if text in seen:
-            continue
-        seen.add(text)
-        records.extend(_requirement_segments(text))
+        # A requirement is a durable semantic unit, not a prompt-sized
+        # fragment.  The scoped immutable briefing reader handles volume, so
+        # a successor must receive this exact record rather than a server-side
+        # split projection.
+        records.append(text)
     return tuple(records)
 
 
@@ -195,9 +162,7 @@ def _domain_decisions(value: object) -> tuple[Decision, ...]:
         answer_value = raw.get("answer_en")
         question = _domain_text(question_value, label="decision question", limit=500)
         answer = _domain_text(answer_value, label="decision answer", limit=800)
-        decision = Decision(question=question, answer=answer)
-        if decision not in decisions:
-            decisions.append(decision)
+        decisions.append(Decision(question=question, answer=answer))
     return tuple(decisions)
 
 
@@ -221,10 +186,8 @@ def _compiler_visible_events(canonical: Mapping[str, Any]) -> list[dict[str, str
             "answer": _text(payload.get("answer"), 800),
         }
         compact = {key: value for key, value in item.items() if value}
-        if compact and compact not in projected:
+        if compact:
             projected.append(compact)
-        if len(projected) >= 16:
-            break
     return projected
 
 
@@ -264,12 +227,10 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
     for event in _compiler_visible_events(canonical):
         if event.get("event_type") != "decision_resolved":
             continue
-        decision = Decision(
+        decisions.append(Decision(
             question=_domain_text(event.get("question"), label="decision question", limit=500),
             answer=_domain_text(event.get("answer"), label="decision answer", limit=800),
-        )
-        if decision not in decisions:
-            decisions.append(decision)
+        ))
     finding_texts: list[str] = []
     for predecessor in _sequence(canonical.get("predecessor_results")):
         source = _mapping(predecessor)
@@ -277,13 +238,9 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
             detail = _mapping(raw)
             candidate = detail.get("summary") or detail.get("message") or raw
             if isinstance(candidate, str):
-                text = candidate.strip()[:500]
-                if text and text not in finding_texts:
+                text = candidate.strip()
+                if text:
                     finding_texts.append(text)
-            if len(finding_texts) >= 8:
-                break
-        if len(finding_texts) >= 8:
-            break
     return ContextDomain(
         intent=intent,
         requirements=requirements,
@@ -296,18 +253,16 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
 
 
 def _text(value: object, limit: int = MAX_TEXT) -> str:
-    """Return a bounded scalar without interpreting worker-controlled prose."""
+    """Return a complete scalar without interpreting worker-controlled prose."""
     if value is None:
         return ""
     return _utf8_prefix(str(value).strip(), limit)
 
 
 def _utf8_prefix(value: str, maximum_bytes: int) -> str:
-    """Return a valid UTF-8 prefix without treating characters as bytes."""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= maximum_bytes:
-        return value
-    return encoded[:maximum_bytes].decode("utf-8", errors="ignore")
+    """Keep complete canonical text; limits are prompt guidance only."""
+    del maximum_bytes
+    return value
 
 
 def _project_texts(
@@ -317,29 +272,9 @@ def _project_texts(
     item_limit: int,
     source: Mapping[str, Any] | None,
 ) -> tuple[list[str], dict[str, Any] | None]:
-    """Make a deterministic non-authoritative text projection.
-
-    The caller retains canonical text in SQLite.  When any element or the
-    number of elements is reduced, the result carries an auditable reference
-    to the immutable task-contract artifact (when dispatch supplied one), so
-    a bounded prompt never silently becomes the source of truth.
-    """
-    selected = list(values[:item_limit])
-    rendered = [_utf8_prefix(item, item_bytes) for item in selected]
-    shortened = len(values) > len(selected) or any(a != b for a, b in zip(selected, rendered))
-    if not shortened:
-        return rendered, None
-    metadata: dict[str, Any] = {
-        "total_items": len(values),
-        "selected_items": len(rendered),
-        "item_byte_limit": item_bytes,
-        "truncated": True,
-    }
-    if isinstance(source, Mapping):
-        for key in ("artifact_ref", "digest_sha256", "artifact_path", "byte_size"):
-            if source.get(key) not in (None, ""):
-                metadata[key] = source[key]
-    return rendered, metadata
+    """Return every complete text item without a backend transport budget."""
+    del item_bytes, item_limit, source
+    return list(values), None
 
 
 def _strings(value: object, *, limit: int = MAX_ITEMS, item_limit: int = MAX_TEXT) -> list[str]:
@@ -353,10 +288,9 @@ def _strings(value: object, *, limit: int = MAX_ITEMS, item_limit: int = MAX_TEX
     result: list[str] = []
     for item in values:
         rendered = _text(item, item_limit)
-        if rendered and rendered not in result:
+        if rendered:
             result.append(rendered)
-        if len(result) >= limit:
-            break
+    del limit
     return result
 
 
@@ -378,7 +312,7 @@ def _nonnegative_int(value: object, default: int) -> int:
 
 
 def _bounded_facts(value: object) -> list[dict[str, Any]]:
-    """Project canonical predecessor results; never embed a second transport."""
+    """Project canonical predecessor results without a content-volume gate."""
     values = _sequence(value)
     facts: list[dict[str, Any]] = []
     for raw in values:
@@ -402,16 +336,14 @@ def _bounded_facts(value: object) -> list[dict[str, Any]]:
             "conclusion": summary or None,
             "changed_files": _strings(source.get("changed_files"), limit=24, item_limit=300),
             "checks": _strings(source.get("checks") or source.get("verification"), limit=8, item_limit=500),
-            "unresolved_findings": [entry for entry in findings[:8] if entry],
+            "unresolved_findings": [entry for entry in findings if entry],
         }
         facts.append({key: value for key, value in item.items() if value not in (None, [], "")})
-        if len(facts) >= MAX_PREDECESSORS:
-            break
     return facts
 
 
 class ContextCompiler:
-    """Build a target-independent, bounded context from canonical records.
+    """Build a target-independent context from canonical records.
 
     ``canonical`` is intentionally a small adapter boundary.  The runtime
     should populate it from SQLite/task state, not from an arbitrary previous
@@ -471,7 +403,7 @@ class ContextCompiler:
                 "verification_requirements": verification_projection,
             }.items() if value
         }
-        decision_values = list(domain.decisions[:8])
+        decision_values = list(domain.decisions)
         rendered_decisions = [
             {
                 "question": _utf8_prefix(item.question, 500),
@@ -479,10 +411,7 @@ class ContextCompiler:
             }
             for item in decision_values
         ]
-        decisions_truncated = len(domain.decisions) > len(decision_values) or any(
-            rendered["question"] != source.question or rendered["answer"] != source.answer
-            for source, rendered in zip(decision_values, rendered_decisions)
-        )
+        decisions_truncated = False
         if decisions_truncated:
             decision_projection: dict[str, Any] = {
                 "total_items": len(domain.decisions), "selected_items": len(rendered_decisions),
@@ -512,21 +441,25 @@ class ContextCompiler:
                 "allowed_paths": _strings(attempt.get("allowed_paths") or task.get("allowed_paths"), limit=MAX_PATHS, item_limit=300),
             },
             "decisions": rendered_decisions,
-            "decisions_projection": decision_projection or None,
             "event_transitions": _compiler_visible_events(canonical),
             "findings": [item.summary for item in domain.findings],
             "predecessor_facts": predecessors,
             "predecessor_selection": {
                 "available": max(available_predecessors, len(predecessors)),
                 "selected": len(predecessors),
-                "limit": MAX_PREDECESSORS,
-                "truncated": available_predecessors > len(predecessors),
+                "truncated": False,
             },
             "server_receipts": {
                 "briefing_read": bool(briefing_receipt),
                 "predecessor_result_refs_read": receipt_refs,
             },
         }
+        # Unlike the task-level projection key (which is part of the stable
+        # compiled-context shape), this optional diagnostic was historically
+        # absent when no decision projection was needed.  Keep that shape
+        # without using it to omit any decision content.
+        if decision_projection:
+            context["decisions_projection"] = decision_projection
         return _drop_empty(context)
 
 
@@ -572,7 +505,7 @@ def compile_dispatch_context(package: Mapping[str, Any], profile: str) -> dict[s
     """Compile the dispatch package through the canonical state seam.
 
     This is the single assembly call used by ``briefings.host_spawn_prompt``.
-    It retains only bounded canonical fields required by the target profile.
+    It preserves every canonical field required by the target profile.
     """
     return ContextCompiler().compile(
         dispatch_canonical_state(package, profile),
@@ -582,7 +515,7 @@ def compile_dispatch_context(package: Mapping[str, Any], profile: str) -> dict[s
 
 def _drop_empty(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _drop_empty(item) for key, item in value.items() if item not in (None, "", [], {})}
+        return {key: _drop_empty(item) for key, item in value.items() if item not in ("", [], {})}
     if isinstance(value, list):
         return [_drop_empty(item) for item in value]
     return value

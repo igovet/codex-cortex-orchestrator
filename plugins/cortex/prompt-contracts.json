@@ -54,7 +54,8 @@
     "title": "Cortex Worker Briefing v3 (artifact-backed, attempt-result protocol)",
     "required_sections": ["authority", "hard_constraints", "assignment", "role", "tool_protocol", "output_contract", "stopping"],
     "conditional_sections": ["mode", "gate", "context"],
-    "artifact_contract": "immutable_briefing_digest_bootstrap_remains_authoritative; AttemptResult/Event are the worker semantic transport; attempt_result_ref and any server-built human projection are derived outputs"
+    "artifact_contract": "immutable_briefing_digest_bootstrap_remains_authoritative; AttemptResult/Event are the worker semantic transport; attempt_result_ref and any server-built human projection are derived outputs",
+    "prompt_volume_guidance": "Prompt volume targets are advisory worker guidance only. Prefer concise, complete evidence where practical, but never truncate, summarize away, reject, or omit material task, plan, result, event, question, answer, or artifact data to satisfy a byte, character, or file-size target. A complete payload may exceed any target and must be submitted intact; backend persistence stores the complete submitted content."
   },
   "attempt_result_contract": {
     "schema": "cortex/attempt-result/v1",
@@ -63,7 +64,7 @@
     "worker_authority": "semantic facts only; the worker result is never authoritative for identity, task revision, dispatch, profile, phase, predecessors, changed_files, timestamps, verification metadata, receipts, or evidence markers",
     "server_receipts": ["briefing_read", "predecessor_read"],
     "projection": "attempt_result_ref and any human projection generated from the canonical AttemptRecord",
-    "coordinator_completion": "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned dispatch.call with unmodified dispatch.arguments; a generic collaboration spawn, self-authored task name, or replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the coordinator must read its exact canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed."
+    "coordinator_completion": "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned dispatch.call with unmodified dispatch.arguments; a generic collaboration spawn, self-authored task name, or replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the coordinator must read its exact canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed. A successful continue is one-shot: follow only its returned dispatch/wait/terminal outcome; never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is terminal: stop and result the blocker."
   },
   "role_delta_required_markers": [
     "Role and mission:",
@@ -79,6 +80,7 @@
     "knowledge-harvest": ["## Modes", "## Required pipeline"],
     "output-validation": []
   },
+  "prompt_guidance_semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
   "budgets": {
     "bootstrap_target_bytes": 1500,
     "ordinary_briefing_target_bytes": 16384,

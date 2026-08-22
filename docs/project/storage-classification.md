@@ -13,7 +13,7 @@ The canonical worker protocol is AttemptResult plus append-only AttemptEvent.
 The worker supplies semantic facts; the server owns attempt identity, task
 revision, dispatch/profile/phase, timestamps, changed-file calculation,
 workspace observations, checks, verification observations, and read
-observations. ContextCompiler and HandoffCompiler build bounded views from this
+observations. ContextCompiler and HandoffCompiler build scoped target-specific views from this
 state.
 
 ## Classification matrix
@@ -45,7 +45,7 @@ FINALIZING ── retry same attempt ──> COMPLETED
      └── FAILED
 ~~~
 
-record_attempt_event is bounded and idempotent by event key. complete_attempt
+record_attempt_event is lossless and idempotent by event key. complete_attempt
 validates semantic input and commits the canonical result. A finalization error
 remains attached to that attempt.
 

@@ -635,24 +635,23 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertEqual(first["returned_bytes"], len("😀".encode("utf-8")))
             self.assertEqual(first["next_byte_offset"], len("😀".encode("utf-8")))
 
-    def test_artifact_transport_keeps_utf8_pages_bounded_and_cursor_continuous(self) -> None:
+    def test_artifact_transport_honors_optional_utf8_pages_and_cursor_continuity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             ledger_db.ensure_database(root)
             self.create_task(root)
-            # The four-byte scalar starts exactly where a 32 KiB page would
-            # otherwise split it.  The page must stop before it, not exceed
-            # the hard cap and not emit replacement text.
-            content = "a" * (ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES - 1) + "😀tail"
+            # A caller-selected page may end at a multi-byte scalar. The
+            # server preserves that complete scalar rather than enforcing a
+            # hidden transport cap or emitting replacement text.
+            content = "a" * 31 + "😀tail"
             artifact = ledger_db.put_artifact(
                 root, "artifact-task", kind="canonical_markdown", title="artifacts/markdown/boundary.md",
                 mime_type="text/markdown", content=content, export_path="artifacts/markdown/boundary.md",
             )
             first = ledger_db.read_artifact_range(
-                root, "artifact-task", artifact["artifact_ref"], max_bytes=ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES,
+                root, "artifact-task", artifact["artifact_ref"], max_bytes=32,
             )
-            self.assertEqual(first["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES - 1)
-            self.assertLessEqual(first["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES)
+            self.assertEqual(first["returned_bytes"], 31)
             self.assertFalse(first["complete"])
             self.assertEqual(first["next_byte_offset"], first["returned_bytes"])
             self.assertNotIn("\ufffd", first["content_part"])
@@ -664,7 +663,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 part = ledger_db.read_artifact_range(
                     root, "artifact-task", artifact["artifact_ref"], byte_offset=offset, max_bytes=1,
                 )
-                self.assertLessEqual(part["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MIN_BYTES)
+                self.assertGreaterEqual(part["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MIN_BYTES)
                 self.assertGreater(part["returned_bytes"], 0)
                 self.assertEqual(part["byte_offset"], offset)
                 self.assertNotIn("\ufffd", part["content_part"])
@@ -678,7 +677,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "UTF-8 boundary"):
                 ledger_db.read_artifact_range(
                     root, "artifact-task", artifact["artifact_ref"],
-                    byte_offset=ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES,
+                    byte_offset=32,
                 )
 
     def test_artifact_transport_binary_eof_and_malformed_cursor_do_not_create_or_mutate_state(self) -> None:
@@ -841,46 +840,50 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 with self.assertRaises(sqlite3.OperationalError):
                     snapshot.execute("DELETE FROM tasks WHERE task_id = 'snapshot-task'")
 
-    def test_unicode_oversized_mutable_documents_reject_before_replacing_existing_values(self) -> None:
-        """Document budgets are UTF-8 byte budgets and leave existing rows intact."""
+    def test_unicode_large_mutable_documents_round_trip_exactly(self) -> None:
+        """Mutable documents have no backend content-size admission quota."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             ledger_db.ensure_database(root)
             self.create_task(root, "bounded-document-task")
             ledger_db.put_global(root, "bounded-global", {"value": "before"})
             ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"value": "before"})
-            oversized = "🙂" * (ledger_db.MAX_DURABLE_DOCUMENT_BYTES // len("🙂".encode("utf-8")) + 1)
-            with self.assertRaisesRegex(ValueError, "SQLite global document 'bounded-global' exceeds"):
-                ledger_db.put_global(root, "bounded-global", {"unicode": oversized})
-            with self.assertRaisesRegex(ValueError, "SQLite task document 'bounded-task' exceeds"):
-                ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"unicode": oversized})
-            self.assertEqual(ledger_db.get_global(root, "bounded-global"), {"value": "before"})
-            self.assertEqual(
-                ledger_db.get_task_document(root, "bounded-document-task", "bounded-task"),
-                {"value": "before"},
-            )
+            oversized = "🙂" * 140_000
+            ledger_db.put_global(root, "bounded-global", {"unicode": oversized})
+            ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"unicode": oversized})
+            self.assertEqual(ledger_db.get_global(root, "bounded-global"), {"unicode": oversized})
+            self.assertEqual(ledger_db.get_task_document(root, "bounded-document-task", "bounded-task"), {"unicode": oversized})
 
-    def test_oversized_observation_metadata_rejects_before_a_row_is_written(self) -> None:
+    def test_oversized_observation_metadata_round_trips_without_a_body_quota(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             ledger_db.ensure_database(root)
             self.create_task(root, "bounded-observation-task")
-            with self.assertRaisesRegex(ValueError, "workspace_generation exceeds"):
-                ledger_db.record_tool_observation(
-                    root,
-                    task_id="bounded-observation-task",
-                    attempt_id="attempt-1",
-                    context_epoch=0,
-                    fingerprint="f" * 64,
-                    tool_name="Read",
-                    normalized_arguments="{}",
-                    workspace_generation="🙂" * 100,
-                    result_digest=None,
-                    coverage="full",
-                    status="success",
-                )
+            tool_name = "Read-" + "🙂" * 2_000
+            workspace_generation = "generation-" + "🙂" * 4_000
+            normalized_arguments = json.dumps({"payload": "🙂" * 10_000}, ensure_ascii=False)
+            ledger_db.record_tool_observation(
+                root,
+                task_id="bounded-observation-task",
+                attempt_id="attempt-1",
+                context_epoch=0,
+                fingerprint="f" * 64,
+                tool_name=tool_name,
+                normalized_arguments=normalized_arguments,
+                workspace_generation=workspace_generation,
+                result_digest=None,
+                coverage="full",
+                status="success",
+            )
             with ledger_db._connection(root) as connection:
-                self.assertEqual(connection.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0], 0)
+                row = connection.execute(
+                    "SELECT tool_name, normalized_arguments, workspace_generation FROM tool_observations WHERE task_id=? AND attempt_id=?",
+                    ("bounded-observation-task", "attempt-1"),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(row["tool_name"], tool_name)
+                self.assertEqual(row["normalized_arguments"], normalized_arguments)
+                self.assertEqual(row["workspace_generation"], workspace_generation)
 
 
 if __name__ == "__main__":  # pragma: no cover

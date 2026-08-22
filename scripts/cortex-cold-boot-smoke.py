@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import subprocess
@@ -16,7 +17,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 from jsonrpc_harness import JsonRpcHarness  # noqa: E402
 import cortex  # noqa: E402
-from cortex_runtime.briefings import TARGET_V3_BRIEFING_BYTES  # noqa: E402
 
 SERVER = ROOT / "plugins/cortex/scripts/cortex.py"
 
@@ -418,6 +418,33 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 if not isinstance(briefing_text, str):
                     raise AssertionError("cold-boot briefing read did not return complete text")
                 briefing_bytes = len(briefing_text.encode("utf-8"))
+                briefing_path = Path(str(dispatch["briefing_path"]))
+                stored_briefing = briefing_path.read_text(encoding="utf-8")
+                if stored_briefing != briefing_text:
+                    raise AssertionError("cold-boot briefing artifact differs from the scoped worker read")
+                if hashlib.sha256(stored_briefing.encode("utf-8")).hexdigest() != attempt["briefing_digest"]:
+                    raise AssertionError("cold-boot briefing artifact digest differs from the issued dispatch digest")
+                artifact = briefing.get("briefing_artifact")
+                if not isinstance(artifact, dict) or artifact.get("byte_size") != briefing_bytes:
+                    raise AssertionError("cold-boot briefing artifact byte_size does not match its materialized content")
+                # Public orchestration responses expose the native request as
+                # a server-authorized ``call`` plus ``arguments`` envelope;
+                # older smoke code looked only at the flattened private
+                # request fields and falsely reported a lost bootstrap.
+                dispatch_arguments = dispatch.get("arguments") if isinstance(dispatch.get("arguments"), dict) else {}
+                bootstrap = str(
+                    dispatch.get("message")
+                    or dispatch.get("prompt")
+                    or dispatch_arguments.get("message")
+                    or dispatch_arguments.get("prompt")
+                    or ""
+                )
+                if (
+                    "read_dispatch_briefing" not in bootstrap
+                    or str(attempt["briefing_digest"]) not in bootstrap
+                    or str(briefing_path) not in bootstrap
+                ):
+                    raise AssertionError("cold-boot native bootstrap lost its immutable briefing capability")
                 briefing_sizes.append({
                     "step": int(current["step"]),
                     "worker": index,
@@ -425,11 +452,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                     "profile": str(dispatch["profile"]),
                     "bytes": briefing_bytes,
                 })
-                if briefing_bytes > TARGET_V3_BRIEFING_BYTES:
-                    raise AssertionError(
-                        f"cold-boot briefing exceeds safe target: {attempt['gate']}/{dispatch['profile']} "
-                        f"{briefing_bytes}>{TARGET_V3_BRIEFING_BYTES}"
-                    )
                 for predecessor_ref in attempt.get("context_result_refs") or []:
                     predecessor = worker_rpc.tool("read_worker_result", {
                         "project_root": str(project),
@@ -571,8 +593,8 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
         raise AssertionError("the smoke did not exercise three dynamic replans and implementation retention")
     if not implementation_applied:
         raise AssertionError("the dynamically replanned pipeline never executed implementation")
-    if not briefing_sizes or max(int(item["bytes"]) for item in briefing_sizes) > TARGET_V3_BRIEFING_BYTES:
-        raise AssertionError("cold-boot briefing size regression exceeded the safe target")
+    if not briefing_sizes:
+        raise AssertionError("cold-boot did not materialize any immutable worker briefing")
 
     task_path = ledger / "tasks" / task_directory
     state = cortex.load_task_state_for_artifact(task_path)
@@ -604,7 +626,7 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
     return {
         "status": "PASS", "fixture": str(base), "task_directory": str(task_path),
         "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
-        "briefing_size_target_bytes": TARGET_V3_BRIEFING_BYTES,
+        "briefing_size_policy": "advisory_only",
         "briefing_size_max_bytes": max(int(item["bytes"]) for item in briefing_sizes),
         "briefing_sizes": briefing_sizes,
         "result_count": len(attempt_result_refs), "parallel_wave_seen": parallel_wave_seen,

@@ -1,4 +1,4 @@
-"""Adversarial UTF-8 transport tests for bounded dispatch projections."""
+"""Adversarial UTF-8 tests for lossless immutable dispatch briefings."""
 from __future__ import annotations
 
 import sys
@@ -10,11 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins" / "cortex" / "scripts"))
 
 import cortex as control
-from cortex_runtime.briefings import TARGET_V3_BRIEFING_BYTES
 
 
 class BriefingSizeProjectionTests(unittest.TestCase):
-    def test_unicode_heavy_dispatch_is_bounded_and_points_to_full_task_contract(self) -> None:
+    def test_unicode_heavy_dispatch_is_preserved_without_backend_rejection(self) -> None:
         huge = "Ж界" * 10_000
         package = {
             "task_id": "task-size", "task_ref": "task-size", "attempt_id": "attempt-size",
@@ -36,12 +35,12 @@ class BriefingSizeProjectionTests(unittest.TestCase):
             "predecessor_results": [], "resolved_user_decisions": [], "mode": "ordinary",
         }
         prompt = control.host_spawn_prompt("backend_dev", package)
-        self.assertLessEqual(len(prompt.encode("utf-8")), TARGET_V3_BRIEFING_BYTES)
+        self.assertGreater(len(prompt.encode("utf-8")), 14_500)
         self.assertIn("artifact-contract", prompt)
         self.assertIn("task-contract", prompt)
-        self.assertNotIn(huge, prompt)
+        self.assertIn(huge, prompt)
 
-    def test_actual_remaining_utf8_budget_keeps_complete_fitting_item(self) -> None:
+    def test_oversized_successor_projection_retains_each_complete_item(self) -> None:
         fitting = "α" * 900
         omitted = "界" * 5_000
         package = {
@@ -56,9 +55,9 @@ class BriefingSizeProjectionTests(unittest.TestCase):
             "predecessor_results": [], "resolved_user_decisions": [], "mode": "ordinary",
         }
         prompt = control.host_spawn_prompt("backend_dev", package)
-        self.assertLessEqual(len(prompt.encode("utf-8")), TARGET_V3_BRIEFING_BYTES)
+        self.assertGreater(len(prompt.encode("utf-8")), 14_500)
         self.assertIn(fitting, prompt)
-        self.assertNotIn(omitted, prompt)
+        self.assertIn(omitted, prompt)
         self.assertIn("artifact-contract", prompt)
 
 

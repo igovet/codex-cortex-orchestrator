@@ -1,5 +1,18 @@
 # Changelog
 
+## [10.0.7] - 2026-08-22
+
+### Fixed
+
+- Make prompt volume targets advisory only. Canonical task, plan, result,
+  event, question, answer, governance, manifest, artifact, and handoff data is
+  stored and read losslessly; backend admission no longer rejects or silently
+  projects valid content because of byte, character, or file-size targets.
+- Make large immutable briefings cursor-readable without a hidden transport
+  quota while preserving strict identity, digest, path, and lifecycle checks.
+- Preserve complete predecessor context and planning/scoping projections across
+  successor dispatch and compaction-safe recovery.
+
 ## [10.0.6] - 2026-08-22
 
 ### Fixed

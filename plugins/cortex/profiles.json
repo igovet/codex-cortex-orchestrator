@@ -77,7 +77,8 @@
     "prompt_compaction_guidance": {
       "bootstrap_target_bytes": 1500,
       "ordinary_briefing_target_bytes": 16384,
-      "harvest_briefing_target_bytes": 18432
+      "harvest_briefing_target_bytes": 18432,
+      "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule"
     },
     "required_attempt_result_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"]
   },
@@ -160,7 +161,7 @@
     "planner": {
       "inputs": "Read supplied knowledge indexes and relevant pages, then current entry points, contracts, configuration, tests, requirements, acceptance, and predecessor result projections.",
       "project_artifacts": "Result-only: Planner Scope publishes the separate structured scoping object and Planner Plan publishes the separate structured planning object as semantic attempt results through complete_attempt; never create scoping, planning, or ledger files directly.",
-      "completion": "For scope, produce a non-solution discovery brief with context and up to eight non-overlapping discovery domains. For plan, consume every supplied predecessor result projection and produce a decision-complete work breakdown with paths, profile ownership, dependencies, acceptance, verification, risk gates, and no unresolved material decision."
+      "completion": "For scope, produce a non-solution discovery brief with context and all validated non-overlapping discovery domains. For plan, consume every supplied predecessor result projection and produce a decision-complete work breakdown with paths, profile ownership, dependencies, acceptance, verification, risk gates, and no unresolved material decision."
     },
     "qa_engineer": {
       "inputs": "Read every delegated acceptance criterion, changed contract, implementation path, existing test layer, fixtures, and predecessor evidence.",

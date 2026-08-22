@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 10.0.6 Codex plugin. The runtime is
+This repository contains the Cortex 10.0.7 Codex plugin. The runtime is
 opt-in, runs locally, and stores orchestration state in a host-private SQLite
 v15 ledger. The supported public contract is the fresh v10 protocol only.
 
@@ -33,8 +33,11 @@ read_worker_result.
 
 Do not place credentials, access tokens, personal data, private task content,
 or raw host/model responses in prompts, issues, commits, generated views, or
-logs. The runtime bounds event count, event bytes, context size, and diagnostic
-output. It rejects symlink and non-regular targets at capability boundaries.
+logs. Canonical task, result, event, question, answer, briefing, and artifact
+content is stored losslessly; prompt compactness targets are advisory only.
+Structural identity, strict-JSON, cursor, pagination, lifecycle, and private
+diagnostic-retention guards remain in force, and the runtime rejects symlink
+and non-regular targets at capability boundaries.
 
 The worker contributes semantic facts only. The server derives identity,
 timestamps, task revision, profile, phase, changed paths, executed checks,
@@ -85,7 +88,7 @@ Prompt Contract v3 is the sole stable prompt path. Dispatch-controlled values
 are fenced assignment data; static policy remains in the bundled skill and
 profile sources. Prompt lint, deterministic prompt evaluation, marketplace
 validation, and source-mode package checks are required before release. The
-package manifest is version 10.0.6 and the ledger schema is v15.
+package manifest is version 10.0.7 and the ledger schema is v15.
 
 ## Vulnerability reporting
 
@@ -108,7 +111,7 @@ or operational data before committing it.
 
 ## Release safety checklist
 
-Before publishing 10.0.6 or a later release:
+Before publishing 10.0.7 or a later release:
 
 1. Run the focused protocol, lifecycle, context, handoff, governance, and
    packaging tests.

@@ -181,9 +181,8 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertTrue(cold_boot["implementation_phase_seen"])
         briefing_sizes = cold_boot["briefing_sizes"]
         self.assertTrue(briefing_sizes)
-        self.assertEqual(cold_boot["briefing_size_target_bytes"], 14_500)
         self.assertEqual(cold_boot["briefing_size_max_bytes"], max(item["bytes"] for item in briefing_sizes))
-        self.assertTrue(all(item["bytes"] <= 14_500 for item in briefing_sizes))
+        self.assertEqual(cold_boot["briefing_size_policy"], "advisory_only")
         self.assertEqual(len(briefing_sizes), cold_boot["worker_attempts"])
         self.assertTrue(luna)
         self.assertTrue(all(item["outcome"] == "completed" for item in luna))
@@ -503,6 +502,8 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             prompt,
         )
         self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
+        self.assertIn("never request artifacts or add future_waves after an accepted continuation", prompt)
+        self.assertIn("If Cortex returns retryable=false for task identity or step mismatch, stop the scenario immediately", prompt)
 
     def test_automatic_governance_question_authority_is_explicit_and_fail_closed(self) -> None:
         policy = LUNA_EVAL.live_question_policy("automatic_governance")

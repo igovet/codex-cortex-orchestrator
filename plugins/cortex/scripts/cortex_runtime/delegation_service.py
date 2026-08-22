@@ -26,7 +26,6 @@ bind_symbols(
         "AWAITING_HOST_SPAWN",
         "DOCUMENTATION_EVIDENCE_KINDS",
         "PROFILES",
-        "PROMPT_COMPACTION_GUIDANCE",
         "QUESTION_SCHEMA",
         "REWORK_EFFORT_BY_PRIOR_FAILURES",
         "REWORK_TERRA_AFTER_FAILURES",
@@ -70,7 +69,6 @@ bind_symbols(
 from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
 from cortex_runtime.ledger_db import fail_projection_job, list_projection_jobs, get_task_document as db_get_task_document
 from cortex_runtime import attempt_protocol
-from cortex_runtime.context_compiler import MAX_PREDECESSORS
 
 
 def _canonical_text_items(
@@ -167,7 +165,7 @@ def _canonical_verification_checks(root: Path, task_id: str, attempt_id: str) ->
     """Project only command/exit facts from AttemptEvent verification rows."""
     checks: list[str] = []
     for event in attempt_protocol.list_attempt_events(
-        root, task_id=task_id, attempt_id=attempt_id, limit=32,
+        root, task_id=task_id, attempt_id=attempt_id,
     ):
         if event.get("event_type") != "verification_observed" or event.get("actor") != "cortex":
             continue
@@ -185,8 +183,6 @@ def _canonical_verification_checks(root: Path, task_id: str, attempt_id: str) ->
             rendered = f"{command} (exit {exit_code})" if isinstance(exit_code, int) and not isinstance(exit_code, bool) else command
             if rendered not in checks:
                 checks.append(rendered)
-            if len(checks) >= 8:
-                return checks
     return checks
 
 
@@ -198,7 +194,7 @@ def _bounded_predecessor_results(
 ) -> list[dict[str, Any]]:
     """Build the dispatch's semantic predecessor basis from canonical facts.
 
-    An AttemptResult plus its bounded AttemptEvent stream is the only source.
+    An AttemptResult plus its lossless AttemptEvent stream is the only source.
     Result refs are server-issued and mapped back to the exact persisted
     attempt before a semantic projection is constructed.  Generated views
     and indexes never contribute predecessor context.
@@ -213,7 +209,7 @@ def _bounded_predecessor_results(
                 continue
             result_attempts[safe_id(raw_result_ref)] = item
     results: list[dict[str, Any]] = []
-    for result_ref in context_result_refs[:MAX_PREDECESSORS]:
+    for result_ref in context_result_refs:
         attempt = result_attempts.get(result_ref)
         if not isinstance(attempt, dict):
             raise ValueError("context_result_refs must name completed canonical AttemptResults from this task")
@@ -239,7 +235,7 @@ def _bounded_predecessor_results(
                 "actor": event["actor"],
                 "payload": event["payload"],
             }
-            for event in attempt_protocol.list_attempt_events(root, task_id=task_id, attempt_id=attempt_id, limit=64)
+            for event in attempt_protocol.list_attempt_events(root, task_id=task_id, attempt_id=attempt_id)
             if event.get("actor") == "cortex" and event.get("event_type") in {
                 "question_created", "question_answered", "decision_resolved",
             }
@@ -257,8 +253,8 @@ def _bounded_predecessor_results(
                 canonical.get("changed_files"), field="AttemptResult changed_files", limit=24, item_chars=300,
             ),
             "checks": _canonical_verification_checks(root, task_id, attempt_id),
-            "unresolved_findings": [item for item in findings if item][:8],
-            "semantic_events": semantic_events[:16],
+            "unresolved_findings": [item for item in findings if item],
+            "semantic_events": semantic_events,
             "semantic_source": "attempt_result",
         })
     return results
@@ -577,18 +573,9 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         resolved_user_decisions_digest = digest_text(json.dumps(
             all_resolved_user_decisions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ))
-        # Keep the immutable briefing compact by reference. The bounded
-        # AttemptResult projection covers predecessor facts without sending a
-        # worker-authored predecessor document to the new worker.
-        resolved_user_decisions: list[dict[str, Any]] = []
-        resolved_user_decision_bytes = 2
-        for decision in reversed(all_resolved_user_decisions):
-            encoded = json.dumps(decision, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            if resolved_user_decision_bytes + len(encoded) + 1 > 32 * 1024:
-                break
-            resolved_user_decisions.append(decision)
-            resolved_user_decision_bytes += len(encoded) + 1
-        resolved_user_decisions.reverse()
+        # Preserve every resolved user decision in the immutable briefing.
+        # Concision is prompt guidance, never a backend byte quota.
+        resolved_user_decisions = list(all_resolved_user_decisions)
         attempt_id = _next_attempt_id(state, task_dir, gate)
         # The role label remains canonical, but the native task key must be
         # unique per task/attempt.  Keeping only ``agent`` here lets the host
@@ -640,20 +627,6 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             manifest_ref=result_baseline_ref,
             manifest_digest=str(result_baseline.get("digest") or ""),
         )
-        if governance_context is not None and gate not in {"governance_activation", "governance_close"}:
-            # Ordinary workers need the immutable decision basis, not the
-            # reviewer-only explanation/detail fields.  Keep this compact
-            # projection in the dispatch while the same fields remain in the
-            # digest-bound task contract.
-            governance_context = {
-                key: governance_context[key]
-                for key in (
-                    "schema", "requested_mode", "effective_mode", "policy_snapshot",
-                    "policy_snapshot_digest", "manifest_ref", "manifest_digest",
-                    "current_pipeline",
-                )
-                if key in governance_context
-            }
         dispatch_ref = "dispatch-" + digest_text(
             "\0".join((state["task_id"], attempt_id, agent, task_name))
         )[:24]
@@ -673,7 +646,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         task_acceptance = _canonical_text_items(task_definition.get("acceptance_criteria"), field="acceptance_criteria", limit=100, item_chars=1000)
         task_verification = _canonical_text_items(task_definition.get("verification"), field="verification", limit=100, item_chars=1000)
         pause_conditions = _canonical_text_items(task_definition.get("pause_conditions"), field="pause_conditions", limit=100, item_chars=1000)
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "task_requirements": task_requirements, "task_constraints": task_constraints, "task_scope": task_scope, "task_acceptance_criteria": task_acceptance, "task_verification": task_verification, "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or state.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history[-100:]), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs), "limit": MAX_PREDECESSORS}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": len(resolved_user_decisions) < len(all_resolved_user_decisions), "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "governance_context": governance_context, "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "task_requirements": task_requirements, "task_constraints": task_constraints, "task_scope": task_scope, "task_acceptance_criteria": task_acceptance, "task_verification": task_verification, "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or state.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs)}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": False, "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]], "verification": [redact(item, 1000) for item in required_lists["verification"]], "governance_context": governance_context, "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = pause_conditions
@@ -713,7 +686,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "digest_sha256": task_definition.get("user_request_digest"),
             "byte_size": task_definition.get("user_intent_byte_size"),
         }
-        # A dispatch prompt is deliberately bounded, while a task definition
+        # A dispatch prompt is complete, while a task definition
         # is not.  Give every worker a digest-bound immutable task-contract
         # artifact before rendering the prompt, so reducing an oversized
         # array/scalar is a projection rather than data loss or a reason to
@@ -840,10 +813,6 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         full_briefing = host_spawn_prompt(agent, package)
         briefing_bytes = len(full_briefing.encode("utf-8"))
         package["briefing_bytes"] = briefing_bytes
-        package["briefing_compaction_target_bytes"] = int(PROMPT_COMPACTION_GUIDANCE[
-            "harvest_briefing_target_bytes" if package["mode"] == "harvest"
-            else "ordinary_briefing_target_bytes"
-        ])
         spawn_requested_at = now()
         spawn_lease_expires_at = (
             datetime.now(timezone.utc) + timedelta(minutes=10)

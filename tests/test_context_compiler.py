@@ -83,7 +83,7 @@ class ContextCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decision question"):
             context_domain_from_canonical(noncanonical_decision)
 
-    def test_oversized_persisted_requirement_is_losslessly_segmented_for_context_and_handoff(self) -> None:
+    def test_oversized_persisted_requirement_round_trips_losslessly_for_context_and_handoff(self) -> None:
         # This simulates a task written before the per-item requirement bound.
         # Unicode and mixed whitespace ensure the recovery path is not an
         # ASCII-only slice or a silent truncation.
@@ -99,20 +99,15 @@ class ContextCompilerTests(unittest.TestCase):
 
         domain = context_domain_from_canonical(canonical)
         segments = [item.text for item in domain.requirements]
-        self.assertGreater(len(segments), 1)
-        self.assertTrue(all(len(segment) <= 600 for segment in segments))
-        self.assertEqual("".join(segments), oversized)
+        self.assertEqual(segments, [oversized])
 
         context = ContextCompiler().compile(canonical, target_profile="backend_dev")
-        # Context is a native-transport projection, so its ceiling is UTF-8
-        # bytes rather than Python characters.  The full lossless segment
-        # stream remains in the typed domain / immutable task contract.
-        self.assertTrue(all(len(item.encode("utf-8")) <= 600 for item in context["task"]["requirements"]))
-        self.assertTrue(context["task"]["projection"]["requirements"]["truncated"])
+        self.assertEqual(context["task"]["requirements"], [oversized])
+        self.assertIsNone(context["task"]["projection"])
         handoff = HandoffCompiler().build(
             canonical, target_profile="backend_dev", target_gate="implementation"
         )
-        self.assertTrue(all(len(item.encode("utf-8")) <= 600 for item in handoff["requirements"]))
+        self.assertEqual(handoff["requirements"], [oversized])
 
     def test_requirements_still_reject_non_array_shape_after_length_recovery(self) -> None:
         malformed = {
@@ -122,7 +117,7 @@ class ContextCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requirements"):
             context_domain_from_canonical(malformed)
 
-    def test_all_large_task_fields_compile_as_referenced_utf8_projections(self) -> None:
+    def test_all_large_task_fields_compile_without_backend_projection_loss(self) -> None:
         """Valid durable facts never become a late dispatch validation error."""
         huge = "界" * 2_000
         contract = {
@@ -147,13 +142,12 @@ class ContextCompilerTests(unittest.TestCase):
             ],
         }
         context = ContextCompiler().compile(canonical, target_profile="backend_dev")
-        self.assertLessEqual(len(context["task"]["user_request"].encode("utf-8")), 2_400)
+        self.assertEqual(context["task"]["user_request"], huge)
         for field in ("requirements", "constraints", "acceptance_criteria", "verification_requirements"):
-            self.assertLessEqual(len(context["task"][field]), 12)
-            self.assertTrue(context["task"]["projection"][field]["truncated"])
-            self.assertEqual(context["task"]["projection"][field]["artifact_ref"], "artifact-task-contract")
-        self.assertTrue(context["decisions_projection"]["truncated"])
-        self.assertEqual(context["decisions_projection"]["artifact_ref"], "artifact-task-contract")
+            self.assertEqual(context["task"][field], [huge] * 24)
+        self.assertIsNone(context["task"]["projection"])
+        self.assertEqual(context["decisions"], [{"question": huge, "answer": huge}] * 16)
+        self.assertNotIn("decisions_projection", context)
 
 
     def test_server_question_decision_events_are_compiler_visible(self) -> None:
@@ -205,14 +199,14 @@ class ContextCompilerTests(unittest.TestCase):
         for projection in (backend, qa, review):
             self.assertNotIn("editable_worker_transport", projection)
 
-    def test_bounded_handoff_truncates_canonical_result_facts_without_raw_body(self) -> None:
+    def test_handoff_preserves_canonical_result_facts_without_raw_body(self) -> None:
         self.canonical["predecessor_results"][0]["semantic_source"] = "attempt_result"
         self.canonical["predecessor_selection"] = {
             "available": 24,
         }
         context = ContextCompiler().compile(self.canonical, target_profile="qa_engineer")
-        self.assertEqual(context["predecessor_selection"]["limit"], 16)
-        self.assertTrue(context["predecessor_selection"]["truncated"])
+        self.assertEqual(context["predecessor_selection"]["selected"], 1)
+        self.assertFalse(context["predecessor_selection"]["truncated"])
         self.assertEqual(context["predecessor_facts"][0]["semantic_source"], "attempt_result")
 
         handoff = HandoffCompiler().build(
@@ -221,8 +215,8 @@ class ContextCompilerTests(unittest.TestCase):
             target_gate="qa",
             compact=True,
         )
-        self.assertEqual(handoff["predecessor_selection"]["limit"], 16)
-        self.assertTrue(handoff["predecessor_selection"]["truncated"])
+        self.assertEqual(handoff["predecessor_selection"]["selected"], 1)
+        self.assertFalse(handoff["predecessor_selection"]["truncated"])
         self.assertIn("files_changed", handoff)
         self.assertNotIn("raw_worker_body", str(handoff))
         self.assertNotIn("worker_body", handoff)

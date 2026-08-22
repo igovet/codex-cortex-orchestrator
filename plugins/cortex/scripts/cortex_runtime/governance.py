@@ -45,14 +45,6 @@ OFF_ASSESSMENT_KEYS = HARD_TRIGGER_KEYS | {
     "conflicting_resources", "multi_session_handoff",
 }
 
-# Governance records are intentionally bounded at the trust boundary. The
-# SQLite columns are TEXT, but an unbounded JSON body would still permit one
-# MCP request to consume disproportionate memory, storage, and transport time.
-MAX_GOVERNANCE_CONTENT_BYTES = 256 * 1024
-MAX_GOVERNANCE_CONTENT_DEPTH = 12
-MAX_GOVERNANCE_COLLECTION_ITEMS = 1024
-MAX_GOVERNANCE_STRING_BYTES = 64 * 1024
-
 _CLOSE_EVIDENCE_TYPES = {
     "oracle_evidence": {"oracle_evidence", "acceptance_oracle", "acceptance_oracle_evidence"},
     "risk_disposition": {"risk_disposition", "risk_register", "risk_evidence"},
@@ -88,31 +80,17 @@ def _canonical(value: Any) -> str:
 
 
 def _bounded_content_json(value: Any, *, label: str) -> str:
-    """Return strict canonical JSON after enforcing the durable byte budget.
-
-    ``approval_basis`` is persisted twice (the record projection and its
-    append-only lifecycle entry), so it must obey the same trust-boundary
-    budget as record content.  Validate before opening a writer: a rejected
-    payload must never create a partial governance record, artifact, or
-    lifecycle transition.
-    """
+    """Return strict canonical JSON without a backend content-size quota."""
     _validate_content_shape(value)
-    encoded = _canonical(value).encode("utf-8")
-    if len(encoded) > MAX_GOVERNANCE_CONTENT_BYTES:
-        raise GovernanceError(
-            f"{label} exceeds the bounded size limit",
-            code="content_size_exceeded",
-        )
-    return encoded.decode("utf-8")
+    del label
+    return _canonical(value)
 
 
 def _bounded_governance_text(value: Any, *, label: str, required: bool = False) -> str:
-    """Normalize a scalar governance field without admitting a large TEXT row."""
+    """Normalize a scalar governance field without a content-size quota."""
     text = str(value or "").strip()
     if required and not text:
         raise GovernanceError(f"{label} is required", code="initiative_fields_required")
-    if len(text.encode("utf-8")) > MAX_GOVERNANCE_STRING_BYTES:
-        raise GovernanceError(f"{label} exceeds the bounded size limit", code="content_size_exceeded")
     return text
 
 
@@ -406,27 +384,18 @@ def _record_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _validate_content_shape(value: Any, *, depth: int = 0) -> None:
-    """Reject pathological governance JSON before canonicalization/storage."""
-    if depth > MAX_GOVERNANCE_CONTENT_DEPTH:
-        raise GovernanceError("governance content nesting exceeds the bounded limit", code="content_depth_exceeded")
+    """Validate strict JSON types without a content-volume or depth quota."""
+    del depth
     if isinstance(value, dict):
-        if len(value) > MAX_GOVERNANCE_COLLECTION_ITEMS:
-            raise GovernanceError("governance content has too many object members", code="content_items_exceeded")
         for key, item in value.items():
             if not isinstance(key, str):
                 raise GovernanceError("governance content object keys must be strings", code="content_invalid")
-            if len(key.encode("utf-8")) > MAX_GOVERNANCE_STRING_BYTES:
-                raise GovernanceError("governance content object key is too large", code="content_string_exceeded")
-            _validate_content_shape(item, depth=depth + 1)
+            _validate_content_shape(item)
         return
     if isinstance(value, list):
-        if len(value) > MAX_GOVERNANCE_COLLECTION_ITEMS:
-            raise GovernanceError("governance content has too many array items", code="content_items_exceeded")
         for item in value:
-            _validate_content_shape(item, depth=depth + 1)
+            _validate_content_shape(item)
         return
-    if isinstance(value, str) and len(value.encode("utf-8")) > MAX_GOVERNANCE_STRING_BYTES:
-        raise GovernanceError("governance content string is too large", code="content_string_exceeded")
     if value is None or type(value) in {bool, int, str}:
         return
     if type(value) is float:

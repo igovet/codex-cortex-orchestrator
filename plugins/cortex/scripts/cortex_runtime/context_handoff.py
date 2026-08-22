@@ -133,16 +133,21 @@ def _context_handoff(
         next_action = "Follow the current canonical lifecycle state; use only attempt_result_ref values for completed predecessors."
     return {
         "schema": "cortex/context-handoff/v2",
-        "task_ref": _v3_task_ref(state),
+        # ``task_ref`` is the opaque public identity derived from the exact
+        # task id.  Passing the whole state projection here hashes its string
+        # representation and manufactures a different reference after every
+        # state change, which can make a compacted coordinator recover the
+        # wrong task identity.
+        "task_ref": _v3_task_ref(str(state.get("task_id") or "")),
         "task_id": redact(state.get("task_id", ""), 128),
         "generated_at": now(),
         "goal": redact(task.get("user_request_projection") or task.get("user_request", ""), 4000),
-        "acceptance_criteria": [redact(item, 1000) for item in (task.get("acceptance_criteria") or [])[:32]],
-        "verification": [redact(item, 1000) for item in (task.get("verification") or [])[:32]],
+        "acceptance_criteria": [redact(item, 1000) for item in (task.get("acceptance_criteria") or [])],
+        "verification": [redact(item, 1000) for item in (task.get("verification") or [])],
         "state": _orchestrate_summary(state),
         "pipeline": _orchestrate_pipeline_snapshot(state, plan),
         "active_gates": active,
-        "completed_results": completed_results[-64:],
+        "completed_results": completed_results,
         "pending_dispatches": pending_dispatches,
         "active_workers": active_workers,
         "stopped_workers": stopped_workers,

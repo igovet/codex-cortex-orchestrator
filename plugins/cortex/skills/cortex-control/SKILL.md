@@ -158,6 +158,11 @@ paths forbidden above.
    bootstrap: the complete prompt is the one immutable briefing named by the
    returned path and digest. The coordinator must not read, inline, expand, or
    reconstruct that file or expose the surrounding ledger. Never add ledger
+   identifiers to the bootstrap. Prompt volume targets are advisory only: do
+   not truncate, omit, reject, or summarize away material task, plan, result,
+   event, question, answer, or artifact data to satisfy a byte/character/file
+   target. Complete content may be sent intact and is stored intact by the
+   backend.
    IDs or copy an expected model into a missing native `model` field. Hidden `spawn_agent` dispatches must retain
    the returned `fork_turns: "none"`: the generated Cortex briefing is the
    complete worker context, and inheriting the coordinator transcript can leak
@@ -181,8 +186,9 @@ paths forbidden above.
    mismatch. That path, plus only the immutable user-intent and optional
    compiled-plan paths with their exact SHA-256 values supplied in the same
    bootstrap, are the direct-read exceptions below the host-private Cortex
-   state root. A compiled plan is a full immutable artifact; its briefing
-   projection is only a compact ref/count/digest index. Never list or inspect
+   state root. A compiled plan is a full immutable artifact; a briefing may
+   carry its complete content or an exact ref/count/digest index, but no
+   backend size rule may force omission. Never list or inspect
    the directory, mutable state, baselines, delegation packages, another
    briefing, or result artifacts. If the
    host filesystem read says this exact path is missing or unreadable, the
@@ -268,10 +274,10 @@ continuing. Never replace the worker or advance the wave for a question.
    corrected and retried on the same attempt; finalization/projection errors
    never authorize a replacement worker. Cortex derives identity, timestamps,
    changed files, checks, receipts, and evidence from canonical state and
-   server observations, then exposes the result ref and bounded human/handoff
+   server observations, then exposes the result ref and scoped human/handoff
    projections. The worker returns only `ATTEMPT_COMPLETED attempt_result_ref=<generated id>`
    plus at most two summary sentences and never pastes a generated projection.
-   Generated content is bounded and redacted by the server. It is a projection,
+   Generated content is redacted by the server. It is a projection,
    not worker-authored authority. When predecessor handoffs are supplied, a
    successful scoped `read_worker_result` creates the server-owned receipt.
    A successor worker reads each supplied predecessor ref before repository
@@ -292,7 +298,7 @@ continuing. Never replace the worker or advance the wave for a question.
    publish the same semantic AttemptResult as every other worker. Findings,
    decisions, material blockers, verification claims, and changed paths
    are represented by their documented AttemptResult fields and AttemptEvents;
-   server observations and bounded human/handoff projections are added by
+   server observations and human/handoff projections are added by
    Cortex. A corrective worker may result a changed artifact but cannot resolve
    an inherited finding. Only a fresh rerun of the gate that opened the exact
    fingerprint, with its immutable origin result and a separate server-bound
@@ -516,6 +522,15 @@ Inspect `available_results` exposes an existing derived path only when its
 optional projection is already materialized; recovery uses the exact result
 ref, and `read_worker_result` remains the publication-eligible link surface.
 Required-plan `plan_review` retains its derived path for approval review.
+
+`continue_orchestration` is a one-shot receipt for the exact current wave. On
+success, perform only the action authorized by that response: invoke its
+returned dispatches, wait for the exact persisted active workers, or stop on a
+terminal `completed`/`blocked` outcome after closing the consumed child. Never
+call `continue_orchestration` again with the same step/results, request
+artifacts, add `future_waves`, or spawn a replacement after that receipt. A
+`retryable=false` task-identity or relative-step diagnostic is terminal; result
+the blocker and do not retry, inspect broadly, or reconstruct a continuation.
 
 Normal requests never carry caller-generated submission, task, wave, attempt,
 principal, thread, host-tool, host-model, or host-effort fields. Internal IDs
@@ -742,12 +757,16 @@ appear in only one wave; multiple owners for a phase share that wave. Generic
 `verification` maps to `qa`, while `build_verification` and
 `final_verification` map to `close`.
 
-Every result remains quota-, redaction-, path-, and receipt-checked. Cortex
-fails closed on root or symlink violations, stale steps, invalid slots,
-changed retries, missing sections, invalid rework, failed close verification,
-manifest mismatch, incomplete predecessor or knowledge-index receipt,
-or handoff context that exceeds its safe count/size budget. It never silently drops an older
-result; narrow the dependency set with `depends_on`.
+Every result remains strict-JSON-, redaction-, path-, lifecycle-, and
+receipt-checked. Canonical result/event/question/answer/briefing/artifact
+content has no backend byte or character admission quota and is never silently
+truncated. Cortex fails closed on root or symlink violations, stale steps,
+invalid slots, changed retries, missing sections, invalid rework, failed close
+verification, manifest mismatch, incomplete predecessor or knowledge-index
+receipt, or handoff context that is malformed, incomplete, or unverifiable. It
+never silently drops an older result; narrow the dependency set with
+`depends_on` only when the coordinator intentionally scopes the worker's
+evidence.
 
 ## Durable artifacts
 

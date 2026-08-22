@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 10.0.6 is an opt-in Codex plugin for staged multi-agent work. The
+Cortex 10.0.7 is an opt-in Codex plugin for staged multi-agent work. The
 installable runtime is under [plugins/cortex](../../plugins/cortex/); root
 scripts and tests support source development. New tasks use task contract
 cortex/v10, orchestration lifecycle cortex/orchestration/v6, and SQLite schema

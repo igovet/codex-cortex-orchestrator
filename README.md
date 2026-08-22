@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-10.0.6-7c3aed" alt="Cortex 10.0.6" />
+        <img src="https://img.shields.io/badge/Cortex-10.0.7-7c3aed" alt="Cortex 10.0.7" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-SQLite%20schema%20v15-0f766e" alt="SQLite ledger schema v15" />
@@ -638,7 +638,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
    acceptance criteria, and task boundaries.
 2. **Evidence-first scoping and planning.** C2 starts with Explorer discovery.
    C3 and knowledge harvest start with a read-only Planner **scope** phase that
-   publishes a discovery brief and up to eight non-overlapping domains. The
+   publishes a complete discovery brief and all validated discovery domains. The
    final Planner **plan** phase runs after discovery and all design gates, and
    consumes their predecessor result references before publishing the decision-complete
    `planning` artifact. `scope` gathers evidence but never closes a user-intent
@@ -660,8 +660,8 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
    parallel, while overlapping writes are serialized.
 6. **Results instead of trust.** Every worker publishes the canonical
    `cortex/attempt-result/v1` payload. Planner Scope may additionally
-   publish a bounded `scoping` projection (`overview`, `context_files`, and up
-   to eight validated discovery domains); Planner Plan may publish a bounded
+   publish a complete `scoping` projection (`overview`, `context_files`, and
+   all validated discovery domains); Planner Plan may publish a complete
    `planning` projection. The server also attaches the task-wide
    `resolved_user_decisions` snapshot. These projections never widen the
    worker-authored AttemptResult fields.
@@ -691,10 +691,10 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 10.0.6 canonical AttemptResult and AttemptEvent protocol
+### 10.0.7 canonical AttemptResult and AttemptEvent protocol
 
-Cortex 10.0.6 uses one database-centric worker protocol. A worker checkpoints
-bounded semantic facts with `record_attempt_event` and closes exactly one
+Cortex 10.0.7 uses one database-centric worker protocol. A worker checkpoints
+complete semantic facts of any content volume with `record_attempt_event` and closes exactly one
 attempt with `complete_attempt`. `AttemptEvent` is append-only and keyed for
 idempotent retries; its event kinds cover findings, decision evidence,
 blockers, verification observations, progress, and notes. `AttemptResult`
@@ -718,7 +718,7 @@ RUNNING → WORK_COMPLETED → FINALIZING → COMPLETED
 ```
 
 `WORK_COMPLETED` means the worker's semantic result is durable. `FINALIZING`
-represents server-owned result views, handoff compilation, and other bounded
+represents server-owned result views, handoff compilation, and other server-owned
 infrastructure work. `COMPLETED` is reached only after required finalization
 passes. `BLOCKED` and `FAILED` are semantic worker outcomes; a missing file,
 transport error, or lost native acknowledgement does not invent either status.
@@ -729,17 +729,17 @@ pass, handoff, terminal acceptance, and coordinator completion. A native child
 binding is recovery metadata only; the coordinator must read the result,
 receive the server-derived continuation, and only then close that child.
 
-### 10.0.6 ContextCompiler and HandoffCompiler boundaries
+### 10.0.7 ContextCompiler and HandoffCompiler boundaries
 
 `ContextCompiler` is the only normal coordinator-to-worker context boundary.
 It compiles task intent, requirements, constraints, decisions, assigned scope,
 allowed paths, acceptance criteria, verification requirements, validated
-predecessor result references, and server observations into a bounded,
+predecessor result references, and server observations into a complete,
 immutable dispatch briefing. The briefing is a private capability export: its
 path, identity, and digest are checked, but it is not mutable task state.
 
-`HandoffCompiler` creates target-specific projections rather than copying an
-unbounded prior worker payload. Implementation workers receive requirements,
+`HandoffCompiler` creates target-specific projections over canonical references
+rather than copying mutable task state. Implementation workers receive requirements,
 decisions, scope, and allowed paths. QA workers receive changed files,
 acceptance and verification needs, observed checks, unresolved findings, and
 risk areas. Review workers receive the change inventory, requirements,
@@ -754,7 +754,7 @@ worker does not prove a read with prose. The coordinator and compiler consume
 canonical result references and observations, never an arbitrary file selected
 from a project directory.
 
-### 10.0.6 same-attempt finalization and recovery
+### 10.0.7 same-attempt finalization and recovery
 
 The `SubagentStop` hook binds the exact native child to its server-issued
 attempt. If a child stops before `WORK_COMPLETED`, recovery inspects that exact
@@ -772,10 +772,10 @@ checks, and workspace observations authoritative across compaction and resume.
 The `Stop` hook blocks a coordinator final answer while a durably bound worker
 is still active. `SessionStart`, `SubagentStart`, `PreToolUse`, and
 `PostToolUse` keep the native identity and the ledger state aligned. Optional
-telemetry is bounded and fail-open when SQLite is busy; lifecycle authority
+private telemetry is retention-bounded and fail-open when SQLite is busy; lifecycle authority
 remains fail-closed at the canonical mutation boundary.
 
-### 10.0.6 public API and audience boundary
+### 10.0.7 public API and audience boundary
 
 The public registry contains exactly nine operations. A strict coordinator
 process exposes `start_orchestration`, `continue_orchestration`,
@@ -798,15 +798,17 @@ The root coordinator projects one self-contained ordinary-chat question with
 outcome-based options and a recommendation, ends the turn, records the next
 user message, and resumes the same attempt. Silence never implies approval.
 
-### 10.0.6 Prompt Contract v3 and dispatch authority
+### 10.0.7 Prompt Contract v3 and dispatch authority
 
 Prompt Contract v3 is the sole stable prompt path. Static authority and worker
 policy live in the bundled skills and profiles; every dispatch-controlled value
-is fenced assignment JSON with explicit byte and structure bounds. The renderer
-has one ownership matrix, one section order, one data boundary, and one current
-fixture format. Offline lint and deterministic evaluation verify the source,
-headings, byte ceiling, fence width, and hostile-value containment. They are
-structural checks and do not make model-quality claims.
+is fenced assignment JSON with one explicit data boundary and strict structural
+validation. Prompt byte targets are advisory guidance for the worker, not
+backend admission or storage limits. The renderer has one ownership matrix, one
+section order, one data boundary, and one current fixture format. Offline lint
+and deterministic evaluation verify the source, headings, fence width, and
+hostile-value containment. They are structural checks and do not make
+model-quality claims.
 
 The worker reads the exact immutable briefing before project work and verifies
 its SHA-256 digest. A detailed compiled plan is an immutable artifact addressed
@@ -822,7 +824,7 @@ fixture, validator, and profile contract names `AttemptResult`, `AttemptEvent`,
 change is not complete until prompt lint, deterministic evaluation, marketplace
 validation, and the affected focused tests pass.
 
-### 10.0.6 governance, security, and verification
+### 10.0.7 governance, security, and verification
 
 Governance state, immutable artifacts, exact scope, revision chains, and
 authenticated lifecycle transitions are server-owned in schema v15. Required
@@ -897,7 +899,7 @@ Every worker assignment is an immutable, digest-checked briefing. The native
 bootstrap carries only the exact task and dispatch identity, briefing path, and
 digest; the worker reads and verifies the briefing before project work. Result
 links are `attempt_result_ref`, `context_result_refs`, and
-`predecessor_result_refs`. Compact inspect and recovery responses keep bounded
+`predecessor_result_refs`. Compact inspect and recovery responses keep scoped
 summaries, while the complete canonical result remains in SQLite. No worker
 scans a project directory for a task or selects an unrelated result.
 
@@ -914,12 +916,14 @@ The complete worker assignment is stored in a private immutable briefing
 protected by a SHA-256 digest. Worker Briefing v3 JSON-serializes every
 task-controlled assignment value inside one explicitly untrusted data block;
 the surrounding authority, bounded role contract, optional mode overlay,
-evidence rules, and worker protocol remain fixed instructions. Its byte budget
-is enforced before dispatch. Full Planner microtasks are represented by one
-immutable compiled-plan artifact and an exact digest-bound reference, so a
-valid plan is not silently truncated merely to fit a worker prompt. Ordinary
-profiles do not carry harvest specialization; exact harvest routes add a
-conditional mode overlay. Briefings have non-blocking compactness targets:
+evidence rules, and worker protocol remain fixed instructions. Prompt volume
+targets are advisory worker guidance only: no task, plan, result, event,
+question, answer, or artifact content is truncated, rejected, or omitted to
+fit a byte, character, or file-size target. Full Planner microtasks may remain
+inline or use their exact digest-bound artifact reference, and complete
+payloads are stored intact. Ordinary profiles do not carry harvest
+specialization; exact harvest routes add their conditional mode overlay.
+Briefings have non-blocking compactness targets:
 1.5 KiB for the bootstrap, 16 KiB for ordinary work, and 18 KiB for harvest
 work. They are prompt guidance, not lifecycle authority.
 

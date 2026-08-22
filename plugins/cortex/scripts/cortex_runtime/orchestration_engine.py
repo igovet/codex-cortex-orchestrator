@@ -2170,11 +2170,11 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
                     "microtask_count": package.get("microtask_count", 0),
                     "artifact_path": package.get("artifact_path"),
                 }
-                for package in manifest.get("work_packages", [])[:MAX_WORK_PACKAGES]
+                for package in manifest.get("work_packages", [])
                 if isinstance(package, dict)
             ],
         }
-        for package_summary in manifest.get("work_packages", [])[:MAX_WORK_PACKAGES]:
+        for package_summary in manifest.get("work_packages", []):
             if not isinstance(package_summary, dict) or not str(package_summary.get("artifact_path") or ""):
                 continue
             package_record, _ = read_immutable_json_artifact(
@@ -2190,7 +2190,7 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
             for microtask in package.get("microtasks", []):
                 if not isinstance(microtask, dict):
                     continue
-                checks = [redact(item, 1000) for item in microtask.get("verification", [])][:12]
+                checks = [redact(item, 1000) for item in microtask.get("verification", [])]
                 verification_summary.extend(checks)
                 microtasks.append({
                     "id": microtask.get("id"),
@@ -2199,7 +2199,7 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
                     "profile": microtask.get("profile"),
                     "allowed_paths": list(microtask.get("allowed_paths") or package.get("allowed_paths") or []),
                     "depends_on": list(microtask.get("depends_on") or []),
-                    "acceptance_criteria": [redact(item, 1000) for item in microtask.get("acceptance_criteria", [])][:12],
+                    "acceptance_criteria": [redact(item, 1000) for item in microtask.get("acceptance_criteria", [])],
                     "verification": checks,
                 })
             work_package_details.append({
@@ -2222,15 +2222,15 @@ def _plan_review_payload(task_dir: Path, state: dict[str, Any], plan: dict[str, 
         "user_intent_artifact_ref": task.get("user_intent_artifact_ref"),
         "summary": redact(result["summary"], 2400),
         "work_packages": work_package_details,
-        "verification": list(dict.fromkeys(verification_summary))[:64],
-        "findings": [redact(item, 1000) for item in result.get("findings", [])][:12],
-        "uncertainty": [redact(item, 1000) for item in result.get("unresolved", [])][:12],
+        "verification": list(dict.fromkeys(verification_summary)),
+        "findings": [redact(item, 1000) for item in result.get("findings", [])],
+        "uncertainty": [redact(item, 1000) for item in result.get("unresolved", [])],
         "remaining_phases": list(active_gates(state)),
         "recommendation": (manifest or {}).get("recommendation", "approve"),
         "recommendation_rationale": redact((manifest or {}).get("recommendation_rationale", ""), 2400),
-        "requirement_coverage": list((manifest or {}).get("requirement_coverage") or [])[:100],
-        "resolved_questions": list((manifest or {}).get("resolved_questions") or [])[:32],
-        "risks": [redact(item, 1000) for item in (manifest or {}).get("risks", [])][:64],
+        "requirement_coverage": list((manifest or {}).get("requirement_coverage") or []),
+        "resolved_questions": list((manifest or {}).get("resolved_questions") or []),
+        "risks": [redact(item, 1000) for item in (manifest or {}).get("risks", [])],
         "plan_tracker": (
             {
                 "revision": tracker.get("revision"),
