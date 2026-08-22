@@ -824,10 +824,11 @@ def v3_response(
             "invoked, do not call start_orchestration, continue_orchestration, manage_orchestration, inspect, or wait. "
             "A worker exists only after the native call returns a child target. Never claim it was sent or call wait "
             "without the returned child target. Wait only for those targets. Each worker must publish through "
-            "complete_attempt. Read every returned attempt_result_ref with read_worker_result, then close that exact completed native child with close_agent. "
-            "Only after every result is durably read and every eligible child is closed, copy the returned "
-            "read_worker_result.continuation.step and continuation.results verbatim into continue_orchestration; "
-            "never increment its step or substitute a projection_ref/formatted reference."
+            "complete_attempt. For each terminal worker, read its exact returned attempt_result_ref with read_worker_result, "
+            "then copy that server-returned read_worker_result.continuation.step and continuation.results verbatim into "
+            "continue_orchestration; never increment its step or substitute a projection_ref/formatted reference. Only "
+            "after that successful server continuation or terminal audit, close that exact completed native child with "
+            "close_agent. Do not dispatch another worker before that close succeeds."
         )
     elif outcome == "awaiting_plan_approval":
         next_action = (

@@ -36,8 +36,9 @@ _EXPECTED_GATES = frozenset((
 _COORDINATOR_COMPLETION_CONTRACT = (
     "A native spawn or wait is never completion evidence. For every terminal worker, the coordinator must read its exact "
     "canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned "
-    "continuation or failed-result route. Only the resulting successful server lifecycle outcome is the continuation or "
-    "terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed."
+    "continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only "
+    "the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator "
+    "must neither present completion nor close the worker as consumed."
 )
 
 

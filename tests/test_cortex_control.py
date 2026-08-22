@@ -3738,6 +3738,19 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("exact failed result Cortex already accepted", started["next_action"])
         self.assertIn("use list_agents defensively", started["next_action"])
         self.assertIn("THEN call every dispatch.call", started["next_action"])
+        self.assertIn(
+            "read its exact returned attempt_result_ref with read_worker_result, then copy that server-returned",
+            started["next_action"],
+        )
+        self.assertIn(
+            "Only after that successful server continuation or terminal audit, close that exact completed native child with close_agent",
+            started["next_action"],
+        )
+        self.assertIn("Do not dispatch another worker before that close succeeds", started["next_action"])
+        self.assertNotIn(
+            "Read every returned attempt_result_ref with read_worker_result, then close that exact completed native child with close_agent. Only after every result",
+            started["next_action"],
+        )
         self.assertIn("close that exact completed native child with close_agent", started["next_action"])
         assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
         self.assertEqual(assignment["user_intent"]["projection"], request)

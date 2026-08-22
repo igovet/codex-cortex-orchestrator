@@ -113,6 +113,16 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("native spawn or wait is never completion evidence", coordinator_completion)
         self.assertIn("read_worker_result", coordinator_completion)
         self.assertIn("continue_orchestration", coordinator_completion)
+        self.assertIn("then close_agent", coordinator_completion)
+        self.assertIn("before any successor dispatch", coordinator_completion)
+        self.assertLess(
+            coordinator_completion.index("read_worker_result"),
+            coordinator_completion.index("continue_orchestration"),
+        )
+        self.assertLess(
+            coordinator_completion.index("continue_orchestration"),
+            coordinator_completion.index("close_agent"),
+        )
         self.assertIn("successful server lifecycle outcome", coordinator_completion)
         self.assertEqual(prompt_compiler.load_prompt_contract(contract_path), contract)
 
@@ -406,7 +416,18 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             "read_worker_result -> close_agent(completed child) -> continue_orchestration",
             prompt,
         )
-        self.assertIn("the only legal next tool call is every returned dispatch.call", prompt)
+        self.assertIn(
+            "the only legal next tool call is close_agent for the completed child whose exact result that continuation consumed",
+            prompt,
+        )
+        self.assertIn(
+            "Only after that close succeeds, when the continuation outcome=ready_to_spawn, the only legal next tool call is every returned dispatch.call",
+            prompt,
+        )
+        self.assertNotIn(
+            "After each successful continue_orchestration response with outcome=ready_to_spawn, the only legal next tool call is every returned dispatch.call",
+            prompt,
+        )
         self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
 
     def test_automatic_governance_question_authority_is_explicit_and_fail_closed(self) -> None:
