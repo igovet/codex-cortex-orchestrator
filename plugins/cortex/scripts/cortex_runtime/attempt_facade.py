@@ -338,6 +338,19 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
         plan_attempt = profile == "planner" and str(attempt.get("gate") or "") == "plan"
         if "planning" in params and not plan_attempt:
             raise ValueError("planning is supported only for planner attempts on the plan gate")
+        # Validate the planner-only sibling before any receipt or canonical
+        # completion work.  A malformed/missing plan must remain a correction
+        # on this attempt, never a partially committed AttemptResult.
+        normalized_planning = None
+        if plan_attempt:
+            if "planning" not in params:
+                current = _runtime.current_planning_manifest(task_dir)
+                if not isinstance(current, dict):
+                    raise ValueError("planner plan attempts require a planning payload")
+            else:
+                normalized_planning = _runtime.sanitize_planning_payload(
+                    params["planning"], persisted=True,
+                )
         root = _runtime.ledger_root({"project_root": str(project)})
         _receipt_guard(root, state, attempt)
         semantic_result = {
@@ -389,13 +402,13 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                 "next_action": "Return this semantic non-success to the coordinator; Cortex retained the attempt facts.",
             }
         if plan_attempt:
-            if "planning" in params:
+            if normalized_planning is not None:
                 _runtime.materialize_planning_payload(
                     task_dir,
                     state,
                     attempt,
                     str(canonical["result_ref"]),
-                    params["planning"],
+                    normalized_planning,
                 )
             else:
                 current = _runtime.current_planning_manifest(task_dir)

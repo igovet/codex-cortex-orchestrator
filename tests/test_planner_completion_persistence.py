@@ -140,6 +140,44 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertIn("only for planner attempts", response["diagnostics"][0]["message"])
         complete.assert_not_called()
 
+    def test_planner_missing_payload_is_rejected_before_canonical_completion(self) -> None:
+        attempt = {
+            "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
+            "status": "running", "dispatch_ref": "dispatch-plan-01",
+        }
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner", "status": "completed",
+            "summary": "The plan is ready.", "findings": [],
+            "decisions_needed": [], "unresolved": [],
+        }
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"])
+        self.assertIn("planning payload", response["diagnostics"][0]["message"])
+        complete.assert_not_called()
+
+    def test_planner_invalid_payload_is_rejected_before_canonical_completion(self) -> None:
+        attempt = {
+            "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
+            "status": "running", "dispatch_ref": "dispatch-plan-01",
+        }
+        malformed = self.planning()
+        malformed["work_packages"][0]["microtasks"][0]["verification"] = []
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner", "status": "completed",
+            "summary": "The plan is ready.", "findings": [],
+            "decisions_needed": [], "unresolved": [], "planning": malformed,
+        }
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"])
+        self.assertIn("verification", response["diagnostics"][0]["message"])
+        complete.assert_not_called()
+
     def test_planner_facade_persists_plan_after_canonical_completion(self) -> None:
         attempt = {
             "attempt_id": "plan-01",

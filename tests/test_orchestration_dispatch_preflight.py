@@ -93,6 +93,11 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
 
         self.assertFalse(rejected["ok"])
         self.assertEqual(rejected["code"], "orchestrate_validation_failed")
+        # A malformed coordinator payload (including a future_waves
+        # replacement) is retryable machine error, not a user decision.  The
+        # active attempt remains untouched and the public adapter must not
+        # render a misleading Question message.
+        self.assertEqual(rejected["state"], "error")
         self.assertEqual(rejected["phase"], "started")
         self.assertIn("canonical requirements must be an array of strings", rejected["diagnostics"][0]["message"])
         completed.assert_not_called()
@@ -106,6 +111,13 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["phase"], "started")
 
+        public = control._v3_response(rejected, "task-atomic-context")
+        self.assertFalse(public["ok"])
+        self.assertEqual(public["outcome"], "error")
+        self.assertNotEqual(public["user_message"].get("message_type"), "Question")
+        self.assertEqual(public["dispatches"], [])
+        self.assertIn("COORDINATOR LOCK", public["next_action"])
+
         # The exact same request can be reserved again; no gates_recorded
         # partial state forces a synthetic completion, replacement worker, or
         # altered continuation identity after the task data is repaired.
@@ -113,3 +125,30 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.assertIsNone(replay)
         self.assertEqual(retried["status"], "running")
         self.assertEqual(retried["phase"], "started")
+
+    def test_malformed_future_waves_with_active_worker_is_recoverable_error_not_question(self) -> None:
+        """A recovery payload must not ask the user to decide on validation."""
+        rejected = orchestration_engine._orchestrate_error(
+            "advance",
+            "orchestrate_validation_failed",
+            "future_waves cannot silently drop a pending implementation phase; retain implementation",
+            phase="started",
+            recoverable=True,
+            task_id="active-task",
+            diagnostics=[{
+                "code": "orchestrate_validation_failed",
+                "phase": "started",
+                "message": "future_waves cannot silently drop a pending implementation phase; retain implementation",
+            }],
+        )
+        rejected["state_summary"] = {
+            "attempts": [{"gate": "implementation", "status": "running"}],
+        }
+        public = control._v3_response(rejected, "task-active")
+        self.assertFalse(public["ok"])
+        self.assertEqual(public["outcome"], "error")
+        self.assertEqual(public["code"], "orchestrate_validation_failed")
+        self.assertNotEqual(public["user_message"].get("message_type"), "Question")
+        self.assertEqual(public["dispatches"], [])
+        self.assertTrue(public["recoverable"])
+        self.assertIn("COORDINATOR LOCK", public["next_action"])

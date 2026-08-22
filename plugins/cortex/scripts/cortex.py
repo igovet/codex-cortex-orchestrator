@@ -4648,8 +4648,16 @@ def canonical_pipeline_gate(gate: Any) -> str:
 _PLANNING_GATE_PROSE_MARKERS = (
     "missing", "timed_out", "inaccessible", "ambiguous", "production",
     "release_blocker", "autonomous", "no_production_mutation", "restart",
-    "deployment", "order",
+    "deployment", "order", "enable", "release", "warmup",
 )
+
+# These are deliberately a closed vocabulary.  A planner sentence such as
+# ``enable release warmup`` may be tokenized into the optional package-gates
+# field, but an arbitrary unknown identifier must continue to fail closed.
+_PLANNING_PACKAGE_PROSE_GATE_TOKENS = frozenset({
+    *_PLANNING_GATE_PROSE_MARKERS,
+    "a_missing", "production_fact", "autonomous_averaging",
+})
 
 
 def _planning_package_gates(
@@ -4671,7 +4679,11 @@ def _planning_package_gates(
     if unknown:
         joined = "_".join(unknown)
         marker_hits = sum(marker in joined for marker in _PLANNING_GATE_PROSE_MARKERS)
-        if len(unknown) >= 3 and marker_hits >= 2:
+        if (
+            len(unknown) >= 3
+            and marker_hits >= 2
+            and set(unknown).issubset(_PLANNING_PACKAGE_PROSE_GATE_TOKENS)
+        ):
             derived = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])})
             return derived or ["implementation"]
         raise ValueError(

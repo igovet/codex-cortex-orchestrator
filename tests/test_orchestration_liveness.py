@@ -345,6 +345,39 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertNotIn("discover", state.get("rework_pauses", {}))
         self.assertEqual(state["rework_progress"]["discover"]["consecutive_identical_iterations"], 1)
 
+    def test_delivery_recovery_retains_blocked_implementation_from_durable_attempt(self) -> None:
+        """A stopped implementation cannot turn internal recovery into plan-only work."""
+        self._start()
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = {
+            "attempts": [{"gate": "implementation", "status": "blocked", "invalidated": False}],
+            "completed_gates": [],
+            "skipped_gates": [],
+        }
+        plan = {
+            "history": [{
+                "semantic_future_pipeline": [{
+                    "workers": [{
+                        "phase": "implementation",
+                        "profile": "backend_dev",
+                        "dependencies": ["plan"],
+                    }],
+                }],
+            }],
+        }
+
+        waves = orchestration_engine._delivery_recovery_waves(
+            task_dir,
+            state,
+            plan,
+            required_gates=["qa", "review"],
+        )
+
+        self.assertEqual([wave["delegations"][0]["gate"] for wave in waves], [
+            "plan", "implementation", "qa", "review",
+        ])
+        self.assertEqual(waves[1]["delegations"][0]["context_gates"], ["plan"])
+
     def test_paraphrased_equivalent_failure_reasons_still_trip_the_circuit_breaker(self) -> None:
         current = self._start()
         reasons = (
