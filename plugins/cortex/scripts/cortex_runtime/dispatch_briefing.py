@@ -15,6 +15,7 @@ from typing import Any
 
 import cortex as _runtime
 from cortex import (
+    AGENTS,
     AWAITING_HOST_SPAWN,
     PUBLIC_ORCHESTRATION_SCHEMA,
     _attempt,
@@ -31,6 +32,33 @@ from cortex_runtime.validation import ValidationFailure, collect_validations
 
 
 _MISSING = object()
+
+_DISPATCH_FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
+    "project_root": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "string", "minLength": 1},
+    "profile": {"type": "string"},
+    "dispatch_ref": {"type": "string", "minLength": 1},
+    "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "cursor": {"type": "string", "minLength": 1},
+    "max_bytes": {"type": "integer", "minimum": 1},
+}
+
+
+def _dispatch_diagnostic_defaults(item: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = dict(item)
+    path = str(result.get("path") or "$")
+    field = path.rsplit(".", 1)[-1]
+    schema = _DISPATCH_FIELD_SCHEMAS.get(field, {"type": "object"})
+    if field == "profile":
+        schema = {**schema, "enum": sorted(AGENTS)}
+    result.setdefault("field_schema", schema)
+    result.setdefault("json_pointer", path)
+    if "received" not in result and params is not None and path.startswith("$."):
+        result["received"] = params.get(path[2:])
+    result.setdefault("expected", schema)
+    result.setdefault("fix", f"Correct only {path} according to field_schema, then retry read_dispatch_briefing with the same worker identity.")
+    return result
 def _bounded_artifact_max_bytes(value: Any, *, label: str) -> tuple[int | None, int | None, bool]:
     """Validate an optional caller-selected artifact page size."""
     if value is _MISSING:
@@ -53,7 +81,7 @@ def _dispatch_briefing_error_path(message: str) -> str:
     return "$"
 
 
-def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
+def _dispatch_briefing_failure(exc: BaseException, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return safe retryable argument diagnostics or an integrity blocker."""
     message = redact(str(exc), 1000)
     lowered = message.lower()
@@ -77,14 +105,28 @@ def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
         if not isinstance(diagnostics, list) or not diagnostics:
             diagnostics = [{"code": "dispatch_briefing_request_invalid", "path": path, "message": message, "fix": fix}]
         else:
-            for item in diagnostics:
-                item.setdefault("fix", fix)
+            diagnostics = [dict(item) for item in diagnostics if isinstance(item, dict)]
+        diagnostics = [_dispatch_diagnostic_defaults(item, params) for item in diagnostics]
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "needs_correction",
             "code": "dispatch_briefing_request_invalid",
             "diagnostics": diagnostics,
             "retryable": True, "attempt_budget_consumed": False,
-            "next_action": "Apply the diagnostic fix and retry read_dispatch_briefing on this same attempt. Stop only if a later response explicitly returns retryable=false or outcome=blocked.",
+            "next_action": "Correct every listed path according to its field_schema, preserve the exact project_root/task_id/attempt_id/profile/dispatch_ref/briefing_digest identity, and retry read_dispatch_briefing. No briefing write or replacement worker is authorized.",
+            "validation": {
+                "schema": "cortex/validation-error/v1",
+                "diagnostics_are_complete": True,
+                "invalid_paths": [item.get("path") for item in diagnostics if item.get("path")],
+                "retry": {"same_attempt": True, "attempt_budget_consumed": False, "replacement_worker_authorized": False},
+                "apply_all_diagnostics_atomically": True,
+            },
+            "repair": {
+                "tool": "read_dispatch_briefing",
+                "same_attempt": True,
+                "patch_only": True,
+                "paths": [item.get("json_pointer") for item in diagnostics if item.get("json_pointer")],
+                "preserve_paths_not_listed": True,
+            },
         }
     return {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "blocked",
@@ -187,4 +229,4 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
         receipt = attempt_protocol.acknowledge_briefing(root, task_id=state["task_id"], attempt_id=attempt_id, dispatch_ref=dispatch_ref, digest=briefing_digest)
         return {**base, "briefing": briefing, "briefing_receipt": receipt, "next_action": "Follow this complete validated briefing. Cortex recorded the server-owned read receipt; do not author an acknowledgement marker or read another Cortex ledger path or briefing."}
     except (ValueError, OSError, json.JSONDecodeError) as exc:
-        return _dispatch_briefing_failure(exc)
+        return _dispatch_briefing_failure(exc, params=params)

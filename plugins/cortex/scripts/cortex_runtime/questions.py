@@ -54,6 +54,7 @@ BATCH_QUESTION_SCHEMA = "cortex/question-batch/v1"
 _BATCH_DOCUMENT_PREFIX = "question_batch:"
 _BATCH_OPEN_STATUSES = {"open", "awaiting_translation"}
 _BATCH_QUESTION_TYPES = {"single_select", "multi_select", "text"}
+_MISSING = object()
 _GENERIC_DECISION_LABELS = {
     "a", "b", "c", "d",
     "option", "recommended option", "alternative option", "other option",
@@ -71,6 +72,49 @@ _GENERIC_NUMBERED_QUESTION = re.compile(
     r"\bрешени[ея]\s*#?\d+\b|\b(?:перв\w*|втор\w*|трет\w*)\s+решени\w*\b)",
     re.IGNORECASE,
 )
+
+# Keep boundary diagnostics aligned with the public MCP form.  These are
+# intentionally small field schemas: the response contains only the fields
+# that failed, while the tool declaration remains the complete form.
+_QUESTION_FIELD_SCHEMAS: dict[str, dict[str, Any]] = {
+    "project_root": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "string", "minLength": 1},
+    "profile": {"type": "string"},
+    "action": {"type": "string", "enum": ["ask", "poll", "ask_batch", "poll_batch"]},
+    "question_ref": {"type": "string", "minLength": 1},
+    "batch_ref": {"type": "string", "minLength": 1},
+    "question": {"type": "string", "minLength": 1},
+    "batch": {"type": "object"},
+    "header": {"type": "string"},
+    "options": {"type": "array"},
+    "recommendation": {"type": "string", "minLength": 1},
+    "recommended_option_ids": {"type": "array", "minItems": 1, "uniqueItems": True},
+    "recommended_answer": {"type": "string", "minLength": 1},
+}
+_QUESTION_ALLOWED_FIELDS = set(_QUESTION_FIELD_SCHEMAS) | {
+    "multiple", "custom_label", "context",
+}
+
+
+def _question_diagnostic(path: str, message: str, *, received: Any = _MISSING, expected: Any = None) -> dict[str, Any]:
+    field = path.rsplit(".", 1)[-1]
+    schema = dict(_QUESTION_FIELD_SCHEMAS.get(field, {"type": "object"}))
+    if field == "profile":
+        schema["enum"] = sorted(AGENTS)
+    item: dict[str, Any] = {
+        "code": "worker_question_request_invalid",
+        "path": path,
+        "json_pointer": path,
+        "message": message,
+        "field_schema": schema,
+        "fix": f"Correct only {path} according to field_schema, then retry worker_question on this same attempt.",
+    }
+    if received is not _MISSING:
+        item["received"] = received
+    if expected is not None:
+        item["expected"] = expected
+    return item
 
 def _canonical_json_bytes(value: object, *, label: str, maximum: int) -> int:
     """Validate one lossless strict JSON value without a size quota."""
@@ -154,7 +198,7 @@ def _validate_single_question_submission(params: dict[str, Any]) -> None:
         try:
             check()
         except (ValueError, TypeError) as exc:
-            diagnostics.append({"code": "worker_question_request_invalid", "path": f"$.{path}", "message": str(exc)})
+            diagnostics.append(_question_diagnostic(f"$.{path}", str(exc), received=params.get(path, _MISSING)))
     if diagnostics:
         raise ValidationFailure(diagnostics)
 
@@ -171,7 +215,7 @@ def _validate_question_answer_submission(params: dict[str, Any]) -> None:
         try:
             check()
         except (ValueError, TypeError) as exc:
-            diagnostics.append({"code": "worker_question_request_invalid", "path": f"$.{path}", "message": str(exc)})
+            diagnostics.append(_question_diagnostic(f"$.{path}", str(exc), received=params.get(path, _MISSING)))
     if diagnostics:
         raise ValidationFailure(diagnostics)
 
@@ -926,22 +970,35 @@ def _poll_worker_question_batch(
 def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
     """Public facade adapter for durable ask/poll on one exact worker attempt."""
     action = str(params.get("action") or "").strip().lower()
+    # Independent JSON-form checks happen before action-specific/cross-field
+    # checks, state lookup, or any durable write.  This mirrors a form
+    # validator: one response contains every correctable field.
+    preflight: list[dict[str, Any]] = []
+    unknown = sorted(set(params) - _QUESTION_ALLOWED_FIELDS)
+    for field in unknown:
+        preflight.append(_question_diagnostic(
+            f"$.{field}", "unsupported worker_question field", received=params.get(field), expected="a field declared by worker_question schema",
+        ))
+    for field in ("project_root", "task_id", "attempt_id", "profile", "action"):
+        if not str(params.get(field) or "").strip():
+            preflight.append(_question_diagnostic(
+                f"$.{field}", f"{field} is required", received=params.get(field), expected="non-empty string",
+            ))
     if action not in {"ask", "poll", "ask_batch", "poll_batch"}:
-        raise ValueError("worker question action must be ask, poll, ask_batch, or poll_batch")
-    # These are independent caller/schema checks.  Aggregate them before any
-    # state lookup so malformed requests never partially write or consume an
-    # attempt.  Semantic/cross-field checks below run only after this passes.
-    if action in {"ask", "ask_batch"}:
-        checks = [
-            ("task_id", lambda: None if str(params.get("task_id") or "").strip() else "task_id is required"),
-            ("attempt_id", lambda: None if str(params.get("attempt_id") or "").strip() else "attempt_id is required"),
-            ("profile", lambda: None if str(params.get("profile") or "").strip() else "profile is required"),
-        ]
-        if action == "ask":
-            checks.append(("question", lambda: None if str(params.get("question") or "").strip() else "ask requires question"))
-        else:
-            checks.append(("batch", lambda: None if isinstance(params.get("batch"), (dict, list)) else "ask_batch requires batch"))
-        collect_validations(checks, code="worker_question_request_invalid")
+        preflight.append(_question_diagnostic(
+            "$.action", "worker question action is unsupported", received=params.get("action"), expected=["ask", "poll", "ask_batch", "poll_batch"],
+        ))
+    raw_profile = params.get("profile")
+    if raw_profile not in AGENTS:
+        preflight.append(_question_diagnostic(
+            "$.profile", "profile must be an exact advertised Cortex worker profile", received=raw_profile, expected=sorted(AGENTS),
+        ))
+    if action == "ask" and not str(params.get("question") or "").strip():
+        preflight.append(_question_diagnostic("$.question", "ask requires question", received=params.get("question"), expected="non-empty string"))
+    if action == "ask_batch" and not isinstance(params.get("batch"), dict):
+        preflight.append(_question_diagnostic("$.batch", "ask_batch requires batch", received=params.get("batch"), expected={"type": "object"}))
+    if preflight:
+        raise ValidationFailure(preflight)
     profile = canonical_profile(params.get("profile") or "")
     if profile not in AGENTS:
         raise ValueError("profile must be an exact Cortex worker profile")
@@ -1130,9 +1187,23 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
                     "Correct only this field from the active briefing or the last worker_question response, then retry worker_question on this same worker attempt."
                 ),
             }]
-        else:
-            for item in diagnostics:
-                item.setdefault("fix", "Correct this field and retry worker_question on this same attempt; no write or replacement worker was created.")
+        normalized: list[dict[str, Any]] = []
+        for raw in diagnostics:
+            item = dict(raw) if isinstance(raw, dict) else {"message": str(raw)}
+            path = str(item.get("path") or "$")
+            field = path.rsplit(".", 1)[-1]
+            item.setdefault("code", code)
+            item.setdefault("json_pointer", path)
+            schema = dict(_QUESTION_FIELD_SCHEMAS.get(field, {"type": "object"}))
+            if field == "profile":
+                schema["enum"] = sorted(AGENTS)
+            item.setdefault("field_schema", schema)
+            if "received" not in item and path.startswith("$."):
+                item["received"] = params.get(path[2:], None)
+            item.setdefault("expected", item.get("field_schema"))
+            item.setdefault("fix", f"Correct only {path} according to field_schema, then retry worker_question on this same attempt; no write or replacement worker was created.")
+            normalized.append(item)
+        diagnostics = normalized
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": False,
@@ -1142,11 +1213,24 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "retryable": not terminal,
             "attempt_budget_consumed": False,
             "next_action": (
-                "Stop this worker call because the response is explicitly non-retryable."
+                "Stop this worker call because the response is explicitly non-retryable; do not create a replacement worker."
                 if terminal else
-                "Correct the diagnostic field and retry worker_question on this same attempt; rejected caller "
-                "validation does not consume an attempt and must not end the worker."
+                "Correct every listed path in the worker_question request according to its field_schema, preserve all other fields, and call worker_question again with the same project_root, task_id, attempt_id, and profile."
             ),
+            "validation": {
+                "schema": "cortex/validation-error/v1",
+                "diagnostics_are_complete": True,
+                "invalid_paths": [item.get("path") for item in diagnostics if item.get("path")],
+                "retry": {"same_attempt": True, "attempt_budget_consumed": False, "replacement_worker_authorized": False},
+                "apply_all_diagnostics_atomically": True,
+            },
+            "repair": {
+                "tool": "worker_question",
+                "same_attempt": True,
+                "patch_only": True,
+                "paths": [item.get("json_pointer") for item in diagnostics if item.get("json_pointer")],
+                "preserve_paths_not_listed": True,
+            },
         }
 
 
