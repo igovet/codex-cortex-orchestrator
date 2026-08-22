@@ -908,8 +908,13 @@ class ControlPlaneTests(unittest.TestCase):
                 "dispatch_ref": attempt["dispatch_ref"],
             }],
         })
-        self.assertFalse(failed["ok"], failed)
-        self.assertEqual(failed["code"], "continue_validation_failed")
+        # The hook and attempt state use the canonical
+        # ``native_worker_stopped_without_result`` marker.  The failed slot
+        # must remain addressable in the active wave so this exact recovery
+        # receipt is accepted instead of failing cardinality validation.
+        self.assertTrue(failed["ok"], failed)
+        self.assertEqual(failed["outcome"], "ready_to_spawn")
+        self.assertEqual(len(failed["dispatches"]), 1)
 
 
     def test_read_only_inspect_never_enters_state_lock_and_explicit_recovery_is_the_writer(self):

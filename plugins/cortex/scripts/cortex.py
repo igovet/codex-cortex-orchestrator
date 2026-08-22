@@ -9521,7 +9521,7 @@ def _v3_active_wave_context(
         for item in state.get("attempts", [])
         if item.get("gate") in wave.get("gates", [])
         and item.get("status") == "failed"
-        and item.get("host_stop_outcome") == "native_worker_stopped_without_attempt_result"
+        and item.get("host_stop_outcome") == "native_worker_stopped_without_result"
         and not item.get("invalidated")
     }
     wave_attempt_ids = [
