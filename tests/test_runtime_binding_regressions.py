@@ -161,6 +161,30 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "active_attempt_result_pending"):
             control.validate_completion_invariants(state, artifact_root=self.ledger)
 
+    def test_facade_finalizer_refuses_resultless_success_before_projection(self) -> None:
+        """The host finalizer cannot create the terminal-status guard bypass."""
+        task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+        attempt.update({"status": "running", "lifecycle_status": "running"})
+        control.db_update_task_state(self.ledger, state)
+
+        response = control.finalize_attempt({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "thread_id": state["thread_id"],
+            "expected_revision": state["revision"],
+            "attempt_id": attempt["attempt_id"],
+            "status": "passed",
+        })
+
+        self.assertFalse(response["recorded"])
+        self.assertTrue(response["recoverable"])
+        self.assertEqual(response["reason"], "passed_attempt_result_required")
+        self.assertEqual(response["next_action"], "complete_attempt")
+        persisted = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(persisted["attempts"][0]["status"], "running")
+
     def test_stop_hook_blocks_pending_unbound_facade_dispatch(self) -> None:
         """A coordinator cannot silently end a turn before a spawn is bound."""
         _task_dir, state = self._started_task()

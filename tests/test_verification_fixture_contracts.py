@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
@@ -250,6 +251,75 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertEqual(len(records), len(state["attempts"]))
         self.assertTrue(LUNA_EVAL.canonical_results_are_strict(records))
 
+    def test_auto_c3_terminal_audit_rejects_a_passed_governance_projection_without_result(self) -> None:
+        """A replayed terminal audit must re-check SQLite, not a passed state row.
+
+        The setup uses the same public start -> complete_attempt ->
+        continue_orchestration lifecycle as the automatic-governance fixture.
+        The mocked lookup models a missing/corrupt canonical row after a
+        historical gate projection; close_audit must fail without mutating the
+        completed task.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary) / "automatic-governance-terminal-audit"
+            project.mkdir()
+            (project / "README.md").write_text("# governance fixture\n", encoding="utf-8")
+            started = cortex.start_orchestration(
+                {
+                    "project_root": str(project),
+                    "task": {
+                        "user_request": "Complete a high-impact cross-system governance fixture.",
+                        "complexity": "C3",
+                        "acceptance_criteria": ["The governed fixture completes."],
+                        "verification": ["Verify the governed lifecycle."],
+                        "plan_approval": "auto",
+                    },
+                    "waves": [
+                        {"workers": [{"phase": "implementation"}]},
+                        {"workers": [{"phase": "documentation"}]},
+                        {"workers": [{"phase": "close"}]},
+                    ],
+                }
+            )
+            completed = LUNA_EVAL.finish(project, started)
+            ledger = cortex.ledger_root({"project_root": str(project)})
+            registry = cortex._operation_registry(ledger)
+            task_id = next(iter(registry["tasks"]))
+            task_dir, state, _task = cortex._v3_task_state(ledger, task_id)
+            activation = next(
+                item for item in state["attempts"]
+                if item.get("gate") == "governance_activation" and not item.get("invalidated")
+            )
+            original_lookup = cortex.attempt_protocol.get_attempt_result
+
+            def missing_activation_result(root, *, task_id, attempt_id):
+                if attempt_id == activation["attempt_id"]:
+                    return None
+                return original_lookup(root, task_id=task_id, attempt_id=attempt_id)
+
+            # The fixture has completed and therefore released its interactive
+            # activation. Authorization is not under test here; retain the
+            # public lifecycle setup and isolate the terminal ledger guard.
+            with mock.patch.object(cortex, "authorize"), mock.patch.object(
+                cortex.attempt_protocol,
+                "get_attempt_result",
+                side_effect=missing_activation_result,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "passed_attempt_result_unfinalized: " + activation["attempt_id"],
+                ):
+                    cortex.close_audit({"project_root": str(project), "task_id": task_id})
+
+            persisted = cortex.load_task_state_for_artifact(task_dir)
+
+        self.assertEqual(completed["outcome"], "completed")
+        self.assertEqual(persisted["status"], "completed")
+        self.assertEqual(
+            next(item for item in persisted["attempts"] if item["attempt_id"] == activation["attempt_id"])["status"],
+            "passed",
+        )
+
     def test_live_prompt_uses_the_canonical_attempt_result_contract(self) -> None:
         prompt = LUNA_EVAL.live_prompt("automatic_sequential", Path("/workspace/cortex-live"))
         for field in ("summary", "findings", "decisions_needed", "unresolved"):
@@ -320,7 +390,13 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("Deterministic decision policy authored for this fixture", prompt)
         self.assertIn("complete authorized facts and scope", prompt)
         self.assertIn("do not widen scope", prompt)
-        self.assertIn("If the question requests any fact or decision outside that policy", prompt)
+        self.assertIn("scenario-owned answer authorization", prompt)
+        self.assertIn("it is not ordinary user authority", prompt)
+        self.assertIn("exact two-call route", prompt)
+        self.assertIn("expect outcome=awaiting_user", prompt)
+        self.assertIn("command=answer, the exact same", prompt)
+        self.assertIn("resume/read/continue receipt is missing", prompt)
+        self.assertIn("<evaluator_question_authorization>", prompt)
         self.assertIn("strict state machine for all five sequential server waves", prompt)
         self.assertIn(
             "read_worker_result -> continue_orchestration(existing project_root/task_ref plus server continuation step/results verbatim) -> close_agent(completed child)",
@@ -332,6 +408,22 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         )
         self.assertIn("the only legal next tool call is every returned dispatch.call", prompt)
         self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
+
+    def test_automatic_governance_question_authority_is_explicit_and_fail_closed(self) -> None:
+        policy = LUNA_EVAL.live_question_policy("automatic_governance")
+        self.assertIsNotNone(policy)
+        assert policy is not None
+        self.assertEqual(policy["maximum_questions"], 1)
+        self.assertEqual(
+            policy["preauthorized_answer"],
+            "Proceed with the stated fixture contract and current repository evidence; do not widen scope.",
+        )
+        self.assertTrue(LUNA_EVAL.question_matches_pre_authorized_policy({
+            "question": "May this fixture proceed within the stated scope?",
+        }, policy))
+        self.assertFalse(LUNA_EVAL.question_matches_pre_authorized_policy({
+            "question": "Which external deployment should we use?",
+        }, policy))
 
     def test_targeted_live_prompts_carry_complete_start_and_follow_up_contracts(self) -> None:
         compact = LUNA_EVAL.live_prompt("compact_parallel", Path("/workspace/cortex-live"))
@@ -367,12 +459,17 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
             {
                 "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
+                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
                 "ok": True, "management_intent": "question", "outcome": "question_answered",
                 "resume_contract": True,
             },
             {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
+            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
         ]
         self.assertTrue(LUNA_EVAL.observed_question_resume_lifecycle(events))
@@ -385,6 +482,10 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
             {
                 "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
+                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
                 "ok": True, "management_intent": "question", "outcome": "question_answered",
                 "resume_contract": True,
             },
@@ -392,10 +493,11 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
+            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
         ]
         self.assertTrue(LUNA_EVAL.observed_question_resume_lifecycle(events))
-        with_second_worker = [*events[:3], {
+        with_second_worker = [*events[:4], {
             "event": "native_tool_call", "tool": "spawn_agent", "status": "completed",
         }, *events[3:]]
         self.assertFalse(LUNA_EVAL.observed_question_resume_lifecycle(with_second_worker))

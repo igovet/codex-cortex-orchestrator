@@ -3867,10 +3867,16 @@ class ControlPlaneTests(unittest.TestCase):
                 )
             ],
         }
+        # This fixture deliberately supplies a projected task directory rather
+        # than creating a complete task/result ledger.  The terminal-result
+        # backstop is covered separately; keep this test focused on whether
+        # the unresolved-result scan is limited to the closure verifier rows.
         with mock.patch.object(control, "db_task_artifact_path", return_value=self.project), \
+             mock.patch.object(control, "_attempts_missing_result_validation", return_value=[]) as finalized, \
              mock.patch.object(control, "_attempts_with_unresolved_canonical_results", return_value=["governance-close-01"]) as unresolved:
             with self.assertRaisesRegex(ValueError, "closure_attempt_unresolved: governance-close-01"):
                 control.validate_completion_invariants(state, artifact_root=self.ledger)
+        finalized.assert_called_once_with(self.project, state["attempts"])
         scanned = unresolved.call_args.args[1]
         self.assertEqual([item["gate"] for item in scanned], ["governance_close", "close"])
         self.assertNotIn("documentation", [item["gate"] for item in scanned])
@@ -3913,6 +3919,7 @@ class ControlPlaneTests(unittest.TestCase):
             ],
         }
         with mock.patch.object(control, "db_task_artifact_path", return_value=self.project), \
+             mock.patch.object(control, "_attempts_missing_result_validation", return_value=[]), \
              mock.patch.object(control, "_attempts_with_unresolved_canonical_results", return_value=[]) as unresolved, \
              mock.patch.object(control, "validate_governance_obligation_evidence"):
             control.validate_completion_invariants(state, artifact_root=self.ledger)
@@ -5591,7 +5598,7 @@ class ControlPlaneTests(unittest.TestCase):
                 return json.loads(line)
 
             initialized = call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "10.0.1")
+            self.assertEqual(initialized["result"]["serverInfo"]["version"].split("+", 1)[0], "10.0.2")
             cached.rename(renamed)
             request = {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",

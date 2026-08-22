@@ -4919,6 +4919,37 @@ def validate_completion_invariants(
             raise ValueError(
                 "active_attempt_result_pending: " + ", ".join(pending_attempts)
             )
+    # The active-attempt guard intentionally excludes terminal rows, but a
+    # malformed or historical state can already contain a facade row projected
+    # as ``passed`` without its canonical result ever completing. Do not let
+    # that projection survive a recovery/replay path and become terminal merely
+    # because it no longer counts as active. Non-success terminal attempts
+    # legitimately have no successful AttemptResult, so this backstop is
+    # scoped to successful facade rows only.
+    passed_facade_attempts = [
+        item for item in state.get("attempts", [])
+        if isinstance(item, dict)
+        and item.get("facade_managed")
+        and not item.get("invalidated")
+        and item.get("status") == "passed"
+    ]
+    if passed_facade_attempts:
+        if artifact_root is None:
+            raise ValueError(
+                "passed_attempt_result_unfinalized: canonical ledger root is required"
+            )
+        task_dir = db_task_artifact_path(artifact_root, str(state.get("task_id") or ""))
+        if task_dir is None:
+            raise ValueError(
+                "passed_attempt_result_unfinalized: task artifact directory is unavailable"
+            )
+        missing_passed_results = _attempts_missing_result_validation(
+            task_dir, passed_facade_attempts
+        )
+        if missing_passed_results:
+            raise ValueError(
+                "passed_attempt_result_unfinalized: " + ", ".join(missing_passed_results)
+            )
     governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
     governance_full = governance.get("effective_mode") == "full"
     if not state.get("require_handoff") and not governance_full:
@@ -6147,7 +6178,14 @@ def _validated_evidence_records(task_dir: Path, state: dict[str, Any]) -> list[d
 
 
 def finalize_attempt(params: dict[str, Any]) -> dict[str, Any]:
-    """Explicitly close a host-completed attempt when it cannot publish a canonical result."""
+    """Explicitly close a host-completed attempt when it cannot publish a canonical result.
+
+    A facade-managed worker may use this escape hatch only for a terminal
+    non-success. A successful worker must first complete and finalize its
+    canonical AttemptResult through ``complete_attempt``; otherwise a mutable
+    ``status=passed`` projection could bypass the active-attempt guard after
+    it became terminal.
+    """
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -6162,6 +6200,20 @@ def finalize_attempt(params: dict[str, Any]) -> dict[str, Any]:
         status = str(params.get("status", "")).strip().lower()
         if status not in TERMINAL_ATTEMPT_STATUSES:
             raise ValueError("status must be passed, failed, blocked, cancelled, or superseded")
+        if status == "passed" and attempt.get("facade_managed"):
+            missing_result = _attempts_missing_result_validation(task_dir, [attempt])
+            if missing_result:
+                return {
+                    "recorded": False,
+                    "attempt_id": attempt_id,
+                    "status": status,
+                    "reason": "passed_attempt_result_required",
+                    "next_action": "complete_attempt",
+                    "required_fields": ["attempt_result_ref"],
+                    "recoverable": True,
+                    "revision_correction": revision_correction,
+                    "state": state,
+                }
         if attempt.get("status") in TERMINAL_ATTEMPT_STATUSES:
             if attempt.get("status") == status:
                 return {"attempt_id": attempt_id, "status": status, "idempotent": True, "revision_correction": revision_correction, "state": state}
@@ -6780,6 +6832,10 @@ def close_audit(params: dict[str, Any]) -> dict[str, Any]:
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
+        # A transaction replay can arrive after the final gate was already
+        # projected. Re-run the invariant against SQLite rather than treating
+        # that projection as proof of durable worker completion.
+        validate_completion_invariants(state, artifact_root=root)
         result_refs = [
             safe_id(str(item.get("attempt_result_ref") or ""))
             for item in state.get("attempts", [])

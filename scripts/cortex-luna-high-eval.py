@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "plugins/cortex/scripts/cortex.py"
+LIVE_QUESTION_FIXTURES_PATH = ROOT / "plugins/cortex/prompt-evals/live-question-fixtures.json"
 sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 import cortex  # noqa: E402
 
@@ -77,6 +78,61 @@ SAFE_QUESTION_MANAGEMENT_OUTCOMES = {
 
 BOOTSTRAP_MISSING_INPUT_NAME = "bootstrap_fixture_approval"
 BOOTSTRAP_MISSING_INPUT_ANSWER = "APPROVED-FOR-ISOLATED-SMOKE"
+
+
+def load_live_question_fixtures(path: Path = LIVE_QUESTION_FIXTURES_PATH) -> dict[str, object]:
+    """Load the narrow evaluator-only authority for scripted question answers.
+
+    A live evaluator normally has no authority to answer a durable worker
+    question. This separate fixture is the sole exception: it records a
+    scenario-owned answer before the run and binds it to a small, explicit
+    question scope. Do not infer a policy from the task prompt or from a
+    worker's question at runtime.
+    """
+    try:
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("live question fixture is unreadable") from exc
+    if not isinstance(decoded, dict) or decoded.get("schema") != "cortex/live-question-fixtures/v1":
+        raise RuntimeError("live question fixture schema is invalid")
+    scenarios = decoded.get("scenarios")
+    if not isinstance(scenarios, dict):
+        raise RuntimeError("live question fixture scenarios are invalid")
+    for scenario, policy in scenarios.items():
+        if not isinstance(scenario, str) or not scenario or not isinstance(policy, dict):
+            raise RuntimeError("live question fixture scenario is invalid")
+        if set(policy) != {"maximum_questions", "required_question_markers", "preauthorized_answer"}:
+            raise RuntimeError("live question fixture policy fields are invalid")
+        maximum = policy.get("maximum_questions")
+        markers = policy.get("required_question_markers")
+        answer = policy.get("preauthorized_answer")
+        if (
+            type(maximum) is not int or maximum < 1 or maximum > 8
+            or not isinstance(markers, list) or not markers
+            or not all(isinstance(marker, str) and marker.strip() for marker in markers)
+            or len({marker.casefold().strip() for marker in markers}) != len(markers)
+            or not isinstance(answer, str) or not answer.strip()
+        ):
+            raise RuntimeError("live question fixture policy is invalid")
+    return decoded
+
+
+def live_question_policy(scenario: str) -> dict[str, object] | None:
+    """Return one fully validated pre-authorized answer policy, if any."""
+    scenarios = load_live_question_fixtures().get("scenarios")
+    if not isinstance(scenarios, dict):  # Guarded above; preserve type safety.
+        raise RuntimeError("live question fixture scenarios are invalid")
+    policy = scenarios.get(scenario)
+    return dict(policy) if isinstance(policy, dict) else None
+
+
+def question_matches_pre_authorized_policy(question: object, policy: dict[str, object]) -> bool:
+    """Fail closed unless the durable question stays inside fixture authority."""
+    if not isinstance(question, dict):
+        return False
+    text = str(question.get("question") or "").casefold()
+    markers = policy.get("required_question_markers")
+    return isinstance(markers, list) and all(str(marker).casefold() in text for marker in markers)
 
 RESULT_FAILURE_PATTERNS = (
     ("passed completion requires attempt_result_ref", "resultless_success"),
@@ -897,10 +953,14 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
 
     Source-mode telemetry intentionally has no child identifiers or result
     references.  It can nevertheless prove, without retaining either, that
-    each observed successful wait was followed by a successful canonical
+    each observed terminal wait was followed by a successful canonical
     ``read_worker_result`` and a successful server-derived
-    ``continue_orchestration`` audit before the child was closed.  The
-    counters are an aggregate proof only: durable attempt/result identity is checked
+    ``continue_orchestration`` audit before the child was closed.  A native
+    ``ATTEMPT_COMPLETED`` marker is useful telemetry, but it is not the
+    authority: hosts can instead expose an unclassified terminal message.
+    Such a wait is *provisional* until this exact aggregate sequence reaches
+    a successful server read, continuation, and close.  The counters are an
+    aggregate proof only: durable attempt/result identity is checked
     independently by :func:`safe_terminal_result_audit` below.
 
     Adjacent identical host observations are ambiguous: source-mode telemetry
@@ -923,9 +983,16 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
             if tool == "spawn_agent":
                 operation = "spawn"
             elif tool == "wait":
-                operation = "wait_result" if outcome == "attempt_result_recorded" else (
-                    "wait_terminal_other" if outcome else None
-                )
+                if outcome == "attempt_result_recorded":
+                    operation = "wait_result"
+                elif outcome == "other_terminal_message":
+                    # The native child did stop, but its retained message is
+                    # deliberately not evidence of an AttemptResult.  Keep
+                    # this as a provisional wait and require the public
+                    # server read below to prove the canonical result.
+                    operation = "wait_provisional_result"
+                elif outcome:
+                    operation = "wait_terminal_other"
             elif tool == "close_agent":
                 operation = "close"
         elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
@@ -937,14 +1004,14 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
         if operation is None:
             continue
         if operation == last_operation and operation in {
-            "spawn", "wait_result", "read_result", "continue_result", "close",
+            "spawn", "wait_result", "wait_provisional_result", "read_result", "continue_result", "close",
         }:
             ambiguous_observations += 1
             continue
         last_operation = operation
         if operation == "spawn":
             spawned += 1
-        elif operation == "wait_result":
+        elif operation in {"wait_result", "wait_provisional_result"}:
             if waited >= spawned:
                 violation_count += 1
             else:
@@ -1074,9 +1141,12 @@ def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
     """Prove answer-before-follow-up ordering from privacy-safe live telemetry.
 
     Source mode cannot expose native child identifiers or question content. It
-    can still prove the only legal protocol: native question pause, successful
-    public ``manage_orchestration(intent=question)`` answer with Cortex's
-    resume contract, exact native follow-up, canonical result read, and close.
+    can still prove the only legal protocol: native question pause, one public
+    ``manage_orchestration(intent=question)`` presentation returning
+    ``awaiting_user``, then the fixture-authorized durable answer with Cortex's
+    resume contract, exact native follow-up, canonical result read, successful
+    server continuation audit, and close. A read is not completion evidence;
+    the resumed same attempt must be consumed by Cortex before its child closes.
     Repeated adjacent host observations are transport echoes and are collapsed;
     every non-adjacent reordering fails closed.
     """
@@ -1101,15 +1171,20 @@ def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
         elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
             tool = str(event.get("tool") or "")
             if tool == "manage_orchestration" and event.get("management_intent") == "question":
-                operation = (
-                    "question_answered"
-                    if event.get("ok") is True
+                if event.get("ok") is True and event.get("outcome") == "awaiting_user":
+                    operation = "question_presented"
+                elif (
+                    event.get("ok") is True
                     and event.get("outcome") == "question_answered"
                     and event.get("resume_contract") is True
-                    else "question_management_other"
-                )
+                ):
+                    operation = "question_answered"
+                else:
+                    operation = "question_management_other"
             elif tool == "read_worker_result":
                 operation = "read_result" if event.get("ok") is True else "read_result_other"
+            elif tool == "continue_orchestration":
+                operation = "continue_audited" if event.get("ok") is True else "continue_other"
         if operation is not None and (not operations or operation != operations[-1]):
             operations.append(operation)
 
@@ -1123,19 +1198,24 @@ def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
             return False
         if stage == 1 and operation == "wait_question":
             stage = 2
-        elif stage == 2 and operation == "question_answered":
+        elif stage == 2 and operation == "question_presented":
             stage = 3
-        elif stage == 3 and operation == "followup":
+        elif stage == 3 and operation == "question_answered":
             stage = 4
-        elif stage == 4 and operation == "wait_result":
+        elif stage == 4 and operation == "followup":
             stage = 5
-        elif stage == 5 and operation == "read_result":
+        elif stage == 5 and operation == "wait_result":
             stage = 6
-        elif stage == 6 and operation == "close":
+        elif stage == 6 and operation == "read_result":
+            stage = 7
+        elif stage == 7 and operation == "continue_audited":
+            stage = 8
+        elif stage == 8 and operation == "close":
             return True
         elif operation in {
-            "followup", "question_answered", "question_management_other", "wait_result",
-            "wait_other_terminal", "read_result", "read_result_other", "close",
+            "question_presented", "followup", "question_answered", "question_management_other", "wait_result",
+            "wait_other_terminal", "read_result", "read_result_other", "continue_audited",
+            "continue_other", "close",
         }:
             return False
     return False
@@ -2075,6 +2155,11 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         f"The exact project_root is {project}. "
     )
     if scenario == "automatic_governance":
+        question_policy = live_question_policy(scenario)
+        if question_policy is None:
+            raise RuntimeError("automatic governance requires an explicit live question fixture")
+        question_markers = question_policy["required_question_markers"]
+        preauthorized_answer = question_policy["preauthorized_answer"]
         return common + (
             "<cortex_task_contract>"
             "{\"user_request\":\"Inspect README.md and create result.txt containing exactly one line: Automatic governance fixture completed. Treat this as a high-impact cross-system release change requiring independent oversight.\","
@@ -2098,12 +2183,23 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "acceptance criteria, and the listed verification are the complete authorized facts and scope. No external "
             "system, credential, deployment, product preference, or additional user choice is required. Do not ask a "
             "worker_question for ordinary implementation, review, governance, documentation, or close choices: apply the "
-            "stated contract and current repository evidence. If a worker nevertheless asks only whether this closed "
-            "fixture may proceed on those stated facts, first route its exact question_ref, then submit this exact "
-            "user-authored answer: 'Proceed with the stated fixture contract and current repository evidence; do not "
-            "widen scope.' Resume only if Cortex returns outcome=question_answered with its resume_contract. If the "
-            "question requests any fact or decision outside that policy, do not invent an answer or resume the child; "
-            "stop the scenario safely. "
+            "stated contract and current repository evidence. This live evaluator has one narrow scenario-owned answer "
+            "authorization, recorded before execution in <evaluator_question_authorization>; it is not ordinary user "
+            "authority and it overrides neither the task contract nor an unrecognized worker question. If and only if a "
+            "paused worker's presented durable question contains every required scope marker, do this exact two-call route: "
+            "(1) call manage_orchestration intent=question with only its exact question_ref and expect outcome=awaiting_user; "
+            "do not stop or render that interaction; (2) call manage_orchestration again with command=answer, the exact same "
+            "question_ref, and exactly the preauthorized_answer. That second call is mandatory only under this explicit "
+            "fixture authorization and must return outcome=question_answered plus resume_contract. Then use that exact "
+            "resume_contract and the original native child target: followup_task, wait for ATTEMPT_COMPLETED, read_worker_result, "
+            "call continue_orchestration once with its server-provided continuation, and only then close_agent. If any marker "
+            "is absent, a second question appears, the first route does not await the user, the answer is not accepted, or any "
+            "resume/read/continue receipt is missing, stop the scenario transparently without inventing user authority. "
+            "<evaluator_question_authorization>"
+            f"{{\"maximum_questions\":{question_policy['maximum_questions']},"
+            f"\"required_question_markers\":{json.dumps(question_markers)},"
+            f"\"preauthorized_answer\":{json.dumps(preauthorized_answer)}}}"
+            "</evaluator_question_authorization> "
             "Use this strict state machine for all five sequential server waves when no worker question is paused: "
             "dispatch.call -> wait(target returned by that dispatch) -> read_worker_result "
             "-> continue_orchestration(existing project_root/task_ref plus server continuation step/results verbatim) -> close_agent(completed child) -> next dispatch.call. "
@@ -2458,7 +2554,7 @@ def _live_eval(
                 item for item in state.get("attempts", [])
                 if isinstance(item, dict)
                 and item.get("gate") in {"governance_activation", "governance_close"}
-                and item.get("result_transport_status") == "not_recorded"
+                and item.get("completion_transport_status") == "not_recorded"
             ]
             governance_evidence = [
                 item for item in state.get("evidence", [])
@@ -2473,6 +2569,29 @@ def _live_eval(
             }
             required_obligations = set(
                 cortex._governance_obligations_for_gate(state, "governance_close")
+            )
+            question_policy = live_question_policy(scenario)
+            if question_policy is None:
+                raise RuntimeError("automatic governance requires an explicit live question fixture")
+            question_records = cortex._question_records(cortex.question_bus_paths(task_dir), state)
+            authorized_question_records = (
+                len(question_records) <= int(question_policy["maximum_questions"])
+                and all(isinstance(question, dict) for question in question_records)
+                and all(
+                    question_matches_pre_authorized_policy(question, question_policy)
+                    and question.get("status") == "answered"
+                    and question.get("answer_text") == question_policy["preauthorized_answer"]
+                    for question in question_records
+                    if isinstance(question, dict)
+                )
+            )
+            question_resume_completed = (
+                not question_records
+                or (
+                    authorized_question_records
+                    and question_resolution_audit["all_question_attempts_resolved_before_result"] is True
+                    and observed_question_resume_lifecycle(events)
+                )
             )
             checks.update({
                 "governance_not_forced": "manage_governance" not in tool_names,
@@ -2511,6 +2630,8 @@ def _live_eval(
                     and all(item.get("artifact_verified") is True for item in governance_evidence)
                     and all(item.get("verified_execution") is True for item in governance_evidence)
                 ),
+                "question_authority_is_fixture_bound": authorized_question_records,
+                "question_resume_consumed_before_close": question_resume_completed,
             })
         if scenario == "follow_up_partial":
             source_dir = next((path for path in task_dirs if path != task_dir), None)
@@ -2604,7 +2725,7 @@ def _live_eval(
                     "gate": item.get("gate"),
                     "status": item.get("status"),
                     "invalidated": bool(item.get("invalidated")),
-                    "result_transport_status": item.get("result_transport_status"),
+                    "completion_transport_status": item.get("completion_transport_status"),
                     "gate_decision": item.get("gate_decision"),
                 }
                 for item in state.get("attempts", [])

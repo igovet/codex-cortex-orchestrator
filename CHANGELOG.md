@@ -1,5 +1,18 @@
 # Changelog
 
+## [10.0.2] - 2026-08-22
+
+This patch closes terminal replay and live-evaluation gaps found by the
+10.0.1 end-only C3 source-mode gate.
+
+- Reject a facade attempt projected `passed` without its exact finalized
+  canonical result in finalization, terminal invariants, and close audit.
+- Correlate neutral native terminal waits only after an ordered successful
+  result-read, server continuation, and child-close sequence.
+- Permit an evaluator answer only through a narrow, explicit scenario fixture
+  authority; require the durable question presentation, answer, resume, and
+  same-attempt terminal sequence before acceptance.
+
 ## [10.0.1] - 2026-08-22
 
 This patch makes orchestration completion fail closed whenever a dispatched

@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 10.0.1 is a database-centric orchestration control plane for the
+Cortex 10.0.2 is a database-centric orchestration control plane for the
 `cortex/v10` task contract and `cortex/orchestration/v6` lifecycle. Schema v15
 separates worker semantic input from server-observed attempt state.
 

@@ -456,18 +456,26 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         lifecycle = [
             {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
+            {
+                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
+                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
+            },
             answer,
             {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
+            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
             {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
         ]
         self.assertTrue(self.harness.observed_question_resume_lifecycle(lifecycle))
         self.assertFalse(self.harness.observed_question_resume_lifecycle([
-            lifecycle[0], lifecycle[1], lifecycle[3], answer, *lifecycle[4:],
+            lifecycle[0], lifecycle[1], lifecycle[4], answer, *lifecycle[5:],
         ]))
         self.assertFalse(self.harness.observed_question_resume_lifecycle([
-            lifecycle[0], lifecycle[1], answer, lifecycle[3], lifecycle[4], answer, *lifecycle[5:],
+            lifecycle[0], lifecycle[1], lifecycle[2], answer, lifecycle[4], lifecycle[5], answer, *lifecycle[6:],
+        ]))
+        self.assertFalse(self.harness.observed_question_resume_lifecycle([
+            *lifecycle[:7], lifecycle[8],
         ]))
 
     def test_question_resolution_audit_requires_durable_answer_and_decision_before_result(self) -> None:
@@ -612,6 +620,93 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         ambiguous = self.harness.safe_native_terminal_audit([events[0], events[0], *events[1:]])
         self.assertFalse(ambiguous["all_observed_workers_terminally_audited"])
         self.assertEqual(ambiguous["ambiguous_native_observations"], 1)
+
+    def test_native_terminal_audit_correlates_provisional_waits_from_progress_events(self) -> None:
+        """A host terminal message is not a result until Cortex confirms it.
+
+        This mirrors the privacy-safe progress sequence from the live
+        evaluator: every tool emits started/in-progress/completed events, but
+        a completed native wait can retain only ``other_terminal_message``.
+        The test deliberately uses five sequential workers so a regression
+        cannot hide behind a single aggregate correlation.
+        """
+        events: list[dict[str, object]] = []
+        for _worker in range(5):
+            events.extend([
+                {"event": "native_tool_call", "tool": "spawn_agent", "status": "started"},
+                {"event": "native_tool_call", "tool": "spawn_agent", "status": "in_progress"},
+                {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+                {"event": "native_tool_call", "tool": "wait", "status": "started"},
+                {"event": "native_tool_call", "tool": "wait", "status": "in_progress"},
+                {
+                    "event": "native_tool_call", "tool": "wait", "status": "completed",
+                    "outcome": "other_terminal_message",
+                },
+                {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "started"},
+                {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "in_progress"},
+                {
+                    "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
+                    "ok": True,
+                },
+                {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "started"},
+                {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "in_progress"},
+                {
+                    "event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed",
+                    "ok": True,
+                },
+                {"event": "native_tool_call", "tool": "close_agent", "status": "in_progress"},
+                {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+            ])
+
+        audit = self.harness.safe_native_terminal_audit(events)
+        self.assertEqual(audit, {
+            "spawned_worker_observations": 5,
+            "terminal_wait_observations": 5,
+            "canonical_result_reads": 5,
+            "server_continuation_audits": 5,
+            "terminal_closes": 5,
+            "pending_canonical_reads": 0,
+            "pending_server_continuation_audits": 0,
+            "pending_terminal_closes": 0,
+            "protocol_violations": 0,
+            "ambiguous_native_observations": 0,
+            "all_observed_workers_terminally_audited": True,
+        })
+
+        # A provisional wait never bypasses the server-derived continuation.
+        before_continuation = [
+            event for event in events
+            if not (
+                event.get("event") == "cortex_mcp_call"
+                and event.get("tool") == "continue_orchestration"
+            )
+        ]
+        reordered = self.harness.safe_native_terminal_audit(before_continuation)
+        self.assertFalse(reordered["all_observed_workers_terminally_audited"])
+        self.assertEqual(reordered["terminal_closes"], 0)
+        self.assertEqual(reordered["protocol_violations"], 5)
+
+        # The provisional classification relaxes no ordering rule: a native
+        # close still cannot precede Cortex's successful continuation audit.
+        close_before_continuation = self.harness.safe_native_terminal_audit([
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {
+                "event": "native_tool_call", "tool": "wait", "status": "completed",
+                "outcome": "other_terminal_message",
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
+                "ok": True,
+            },
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+            {
+                "event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed",
+                "ok": True,
+            },
+        ])
+        self.assertFalse(close_before_continuation["all_observed_workers_terminally_audited"])
+        self.assertEqual(close_before_continuation["terminal_closes"], 0)
+        self.assertEqual(close_before_continuation["protocol_violations"], 1)
 
     def test_terminal_result_audit_requires_one_finalized_result_per_accepted_attempt(self) -> None:
         state = {
