@@ -1,6 +1,7 @@
 """Deterministic regressions for the Planner completion transport seam."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="cortex-planner-completion-")
         self.project = Path(self.temporary.name) / "project"
         self.project.mkdir()
+        self.host_store = Path(self.temporary.name) / "host-store"
+        self.host_store.mkdir(mode=0o700)
+        self._host_store_env = mock.patch.dict(
+            os.environ, {"CORTEX_HOST_STATE_DIR": str(self.host_store)}, clear=False,
+        )
+        self._host_store_env.start()
         self.root = self.project / "cortex"
         ledger_db.ensure_database(self.root)
         self.task_id = "planner-completion-task"
@@ -43,6 +50,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.attempt = {"attempt_id": "plan-01", "gate": "plan", "profile": "planner"}
 
     def tearDown(self) -> None:
+        self._host_store_env.stop()
         self.temporary.cleanup()
 
     @staticmethod
@@ -85,6 +93,22 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertEqual(planning["type"], "object")
         self.assertEqual(planning["required"], ["overview", "work_packages"])
         self.assertFalse(planning["additionalProperties"])
+
+    def test_schema_has_a_patch_only_repair_variant(self) -> None:
+        schema = cortex.PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
+        self.assertEqual(
+            schema["required"],
+            ["project_root", "task_id", "attempt_id", "profile"],
+        )
+        repair = next(
+            branch for branch in schema["oneOf"]
+            if set(branch["required"]) == {"base_payload_digest", "patches"}
+        )
+        self.assertIn({"required": ["planning"]}, repair["not"]["anyOf"])
+        for field in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims"):
+            self.assertIn({"required": [field]}, repair["not"]["anyOf"])
+        self.assertEqual(schema["properties"]["patches"]["minItems"], 1)
+        self.assertIn("diagnostic", schema["properties"]["patches"]["description"])
 
     def test_materialization_is_atomic_and_idempotent(self) -> None:
         first = cortex.materialize_planning_payload(
@@ -196,8 +220,151 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertGreaterEqual(len(response["diagnostics"]), 4)
         self.assertTrue(any("recommendation" in item["message"] for item in response["diagnostics"]))
+        self.assertRegex(response.get("base_payload_digest", ""), r"^sha256:[0-9a-f]{64}$")
+        self.assertTrue(response["planning_repair"]["preserve_other_fields"])
+        self.assertEqual(response["planning_repair"]["mode"], "same_attempt_patch")
+        self.assertIn("/overview", response["planning_repair"]["patch_paths"])
+        self.assertIn("base_payload_digest", response["next_action"])
         complete.assert_not_called()
         self.assertEqual(ledger_db.list_artifacts(self.root, self.task_id)[0], [])
+        rejected = ledger_db.get_task_document(
+            self.root, self.task_id, "planning_rejected_draft:plan-01",
+        )
+        self.assertIsNotNone(rejected)
+        self.assertEqual(rejected["planning"]["work_packages"][0]["id"], "one")
+        self.assertEqual(rejected["planning"]["work_packages"][1]["id"], "two")
+        self.assertEqual(
+            rejected["base_payload_digest"], response["base_payload_digest"],
+        )
+        self.assertIsNone(attempt_protocol.get_attempt_result(
+            self.root, task_id=self.task_id, attempt_id="plan-01",
+        ))
+
+    def test_planner_collects_prose_gate_and_coverage_errors_without_rebuilding_valid_plan(self) -> None:
+        malformed = self.planning()
+        malformed["work_packages"][0]["id"] = "release_safety"
+        malformed["work_packages"][0]["gates"] = ["release", "warmup"]
+        malformed["requirement_coverage"] = [{
+            "requirement": "preserve the requested scope",
+            "plan_refs": ["missing_item"],
+            "verification": ["inspect the resulting plan"],
+            "status": "covered",
+        }]
+        with self.assertRaises(attempt_facade._runtime.PlanningValidationError) as raised:
+            attempt_facade._runtime.sanitize_planning_payload(malformed)
+        diagnostics = raised.exception.diagnostics
+        self.assertTrue(any(item["code"] == "planning_coverage_invalid" for item in diagnostics))
+        coverage = next(item for item in diagnostics if item["code"] == "planning_coverage_invalid")
+        self.assertEqual(coverage["path"], "planning.requirement_coverage[0].plan_refs")
+        self.assertEqual(
+            cortex.planning_diagnostic_patch_paths(diagnostics),
+            ["/requirement_coverage/0/plan_refs"],
+        )
+        self.assertFalse(any(item["code"] == "planning_gates_invalid" for item in diagnostics))
+
+    def test_planner_repair_rejects_patch_outside_diagnostic_scope_atomically(self) -> None:
+        attempt = {"attempt_id": "plan-01", "gate": "plan", "profile": "planner", "status": "running"}
+        state = {**self.state, "attempts": [attempt]}
+        draft = cortex.planning_rejected_draft_document(
+            self.task_dir,
+            state,
+            attempt,
+            self.planning(),
+            [{"code": "planning_gates_invalid", "path": "planning.work_packages[0].gates", "message": "bad gate"}],
+            {"status": "completed", "summary": "draft", "findings": [], "decisions_needed": [], "unresolved": [], "claims": []},
+        )
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner",
+            "status": "completed", "summary": "draft", "findings": [],
+            "decisions_needed": [], "unresolved": [], "claims": [],
+            "base_payload_digest": draft["base_payload_digest"],
+            "patches": [{"op": "replace", "path": "/overview", "value": "rewritten"}],
+        }
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["code"], "repair_planning_invalid")
+        self.assertIn("patches", response["next_action"])
+        complete.assert_not_called()
+        persisted = ledger_db.get_task_document(self.root, self.task_id, "planning_rejected_draft:plan-01")
+        self.assertEqual(persisted["planning"]["overview"], self.planning()["overview"])
+
+    def test_planner_repair_applies_patch_then_finalizes_same_attempt(self) -> None:
+        attempt = {
+            "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
+            "status": "running", "dispatch_ref": "dispatch-plan-01",
+        }
+        state = {**self.state, "attempts": [attempt]}
+        draft = cortex.planning_rejected_draft_document(
+            self.task_dir,
+            state,
+            attempt,
+            self.planning(),
+            [{"code": "planning_gates_invalid", "path": "planning.work_packages[0].gates", "message": "bad gate"}],
+            {"status": "completed", "summary": "draft", "findings": [], "decisions_needed": [], "unresolved": [], "claims": []},
+        )
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner",
+            "base_payload_digest": draft["base_payload_digest"],
+            "patches": [{"op": "replace", "path": "/work_packages/0/gates", "value": ["implementation"]}],
+        }
+        canonical = {
+            "result_ref": "attempt-result-repaired", "status": "completed",
+            "result_status": "completed", "summary": "draft",
+            "lifecycle_status": attempt_protocol.LIFECYCLE_WORK_COMPLETED,
+        }
+        finalized = {**canonical, "lifecycle_status": attempt_protocol.LIFECYCLE_COMPLETED}
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
+             mock.patch.object(attempt_facade, "_receipt_guard", return_value={}), \
+             mock.patch.object(attempt_facade, "_workspace_observation", return_value={}), \
+             mock.patch.object(attempt_facade, "_mark_attempt"), \
+             mock.patch.object(attempt_protocol, "get_attempt_result", return_value=None), \
+             mock.patch.object(attempt_protocol, "complete_attempt", return_value={"result": canonical}), \
+             mock.patch.object(attempt_protocol, "begin_attempt_finalization"), \
+             mock.patch.object(attempt_protocol, "build_attempt_result_view", return_value={"projection_ref": "view-repaired"}), \
+             mock.patch.object(attempt_protocol, "finalize_attempt", return_value={"result": finalized}):
+            response = attempt_facade.complete_attempt(params)
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["attempt_result_ref"], "attempt-result-repaired")
+        manifest = cortex.current_planning_manifest(self.task_dir)
+        self.assertIsNotNone(manifest)
+        self.assertEqual(manifest["source_result_ref"], "attempt-result-repaired")
+        self.assertEqual(manifest["repair"]["mode"], "same_attempt_patch")
+        self.assertEqual(manifest["repair"]["patch_paths"], ["/work_packages/0/gates"])
+
+    def test_planner_rejects_full_regeneration_after_rejected_draft(self) -> None:
+        attempt = {"attempt_id": "plan-01", "gate": "plan", "profile": "planner", "status": "running"}
+        state = {**self.state, "attempts": [attempt]}
+        draft = cortex.planning_rejected_draft_document(
+            self.task_dir,
+            state,
+            attempt,
+            self.planning(),
+            [{"code": "planning_coverage_invalid", "path": "planning.requirement_coverage[0].plan_refs", "message": "bad ref"}],
+            {"status": "completed", "summary": "draft", "findings": [], "decisions_needed": [], "unresolved": [], "claims": []},
+        )
+        regenerated = self.planning()
+        regenerated["overview"] = "the model regenerated everything"
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner",
+            "status": "completed", "summary": "draft", "findings": [],
+            "decisions_needed": [], "unresolved": [], "claims": [],
+            "planning": regenerated,
+        }
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["base_payload_digest"], draft["base_payload_digest"])
+        self.assertEqual(response["planning_repair"]["mode"], "same_attempt_patch")
+        self.assertIn("patches", response["planning_repair"]["instruction"])
+        complete.assert_not_called()
+        persisted = ledger_db.get_task_document(self.root, self.task_id, "planning_rejected_draft:plan-01")
+        self.assertEqual(persisted["planning"]["overview"], self.planning()["overview"])
 
     def test_attempt_result_reports_independent_envelope_errors_together(self) -> None:
         attempt = {"attempt_id": "implementation-01", "gate": "implementation", "profile": "backend_dev", "status": "running"}

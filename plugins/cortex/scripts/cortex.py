@@ -3322,18 +3322,27 @@ def _planning_paths_list(value: Any, label: str) -> list[str]:
     return paths
 
 
-def _validate_planning_dependency_graph(nodes: set[str], dependencies: dict[str, list[str]], label: str) -> None:
+def _validate_planning_dependency_graph(
+    nodes: set[str],
+    dependencies: dict[str, list[str]],
+    label: str,
+    *,
+    node_paths: Mapping[str, str] | None = None,
+) -> None:
+    node_paths = node_paths or {}
     diagnostics: list[dict[str, Any]] = []
     for node, items in dependencies.items():
         unknown = sorted(set(items) - nodes)
         if unknown:
             diagnostics.append(_planning_diag(
                 f"{label} {node!r} depends on unknown item(s): " + ", ".join(unknown),
+                path=node_paths.get(node),
                 code="planning_dependency_invalid",
             ))
         if node in items:
             diagnostics.append(_planning_diag(
                 f"{label} {node!r} cannot depend on itself",
+                path=node_paths.get(node),
                 code="planning_dependency_invalid",
             ))
     visiting: set[str] = set()
@@ -3341,7 +3350,11 @@ def _validate_planning_dependency_graph(nodes: set[str], dependencies: dict[str,
 
     def visit(node: str) -> None:
         if node in visiting:
-            diagnostics.append(_planning_diag(f"{label} dependencies must be acyclic", code="planning_dependency_cycle"))
+            diagnostics.append(_planning_diag(
+                f"{label} dependencies must be acyclic",
+                path=node_paths.get(node),
+                code="planning_dependency_cycle",
+            ))
             return
         if node in visited:
             return
@@ -3626,6 +3639,9 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     package_ids: set[str] = set()
     microtask_ids: set[str] = set()
     microtask_dependencies: dict[str, list[str]] = {}
+    package_dependency_paths: dict[str, str] = {}
+    microtask_dependency_paths: dict[str, str] = {}
+    planning_diagnostics: list[dict[str, Any]] = []
     total_microtasks = 0
     for index, raw_package in enumerate(raw_packages, 1):
         if not isinstance(raw_package, dict):
@@ -3684,6 +3700,9 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             if len(dependencies) != len(set(dependencies)):
                 raise ValueError(f"planning microtask {microtask_id!r} dependencies must be unique")
             microtask_dependencies[microtask_id] = dependencies
+            microtask_dependency_paths[microtask_id] = (
+                f"planning.work_packages[{index - 1}].microtasks[{micro_index - 1}].depends_on"
+            )
             microtask_acceptance = _planning_string_list(
                 raw_microtask.get("acceptance_criteria"),
                 "planning microtask acceptance_criteria",
@@ -3728,7 +3747,22 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         if isinstance(package_order, bool) or not isinstance(package_order, int) or package_order < 1:
             raise ValueError(f"planning package {package_id!r} order must be a positive integer")
         raw_package_gates = raw_package.get("gates", ["implementation"])
-        package_gates = _planning_package_gates(raw_package_gates, microtasks, package_id)
+        package_dependency_paths[package_id] = f"planning.work_packages[{index - 1}].depends_on"
+        try:
+            package_gates = _planning_package_gates(raw_package_gates, microtasks, package_id)
+        except ValueError as exc:
+            # Keep validating independent coverage/reference fields in the
+            # same request.  The package is never materialized while this
+            # collection is non-empty; the derived microtask gates are only a
+            # temporary validation projection so later diagnostics can be
+            # reported without turning an invalid package into an executable
+            # gate.
+            planning_diagnostics.append(_planning_diag(
+                str(exc),
+                path=f"planning.work_packages[{index - 1}].gates",
+                code="planning_gates_invalid",
+            ))
+            package_gates = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])}) or ["implementation"]
         packages.append({
             "id": package_id,
             "title": _planning_text(raw_package.get("title"), "planning package title"),
@@ -3740,8 +3774,18 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             "depends_on": dependencies,
             "microtasks": microtasks,
         })
-    _validate_planning_dependency_graph(package_ids, {item["id"]: item["depends_on"] for item in packages}, "planning package")
-    _validate_planning_dependency_graph(microtask_ids, microtask_dependencies, "planning microtask")
+    _validate_planning_dependency_graph(
+        package_ids,
+        {item["id"]: item["depends_on"] for item in packages},
+        "planning package",
+        node_paths=package_dependency_paths,
+    )
+    _validate_planning_dependency_graph(
+        microtask_ids,
+        microtask_dependencies,
+        "planning microtask",
+        node_paths=microtask_dependency_paths,
+    )
     valid_plan_refs = package_ids | microtask_ids
     coverage_diagnostics: list[dict[str, Any]] = []
     for coverage_index, item in enumerate(coverage, 1):
@@ -3749,10 +3793,12 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         if unknown_refs:
             coverage_diagnostics.append(_planning_diag(
                 f"planning requirement_coverage[{coverage_index - 1}] references unknown plan items: "
-                + ", ".join(unknown_refs), code="planning_coverage_invalid",
+                + ", ".join(unknown_refs),
+                path=f"planning.requirement_coverage[{coverage_index - 1}].plan_refs",
+                code="planning_coverage_invalid",
             ))
-    if coverage_diagnostics:
-        raise PlanningValidationError(coverage_diagnostics)
+    if planning_diagnostics or coverage_diagnostics:
+        raise PlanningValidationError(planning_diagnostics + coverage_diagnostics)
     result = {
         "schema": PLANNING_SCHEMA,
         "overview": overview,
@@ -3987,34 +4033,43 @@ def planning_changed_paths(before: Any, after: Any, prefix: str = "") -> list[st
     return [] if before == after else [prefix or "/"]
 
 
-def planning_diagnostic_scope_allows(diagnostics: list[Mapping[str, Any]], changed: list[str]) -> bool:
-    def pointer_scope(raw: str) -> str:
-        # Planner diagnostics use human-readable ``items[0].field`` paths;
-        # repair diffs use RFC-6901 JSON pointers.  Normalize both forms to
-        # the same pointer before checking that a repair stays diagnostic-
-        # scoped.  This check is deliberately pure and happens before any
-        # planning materialization or AttemptResult mutation.
-        raw = raw.strip()
-        if raw == "planning":
-            return "/"
-        if raw.startswith("planning."):
-            raw = raw[9:]
-        parts: list[str] = []
-        for segment in raw.split("."):
-            match = re.fullmatch(r"([^\[]+)((?:\[\d+\])*)", segment)
-            if not match:
-                parts.append(segment)
-                continue
-            parts.append(match.group(1))
-            indices = re.findall(r"\[(\d+)\]", match.group(2))
-            parts.extend(indices)
-        return "/" + "/".join(part.replace("~", "~0").replace("/", "~1") for part in parts if part)
+def planning_diagnostic_pointer(raw: str) -> str:
+    """Convert a planner diagnostic path to the canonical RFC6901 pointer."""
+    raw = str(raw or "").strip()
+    if raw.startswith("/"):
+        return raw
+    if raw == "planning":
+        return "/"
+    if raw.startswith("planning."):
+        raw = raw[9:]
+    parts: list[str] = []
+    for segment in raw.split("."):
+        match = re.fullmatch(r"([^\[]+)((?:\[\d+\])*)", segment)
+        if not match:
+            parts.append(segment)
+            continue
+        parts.append(match.group(1))
+        indices = re.findall(r"\[(\d+)\]", match.group(2))
+        parts.extend(indices)
+    return "/" + "/".join(part.replace("~", "~0").replace("/", "~1") for part in parts if part)
 
-    scopes: list[str] = []
+
+def planning_diagnostic_patch_paths(diagnostics: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return stable JSON Pointer paths for all path-addressable diagnostics."""
+    paths: list[str] = []
     for diagnostic in diagnostics:
-        raw = str(diagnostic.get("path") or "").strip()
-        if not raw: continue
-        scopes.append(pointer_scope(raw))
+        raw = diagnostic.get("path") if isinstance(diagnostic, Mapping) else None
+        if not raw:
+            continue
+        pointer = planning_diagnostic_pointer(str(raw))
+        if pointer not in paths:
+            paths.append(pointer)
+    return paths
+
+
+def planning_diagnostic_scope_allows(diagnostics: list[Mapping[str, Any]], changed: list[str]) -> bool:
+    scopes = planning_diagnostic_patch_paths(diagnostics)
+
     return bool(scopes) and all(any(scope == "/" or path == scope or path.startswith(scope + "/") for scope in scopes) for path in changed)
 
 
@@ -4923,8 +4978,8 @@ def _planning_package_gates(
         joined = "_".join(unknown)
         marker_hits = sum(marker in joined for marker in _PLANNING_GATE_PROSE_MARKERS)
         if (
-            len(unknown) >= 3
-            and marker_hits >= 2
+            len(unknown) >= 2
+            and marker_hits >= 1
             and set(unknown).issubset(_PLANNING_PACKAGE_PROSE_GATE_TOKENS)
         ):
             derived = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])})
@@ -11845,8 +11900,9 @@ WORKER_QUESTION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_question"]
 WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["record_attempt_event"]
 WORKER_COMPLETE_ATTEMPT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
 WORKER_COMPLETE_ATTEMPT_SCHEMA["properties"].update({
-    "base_payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-    "patches": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {"op": {"type": "string", "enum": ["replace", "add", "remove"]}, "path": {"type": "string", "pattern": "^/"}, "value": {}}, "required": ["op", "path"]}},
+    "planning": {**WORKER_COMPLETE_ATTEMPT_SCHEMA["properties"].get("planning", {}), "description": "Initial planner submission only. After a planning validation diagnostic, omit this full object and use base_payload_digest plus diagnostic-scoped patches."},
+    "base_payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest returned with a rejected planner draft; required for same-attempt PATCH repair."},
+    "patches": {"type": "array", "minItems": 1, "description": "PATCH-only planner repair. Every path must be a returned diagnostic path or descendant; unrelated fields are preserved server-side.", "items": {"type": "object", "additionalProperties": False, "properties": {"op": {"type": "string", "enum": ["replace", "add", "remove"]}, "path": {"type": "string", "pattern": "^/"}, "value": {}}, "required": ["op", "path"]}},
 })
 READ_DISPATCH_BRIEFING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_dispatch_briefing"]
 READ_WORKER_RESULT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_worker_result"]
