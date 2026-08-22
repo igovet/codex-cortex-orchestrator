@@ -215,6 +215,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertRegex(response.get("base_payload_digest", ""), r"^sha256:[0-9a-f]{64}$")
         self.assertTrue(response["planning_repair"]["preserve_other_fields"])
         self.assertEqual(response["planning_repair"]["mode"], "same_attempt_patch")
+        self.assertIn("/overview", response["planning_repair"]["patch_paths"])
         self.assertIn("base_payload_digest", response["next_action"])
         complete.assert_not_called()
         self.assertEqual(ledger_db.list_artifacts(self.root, self.task_id)[0], [])
@@ -247,6 +248,10 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertTrue(any(item["code"] == "planning_coverage_invalid" for item in diagnostics))
         coverage = next(item for item in diagnostics if item["code"] == "planning_coverage_invalid")
         self.assertEqual(coverage["path"], "planning.requirement_coverage[0].plan_refs")
+        self.assertEqual(
+            cortex.planning_diagnostic_patch_paths(diagnostics),
+            ["/requirement_coverage/0/plan_refs"],
+        )
         self.assertFalse(any(item["code"] == "planning_gates_invalid" for item in diagnostics))
 
     def test_planner_repair_rejects_patch_outside_diagnostic_scope_atomically(self) -> None:
@@ -319,6 +324,8 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         manifest = cortex.current_planning_manifest(self.task_dir)
         self.assertIsNotNone(manifest)
         self.assertEqual(manifest["source_result_ref"], "attempt-result-repaired")
+        self.assertEqual(manifest["repair"]["mode"], "same_attempt_patch")
+        self.assertEqual(manifest["repair"]["patch_paths"], ["/work_packages/0/gates"])
 
     def test_planner_rejects_full_regeneration_after_rejected_draft(self) -> None:
         attempt = {"attempt_id": "plan-01", "gate": "plan", "profile": "planner", "status": "running"}

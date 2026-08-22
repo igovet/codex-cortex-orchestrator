@@ -180,16 +180,19 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
             item.get("path") for item in diagnostics
             if isinstance(item, dict) and item.get("path")
         ],
+        "patch_paths": _runtime.planning_diagnostic_patch_paths(diagnostics),
         "preserve_other_fields": True,
         "replacement_worker_authorized": False,
         "instruction": (
             "Use complete_attempt on this same attempt with base_payload_digest and JSON patches only. "
-            "Patch only the diagnostic paths; all other rejected-draft fields are retained server-side."
+            "Use planning_repair.patch_paths as the RFC6901 JSON Pointer path source. "
+            "Patch only those paths; all other rejected-draft fields are retained server-side."
         ),
     }
     response["next_action"] = (
         "Retry complete_attempt on this same planner attempt using the returned base_payload_digest and "
-        "diagnostic-scoped JSON patches. Do not regenerate or resend unrelated planning fields; do not spawn "
+        "patches whose paths are copied from planning_repair.patch_paths. Do not regenerate or resend unrelated "
+        "planning fields; do not spawn "
         "a replacement worker."
     )
     return response
@@ -619,7 +622,26 @@ def repair_planning(params: dict[str, Any]) -> dict[str, Any]:
             "planning": normalized,
             "_validated_planning_repair": True,
         }
-        return complete_attempt(completion_params)
+        response = complete_attempt(completion_params)
+        if response.get("ok") is True:
+            # Store only the repair shape alongside the already-materialized
+            # current projection.  This is written after canonical completion,
+            # so a validation failure can never leave a partial repair record.
+            try:
+                current = _runtime.current_planning_manifest(task_dir)
+                if isinstance(current, dict):
+                    current["repair"] = {
+                        "mode": "same_attempt_patch",
+                        "patch_count": len(patches),
+                        "patch_paths": list(patch_paths),
+                    }
+                    _runtime.db_put_task_document(
+                        _runtime._task_document_root(task_dir, state["task_id"]),
+                        state["task_id"], "planning_current", current,
+                    )
+            except (ValueError, OSError, RuntimeError):
+                pass
+        return response
     except (ValueError, TypeError, OSError, RuntimeError, json.JSONDecodeError) as exc:
         response = _public_failure("repair_planning", exc)
         return _planning_repair_failure(response, draft) if draft else response

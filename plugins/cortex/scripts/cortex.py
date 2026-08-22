@@ -4033,34 +4033,43 @@ def planning_changed_paths(before: Any, after: Any, prefix: str = "") -> list[st
     return [] if before == after else [prefix or "/"]
 
 
-def planning_diagnostic_scope_allows(diagnostics: list[Mapping[str, Any]], changed: list[str]) -> bool:
-    def pointer_scope(raw: str) -> str:
-        # Planner diagnostics use human-readable ``items[0].field`` paths;
-        # repair diffs use RFC-6901 JSON pointers.  Normalize both forms to
-        # the same pointer before checking that a repair stays diagnostic-
-        # scoped.  This check is deliberately pure and happens before any
-        # planning materialization or AttemptResult mutation.
-        raw = raw.strip()
-        if raw == "planning":
-            return "/"
-        if raw.startswith("planning."):
-            raw = raw[9:]
-        parts: list[str] = []
-        for segment in raw.split("."):
-            match = re.fullmatch(r"([^\[]+)((?:\[\d+\])*)", segment)
-            if not match:
-                parts.append(segment)
-                continue
-            parts.append(match.group(1))
-            indices = re.findall(r"\[(\d+)\]", match.group(2))
-            parts.extend(indices)
-        return "/" + "/".join(part.replace("~", "~0").replace("/", "~1") for part in parts if part)
+def planning_diagnostic_pointer(raw: str) -> str:
+    """Convert a planner diagnostic path to the canonical RFC6901 pointer."""
+    raw = str(raw or "").strip()
+    if raw.startswith("/"):
+        return raw
+    if raw == "planning":
+        return "/"
+    if raw.startswith("planning."):
+        raw = raw[9:]
+    parts: list[str] = []
+    for segment in raw.split("."):
+        match = re.fullmatch(r"([^\[]+)((?:\[\d+\])*)", segment)
+        if not match:
+            parts.append(segment)
+            continue
+        parts.append(match.group(1))
+        indices = re.findall(r"\[(\d+)\]", match.group(2))
+        parts.extend(indices)
+    return "/" + "/".join(part.replace("~", "~0").replace("/", "~1") for part in parts if part)
 
-    scopes: list[str] = []
+
+def planning_diagnostic_patch_paths(diagnostics: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return stable JSON Pointer paths for all path-addressable diagnostics."""
+    paths: list[str] = []
     for diagnostic in diagnostics:
-        raw = str(diagnostic.get("path") or "").strip()
-        if not raw: continue
-        scopes.append(pointer_scope(raw))
+        raw = diagnostic.get("path") if isinstance(diagnostic, Mapping) else None
+        if not raw:
+            continue
+        pointer = planning_diagnostic_pointer(str(raw))
+        if pointer not in paths:
+            paths.append(pointer)
+    return paths
+
+
+def planning_diagnostic_scope_allows(diagnostics: list[Mapping[str, Any]], changed: list[str]) -> bool:
+    scopes = planning_diagnostic_patch_paths(diagnostics)
+
     return bool(scopes) and all(any(scope == "/" or path == scope or path.startswith(scope + "/") for scope in scopes) for path in changed)
 
 

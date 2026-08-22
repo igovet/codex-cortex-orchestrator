@@ -713,6 +713,37 @@ def safe_dispatch_authorization_metadata(item: dict[str, object], result: object
     return {"authorized_dispatch_count": len(dispatches)}
 
 
+def safe_planning_repair_metadata(item: dict[str, object], result: object) -> dict[str, object] | None:
+    """Audit planner repair call shape without retaining payload values.
+
+    The focused live repair scenario must prove that the second completion is
+    patch-only.  Inspect the transient MCP arguments and response here, then
+    retain only booleans/counts; no planning values, digest, refs, or patch
+    values are written to evaluator telemetry.
+    """
+    if safe_tool_name(item.get("tool") or item.get("name")) != "complete_attempt":
+        return None
+    arguments = bounded_mapping(item.get("arguments", item.get("input")))
+    planning = arguments.get("planning")
+    patches = arguments.get("patches")
+    response = public_response_mapping(result)
+    repair = response.get("planning_repair") if isinstance(response.get("planning_repair"), dict) else {}
+    patch_paths = repair.get("patch_paths") if isinstance(repair.get("patch_paths"), list) else []
+    return {
+        "has_planning": isinstance(planning, dict),
+        "has_base_payload_digest": isinstance(arguments.get("base_payload_digest"), str)
+        and bool(str(arguments.get("base_payload_digest") or "").strip()),
+        "has_patches": isinstance(patches, list) and bool(patches),
+        "patch_count": len(patches) if isinstance(patches, list) and len(patches) <= 32 else None,
+        "patch_paths_are_json_pointers": (
+            isinstance(patches, list)
+            and all(isinstance(patch, dict) and str(patch.get("path") or "").startswith("/") for patch in patches)
+        ),
+        "repair_contract_exposed": bool(patch_paths) or repair.get("mode") == "same_attempt_patch",
+        "accepted": response.get("ok") is True,
+    }
+
+
 def _has_safe_resume_contract(value: object) -> bool:
     """Return whether an answer response has one canonical public resume shape.
 
@@ -861,6 +892,88 @@ def evaluation_planning_manifest(task_dir: Path | None) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def planner_repair_storage_audit(
+    ledger: Path, task_dir: Path | None, state: dict[str, object],
+) -> dict[str, object]:
+    """Audit the durable malformed-draft -> repaired-plan transition.
+
+    Worker MCP arguments are intentionally not retained by this evaluator, so
+    the live proof comes from the ledger: one immutable rejected draft, one
+    canonical result, and a current plan whose fields that were valid in the
+    rejected draft are unchanged.  Only aggregate booleans/counts leave this
+    helper.
+    """
+    if task_dir is None:
+        return {"rejected_draft_count": 0, "valid_fields_preserved": False, "only_diagnostic_fields_repaired": False}
+    task_id = str(state.get("task_id") or "")
+    drafts = cortex.db_list_task_documents(ledger, task_id, "planning_rejected_draft:")
+    if len(drafts) != 1:
+        return {"rejected_draft_count": len(drafts), "valid_fields_preserved": False, "only_diagnostic_fields_repaired": False}
+    draft = drafts[0][1]
+    current = evaluation_planning_manifest(task_dir)
+    if not isinstance(draft, dict) or not isinstance(draft.get("planning"), dict) or not isinstance(current, dict):
+        return {"rejected_draft_count": 1, "valid_fields_preserved": False, "only_diagnostic_fields_repaired": False}
+    planning = draft["planning"]
+    package_rows: list[dict[str, object]] = []
+    for package in current.get("work_packages") or []:
+        if not isinstance(package, dict) or not package.get("artifact_ref"):
+            return {"rejected_draft_count": 1, "valid_fields_preserved": False, "only_diagnostic_fields_repaired": False}
+        try:
+            content = cortex.db_read_artifact_content(ledger, task_id, str(package["artifact_ref"]))
+            decoded = json.loads(content) if isinstance(content, str) else {}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {"rejected_draft_count": 1, "valid_fields_preserved": False, "only_diagnostic_fields_repaired": False}
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("package"), dict):
+            return {"rejected_draft_count": 1, "valid_fields_preserved": False, "only_diagnostic_fields_repaired": False}
+        package_rows.append(decoded["package"])
+    repaired = {
+        "overview": current.get("overview"),
+        "work_packages": package_rows,
+        "requirement_coverage": current.get("requirement_coverage") or [],
+        "recommendation": current.get("recommendation", "approve"),
+        "recommendation_rationale": current.get("recommendation_rationale", ""),
+        "resolved_questions": current.get("resolved_questions") or [],
+        "risks": current.get("risks") or [],
+    }
+    valid_fields_preserved = (
+        repaired["overview"] == planning.get("overview")
+        and len(package_rows) == len(planning.get("work_packages") or [])
+        and all(
+            all(package_rows[index].get(field) == original.get(field) for field in ("id", "title", "objective", "allowed_paths"))
+            and len(package_rows[index].get("microtasks") or []) == len(original.get("microtasks") or [])
+            and all(
+                all(
+                    (package_rows[index].get("microtasks") or [])[micro_index].get(field)
+                    == (original.get("microtasks") or [])[micro_index].get(field)
+                    for field in ("id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification")
+                )
+                for micro_index in range(len(original.get("microtasks") or []))
+            )
+            for index, original in enumerate(planning.get("work_packages") or [])
+        )
+        and len(repaired["requirement_coverage"]) == len(planning.get("requirement_coverage") or [])
+        and all(
+            repaired["requirement_coverage"][index].get(field) == original.get(field)
+            for index, original in enumerate(planning.get("requirement_coverage") or [])
+            for field in ("requirement", "verification", "status")
+        )
+    )
+    diagnostic_paths = cortex.planning_diagnostic_patch_paths(draft.get("diagnostics") or [])
+    only_diagnostic_fields_repaired = (
+        valid_fields_preserved
+        and len(repaired["work_packages"]) == 1
+        and repaired["work_packages"][0].get("gates") != (planning.get("work_packages") or [{}])[0].get("gates")
+        and repaired["requirement_coverage"][0].get("plan_refs") != (planning.get("requirement_coverage") or [{}])[0].get("plan_refs")
+        and "/work_packages/0/gates" in diagnostic_paths
+        and "/requirement_coverage/0/plan_refs" in diagnostic_paths
+    )
+    return {
+        "rejected_draft_count": 1,
+        "valid_fields_preserved": bool(valid_fields_preserved),
+        "only_diagnostic_fields_repaired": bool(only_diagnostic_fields_repaired),
+    }
+
+
 def classified_native_outcome(value: object) -> str | None:
     """Return only a safe durable-result class from native agent state."""
     if not isinstance(value, dict):
@@ -946,6 +1059,9 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
         dispatch_metadata = safe_dispatch_authorization_metadata(item, result)
         if dispatch_metadata is not None:
             safe.update(dispatch_metadata)
+        repair_metadata = safe_planning_repair_metadata(item, result)
+        if repair_metadata is not None:
+            safe["planning_repair"] = repair_metadata
         if ok is False:
             failure = safe_public_failure_metadata(item, result)
             if failure is not None:
@@ -2174,6 +2290,49 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         )
     result_field_names = ", ".join(ATTEMPT_RESULT_FIELDS)
     result_contract = f"exactly {len(ATTEMPT_RESULT_FIELDS)} AttemptResult fields: {result_field_names}"
+    if scenario == "planner_patch_repair":
+        malformed = {
+            "overview": "Immediate malformed planner fixture.",
+            "work_packages": [{
+                "id": "inspect_source",
+                "title": "Inspect source",
+                "objective": "Inspect README.md.",
+                "allowed_paths": ["README.md"],
+                "gates": ["not_a_gate"],
+                "microtasks": [{
+                    "id": "read_readme",
+                    "title": "Read README",
+                    "objective": "Inspect README.md.",
+                    "profile": "explorer",
+                    "allowed_paths": ["README.md"],
+                    "acceptance_criteria": ["README.md is inspected."],
+                    "verification": ["Read README.md."],
+                }],
+            }],
+            "requirement_coverage": [{
+                "requirement": "README must be inspected",
+                "plan_refs": ["missing_plan_item"],
+                "verification": ["Read README.md."],
+                "status": "covered",
+            }],
+        }
+        return (
+            "You are the Luna-high parent for one isolated Cortex planner repair test. "
+            f"The exact project_root is {project}. Call start_orchestration exactly once with this task contract: "
+            "{\"user_request\":\"Produce a planner work breakdown for the fixture.\",\"complexity\":\"C1\","
+            "\"acceptance_criteria\":[\"The planner attempt is completed on the same worker after validation repair.\"],"
+            "\"verification\":[\"Verify the canonical planner result and retained rejected draft.\"],\"plan_approval\":\"auto\"}. "
+            "Call start_orchestration with exactly this initial waves array: [{\"workers\":[{\"phase\":\"plan\",\"profile\":\"planner\",\"objective\":\"Submit the malformed planner fixture immediately.\"}]}]. "
+            "Use the returned dispatch and native wait. On that worker's first turn, call complete_attempt immediately: "
+            "do not inspect the project, run commands, ask questions, or spend time making the report correct. "
+            "The first completion must contain exactly this malformed planning object, while retaining the required "
+            f"AttemptResult fields: {json.dumps(malformed, ensure_ascii=False, separators=(',', ':'))}. "
+            "After the server responds, follow only its public response/schema and the same-attempt lifecycle. "
+            "Do not create a replacement worker, and do not stop before the canonical result is read. "
+            "Close the completed native worker only after the result is read. "
+            "This focused test ends after that planner result: do not call continue_orchestration or dispatch any "
+            "successor wave."
+        )
     if scenario == "bootstrap_missing_inputs":
         return (
             "You are the live Cortex parent for one isolated bootstrap-question smoke. There is no existing task. "
@@ -2434,7 +2593,7 @@ def _live_eval(
     results: list[dict[str, object]] = []
     for scenario in scenarios or (
         "automatic_sequential", "compact_parallel", "blocked_resume",
-        "planner_work_breakdown", "automatic_governance",
+        "planner_work_breakdown", "planner_patch_repair", "automatic_governance",
     ):
         project = base / f"live-{scenario}"
         project.mkdir()
@@ -2661,6 +2820,31 @@ def _live_eval(
                     for package in package_artifacts
                 )
             )
+        if scenario == "planner_patch_repair":
+            repair_storage = planner_repair_storage_audit(ledger, task_dir, state)
+            current_manifest = evaluation_planning_manifest(task_dir)
+            repair_projection = current_manifest.get("repair") if isinstance(current_manifest, dict) else {}
+            repair_paths = repair_projection.get("patch_paths") if isinstance(repair_projection, dict) else []
+            planner_results = [
+                record for record in result_records
+                if record.get("gate") == "plan" and isinstance(record.get("result"), dict)
+            ]
+            checks = {
+                "process_ok": streamed["returncode"] == 0,
+                "used_one_start": completed_tool_names.count("start_orchestration") == 1,
+                "single_task": len(task_dirs) == 1,
+                "one_planner_attempt": len([item for item in state.get("attempts", []) if item.get("gate") == "plan" and not item.get("invalidated")]) == 1,
+                "initial_malformed_draft_retained": repair_storage.get("rejected_draft_count") == 1,
+                "patch_only_repair_once": isinstance(repair_projection, dict) and repair_projection.get("mode") == "same_attempt_patch" and repair_projection.get("patch_count") == 2,
+                "repair_has_json_pointer_paths": isinstance(repair_paths, list) and len(repair_paths) == 2 and all(isinstance(path, str) and path.startswith("/") for path in repair_paths),
+                "same_attempt_finalized": len(planner_results) == 1 and planner_results[0]["result"].get("lifecycle_status") == "COMPLETED",
+                "rejected_draft_retained": repair_storage.get("rejected_draft_count") == 1,
+                "valid_fields_preserved": repair_storage.get("valid_fields_preserved") is True,
+                "only_diagnostic_fields_repaired": repair_storage.get("only_diagnostic_fields_repaired") is True,
+                "no_replacement_worker": completed_native_tool_names.count("spawn_agent") == 1,
+                "no_failed_public_calls": not failed_public_calls,
+            }
+            checks["storage_repair_audit"] = repair_storage
         if scenario == "automatic_governance":
             task_definition = cortex.load_task_definition(task_dir, state) if task_dir else {}
             governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
@@ -2940,7 +3124,7 @@ def main() -> int:
     parser.add_argument(
         "--scenario", choices=(
             "automatic_sequential", "compact_parallel", "blocked_resume",
-            "planner_work_breakdown", "automatic_governance", "follow_up_partial",
+            "planner_work_breakdown", "planner_patch_repair", "automatic_governance", "follow_up_partial",
             "bootstrap_missing_inputs",
         ),
         help="run one live scenario for diagnosis; the default release run still requires all five",
