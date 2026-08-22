@@ -12009,7 +12009,13 @@ def _manage_governance_input_diagnostics(params: Any) -> list[dict[str, Any]]:
         if value is None or (isinstance(value, str) and not value.strip()):
             add_required(field, f"{field} is required for action {normalized_action}")
     if normalized_action in CAPABILITY_RECOVERY_ACTIONS:
-        for field in ("task_ref", "principal", "thread_id", "coordinator_capability"):
+        # Recovery is deliberately allowed through to the canonical proof
+        # handler without a bearer.  The original response can be lost, so a
+        # recover request authenticates with the non-durable recovery proof;
+        # acknowledge validates the delivered replacement pair itself.  If we
+        # reject the absent bearer here, callers receive a generic form error
+        # and never reach the security-specific proof/delivery diagnostics.
+        for field in ("task_ref", "principal", "thread_id"):
             value = params.get(field)
             if value is None or (isinstance(value, str) and not value.strip()):
                 add_required(field, f"{field} is required for recovery action {normalized_action}")

@@ -24,6 +24,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.project.mkdir()
         self.host_store = Path(self.temporary.name) / "host-store"
         self.host_store.mkdir(mode=0o700)
+        # ``mkdir(mode=...)`` is subject to the process umask and can also be
+        # affected by a preconfigured test runner/container policy.  The
+        # runtime deliberately fails closed for host state that is writable
+        # by group/other users, so make the fixture's contract explicit before
+        # the first ledger operation rather than relying on ambient modes.
+        self.host_store.chmod(0o700)
         self._host_store_env = mock.patch.dict(
             os.environ, {"CORTEX_HOST_STATE_DIR": str(self.host_store)}, clear=False,
         )

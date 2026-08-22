@@ -881,7 +881,13 @@ def build_public_schemas(
         "allOf": [
             {
                 "if": {"properties": {"action": {"enum": ["recover_coordinator_capability", "rotate_coordinator_capability", "acknowledge_coordinator_recovery"]}}, "required": ["action"]},
-                "then": {"required": ["task_ref", "principal", "thread_id", "coordinator_capability"]}
+                # Recovery may be requested after the original bearer was
+                # lost.  The canonical handler authenticates that route with
+                # the non-durable recovery proof and returns its precise
+                # proof/delivery diagnostic.  Do not make the replacement
+                # capability a boundary-level requirement for all three
+                # actions, or the caller never reaches that handler.
+                "then": {"required": ["task_ref", "principal", "thread_id"]}
             },
             {
                 "if": {"properties": {"action": {"enum": ["create_initiative"]}}, "required": ["action"]},
