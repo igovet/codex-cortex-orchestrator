@@ -167,6 +167,140 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(result["ok"], result)
         return result
 
+    def test_parallel_wave_requires_the_complete_identity_bound_result_set(self) -> None:
+        """Two simultaneous slots advance only as one exact, server-derived set.
+
+        This is deliberately a public-lifecycle integration test rather than a
+        hand-authored state fixture: each worker receives a separate immutable
+        dispatch, acknowledges that exact dispatch, persists a result, and the
+        coordinator may continue only after both canonical results exist.
+        """
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Run independent discovery and QA workers in one parallel wave.",
+                "complexity": "C1",
+                "acceptance_criteria": ["Both independent workers finish before review starts."],
+                "verification": ["Prove result and receipt identities remain bound to their worker slots."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "discover", "profile": "explorer"}, {"phase": "qa", "profile": "qa_engineer"}]},
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["outcome"], "ready_to_spawn")
+        dispatches = started["dispatches"]
+        self.assertEqual(len(dispatches), 2)
+        self.assertEqual(len({item["dispatch_ref"] for item in dispatches}), 2)
+
+        task_dir, initial_state = self._task_state()
+        attempts = {
+            str(item["attempt_id"]): item
+            for item in initial_state["attempts"]
+            if isinstance(item, dict) and str(item.get("attempt_id") or "")
+        }
+        ordered_attempt_ids = [
+            next(
+                attempt_id
+                for attempt_id, attempt in attempts.items()
+                if attempt.get("dispatch_ref") == dispatch["dispatch_ref"]
+            )
+            for dispatch in dispatches
+        ]
+        self.assertEqual(len(set(ordered_attempt_ids)), 2)
+        self.assertEqual(set(ordered_attempt_ids), set(attempts))
+        for attempt_id in ordered_attempt_ids:
+            self._read_briefing(initial_state, attempts[attempt_id])
+
+        first_id, second_id = ordered_attempt_ids
+        first_ref = self._complete_strict(initial_state, attempts[first_id], "Discovery completed its independent check.")
+        first_read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": first_ref,
+        })
+        self.assertTrue(first_read["ok"], first_read)
+        self.assertNotIn("continuation", first_read)
+        self.assertEqual(first_read.get("continuation_unavailable_reason"), "parallel_wave_results_pending")
+
+        before_partial_continue = self._task_state()[1]
+        partial_continue = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"worker": 1, "attempt_result_ref": first_ref}],
+        })
+        self.assertFalse(partial_continue["ok"], partial_continue)
+        self.assertEqual(partial_continue["code"], "continue_validation_failed")
+        self.assertIn("exactly 2 result", partial_continue["diagnostics"][0]["message"])
+        self.assertEqual(self._task_state()[1], before_partial_continue)
+
+        second_ref = self._complete_strict(initial_state, attempts[second_id], "QA completed its independent check.")
+        self.assertNotEqual(first_ref, second_ref)
+        second_read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": second_ref,
+        })
+        self.assertTrue(second_read["ok"], second_read)
+        continuation = second_read.get("continuation")
+        self.assertIsInstance(continuation, dict, second_read)
+        assert isinstance(continuation, dict)
+        expected_results = [
+            {"worker": 1, "attempt_result_ref": first_ref},
+            {"worker": 2, "attempt_result_ref": second_ref},
+        ]
+        self.assertEqual(continuation["results"], expected_results)
+
+        # The continuation is derived from the complete wave, not from the
+        # particular result just read. This avoids a last-reader association.
+        first_after_complete = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": first_ref,
+        })
+        self.assertEqual(first_after_complete.get("continuation"), continuation)
+
+        # A result may not be transferred to the sibling's server-owned slot.
+        before_swapped_continue = self._task_state()[1]
+        swapped = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": continuation["step"],
+            "results": [
+                {"worker": 1, "attempt_result_ref": second_ref},
+                {"worker": 2, "attempt_result_ref": first_ref},
+            ],
+        })
+        self.assertFalse(swapped["ok"], swapped)
+        self.assertEqual(swapped["code"], "continue_validation_failed")
+        self.assertIn("exact active attempt", swapped["diagnostics"][0]["message"])
+        self.assertEqual(self._task_state()[1], before_swapped_continue)
+
+        for attempt_id, dispatch in zip(ordered_attempt_ids, dispatches):
+            receipts = attempt_protocol.attempt_receipts(
+                self.ledger,
+                task_id=str(initial_state["task_id"]),
+                attempt_id=attempt_id,
+            )
+            receipt = receipts["briefing_receipt"]
+            self.assertIsInstance(receipt, dict)
+            assert isinstance(receipt, dict)
+            self.assertEqual(receipt["payload"]["dispatch_ref"], dispatch["dispatch_ref"])
+        receipt_refs = [
+            attempt_protocol.attempt_receipts(
+                self.ledger, task_id=str(initial_state["task_id"]), attempt_id=attempt_id,
+            )["briefing_receipt"]["event_ref"]
+            for attempt_id in ordered_attempt_ids
+        ]
+        self.assertEqual(len(set(receipt_refs)), 2)
+
+        advanced = self._continue_from_server_continuation(started, continuation)
+        self.assertEqual(advanced["outcome"], "ready_to_spawn")
+        self.assertEqual([item["phase"] for item in advanced["dispatches"]], ["review"])
+
     def test_unresolved_dispatch_cannot_complete_or_close_and_recovers_deterministically(self) -> None:
         """A dispatch without a canonical worker result remains recoverable.
 

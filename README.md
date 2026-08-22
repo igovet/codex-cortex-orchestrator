@@ -13,7 +13,7 @@
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-10.0.3-7c3aed" alt="Cortex 10.0.3" />
+        <img src="https://img.shields.io/badge/Cortex-10.0.4-7c3aed" alt="Cortex 10.0.4" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Ledger-SQLite%20schema%20v15-0f766e" alt="SQLite ledger schema v15" />
@@ -691,9 +691,9 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 10.0.3 canonical AttemptResult and AttemptEvent protocol
+### 10.0.4 canonical AttemptResult and AttemptEvent protocol
 
-Cortex 10.0.3 uses one database-centric worker protocol. A worker checkpoints
+Cortex 10.0.4 uses one database-centric worker protocol. A worker checkpoints
 bounded semantic facts with `record_attempt_event` and closes exactly one
 attempt with `complete_attempt`. `AttemptEvent` is append-only and keyed for
 idempotent retries; its event kinds cover findings, decision evidence,
@@ -729,7 +729,7 @@ pass, handoff, terminal acceptance, and coordinator completion. A native child
 binding is recovery metadata only; the coordinator must read the result,
 receive the server-derived continuation, and only then close that child.
 
-### 10.0.3 ContextCompiler and HandoffCompiler boundaries
+### 10.0.4 ContextCompiler and HandoffCompiler boundaries
 
 `ContextCompiler` is the only normal coordinator-to-worker context boundary.
 It compiles task intent, requirements, constraints, decisions, assigned scope,
@@ -754,7 +754,7 @@ worker does not prove a read with prose. The coordinator and compiler consume
 canonical result references and observations, never an arbitrary file selected
 from a project directory.
 
-### 10.0.3 same-attempt finalization and recovery
+### 10.0.4 same-attempt finalization and recovery
 
 The `SubagentStop` hook binds the exact native child to its server-issued
 attempt. If a child stops before `WORK_COMPLETED`, recovery inspects that exact
@@ -775,7 +775,7 @@ is still active. `SessionStart`, `SubagentStart`, `PreToolUse`, and
 telemetry is bounded and fail-open when SQLite is busy; lifecycle authority
 remains fail-closed at the canonical mutation boundary.
 
-### 10.0.3 public API and audience boundary
+### 10.0.4 public API and audience boundary
 
 The public registry contains exactly nine operations. A strict coordinator
 process exposes `start_orchestration`, `continue_orchestration`,
@@ -798,7 +798,7 @@ The root coordinator projects one self-contained ordinary-chat question with
 outcome-based options and a recommendation, ends the turn, records the next
 user message, and resumes the same attempt. Silence never implies approval.
 
-### 10.0.3 Prompt Contract v3 and dispatch authority
+### 10.0.4 Prompt Contract v3 and dispatch authority
 
 Prompt Contract v3 is the sole stable prompt path. Static authority and worker
 policy live in the bundled skills and profiles; every dispatch-controlled value
@@ -822,7 +822,7 @@ fixture, validator, and profile contract names `AttemptResult`, `AttemptEvent`,
 change is not complete until prompt lint, deterministic evaluation, marketplace
 validation, and the affected focused tests pass.
 
-### 10.0.3 governance, security, and verification
+### 10.0.4 governance, security, and verification
 
 Governance state, immutable artifacts, exact scope, revision chains, and
 authenticated lifecycle transitions are server-owned in schema v15. Required

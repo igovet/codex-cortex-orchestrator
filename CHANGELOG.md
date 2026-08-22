@@ -1,5 +1,12 @@
 # Changelog
 
+## [10.0.4] - 2026-08-22
+
+### Fixed
+
+- Bind parallel-wave continuation to the complete ordered set of canonical
+  results, rejecting partial or cross-slot result submissions before mutation.
+
 ## [10.0.3] - 2026-08-22
 
 ### Fixed

@@ -44,23 +44,73 @@ def _coordinator_continuation(
     wave = _runtime._wave_for_gates(plan, _runtime.active_gates(dict(state)))
     if not isinstance(wave, Mapping):
         return None, "no_active_wave"
-    wave_attempt_ids = {
+    # ``attempt_ids`` is the server-owned slot order.  In particular, do not
+    # turn the result that happened to be read last into a singleton advance
+    # for a parallel wave.  Every member must have its own final canonical
+    # result and its own dispatch identity before the coordinator receives one
+    # atomic continuation payload.
+    wave_attempt_ids = [
         str(item).strip()
         for item in (wave.get("attempt_ids") or [])
         if str(item).strip()
-    }
+    ]
+    if not wave_attempt_ids:
+        return None, "active_wave_attempts_unavailable"
+    if len(set(wave_attempt_ids)) != len(wave_attempt_ids):
+        return None, "active_wave_attempt_identity_conflict"
     source_attempt_id = str(source.get("attempt_id") or "").strip()
     if not source_attempt_id or source_attempt_id not in wave_attempt_ids:
         return None, "attempt_result_not_current"
     if source.get("status") not in _ACTIVE_ATTEMPT_STATUSES:
         return None, "attempt_result_not_current"
+    attempts = {
+        str(candidate.get("attempt_id") or "").strip(): candidate
+        for candidate in state.get("attempts") or []
+        if isinstance(candidate, Mapping)
+    }
+    wave_results: list[dict[str, Any]] = []
+    result_refs: list[str] = []
+    dispatch_refs: list[str] = []
+    root = _runtime._task_document_root(task_dir, state["task_id"])
+    for slot, attempt_id in enumerate(wave_attempt_ids, 1):
+        attempt = attempts.get(attempt_id)
+        if (
+            not isinstance(attempt, Mapping)
+            or attempt.get("invalidated")
+            or attempt.get("status") not in _ACTIVE_ATTEMPT_STATUSES
+        ):
+            return None, "parallel_wave_attempt_not_current"
+        dispatch_ref = str(attempt.get("dispatch_ref") or "").strip()
+        result_ref = str(attempt.get("attempt_result_ref") or "").strip()
+        if not dispatch_ref or not result_ref:
+            return None, "parallel_wave_results_pending"
+        canonical = attempt_protocol.get_attempt_result(
+            root, task_id=str(state["task_id"]), attempt_id=attempt_id,
+        )
+        if (
+            canonical is None
+            or str(canonical.get("attempt_id") or "") != attempt_id
+            or str(canonical.get("result_ref") or "") != result_ref
+            or canonical.get("lifecycle_status") != attempt_protocol.LIFECYCLE_COMPLETED
+        ):
+            return None, "parallel_wave_results_pending"
+        dispatch_refs.append(dispatch_ref)
+        result_refs.append(result_ref)
+        result: dict[str, Any] = {"attempt_result_ref": result_ref}
+        if len(wave_attempt_ids) > 1:
+            result["worker"] = slot
+        wave_results.append(result)
+    if len(set(dispatch_refs)) != len(dispatch_refs):
+        return None, "parallel_wave_dispatch_identity_conflict"
+    if len(set(result_refs)) != len(result_refs):
+        return None, "parallel_wave_result_identity_conflict"
     wave_match = _runtime.re.search(r"(\d+)$", str(wave.get("wave_id") or ""))
     if wave_match is None:
         return None, "active_step_unavailable"
     return {
         "task_id": str(state["task_id"]),
         "step": int(wave_match.group(1)),
-        "results": [{"attempt_result_ref": result_ref}],
+        "results": wave_results,
     }, None
 
 
