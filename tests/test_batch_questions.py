@@ -104,8 +104,8 @@ class BatchQuestionTests(unittest.TestCase):
         self.assertIn("recommendation is required", rejected["diagnostics"][0]["message"])
         self.assertFalse(rejected["attempt_budget_consumed"])
 
-    def test_oversized_question_and_answer_are_rejected_losslessly_then_retry_on_same_attempt(self):
-        """No UI display limit may create a truncated durable question/answer."""
+    def test_large_question_and_answer_are_stored_losslessly(self):
+        """Prompt compactness guidance never becomes a durable size gate."""
         _, state, attempt = self._start()
         identity = self._identity(state, attempt)
         valid = {
@@ -116,64 +116,31 @@ class BatchQuestionTests(unittest.TestCase):
             "recommendation": "Keep the rollback path because the implementation can then be safely reversed.",
             "recommended_answer": "Preserve a tested rollback path for the deployment.",
         }
-        rejected = control.worker_question({**valid, "question": "🙂" * 4_001})
-        self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["outcome"], "needs_correction")
-        self.assertFalse(rejected["attempt_budget_consumed"])
-        self.assertEqual(
-            attempt_protocol.list_attempt_events(
-                self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
-            ),
-            [],
-        )
-
-        # Each leaf fits the legacy 2,000-character sanitizer bound, but their
-        # UTF-8 aggregate exceeds the canonical 64 KiB context document cap.
-        byte_rejected = control.worker_question({
+        complete_question = {
             **valid,
+            "question": "🙂" * 4_001,
             "context": {str(index): "🙂" * 2_000 for index in range(10)},
-        })
-        self.assertFalse(byte_rejected["ok"])
-        self.assertEqual(byte_rejected["outcome"], "needs_correction")
-        self.assertEqual(
-            attempt_protocol.list_attempt_events(
-                self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
-            ),
-            [],
-        )
-
-        asked = control.worker_question(valid)
+        }
+        asked = control.worker_question(complete_question)
         self.assertTrue(asked["ok"], asked)
         question_ref = asked["question_ref"]
-        with self.assertRaisesRegex(ValueError, "bounded storage limit"):
-            control.answer_worker_question({
-                "project_root": str(self.project),
-                "task_id": state["task_id"],
-                "principal": state["principal"],
-                "thread_id": state["thread_id"],
-                "question_id": question_ref,
-                "submission_id": "oversized-answer",
-                "answer": "🙂" * 8_001,
-                "resume_context": {"source": "main_chat"},
-            })
-        open_questions = control.list_worker_questions({
-            "project_root": str(self.project), "task_id": state["task_id"],
-            "principal": state["principal"], "thread_id": state["thread_id"], "status": "open",
-        })
-        self.assertEqual([item["question_id"] for item in open_questions["questions"]], [question_ref])
-
-        answered = control.answer_worker_question({
+        answered_large = control.answer_worker_question({
             "project_root": str(self.project),
             "task_id": state["task_id"],
             "principal": state["principal"],
             "thread_id": state["thread_id"],
             "question_id": question_ref,
-            "submission_id": "same-question-retry",
-            "answer": "Preserve the tested rollback path.",
-            "resume_context": {"source": "main_chat"},
+            "submission_id": "large-answer",
+            "answer": "🙂" * 8_001,
+            "resume_context": {"source": "main_chat", "detail": "🙂" * 4_000},
         })
-        self.assertFalse(answered["idempotent"])
-        self.assertEqual(answered["question"]["attempt_id"], attempt["attempt_id"])
+        self.assertEqual(answered_large["status"], "answered", answered_large)
+        open_questions = control.list_worker_questions({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "principal": state["principal"], "thread_id": state["thread_id"], "status": "open",
+        })
+        self.assertEqual(open_questions["questions"], [])
+        self.assertEqual(answered_large["question"]["attempt_id"], attempt["attempt_id"])
 
     def test_batch_is_rendered_in_chat_with_explicit_recommendations_and_resumes(self):
         started, state, attempt = self._start()

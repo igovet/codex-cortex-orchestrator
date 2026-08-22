@@ -125,8 +125,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "10.0.4":
-        fail("plugin manifest must identify cortex at release version 10.0.4")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "10.0.7":
+        fail("plugin manifest must identify cortex at release version 10.0.7")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -250,6 +250,7 @@ def main() -> int:
         "bootstrap_target_bytes": 1500,
         "ordinary_briefing_target_bytes": 16384,
         "harvest_briefing_target_bytes": 18432,
+        "semantics": "prompt_only_advisory; never a backend admission, storage, truncation, or rejection rule",
     }:
         fail("shared worker contract must define the canonical prompt compaction guidance")
     mode_overlays = profile_contract.get("mode_overlays")
@@ -304,7 +305,7 @@ def main() -> int:
         fail("worker final response must be compact and must not contain projection JSON")
     if (
         shared.get("result_lifecycle")
-        != "record_attempt_event checkpoints then complete_attempt closes one AttemptResult; finalization or human-projection failures retry server-side without respawning the worker"
+        != "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker"
         or shared.get("result_projection")
         != "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord"
         or shared.get("caller_correctable_tool_errors")

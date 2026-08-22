@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.cortex_test_support import HostPrivateControlStoreTestMixin
 
@@ -67,6 +69,32 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                 self.assertNotRegex(visible, communication._TECHNICAL_RE)
                 self.assertTrue(view["quality"]["ok"], view)
 
+    def test_awaiting_user_keeps_short_visible_status_and_machine_guard(self) -> None:
+        """Question pauses expose plain status while retaining internal receipt data."""
+        response = orchestration_engine._segregate_orchestration_output({
+            "schema": "cortex/orchestration/v3",
+            "ok": True,
+            "state": "needs_input",
+            "result": {
+                "outcome": "awaiting_user",
+                "question_ref": "private-question-ref",
+                "next_action": "answer the open question before resuming",
+            },
+            "task_id": "private-task-ref",
+            "wave_id": "wave-question",
+            "next_action": "answer the open question before resuming",
+            "communication_profile": "natural",
+            "user_language": "en",
+        })
+        visible = json.dumps(response["user_view"], sort_keys=True)
+        self.assertEqual(response["user_view"]["message_type"], "decision_required")
+        self.assertTrue(response["user_view"]["requires_user_decision"])
+        self.assertNotIn("private-question-ref", visible)
+        self.assertNotIn("private-task-ref", visible)
+        self.assertNotIn("next_action", visible)
+        self.assertEqual(response["internal"]["result"]["outcome"], "awaiting_user")
+        self.assertEqual(response["internal"]["result"]["question_ref"], "private-question-ref")
+
     def test_remediation_heuristic_ignores_negated_action_but_accepts_later_clause(self) -> None:
         self.assertFalse(
             orchestration_engine._has_non_negated_term(
@@ -108,6 +136,117 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
     def _state(self) -> dict:
         task_dir = next((self.ledger / "tasks").iterdir())
         return control.load_task_state_for_artifact(task_dir)
+
+    def _passed_plan_rework_fixture(self, *, changed: bool = False) -> tuple[dict, dict, list]:
+        """Build one passed-plan future-wave contract without worker I/O."""
+        implementation = {
+            "gate": "implementation", "agent": "general",
+            "objective": "Implement the changed behavior." if changed else "Implement the behavior.",
+            "strategy": "new strategy" if changed else "default",
+            "allowed_paths": ["."], "acceptance_criteria": ["The behavior works."],
+            "verification": ["Run the focused check."],
+        }
+        planner = {
+            "gate": "plan", "agent": "planner", "objective": "Reassess the approved plan.",
+            "strategy": "default", "allowed_paths": ["."],
+            "acceptance_criteria": ["The plan is coherent."],
+            "verification": ["Verify the plan."],
+        }
+        old_implementation = dict(implementation)
+        if changed:
+            old_implementation.update({"objective": "Implement the behavior.", "strategy": "default"})
+        old_plan = {
+            "schema": "cortex/orchestration-plan/v3", "task_id": "rework-loop",
+            "host_capabilities": {},
+            "waves": [
+                {"wave_id": "wave-01", "gates": ["plan"], "status": "completed", "delegations": [planner]},
+                {"wave_id": "wave-02", "gates": ["implementation"], "status": "pending", "delegations": [old_implementation]},
+            ],
+            "history": [],
+        }
+        state = {
+            "task_id": "rework-loop", "revision": 4, "status": "active",
+            "current_pipeline": ["plan", "implementation"],
+            "parallel_groups": [["plan"], ["implementation"]],
+            "completed_gates": ["plan"], "skipped_gates": [], "attempts": [],
+            "pipeline_contract_version": 1,
+            "plan_approval": {"policy": "auto", "status": "not_required", "history": []},
+            "evidence": [], "pipeline_changes": [],
+        }
+        future = [{"wave_id": "wave-03", "gates": ["plan"], "status": "pending", "delegations": [planner]},
+                  {"wave_id": "wave-04", "gates": ["implementation"], "status": "pending", "delegations": [implementation]}]
+        return state, old_plan, future
+
+    def _call_rework_replace(self, state, plan, future):
+        task = {"user_request": "rework loop", "complexity": "C1", "acceptance_criteria": ["works"], "verification": ["check"]}
+        patches = [
+            mock.patch.object(orchestration_engine, "load_task_definition", return_value=task),
+            mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})),
+            mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"),
+            mock.patch.object(orchestration_engine, "save_state"),
+            mock.patch.object(orchestration_engine, "_write_orchestrate_plan"),
+        ]
+        return patches
+
+    def test_passed_plan_identical_rework_is_idempotent_without_invalidation_or_new_attempt(self):
+        state, plan, future = self._passed_plan_rework_fixture()
+        with mock.patch.object(orchestration_engine, "update_pipeline") as update_pipeline:
+            with mock.patch.object(orchestration_engine, "reassess_pipeline"):
+                with mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "rework loop"}), \
+                     mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})), \
+                     mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
+                     mock.patch.object(orchestration_engine, "save_state"), \
+                     mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
+                    with self.assertRaises(orchestration_engine.ReworkRequestIdempotent) as caught:
+                        orchestration_engine._replace_future_orchestrate_waves(
+                            {"project_root": str(self.project), "allow_rework": True, "reason": "same approved route"},
+                            self.project, state, plan, future,
+                        )
+        self.assertEqual(caught.exception.state["completed_gates"], ["plan"])
+        self.assertEqual(caught.exception.state["rework_history"][-1]["outcome"], "idempotent")
+        self.assertFalse(update_pipeline.called)
+        self.assertEqual(state["attempts"], [])
+
+    def test_material_passed_plan_rework_is_recorded_once_as_planner_first(self):
+        state, plan, future = self._passed_plan_rework_fixture(changed=True)
+        updated = dict(state, completed_gates=[])
+        with mock.patch.object(orchestration_engine, "update_pipeline", return_value={"state": updated}) as update_pipeline, \
+             mock.patch.object(orchestration_engine, "reassess_pipeline", return_value={"state": updated}), \
+             mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "rework loop", "complexity": "C1"}), \
+             mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})), \
+             mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
+             mock.patch.object(orchestration_engine, "save_state"), \
+             mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
+            result_state, _ = orchestration_engine._replace_future_orchestrate_waves(
+                {"project_root": str(self.project), "allow_rework": True, "reason": "new verified evidence"},
+                self.project, state, plan, future,
+            )
+        self.assertTrue(update_pipeline.called)
+        self.assertEqual(result_state["rework_history"][-1]["material_change"], True)
+        self.assertEqual(result_state["rework_history"][-1]["outcome"], "applied")
+
+    def test_repeated_material_rework_digest_pauses_before_invalidation_or_spawn(self):
+        state, plan, future = self._passed_plan_rework_fixture(changed=True)
+        candidate = {**plan, "waves": [*plan["waves"], *future]}
+        digest = orchestration_engine.digest_text(json.dumps({
+            "completed_gate_rework": ["plan"],
+            "future_pipeline": orchestration_engine._semantic_future_pipeline(candidate),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        state["rework_history"] = [{"request_digest": digest, "material_change": True, "outcome": "applied"}]
+        with mock.patch.object(orchestration_engine, "update_pipeline") as update_pipeline, \
+             mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "rework loop", "complexity": "C1"}), \
+             mock.patch.object(orchestration_engine, "_normalize_orchestrate_waves", return_value=(future, {"pipeline": ["plan", "implementation"]})), \
+             mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
+             mock.patch.object(orchestration_engine, "save_state"), \
+             mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
+            with self.assertRaises(orchestration_engine.ReworkCircuitBroken):
+                orchestration_engine._replace_future_orchestrate_waves(
+                    {"project_root": str(self.project), "allow_rework": True, "reason": "same new evidence"},
+                    self.project, state, plan, future,
+                )
+        self.assertEqual(state["status"], "needs_input")
+        self.assertEqual(state["rework_pauses"]["plan"]["reason"], "repeated_material_rework_digest")
+        self.assertFalse(update_pipeline.called)
 
     def _start_parallel(self) -> dict:
         return control.start_orchestration({

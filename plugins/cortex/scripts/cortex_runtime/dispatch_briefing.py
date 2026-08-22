@@ -30,19 +30,13 @@ from cortex_runtime import attempt_protocol
 
 
 _MISSING = object()
-MIN_BRIEFING_READ_BYTES = 4
-
-
-def _bounded_artifact_max_bytes(value: Any, *, label: str) -> tuple[int, int | None, bool]:
-    """Normalize a bounded artifact chunk request."""
+def _bounded_artifact_max_bytes(value: Any, *, label: str) -> tuple[int | None, int | None, bool]:
+    """Validate an optional caller-selected artifact page size."""
     if value is _MISSING:
-        return 16 * 1024, None, False
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{label} max_bytes must be an integer")
-    if value < 1:
-        raise ValueError(f"{label} max_bytes must be at least 1")
-    effective = max(MIN_BRIEFING_READ_BYTES, min(value, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES))
-    return effective, value, effective != value
+        return None, None, False
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{label} max_bytes must be a positive integer")
+    return value, value, False
 
 
 def _dispatch_briefing_error_path(message: str) -> str:
@@ -71,7 +65,7 @@ def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
     if caller_correctable:
         path = _dispatch_briefing_error_path(message)
         fix = (
-            "Omit max_bytes or use an integer from 1 through 32768, then retry read_dispatch_briefing on this same worker attempt."
+            "Omit max_bytes or use a positive integer, then retry read_dispatch_briefing on this same worker attempt."
             if path == "max_bytes" else
             "Copy the exact field from the native dispatch bootstrap or the last returned next_cursor, then retry read_dispatch_briefing on this same worker attempt."
         )
@@ -163,7 +157,7 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("briefing cursor byte offset is invalid")
         raw_max_bytes = params["max_bytes"] if "max_bytes" in params else _MISSING
         effective_max, requested_max, max_bytes_normalized = _bounded_artifact_max_bytes(raw_max_bytes, label="briefing")
-        chunked = has_cursor or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
+        chunked = has_cursor or requested_max is not None
         base = {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": True, "outcome": "briefing_read", "task_id": task_id, "attempt_id": attempt_id, "profile": profile, "dispatch_ref": dispatch_ref, "briefing_digest": briefing_digest, "briefing_artifact": artifact}
         if chunked:
             part = _runtime.db_read_artifact_range(root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset, max_bytes=effective_max)

@@ -690,6 +690,29 @@ def safe_question_management_metadata(item: dict[str, object], result: object) -
     return metadata
 
 
+def safe_dispatch_authorization_metadata(item: dict[str, object], result: object) -> dict[str, object] | None:
+    """Retain only the count of dispatches authorized by a Cortex response.
+
+    The live evaluator deliberately does not retain dispatch arguments, task
+    names, result refs, or child identities.  A bounded dispatch count is
+    enough to reject an extra generic host spawn: it was never authorized by
+    a successful ``start_orchestration`` or ``continue_orchestration`` result
+    and therefore cannot be treated as a Cortex worker cycle.
+    """
+    tool = safe_tool_name(item.get("tool") or item.get("name"))
+    if tool not in {"start_orchestration", "continue_orchestration"}:
+        return None
+    response = public_response_mapping(result)
+    if response.get("ok") is not True:
+        return None
+    dispatches = response.get("dispatches")
+    if not isinstance(dispatches, list) or len(dispatches) > 32:
+        return None
+    if not all(isinstance(dispatch, dict) for dispatch in dispatches):
+        return None
+    return {"authorized_dispatch_count": len(dispatches)}
+
+
 def _has_safe_resume_contract(value: object) -> bool:
     """Return whether an answer response has one canonical public resume shape.
 
@@ -820,6 +843,24 @@ def classified_result_failure(value: object) -> str | None:
     return None
 
 
+def evaluation_planning_manifest(task_dir: Path | None) -> dict[str, object]:
+    """Read the optional planner projection without turning absence into a crash.
+
+    ``planning_current`` is produced only after the server accepts a valid
+    Planner payload.  A failed or interrupted Planner therefore legitimately
+    leaves no document behind.  The live evaluator must report the resulting
+    scenario checks as FAIL and retain no diagnostic payload, rather than
+    dereferencing ``None`` while building its safe audit.
+    """
+    if task_dir is None:
+        return {}
+    try:
+        value = cortex.current_planning_manifest(task_dir)
+    except (OSError, ValueError, sqlite3.Error):
+        return {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def classified_native_outcome(value: object) -> str | None:
     """Return only a safe durable-result class from native agent state."""
     if not isinstance(value, dict):
@@ -902,6 +943,9 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
         question_metadata = safe_question_management_metadata(item, result)
         if question_metadata is not None:
             safe.update(question_metadata)
+        dispatch_metadata = safe_dispatch_authorization_metadata(item, result)
+        if dispatch_metadata is not None:
+            safe.update(dispatch_metadata)
         if ok is False:
             failure = safe_public_failure_metadata(item, result)
             if failure is not None:
@@ -974,6 +1018,9 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
     pending_reads = pending_continuations = pending_closes = 0
     violation_count = 0
     ambiguous_observations = 0
+    authorized_dispatches = 0
+    dispatch_authorization_observed = False
+    unmatched_native_spawns = 0
     last_operation: str | None = None
     for event in events:
         operation: str | None = None
@@ -997,6 +1044,15 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
                 operation = "close"
         elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
             tool = str(event.get("tool") or "")
+            authorized_count = event.get("authorized_dispatch_count")
+            if (
+                tool in {"start_orchestration", "continue_orchestration"}
+                and type(authorized_count) is int
+                and 0 <= authorized_count <= 32
+                and event.get("ok") is True
+            ):
+                dispatch_authorization_observed = True
+                authorized_dispatches += authorized_count
             if tool == "read_worker_result":
                 operation = "read_result" if event.get("ok") is True else "read_result_other"
             elif tool == "continue_orchestration":
@@ -1011,6 +1067,12 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
         last_operation = operation
         if operation == "spawn":
             spawned += 1
+            if dispatch_authorization_observed and spawned > authorized_dispatches:
+                # This native child was not returned by a successful Cortex
+                # dispatch response.  It remains generic host work and may
+                # not satisfy a Cortex gate even if it later emits terminal
+                # text resembling a worker result.
+                unmatched_native_spawns += 1
         elif operation in {"wait_result", "wait_provisional_result"}:
             if waited >= spawned:
                 violation_count += 1
@@ -1053,11 +1115,14 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
         "pending_terminal_closes": pending_closes,
         "protocol_violations": violation_count,
         "ambiguous_native_observations": ambiguous_observations,
+        "authorized_native_dispatches": authorized_dispatches,
+        "dispatch_authorization_observed": dispatch_authorization_observed,
+        "unmatched_native_spawns": unmatched_native_spawns,
         "all_observed_workers_terminally_audited": (
             spawned > 0
             and spawned == waited == read == continued == closed
             and pending_reads == pending_continuations == pending_closes == violation_count == 0
-            and ambiguous_observations == 0
+            and ambiguous_observations == unmatched_native_spawns == 0
         ),
     }
 
@@ -1294,6 +1359,28 @@ def safe_question_resolution_audit(
         "all_question_attempts_resolved_before_result": (
             audited and question_attempt_count == resolved_before_result_count
         ),
+    }
+
+
+def automatic_sequential_question_audit(question_records: object) -> dict[str, object]:
+    """Fail closed when the decision-complete sequential fixture gets a question.
+
+    The automatic-sequential task intentionally has no user decision surface.
+    Keep this audit privacy-safe: only the record count and availability are
+    retained, never question text, refs, or answers. A malformed or unavailable
+    question projection is also a failure rather than evidence that no question
+    occurred.
+    """
+    if not isinstance(question_records, list):
+        return {
+            "question_state_available": False,
+            "question_count": None,
+            "no_unexpected_questions": False,
+        }
+    return {
+        "question_state_available": True,
+        "question_count": len(question_records),
+        "no_unexpected_questions": len(question_records) == 0,
     }
 
 
@@ -2124,7 +2211,7 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "You are the parent orchestrator. The exact task contract is the content inside <cortex_task_contract>; "
         "do not copy any surrounding host metadata into the task. Call start_orchestration exactly once with that contract, "
         "and use one continue_orchestration per wave; "
-        f"never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist {result_contract} with complete_attempt and return only attempt_result_ref plus a short summary. "
+        f"never call orchestrate or any private Cortex tool. Execute every native dispatch; workers must persist {result_contract} with complete_attempt and return only the bare canonical attempt_result_ref plus a short summary. A complete_attempt response may also contain projection_ref: it is a generated view identifier, never a result lookup token, and must never be passed to read_worker_result. When both fields appear, copy only the bare value of the attempt_result_ref field into read_worker_result. Do not use a formatted 'attempt_result_ref=<id>' string, a projection_ref, a summary token, or a stale ref from another child. "
         f"For every review, governance review, or close dispatch, complete_attempt must use only the canonical AttemptResult fields; do not add gate-specific compatibility envelopes or prose protocol markers. "
         "Read every ref with read_worker_result and advance only from its server-provided continuation object: verify its task_id matches the active task, "
         "then copy its step and results verbatim alongside the existing project_root and task_ref. Never reconstruct a continuation from a projection, summary, "
@@ -2138,9 +2225,16 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "failed result was accepted by Cortex. If recovery may have missed a terminal child, use "
         "list_agents defensively and apply the same rule; THEN spawn. Do not close active or question-paused children. "
         "Treat a native child as successful only "
-        "when its final response starts with ATTEMPT_COMPLETED and the referenced result was read successfully. If a "
+        "when its final response starts with ATTEMPT_COMPLETED and the referenced result was read successfully. A canonical "
+        "non-success AttemptResult is different: if read_worker_result returns result_view.status=blocked or failed, "
+        "its continuation is intentionally absent and that is not permission to submit the result ref as success or to "
+        "invent a continuation. Reuse the exact current step from the immediately preceding successful Cortex dispatch "
+        "response, submit one terminal receipt with status=blocked or failed, the exact dispatch_ref from that dispatch, "
+        "and a concise reason copied from the canonical result summary; omit attempt_result_ref. This terminal receipt "
+        "stops the current gate and lets Cortex expose its durable recovery path. If a "
         "native wait returns QUESTION_RECORDED, it is neither success nor a resultless failure. Do not call followup_task, "
-        "read_worker_result, continue_orchestration, close_agent, or any management operation after a later child terminal response. "
+        "read_worker_result, continue_orchestration, close_agent, or any management operation for a child from an earlier wave after a later "
+        "wave has been dispatched; process each active child target returned by the current dispatch and keep each child's lifecycle ordered. "
         "While that exact child is paused, route only its exact durable question_ref through manage_orchestration intent=question. "
         "Do not invent an answer, identity, ref, child target, or resume message: an ordinary user answer must be durably submitted "
         "through the same question route. Resume only after its answer response has outcome=question_answered and the server next_action "
@@ -2213,11 +2307,15 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "After each successful continue_orchestration response, the only legal next tool call is close_agent for "
             "the completed child whose exact result that continuation consumed. Invoke close_agent immediately; do not "
             "reason, inspect, list agents, wait, dispatch, or call any Cortex tool between that continuation and the "
-            "close. Only after that close succeeds, when the continuation outcome=ready_to_spawn, the only legal next "
+            "close. This rule includes the final close wave: even when the continuation outcome=completed and no successor "
+            "dispatch is returned, close_agent the completed child before stopping. The terminal close count must equal the "
+            "native spawn count. Only after that close succeeds, when the continuation outcome=ready_to_spawn, the only legal next "
             "tool call is every returned dispatch.call with its exact arguments. A native wait is legal only immediately "
             "after a successful native dispatch and must use the new child target returned by that exact dispatch. Never "
-            "reuse a closed child target, never call continue_orchestration twice for one step, and never call wait "
-            "without the child target returned by the immediately preceding native dispatch. "
+            "reuse a closed child target, never call continue_orchestration twice for one step, never request artifacts "
+            "or add future_waves after an accepted continuation, and never call wait without the child target returned "
+            "by the immediately preceding native dispatch. If Cortex returns retryable=false for task identity or step "
+            "mismatch, stop the scenario immediately; do not retry continue, inspect broadly, or synthesize a recovery. "
             "Governance reviewers must follow their immutable "
             "briefings and publish the canonical AttemptResult plus all evidence they observed. Stop only after Cortex "
             "results completion with a final handoff."
@@ -2225,15 +2323,23 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
     if scenario == "automatic_sequential":
         return common + (
             "<cortex_task_contract>"
-            "{\"user_request\":\"Inspect README.md and append exactly 'Verified note: README heading is Luna high Cortex fixture.' as one new line to result.md, creating the file if absent.\","
+            "{\"user_request\":\"Inspect README.md and append exactly 'Verified note: README heading is Luna high Cortex fixture.' as one new line to result.md, creating the file if absent. This fixture is decision-complete: no material user decision or clarification is required; workers must apply this exact contract and must not call worker_question.\","
             "\"complexity\":\"C2\","
             "\"acceptance_criteria\":[\"README.md is inspected and its heading is confirmed as Luna high Cortex fixture.\","
             "\"result.md contains exactly one appended line: Verified note: README heading is Luna high Cortex fixture.\","
-            "\"The final handoff identifies the changed file and includes evidence that the append was verified.\"],"
+            "\"The final handoff identifies the changed file and includes evidence that the append was verified.\","
+            "\"No material user decision or clarification is required for this fixture; the worker must not publish a question.\"],"
             "\"verification\":[\"Read README.md and confirm its heading, then read result.md and confirm the exact appended line.\","
             "\"Inspect the resulting diff or equivalent file evidence to verify only result.md received the intended line.\"],"
             "\"plan_approval\":\"auto\"}"
-            "</cortex_task_contract>"
+            "</cortex_task_contract> "
+            "This automatic-sequential fixture is decision-complete: the task contract, the current README.md evidence, "
+            "its acceptance criteria, and its verification instructions are the complete authority and scope. No material "
+            "input, policy choice, clarification, or user decision is missing. Workers MUST NOT call worker_question or "
+            "ask the parent for a material decision. If a worker nevertheless returns QUESTION_RECORDED or any durable "
+            "question is observed, do not invent an answer, guess, route, resume, replace the worker, or widen the scope: "
+            "stop the scenario transparently and let the evaluator mark it FAIL. The evaluator rejects any question record "
+            "for this scenario."
         )
     if scenario == "compact_parallel":
         return common + (
@@ -2281,13 +2387,17 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "\"profile\":\"general\",\"allowed_paths\":[\"result.md\"],"
             "\"acceptance_criteria\":[\"result.md contains exactly the required Planner fixture line.\"],"
             "\"verification\":[\"Read result.md and compare its exact content.\"]}]}]}. "
-            "Do not add, remove, rename, or reorder packages or microtasks. Read the plan result, close the completed "
-            "Planner child, then call "
-            "continue_orchestration with that attempt_result_ref. Only after it returns outcome=awaiting_plan_approval and "
-            "plan_review, call manage_orchestration intent=plan_approval with decision=prompt, then submit only the "
-            "embedded Approve action arguments; never call approval before that continue. The user pre-authorized this fixture. Then run implementation, qa, review, "
-            "documentation, and close in the returned order. Implementation creates result.md. Do not bypass approval "
-            "or edit .codex/cortex."
+            "Do not add, remove, rename, or reorder packages or microtasks. After the Planner completes, read its exact "
+            "attempt_result_ref with read_worker_result and treat result_view as a non-authoritative display projection. "
+            "Follow the server-returned next_action and management contract verbatim: call manage_orchestration with "
+            "intent=plan_approval and payload.decision=prompt; do not call continue_orchestration for this plan wave, "
+            "do not invent a step/results continuation, and do not close the Planner before the approval management "
+            "receipt. Render the returned chat_interaction as the bounded plan review. The user pre-authorized this "
+            "fixture, so after that prompt receipt submit only the embedded Approve action arguments (including the "
+            "server-provided request_id), never a self-authored request_id or approval payload. Follow the approval "
+            "response next_action exactly: close the completed Planner child only when the server permits it, then "
+            "invoke every returned implementation dispatch in order. Implementation creates result.md. Do not bypass "
+            "approval or edit .codex/cortex."
         )
     return common + (
         "Exercise a deterministic future-wave reassessment without manufacturing a blocker. "
@@ -2452,6 +2562,8 @@ def _live_eval(
         terminal_result_audit = safe_terminal_result_audit(state, result_records)
         native_terminal_audit = safe_native_terminal_audit(events)
         question_resolution_audit = safe_question_resolution_audit(ledger, state, result_records)
+        question_records = cortex._question_records(cortex.question_bus_paths(task_dir), state)
+        sequential_question_audit = automatic_sequential_question_audit(question_records)
         attempt_results_valid = all(
             isinstance(record.get("result"), dict)
             and record["result"].get("lifecycle_status") == "COMPLETED"
@@ -2475,7 +2587,7 @@ def _live_eval(
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
         )
-        planning_manifest = cortex.current_planning_manifest(task_dir) if task_dir else {}
+        planning_manifest = evaluation_planning_manifest(task_dir)
         checks = {
             "process_ok": streamed["returncode"] == 0,
             "used_start": "start_orchestration" in tool_names,
@@ -2531,6 +2643,10 @@ def _live_eval(
             checks["parallel_native_identity_verifiable"] = False
         if scenario == "blocked_resume":
             checks["resume_or_reassessment_exercised"] = adaptive_exercised
+        if scenario == "automatic_sequential":
+            checks["decision_complete_fixture_has_no_questions"] = (
+                sequential_question_audit["no_unexpected_questions"] is True
+            )
         if scenario == "planner_work_breakdown":
             package_artifacts = planning_manifest.get("work_packages") if isinstance(planning_manifest, dict) else []
             checks["plan_approval_exercised"] = state.get("plan_approval", {}).get("status") == "approved"
@@ -2773,6 +2889,11 @@ def _live_eval(
             "terminal_result_audit": terminal_result_audit,
             "native_terminal_audit": native_terminal_audit,
             "question_resolution_audit": question_resolution_audit,
+            "question_audit": (
+                sequential_question_audit
+                if scenario == "automatic_sequential"
+                else {"not_applicable": True}
+            ),
             "tool_names": tool_names,
             "native_tool_names": native_tool_names,
             "checks": checks, "failed_public_calls": failed_public_calls,

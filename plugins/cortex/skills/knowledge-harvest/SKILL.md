@@ -33,7 +33,7 @@ coverage, page-content, and validation contracts are mandatory.
 1. **Scope:** Dispatch the read-only Planner Scope gate to enumerate top-level
    applications, services, packages, runtime processes, deployment surfaces,
    integrations, and likely functional domains. It publishes a discovery brief,
-   relevant context files, and up to eight non-overlapping discovery domains;
+   relevant context files, and all validated non-overlapping discovery domains;
    it must not design the solution or close material intent questions.
 2. **Domain census:** Replace the discovery wave when necessary with one
    read-only `explorer` per bounded domain, normally 2–8 in parallel for a
@@ -73,7 +73,7 @@ completion uses the small `cortex/attempt-result/v1` semantic result with
 `status`, `summary`, `findings`, `decisions_needed`, and `unresolved`; typed
 gate payloads are allowed when applicable. Scope may add only the top-level
 `scoping` sibling and Plan may add only `planning`. AttemptResult and
-AttemptEvent are the worker transport; result refs and bounded handoff
+AttemptEvent are the worker transport; result refs and complete handoff
 projections are derived server outputs.
 
 The coordinator owns domain partitioning and may change the future pipeline
@@ -148,7 +148,7 @@ generated briefing; a successful scoped predecessor read creates a server-side
 receipt. Workers do not emit digest strings, predecessor markers, changed-file
 lists, timestamps, identity, or evidence markers as authoritative data. Cortex
 derives those facts from the AttemptRecord, workspace observations, hooks, and
-read receipts, then exposes result refs and bounded human projections for
+read receipts, then exposes result refs and complete human projections for
 coordinators. Caller/input/schema diagnostics and `retryable=true` results are
 corrected and retried on the same attempt without consuming recovery budget.
 Only explicit non-retryable integrity/storage failures are blockers; none

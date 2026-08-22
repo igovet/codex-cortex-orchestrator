@@ -537,8 +537,15 @@ class GovernanceIntegrityTests(unittest.TestCase):
             self.root, "task-7", kind="evidence", title="reviewed-material.json", mime_type="application/json",
             content='{"reviewed":true}', immutable=True,
         )
-        state["attempts"] = [{"attempt_id": "close-review", "gate": "governance_close", "agent": "code_reviewer", "status": "passed", "invalidated": False, "result_baseline_ref": "baseline-close-review", "result_baseline_digest": "a" * 64}]
+        state["attempts"] = [{"attempt_id": "close-review", "gate": "governance_close", "agent": "code_reviewer", "dispatch_ref": "dispatch-close-review", "briefing_digest": "briefing-close-review", "briefing_artifact_ref": "artifact-close-review", "status": "passed", "invalidated": False, "result_baseline_ref": "baseline-close-review", "result_baseline_digest": "a" * 64}]
         ledger_db.update_task_state(self.root, state)
+        attempt_protocol.acknowledge_briefing(
+            self.root,
+            task_id="task-7",
+            attempt_id="close-review",
+            dispatch_ref="dispatch-close-review",
+            digest="briefing-close-review",
+        )
         attempt_protocol.record_verification_observation(
             self.root, task_id="task-7", attempt_id="close-review",
             payload={"command": "python -m unittest tests.test_governance_integrity", "exit_code": 0},

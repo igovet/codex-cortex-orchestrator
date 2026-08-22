@@ -111,6 +111,8 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         coordinator_completion = contract["attempt_result_contract"]["coordinator_completion"]
         self.assertIn("native spawn or wait is never completion evidence", coordinator_completion)
+        self.assertIn("Every ready_to_spawn response authorizes only its returned dispatch.call", coordinator_completion)
+        self.assertIn("generic collaboration spawn", coordinator_completion)
         self.assertIn("read_worker_result", coordinator_completion)
         self.assertIn("continue_orchestration", coordinator_completion)
         self.assertIn("then close_agent", coordinator_completion)
@@ -179,9 +181,8 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertTrue(cold_boot["implementation_phase_seen"])
         briefing_sizes = cold_boot["briefing_sizes"]
         self.assertTrue(briefing_sizes)
-        self.assertEqual(cold_boot["briefing_size_target_bytes"], 14_500)
         self.assertEqual(cold_boot["briefing_size_max_bytes"], max(item["bytes"] for item in briefing_sizes))
-        self.assertTrue(all(item["bytes"] <= 14_500 for item in briefing_sizes))
+        self.assertEqual(cold_boot["briefing_size_policy"], "advisory_only")
         self.assertEqual(len(briefing_sizes), cold_boot["worker_attempts"])
         self.assertTrue(luna)
         self.assertTrue(all(item["outcome"] == "completed" for item in luna))
@@ -346,6 +347,55 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("use list_agents defensively", prompt)
         self.assertIn('"complexity":"C2"', prompt)
         self.assertIn("Verified note: README heading is Luna high Cortex fixture.", prompt)
+        self.assertIn("This automatic-sequential fixture is decision-complete", prompt)
+        self.assertIn("Workers MUST NOT call worker_question", prompt)
+        self.assertIn("do not invent an answer, guess, route, resume, replace the worker, or widen the scope", prompt)
+        self.assertIn("stop the scenario transparently and let the evaluator mark it FAIL", prompt)
+        self.assertIn("The evaluator rejects any question record for this scenario", prompt)
+
+        # The worker receives only the immutable JSON task contract.  The
+        # coordinator-level instruction after the closing tag cannot prevent a
+        # worker from following the generic question rule, so the
+        # decision-complete policy must be inside the contract itself.
+        contract_text = prompt.rsplit("<cortex_task_contract>", 1)[1].split(
+            "</cortex_task_contract>", 1
+        )[0]
+        contract = json.loads(contract_text)
+        self.assertIn("must not call worker_question", contract["user_request"])
+        self.assertTrue(any(
+            "must not publish a question" in str(item)
+            for item in contract["acceptance_criteria"]
+        ))
+
+    def test_automatic_sequential_question_audit_fails_closed_without_retaining_question_data(self) -> None:
+        self.assertEqual(
+            LUNA_EVAL.automatic_sequential_question_audit([]),
+            {
+                "question_state_available": True,
+                "question_count": 0,
+                "no_unexpected_questions": True,
+            },
+        )
+        failed = LUNA_EVAL.automatic_sequential_question_audit([{"question": "sensitive text"}])
+        self.assertFalse(failed["no_unexpected_questions"])
+        self.assertEqual(failed["question_count"], 1)
+        self.assertNotIn("sensitive text", str(failed))
+        unavailable = LUNA_EVAL.automatic_sequential_question_audit(None)
+        self.assertFalse(unavailable["question_state_available"])
+        self.assertFalse(unavailable["no_unexpected_questions"])
+
+    def test_planner_evaluator_treats_missing_manifest_as_safe_failed_evidence(self) -> None:
+        """A missing planning projection is a failed check, never evaluator crash data."""
+        with mock.patch.object(LUNA_EVAL.cortex, "current_planning_manifest", return_value=None):
+            manifest = LUNA_EVAL.evaluation_planning_manifest(Path("/workspace/cortex-live"))
+        self.assertEqual(manifest, {})
+        package_artifacts = manifest.get("work_packages", [])
+        self.assertEqual(package_artifacts, [])
+        planning_check = (
+            manifest.get("schema") == "cortex/planning/v1"
+            and len(package_artifacts) >= 2
+        )
+        self.assertFalse(planning_check)
 
     def test_blocked_resume_live_prompt_forces_one_valid_future_wave_reassessment(self) -> None:
         prompt = LUNA_EVAL.live_prompt("blocked_resume", Path("/workspace/cortex-live"))
@@ -374,8 +424,10 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("Do not add, remove, rename, or reorder packages or microtasks", prompt)
         self.assertIn("decision=prompt", prompt)
         self.assertIn("embedded Approve action arguments", prompt)
-        self.assertIn("Only after it returns outcome=awaiting_plan_approval", prompt)
-        self.assertIn("never call approval before that continue", prompt)
+        self.assertIn("Follow the server-returned next_action and management contract verbatim", prompt)
+        self.assertIn("do not call continue_orchestration for this plan wave", prompt)
+        self.assertIn("server-provided request_id", prompt)
+        self.assertNotIn("never call approval before that continue", prompt)
 
     def test_automatic_governance_live_prompt_does_not_force_governance(self) -> None:
         prompt = LUNA_EVAL.live_prompt(
@@ -426,6 +478,22 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             prompt,
         )
         self.assertIn(
+            "This rule includes the final close wave: even when the continuation outcome=completed and no successor dispatch is returned, close_agent the completed child before stopping",
+            prompt,
+        )
+        self.assertIn("The terminal close count must equal the native spawn count", prompt)
+        self.assertIn("projection_ref: it is a generated view identifier, never a result lookup token", prompt)
+        self.assertIn("copy only the bare value of the attempt_result_ref field into read_worker_result", prompt)
+        self.assertIn("do not add gate-specific compatibility envelopes", prompt)
+        self.assertIn(
+            "close_agent, or any management operation for a child from an earlier wave after a later wave has been dispatched",
+            prompt,
+        )
+        self.assertNotIn(
+            "close_agent, or any management operation after a later child terminal response",
+            prompt,
+        )
+        self.assertIn(
             "Only after that close succeeds, when the continuation outcome=ready_to_spawn, the only legal next tool call is every returned dispatch.call",
             prompt,
         )
@@ -434,6 +502,8 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             prompt,
         )
         self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
+        self.assertIn("never request artifacts or add future_waves after an accepted continuation", prompt)
+        self.assertIn("If Cortex returns retryable=false for task identity or step mismatch, stop the scenario immediately", prompt)
 
     def test_automatic_governance_question_authority_is_explicit_and_fail_closed(self) -> None:
         policy = LUNA_EVAL.live_question_policy("automatic_governance")

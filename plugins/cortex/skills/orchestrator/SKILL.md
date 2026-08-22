@@ -90,7 +90,7 @@ completeness gates. Do not substitute a generic documentation task.
 
 Both routes start with the canonical phases `scope`, `discover`, `architecture`,
 `plan`, `documentation`, `review`, and `close`. Planner Scope first publishes a
-discovery brief, relevant context, and up to eight non-overlapping domains; the
+discovery brief, relevant context, and all validated non-overlapping domains; the
 final Planner consumes all predecessor result projections after architecture.
 After reading the scoping projection, the
 coordinator must decide whether the repository is large enough to split the
@@ -156,7 +156,7 @@ main coordinator and never become an alternate user-facing authority.
 
 Workers publish semantic AttemptResult facts and, when useful, incremental
 AttemptEvents. Cortex owns attempt identity, receipts, workspace observations,
-checks, timestamps, and evidence markers; it exposes result refs and bounded
+checks, timestamps, and evidence markers; it exposes result refs and scoped
 human/handoff projections consumed by the coordinator. A projection is a
 handoff view, not the worker's authoritative transport.
 
@@ -229,7 +229,10 @@ Routing is evidence-driven:
 5. Each returned dispatch explains `phase`, `profile`, `capability`, `sandbox`,
    and `selection_reason`. Check that rationale against the latest evidence
    before invoking the dispatch. Never invent a role name or silently replace
-   Cortex's native arguments.
+   Cortex's native arguments. A `ready_to_spawn` response authorizes only its
+   returned `dispatch.call` with those exact `dispatch.arguments`: a generic
+   collaboration spawn, self-authored task name, or replacement child cannot
+   bind to or advance the issued Cortex attempt.
    Do not treat a planned dispatch, commentary, or an empty wait as proof that
    a worker exists. The native call must return a child id before saying it was
    sent; retain those exact ids and wait only on them. A missing or failed

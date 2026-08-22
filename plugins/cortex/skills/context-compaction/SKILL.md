@@ -16,6 +16,13 @@ Do not pass raw transcripts by default. Create a compact handoff containing only
 
 Use short summaries for older logs and results. Preserve exact error output only when the next agent needs it to reproduce or diagnose the issue. Never summarize secrets into the handoff. The parent thread should integrate the handoff; do not depend on private host databases or resume a failed subagent session.
 
+Compactness is a prompt-writing preference, not a data limit. Keep a handoff
+concise when the information remains complete, but never truncate, omit, or
+reject material task, plan, result, event, question, answer, or artifact data
+to meet a byte, character, or file-size target. When the complete content is
+large, include it intact or use the exact authorized artifact/reference that
+contains it; the backend stores the complete submitted content.
+
 ## Cortex recovery after context reset or compaction
 
 When the coordinator resumes after automatic/manual compaction or a host

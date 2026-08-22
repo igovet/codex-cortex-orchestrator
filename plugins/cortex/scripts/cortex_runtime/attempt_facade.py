@@ -260,10 +260,45 @@ def _mark_attempt(
     terminal_status: str | None = None,
     finalization_error: str | None = None,
 ) -> None:
+    """Project one canonical result without leaving its native worker live.
+
+    The task projection intentionally remains ``running`` until the
+    coordinator accepts the exact result through ``continue_orchestration``.
+    That is a gate-consumption state, not evidence that the native worker is
+    still runnable.  Terminal AttemptResult lifecycles therefore reconcile the
+    server-owned worker-session row here, before the result can be surfaced to
+    the coordinator.  A missing session fails closed instead of manufacturing
+    a host identity or allowing a stale ``awaiting_spawn``/``running`` row to
+    survive a terminal result.
+    """
     root = _runtime.ledger_root({"project_root": str(project)})
     with _runtime.state_lock(root):
         _, task_dir, state = _runtime.load_state(task_id, {"project_root": str(project)})
         attempt = _runtime._attempt(state, attempt_id)
+        result_lifecycle = str(result.get("lifecycle_status") or "").upper()
+        terminal_lifecycles = {
+            attempt_protocol.LIFECYCLE_COMPLETED,
+            attempt_protocol.LIFECYCLE_BLOCKED,
+            attempt_protocol.LIFECYCLE_FAILED,
+        }
+        if result_lifecycle in terminal_lifecycles:
+            terminal_at = (
+                result.get("completed_at")
+                or result.get("work_completed_at")
+                or _runtime.now()
+            )
+            _runtime.db_reconcile_terminal_worker_session(
+                root,
+                task_id=state["task_id"],
+                attempt_id=attempt_id,
+                terminated_at=str(terminal_at),
+            )
+            # Do not assert an observed SubagentStop: a host stop hook may
+            # arrive later. This state records only the server-side terminal
+            # reconciliation that prevents a durable session from being
+            # recovered as live work.
+            attempt["worker_session_reconciled_at"] = str(terminal_at)
+            attempt["worker_session_terminal_status"] = "completed"
         attempt["lifecycle_status"] = lifecycle_status
         attempt["attempt_result_ref"] = result.get("result_ref")
         attempt["work_completed_at"] = result.get("work_completed_at")
@@ -294,11 +329,15 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     try:
         allowed = _PUBLIC_IDENTITY_FIELDS | {
             "status", "summary", "findings", "decisions_needed", "unresolved", "claims",
+            "planning",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError("unsupported complete_attempt fields: " + ", ".join(unknown))
         project, task_dir, state, attempt, profile = _worker_context(params)
+        plan_attempt = profile == "planner" and str(attempt.get("gate") or "") == "plan"
+        if "planning" in params and not plan_attempt:
+            raise ValueError("planning is supported only for planner attempts on the plan gate")
         root = _runtime.ledger_root({"project_root": str(project)})
         _receipt_guard(root, state, attempt)
         semantic_result = {
@@ -349,6 +388,19 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                 "worker_replacement_authorized": False,
                 "next_action": "Return this semantic non-success to the coordinator; Cortex retained the attempt facts.",
             }
+        if plan_attempt:
+            if "planning" in params:
+                _runtime.materialize_planning_payload(
+                    task_dir,
+                    state,
+                    attempt,
+                    str(canonical["result_ref"]),
+                    params["planning"],
+                )
+            else:
+                current = _runtime.current_planning_manifest(task_dir)
+                if not isinstance(current, dict) or current.get("source_result_ref") != canonical.get("result_ref"):
+                    raise ValueError("planner plan attempts require a planning payload")
         _mark_attempt(
             project, state["task_id"], attempt["attempt_id"],
             lifecycle_status="work_completed",
@@ -373,8 +425,13 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "attempt_completed",
-            "projection_ref": projection["projection_ref"],
+            # Put the bearer lookup token first and label the generated view
+            # separately.  Native parents frequently serialize this object
+            # verbatim; keeping the canonical token first reduces accidental
+            # selection of the non-authoritative projection ref while the
+            # prompt/schema still require the field name to be copied exactly.
             "attempt_result_ref": canonical["result_ref"],
+            "projection_ref": projection["projection_ref"],
             "summary": canonical["summary"],
             "idempotent": bool(completed.get("idempotent")),
             "worker_replacement_authorized": False,

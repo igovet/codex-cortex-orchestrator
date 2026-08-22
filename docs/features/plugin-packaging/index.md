@@ -4,13 +4,13 @@
 
 ## Purpose
 
-Cortex 10.0.4 is packaged as a repository-local Codex plugin. Marketplace
+Cortex 10.0.7 is packaged as a repository-local Codex plugin. Marketplace
 metadata, the MCP server, profiles, skills, hooks, schemas, and validators must
 describe the same fresh v10 contract.
 
 ## Package files
 
-- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) declares version 10.0.4 and bundled components.
+- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) declares version 10.0.7 and bundled components.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) is the repository marketplace entry.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates package structure.
@@ -26,10 +26,10 @@ The package exposes exactly nine operations. Coordinator tasks expose
 `worker_question`, `record_attempt_event`, `complete_attempt`,
 `read_dispatch_briefing`, and `read_worker_result`.
 
-Workers send bounded semantic events and one `AttemptResult`. The server owns
+Workers send complete semantic events and one `AttemptResult`. The server owns
 identity, timestamps, dispatch/profile/phase, task revision, changed files,
 checks, verification observations, and result links. `ContextCompiler` and
-`HandoffCompiler` expose only bounded, target-specific context. Result views
+`HandoffCompiler` expose complete, target-specific context. Result views
 are rebuildable and cannot authorize lifecycle transitions.
 
 The validator checks the v10 registry, schema v15, strict coordinator and

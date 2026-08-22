@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 10.0.4 is a database-centric orchestration control plane for the
+Cortex 10.0.7 is a database-centric orchestration control plane for the
 `cortex/v10` task contract and `cortex/orchestration/v6` lifecycle. Schema v15
 separates worker semantic input from server-observed attempt state.
 
@@ -13,7 +13,7 @@ separates worker semantic input from server-observed attempt state.
 - [cortex.py](../../../plugins/cortex/scripts/cortex.py) is the executable facade.
 - [ledger_db.py](../../../plugins/cortex/scripts/cortex_runtime/ledger_db.py) owns schema v15, attempts, events, results, observations, governance, projections, and tombstones.
 - [orchestration_engine.py](../../../plugins/cortex/scripts/cortex_runtime/orchestration_engine.py) owns waves, transitions, and dispatch assembly.
-- [context_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/context_compiler.py) compiles bounded task context.
+- [context_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/context_compiler.py) compiles complete task context.
 - [handoff_compiler.py](../../../plugins/cortex/scripts/cortex_runtime/handoff_compiler.py) builds target-specific handoffs.
 - [governance.py](../../../plugins/cortex/scripts/cortex_runtime/governance.py) owns governance state.
 - [projection_service.py](../../../plugins/cortex/scripts/cortex_runtime/projection_service.py) materializes rebuildable views.

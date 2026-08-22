@@ -93,7 +93,15 @@ MAX_LIFECYCLE_EVENTS = 1000
 MAX_LIFECYCLE_BYTES = 256 * 1024
 MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
 MAX_CACHEABLE_READ_BYTES = 64 * 1024
-CORTEX_START_TOOLS = {"mcp__cortex__start_orchestration", "mcp__cortex__manage_orchestration"}
+# Every response that can create a pending native dispatch must immediately
+# reassert the host-call boundary.  In particular, a successful continue can
+# return ``ready_to_spawn`` for the next wave; treating that response as a
+# generic collaboration request left the durable attempt unbound.
+CORTEX_START_TOOLS = {
+    "mcp__cortex__start_orchestration",
+    "mcp__cortex__continue_orchestration",
+    "mcp__cortex__manage_orchestration",
+}
 READ_ONLY_FILE_TOOLS = {"Read", "Grep", "Glob"}
 CACHEABLE_FILE_READ_TOOLS = {"Read"}
 WAIT_TARGET_KEYS = (
@@ -854,7 +862,9 @@ def dispatch_required_context(event: dict) -> str | None:
         f"CORTEX DISPATCH REQUIRED NOW: {len(dispatches)} top-level dispatch(es) are authorized by this exact "
         "response. Your next tool call must invoke dispatches[0].call with dispatches[0].arguments; continue in "
         "returned order. Do not call wait, inspect, start, or continue before every native spawn call returns its "
-        "child id. A planned dispatch or empty wait is not a spawned worker." + suffix
+        "child id. Do not use a generic collaboration spawn, self-authored task name, or replacement child as a "
+        "substitute: it cannot bind to or advance this Cortex attempt. A planned dispatch or empty wait is not a "
+        "spawned worker." + suffix
     )
 
 
@@ -1192,6 +1202,22 @@ def active_worker_stop_block(event: dict, state: dict) -> str | None:
     ]
     if not active_facade_attempts:
         return None
+    # A durable open question is a resumable parent-turn boundary, not live
+    # work.  Check it before host identity: the native child may still be
+    # bound in the authenticated snapshot while SubagentStop is being
+    # reconciled, but the coordinator must surface the question and allow the
+    # normal turn to finish instead of emitting ACTIVE WORKER/Remain silent.
+    if any(
+        str(attempt.get("lifecycle_status") or "") == "paused_awaiting_user"
+        or str(attempt.get("host_stop_outcome") or "") == "awaiting_user"
+        or str(attempt.get("status") or "") == "waiting_question"
+        or (
+            bool(attempt.get("question_refs") or attempt.get("host_question_refs"))
+            and str(attempt.get("status") or "") in {"running", "waiting_question"}
+        )
+        for attempt in active_facade_attempts
+    ):
+        return None
     has_live_bound_worker = any(
         isinstance(attempt, dict)
         and attempt.get("status") == "running"
@@ -1420,12 +1446,28 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
             and str(event.get("agent_id") or "").strip()
         ):
             try:
-                finalize_host_worker_stop_from_hook(
+                finalized = finalize_host_worker_stop_from_hook(
                     str(project),
                     task_id,
                     session_id,
                     event.get("agent_id"),
                 )
+                # The snapshot was authenticated before the native child
+                # stopped. Reflect the exact server-owned question pause in
+                # this in-memory copy so the same hook invocation cannot
+                # re-block the parent turn as if the child were still live.
+                if finalized.get("outcome") == "awaiting_user":
+                    question_refs = list(finalized.get("question_refs") or [])
+                    for attempt in state.get("attempts", []):
+                        if not isinstance(attempt, dict):
+                            continue
+                        if str((attempt.get("host_spawn") or {}).get("agent_id") or "") != str(event.get("agent_id") or ""):
+                            continue
+                        attempt["lifecycle_status"] = "paused_awaiting_user"
+                        attempt["host_stop_outcome"] = "awaiting_user"
+                        attempt["host_resumable"] = True
+                        attempt["host_question_refs"] = question_refs
+                        break
                 agent_name, display_name = worker_identity(event, state)
             except Exception:
                 # Lifecycle persistence is fail-open for the host. The

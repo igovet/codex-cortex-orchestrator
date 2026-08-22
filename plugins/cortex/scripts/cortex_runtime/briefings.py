@@ -13,11 +13,10 @@ from cortex_runtime.context_compiler import compile_dispatch_context
 from cortex_runtime.handoff_compiler import build_dispatch_handoff
 
 
-# Native dispatch messages are subject to a host-side truncation limit.  Keep
-# an explicit 1,000-byte reserve so a valid immutable briefing is never accepted
-# only to be clipped by the transport boundary.
-MAX_V3_BRIEFING_BYTES = 15_000
-TARGET_V3_BRIEFING_BYTES = 14_500
+# Briefing length is a worker-prompt concern, not a ledger admission rule.
+# The native bootstrap grants a path plus exact digest; the complete briefing
+# is an immutable artifact.  No backend byte quota may reject or project away
+# a valid task before its worker has a chance to read it.
 
 
 bind_symbols(
@@ -97,8 +96,8 @@ def host_spawn_bootstrap(
     """Return the compact native prompt that grants a scoped briefing stream."""
     # The bootstrap is a capability invitation, not a second briefing.  Full
     # intent, plan and task-contract references live in the digest-bound
-    # briefing itself.  Repeating their absolute paths here used to make a
-    # long workspace path violate the 1,500-byte host budget.
+    # briefing itself.  The bootstrap remains an intentionally small prompt
+    # guidance surface, while the complete briefing is stored separately.
     del intent_path, intent_digest, plan_unit_path, plan_unit_digest, task_contract_path, task_contract_digest
     return (
         f"Cortex worker `{profile}`; dispatch_ref={dispatch_ref}. Before work call `read_dispatch_briefing` "
@@ -114,69 +113,25 @@ def host_spawn_bootstrap(
 
 
 def _utf8_prefix(value: str, maximum_bytes: int) -> str:
-    """Return a valid UTF-8 prefix under a transport byte budget."""
-    encoded = value.encode("utf-8")
-    if len(encoded) <= maximum_bytes:
-        return value
-    return encoded[:maximum_bytes].decode("utf-8", errors="ignore")
+    """Preserve complete task data; prompt guidance owns concision."""
+    del maximum_bytes
+    return value
 
 
 def _bounded_strings(values: object, *, limit: int, item_chars: int) -> list[str]:
     if not isinstance(values, list):
         return []
-    # The caller's later byte-budget admission decides which complete values
-    # fit.  Never cut a canonical task item merely because a fixed per-item
-    # hint was supplied; a task-contract artifact is used when it cannot fit.
-    del item_chars
-    return [str(item).strip() for item in values if str(item).strip()][:limit]
+    del limit, item_chars
+    return [str(item) for item in values if str(item).strip()]
 
 
 def _briefing_scope(values: object) -> list[str]:
     """Keep a scalar scope entry atomic in the assignment projection."""
     if isinstance(values, str):
-        value = _utf8_prefix(values.strip(), 500)
-        return [value] if value else []
+        return [values] if values.strip() else []
     if isinstance(values, list):
-        return [_utf8_prefix(str(item).strip(), 500) for item in values if str(item).strip()][:12]
+        return [str(item) for item in values if str(item).strip()]
     return []
-
-
-def _task_projection_metadata(
-    package: Mapping[str, Any], assignment: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Describe only task-contract fields reduced for native transport."""
-    source = package.get("task_contract")
-    if not isinstance(source, dict):
-        return {}
-    fields = {
-        "requirements": package.get("task_requirements"),
-        "scope": package.get("task_scope"),
-        "task_acceptance_criteria": package.get("task_acceptance_criteria"),
-        "task_verification": package.get("task_verification"),
-        "pause_conditions": package.get("pause_conditions"),
-    }
-    reduced: dict[str, Any] = {}
-    for field, original in fields.items():
-        if isinstance(original, str):
-            original_values = [original.strip()] if original.strip() else []
-        elif isinstance(original, list):
-            original_values = [str(item).strip() for item in original if str(item).strip()]
-        else:
-            original_values = []
-        projected = assignment.get(field)
-        projected_values = projected if isinstance(projected, list) else []
-        if original_values != projected_values:
-            reduced[field] = {
-                "total_items": len(original_values),
-                "selected_items": len(projected_values),
-                "truncated": True,
-            }
-    if not reduced:
-        return {}
-    # ``task_contract`` itself carries the immutable ref/digest/path.  Keep
-    # this companion deliberately tiny so metadata cannot be the reason a
-    # valid briefing crosses the host transport threshold.
-    return {"fields": reduced, "truncated": True}
 
 
 def _automatic_governance_close(package: dict[str, Any]) -> bool:
@@ -205,311 +160,38 @@ def _automatic_governance_close(package: dict[str, Any]) -> bool:
     return True
 
 
-_MAX_GOVERNANCE_PIPELINE_GATES = 16
-
-
-def _compact_governance_pipeline(values: object) -> tuple[list[str], dict[str, Any] | None]:
-    """Project the controlled pipeline without hiding full-governance edges.
-
-    A valid Cortex pipeline has no more than the sixteen shipped gate IDs, so
-    every normal pipeline fits in the dispatch transport as complete, short
-    identifiers.  Keep it whole.  This defensive branch only handles an
-    invalid/oversized historical projection: retain the activation and final
-    governance anchors and disclose the omitted middle instead of making a
-    first-N slice look like the complete lifecycle.
-    """
-    if not isinstance(values, list):
-        return [], None
-    pipeline = [str(item).strip() for item in values if str(item).strip()]
-    if len(pipeline) <= _MAX_GOVERNANCE_PIPELINE_GATES:
-        return pipeline, None
-
-    terminal = pipeline[-2:]
-    prefix_count = max(1, _MAX_GOVERNANCE_PIPELINE_GATES - len(terminal))
-    projected = [*pipeline[:prefix_count], *terminal]
-    omitted_count = len(pipeline) - len(projected)
-    return projected, {
-        "schema": "cortex/governance-pipeline-projection/v1",
-        "total_gates": len(pipeline),
-        "selected_gates": len(projected),
-        "omitted_middle_gates": omitted_count,
-        "truncated": True,
-        "full_pipeline_source": "task_contract",
-    }
-
-
-def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive: bool = False) -> None:
-    """Compact non-authoritative duplicate assignment context in place.
-
-    Identity, immutable intent, server receipts, the target-specific handoff,
-    and the compiled-context schema remain intact.  Everything below is either
-    duplicate task/gate data or bounded coordination context that can be
-    deterministically shortened when the complete rendered briefing is above
-    the safe native transport target.
-    """
-    # These pairs are the same canonical arrays in ordinary dispatch packages;
-    # retain the gate/task-labelled copies used by the worker contract.
-    if "gate_acceptance_criteria" in assignment or "task_acceptance_criteria" in assignment:
-        assignment.pop("acceptance_criteria", None)
-    if "gate_verification" in assignment or "task_verification" in assignment:
-        assignment.pop("verification", None)
-    assignment.pop("predecessor_handoff_summary", None)
-    assignment.pop("rework_escalation", None)
-    assignment.pop("plan_feedback", None)
-    assignment.pop("plan_tracker", None)
-    assignment.pop("budget", None)
-    assignment.pop("pause_conditions", None)
-    contract = assignment.get("task_contract")
-    if isinstance(contract, dict):
-        projection = assignment.get("task_projection")
-        if not isinstance(projection, dict):
-            projection = {}
-        projection["transport_compacted"] = True
-        for key in ("artifact_ref", "digest_sha256", "artifact_path", "byte_size"):
-            if contract.get(key) not in (None, ""):
-                projection[key] = contract[key]
-        assignment["task_projection"] = projection
-
-    decisions = assignment.get("resolved_user_decisions")
-    if isinstance(decisions, list):
-        assignment["resolved_user_decisions"] = [item for item in decisions[-4:] if isinstance(item, dict)]
-
-    governance = assignment.get("governance_context")
-    if isinstance(governance, dict):
-        compact_governance: dict[str, Any] = {}
-        for key in (
-            "schema", "requested_mode", "effective_mode", "complexity",
-            "initiative_ref", "autonomous_scope_ref", "policy_snapshot_digest",
-        ):
-            value = governance.get(key)
-            if value not in (None, ""):
-                compact_governance[key] = str(value)
-        for key in ("reasons", "trigger_evidence", "close_obligations"):
-            values = governance.get(key)
-            if isinstance(values, list):
-                compact_governance[key] = [str(item).strip() for item in values[:4] if str(item).strip()]
-        pipeline, pipeline_projection = _compact_governance_pipeline(
-            governance.get("current_pipeline")
+def _governance_projection_instruction(package: Mapping[str, Any]) -> str:
+    """Return the worker rule for an existing or incomplete governance basis."""
+    governance = package.get("governance_context")
+    if not isinstance(governance, Mapping):
+        return ""
+    effective_mode = str(governance.get("effective_mode") or "").strip().lower()
+    if effective_mode not in {"light", "full"}:
+        return ""
+    required = (
+        isinstance(governance.get("policy_snapshot"), Mapping)
+        and bool(governance.get("policy_snapshot"))
+        and bool(re.fullmatch(r"[0-9a-f]{64}", str(governance.get("policy_snapshot_digest") or "").strip().lower()))
+        and bool(str(governance.get("manifest_ref") or "").strip())
+        and bool(str(governance.get("manifest_digest") or "").strip())
+        and isinstance(governance.get("current_pipeline"), list)
+        and bool(governance.get("current_pipeline"))
+    )
+    if required:
+        return (
+            "SERVER-OWNED GOVERNANCE PROJECTION: governance is required. Assignment has "
+            "policy_snapshot/policy_snapshot_digest, manifest_ref/manifest_digest, "
+            "current_pipeline, and effective_mode. Treat present values as final server "
+            "evidence, verify digests, and do not ask the user to choose or reconfirm them."
         )
-        if pipeline:
-            compact_governance["current_pipeline"] = pipeline
-        if pipeline_projection is not None:
-            compact_governance["current_pipeline_projection"] = pipeline_projection
-        policy = governance.get("policy_snapshot")
-        if isinstance(policy, dict):
-            compact_governance["policy_snapshot"] = {
-                key: policy[key] for key in (
-                    "schema", "required_floor", "promotion_window_days", "promotion_threshold_scopes",
-                ) if key in policy
-            }
-        assignment["governance_context"] = compact_governance
-
-    compiled_context = assignment.get("compiled_context")
-    if isinstance(compiled_context, dict):
-        # The canonical handoff and resolved-user-decision projection already
-        # carry these duplicate target/decision fields. Keep receipt state and
-        # schema, plus compact server-owned transitions for provenance.
-        compiled_context.pop("assignment", None)
-        transitions = compiled_context.get("event_transitions")
-        if isinstance(transitions, list):
-            compacted: list[dict[str, Any]] = []
-            for item in transitions[:8]:
-                if not isinstance(item, dict):
-                    continue
-                projected = {
-                    key: _utf8_prefix(str(item[key]).strip(), 240)
-                    for key in ("event_type", "question_ref", "answer")
-                    if item.get(key) not in (None, "")
-                }
-                if projected:
-                    compacted.append(projected)
-            compiled_context["event_transitions"] = compacted
-        context_decisions = compiled_context.get("decisions")
-        if isinstance(context_decisions, list):
-            compiled_context["decisions"] = [
-                {
-                    "question": _utf8_prefix(str(item.get("question") or "").strip(), 240),
-                    "answer": _utf8_prefix(str(item.get("answer") or "").strip(), 320),
-                }
-                for item in context_decisions[-4:]
-                if isinstance(item, dict) and (item.get("question") or item.get("answer"))
-            ]
-
-    if aggressive:
-        # Second byte-aware stage: preserve the issued identity, intent,
-        # receipts, handoff and permission-bearing paths, while retaining only
-        # the minimum semantic samples from duplicate context projections.
-        # Values are removed one complete element at a time by
-        # ``_admit_assignment_to_budget`` below; never replace an element with
-        # a lossy character prefix here.
-        decisions = assignment.get("resolved_user_decisions")
-        if isinstance(decisions, list):
-            assignment["resolved_user_decisions"] = [
-                {
-                    "question_en": _utf8_prefix(str(item.get("question_en") or ""), 120),
-                    "answer_en": _utf8_prefix(str(item.get("answer_en") or ""), 160),
-                }
-                for item in decisions[:2] if isinstance(item, dict)
-            ]
-        governance = assignment.get("governance_context")
-        if isinstance(governance, dict):
-            for key in ("reasons", "trigger_evidence", "close_obligations"):
-                values = governance.get(key)
-                if isinstance(values, list):
-                    governance[key] = [_utf8_prefix(str(item).strip(), 80) for item in values[:2] if str(item).strip()]
-        if isinstance(compiled_context, dict):
-            # The assignment-level decision projection remains available; the
-            # compiled context keeps its schema and receipt state as the
-            # authoritative continuation boundary.
-            compiled_context.pop("decisions", None)
-            compiled_context.pop("event_transitions", None)
-
-        # Keep the immutable intent artifact and its digest as the complete
-        # source of truth; this projection is only a short assignment preview.
-        mission = assignment.get("mission")
-        if isinstance(mission, str):
-            assignment["mission"] = _utf8_prefix(mission, 120)
-        intent = assignment.get("user_intent")
-        if isinstance(intent, dict):
-            intent["projection"] = _utf8_prefix(str(intent.get("projection") or ""), 160)
-
-        for field in (
-            "requirements", "scope", "context_files", "knowledge_index_files",
-            "task_acceptance_criteria", "task_verification", "gate_acceptance_criteria",
-            "gate_verification", "resolved_user_decisions", "selection_rationale",
-            "strategy", "intent_clarification_reason",
-        ):
-            assignment.pop(field, None)
-        if isinstance(compiled_context, dict):
-            compiled_context.pop("findings", None)
-        governance = assignment.get("governance_context")
-        if isinstance(governance, dict):
-            assignment["governance_context"] = {
-                key: governance[key]
-                for key in (
-                    "schema", "requested_mode", "effective_mode", "complexity",
-                    "policy_snapshot_digest", "current_pipeline",
-                    "current_pipeline_projection",
-                )
-                if key in governance
-            }
-        handoff = assignment.get("handoff")
-        if isinstance(handoff, dict):
-            assignment["handoff"] = {
-                key: handoff[key]
-                for key in ("schema", "target", "server_receipts", "predecessor_selection")
-                if key in handoff
-            }
-
-
-def _compact_plan_unit_assignment(value: object) -> dict[str, Any] | None:
-    """Project a compiled plan into a bounded dispatch-briefing reference.
-
-    The compiled unit itself is an immutable, separately materialized artifact.
-    Copying its microtasks into the worker briefing made a prompt-size target
-    an accidental upper bound on a valid planner result. The worker already has
-    an explicitly authorized, digest-bound direct read of that artifact from
-    its native bootstrap, so the briefing needs only enough metadata to prove
-    what it must read -- never a second embedded copy of the plan.
-
-    ``host_spawn_prompt`` is also used by the planner's no-write preflight,
-    where an artifact has not yet been allocated.  Preserve a small preview in
-    that case so the preflight verifies the same bounded rendering shape
-    without inventing an artifact path or digest.
-    """
-    if not isinstance(value, dict):
-        return None
-
-    microtasks = value.get("microtasks")
-    package_ids = value.get("package_ids")
-    microtask_count = (
-        int(value.get("microtask_count"))
-        if isinstance(value.get("microtask_count"), int)
-        else len(microtasks) if isinstance(microtasks, list) else 0
+    return (
+        "SERVER-OWNED GOVERNANCE PROJECTION IS INCOMPLETE: governance is required, but "
+        "Assignment is missing a policy snapshot/digest, manifest ref/digest, or current "
+        "pipeline. Do not invent or infer the missing server fact; do not silently continue; "
+        "record one durable worker_question "
+        "for the exact missing server fact and why it blocks verification. Do not ask the "
+        "user to select a policy."
     )
-    package_count = (
-        int(value.get("package_count"))
-        if isinstance(value.get("package_count"), int)
-        else len(package_ids) if isinstance(package_ids, list) else 0
-    )
-    package_ids_digest = str(value.get("package_ids_digest") or "").strip()
-    if not package_ids_digest and isinstance(package_ids, list):
-        package_ids_digest = digest_text(json.dumps(
-            [str(item) for item in package_ids],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ))
-
-    projection = {
-        "schema": "cortex/compiled-plan-unit-ref/v1",
-        "plan_revision": str(value.get("plan_revision") or "").strip() or None,
-        "source_result_ref": str(value.get("source_result_ref") or "").strip() or None,
-        "artifact_ref": str(value.get("artifact_ref") or "").strip() or None,
-        "artifact_path": str(value.get("artifact_path") or "").strip() or None,
-        "digest_sha256": str(value.get("digest_sha256") or "").strip() or None,
-        "byte_size": value.get("byte_size") if isinstance(value.get("byte_size"), int) else None,
-        "microtask_count": max(0, microtask_count),
-        "package_count": max(0, package_count),
-        "package_ids_digest": package_ids_digest or None,
-        "read_required": True,
-    }
-    return {key: item for key, item in projection.items() if item not in (None, "")}
-
-
-def _admit_assignment_to_budget(assignment: dict[str, Any]) -> bool:
-    """Remove one complete optional value for another render attempt.
-
-    This is deliberately one-element-at-a-time: the rendered UTF-8 byte size
-    is the actual budget authority, so an item stays whole whenever it fits
-    the remaining transport capacity.  Task-derived omissions are explicitly
-    tied to the immutable task-contract descriptor already present in the
-    assignment.
-    """
-    task_fields = {
-        "requirements", "scope", "task_acceptance_criteria",
-        "task_verification", "pause_conditions",
-    }
-    for field in (
-        "requirements", "scope", "task_acceptance_criteria", "task_verification",
-        "gate_acceptance_criteria", "gate_verification", "acceptance_criteria",
-        "verification", "context_files", "knowledge_index_files", "allowed_paths",
-        "predecessor_result_refs", "resolved_user_decisions",
-    ):
-        value = assignment.get(field)
-        if not isinstance(value, list) or not value:
-            continue
-        value.pop()
-        if field in task_fields and isinstance(assignment.get("task_contract"), dict):
-            projection = assignment.setdefault("task_projection", {"truncated": True, "fields": {}})
-            fields = projection.setdefault("fields", {})
-            record = fields.setdefault(field, {"truncated": True, "selected_items": len(value)})
-            record["selected_items"] = len(value)
-            record["omitted_for_transport"] = True
-        return True
-    # Last-resort reductions are whole duplicate objects, never abbreviated
-    # strings.  Their authoritative equivalents are separately referenced.
-    # The target-specific handoff is a required successor provenance boundary,
-    # not expendable display context.  Keep it even under hostile input; its
-    # own compiler is already bounded and exposes immutable predecessor refs.
-    # ``compiled_context`` contains the server receipt/projection boundary and
-    # is therefore required alongside the handoff.  Only optional governance
-    # display and follow-up prose may be removed at this last stage.
-    for field in ("governance_context", "follow_up"):
-        if assignment.get(field) not in (None, {}, []):
-            assignment.pop(field, None)
-            return True
-    for field in ("plan_feedback", "mission", "selection_rationale", "strategy", "intent_clarification_reason"):
-        if assignment.get(field):
-            assignment.pop(field, None)
-            return True
-    intent = assignment.get("user_intent")
-    if isinstance(intent, dict) and intent.get("projection"):
-        # The immutable intent artifact/ref/digest remains; only its optional
-        # preview is removed after every complete task field was considered.
-        intent.pop("projection", None)
-        return True
-    return False
 
 
 def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
@@ -576,7 +258,10 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "byte_size": intent.get("byte_size"),
             "read_required": True,
         },
-        "plan_unit": _compact_plan_unit_assignment(package.get("plan_unit")),
+        # Keep the complete approved plan in the immutable briefing. Prompt
+        # compactness is guidance only; no backend projection may omit plan
+        # microtasks or package identities.
+        "plan_unit": package.get("plan_unit"),
         "task_contract": package.get("task_contract") if isinstance(package.get("task_contract"), dict) else None,
         "requirements": _bounded_strings(package.get("task_requirements"), limit=12, item_chars=500),
         "scope": _briefing_scope(package.get("task_scope")),
@@ -616,7 +301,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             package.get("task_verification"), limit=16, item_chars=600,
         ),
         "governance_context": package.get("governance_context") if isinstance(package.get("governance_context"), dict) else None,
-        "resolved_user_decisions": list(package.get("resolved_user_decisions") or [])[-8:],
+        "resolved_user_decisions": list(package.get("resolved_user_decisions") or []),
         "plan_feedback": _utf8_prefix(plan_feedback, 1200) or None,
         "plan_tracker_ref": str(package.get("plan_tracker_ref") or "sqlite:task_documents/plan_tracker_current"),
         "plan_tracker": package.get("plan_tracker") if isinstance(package.get("plan_tracker"), dict) else None,
@@ -627,9 +312,6 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "intent_clarification_reason": _utf8_prefix(str(package.get("intent_clarification_reason") or "").strip(), 500) or None,
         "follow_up": follow_up,
     }
-    task_projection = _task_projection_metadata(package, assignment)
-    if task_projection:
-        assignment["task_projection"] = task_projection
     if gate == "governance_close":
         # Governance-close receives the fresh immutable successor projection
         # in ``handoff``.  These generic fields duplicate gate/task data and
@@ -640,26 +322,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         assignment["predecessor_handoff_summary"] = None
         assignment["plan_feedback"] = None
         assignment["follow_up"] = None
-        # Keep a deterministic semantic slice of large C3 traces.  The
-        # canonical handoff carries the current AttemptResult continuation;
-        # these fields are only the close review's bounded acceptance context.
-        for field, limit, item_chars in (
-            ("requirements", 4, 120),
-            ("scope", 6, 100),
-            ("allowed_paths", 12, 140),
-            ("context_files", 4, 100),
-            ("knowledge_index_files", 3, 100),
-            ("predecessor_result_refs", 6, 64),
-            ("gate_acceptance_criteria", 2, 120),
-            ("gate_verification", 2, 120),
-            ("task_acceptance_criteria", 2, 120),
-            ("task_verification", 2, 120),
-            ("pause_conditions", 3, 150),
-        ):
-            assignment[field] = _bounded_strings(assignment.get(field), limit=limit, item_chars=item_chars)
         assignment["plan_tracker"] = None
         assignment["rework_escalation"] = None
-        assignment["budget"] = _utf8_prefix(str(assignment.get("budget") or ""), 240) or None
     elif package.get("mode") == "harvest" and agent == "planner":
         # Harvest planning receives its exhaustive census contract from the
         # immutable harvest mode overlay.  Do not spend native transport
@@ -690,6 +354,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Acceptance obligations: " + "; ".join(gate_briefing.get("acceptance") or []),
         "Verification obligations: " + "; ".join(gate_briefing.get("verification") or []),
     ]
+    governance_instruction = _governance_projection_instruction(package)
+    if governance_instruction:
+        gate_parts.append(governance_instruction)
     if gate == "governance_activation":
         gate_parts.append(
             "This is a pre-delivery governance activation gate. Evaluate only governance context and activation criteria; "
@@ -774,10 +441,13 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         )
         gate_delta = (
             "Apply the canonical governance_close gate. Own the independent full-governance close review and evaluate only server-owned governance evidence, current source/tests, and the fresh AttemptResult handoff. "
-            "Downstream audit artifacts and handoff are outputs, not missing prerequisites. Add exactly one typed gate-result payload with decision/failure_class/findings/verification/workspace; pass has no open finding. "
+            "Downstream audit artifacts and handoff are outputs, not missing prerequisites. Add exactly one typed gate-result payload with decision/failure_class/findings/verification/workspace in the semantic claims array when applicable; do not invent a new complete_attempt field or submit a separate gate-result envelope. The public complete_attempt schema accepts only status, summary, findings, decisions_needed, unresolved, claims, and the planner-only planning sibling. Pass has no open finding. "
             "Governance-close status=completed requires unresolved=[]; record residual risk, retrospective notes, uncertainty, and non-blocking gaps in summary, claims, or AttemptEvents instead. "
             "This is a read-only result gate: do not edit files or submit changed_files; Cortex owns identity, receipts, timestamps, and trusted observations."
         )
+        governance_instruction = _governance_projection_instruction(package)
+        if governance_instruction:
+            gate_delta += " " + governance_instruction
         if _automatic_governance_close(package):
             gate_delta += (
                 " AUTOMATIC FULL-GOVERNANCE DECISION POLICY: Assignment governance_context requested_mode=auto and effective_mode=full, "
@@ -834,7 +504,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Residual risk, omitted/environment checks, retrospective notes, uncertainty, and placeholder 'none' belong in summary, claims, or AttemptEvents, never unresolved. "
         "Server adds identity/phase/receipts; exposes attempt_result_ref. "
         "failure_class is product/infrastructure/environment/policy/worker. "
-        "Success: ATTEMPT_COMPLETED attempt_result_ref=<generated id>; +2 sentences; no view."
+        "Success: ATTEMPT_COMPLETED attempt_result_ref=<generated id>; +2 sentences; no view. When complete_attempt returns both attempt_result_ref and projection_ref, copy only the bare value of the attempt_result_ref field into the parent response; projection_ref is never a lookup token and must never be passed to read_worker_result."
     )
     stopping = (
         "Ground claims in evidence; separate fact, inference, and gaps. Continue while acceptance or canonical findings remain unresolved; do not stop because an earlier attempt failed. "
@@ -854,29 +524,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             stopping=stopping,
         )
 
-    briefing = render()
-    if len(briefing.encode("utf-8")) > TARGET_V3_BRIEFING_BYTES:
-        _compact_assignment_for_transport(assignment)
-        briefing = render()
-    if len(briefing.encode("utf-8")) > TARGET_V3_BRIEFING_BYTES:
-        # Fit against the actual rendered UTF-8 budget.  This admits every
-        # complete field/item that fits and omits only the next whole value;
-        # no static character clipping can turn a valid fact into prose that
-        # looks authoritative but is incomplete.
-        for _ in range(1_024):
-            if not _admit_assignment_to_budget(assignment):
-                break
-            briefing = render()
-            if len(briefing.encode("utf-8")) <= TARGET_V3_BRIEFING_BYTES:
-                break
-    if len(briefing.encode("utf-8")) > TARGET_V3_BRIEFING_BYTES:
-        # Required boundaries stay present.  This final pass removes only
-        # duplicate previews and optional history nested beneath them.
-        _compact_assignment_for_transport(assignment, aggressive=True)
-        briefing = render()
-    if len(briefing.encode("utf-8")) > TARGET_V3_BRIEFING_BYTES:
-        raise ValueError(
-            "v3 worker briefing exceeds the 14,500-byte safe transport target; "
-            "persist oversized context as an authorized artifact instead"
-        )
-    return briefing
+    # The worker reads this immutable briefing through a cursor-capable server
+    # operation; the host receives only ``host_spawn_bootstrap``.  Preserve
+    # every assignment fact.  Prompt prose may request concise work, but the
+    # backend must never truncate or reject a briefing because of its volume.
+    return render()

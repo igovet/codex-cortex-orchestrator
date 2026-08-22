@@ -1,10 +1,10 @@
 # Release readiness
 
-Status: source-mode release contract for Cortex 10.0.4.
+Status: source-mode release contract for Cortex 10.0.7.
 
 ## Current release identity
 
-- plugin version: 10.0.4
+- plugin version: 10.0.7
 - task contract: cortex/v10
 - orchestration lifecycle: cortex/orchestration/v6
 - SQLite schema: v15
@@ -32,18 +32,18 @@ plugin, trusted hooks, or live-model access.
 
 ## Runtime acceptance
 
-A worker must be able to checkpoint bounded AttemptEvent rows and close one
+A worker must be able to checkpoint complete AttemptEvent rows of any content volume and close one
 AttemptResult. The server must derive identity, timestamps, changed files,
 checks, workspace observations, and verification metadata. The lifecycle must
 distinguish WORK_COMPLETED, FINALIZING, COMPLETED, BLOCKED, and FAILED.
 
 A failed projection or serializer after WORK_COMPLETED must retry the same
 attempt. It must not create a replacement worker. ContextCompiler must produce
-a bounded immutable dispatch briefing, and HandoffCompiler must produce
+a complete immutable dispatch briefing, and HandoffCompiler must produce
 target-specific implementation, QA, and review projections.
 
 The public facade must expose exactly nine operations. Coordinator and worker
-audiences are fixed at launch, and both use read_worker_result for bounded
+audiences are fixed at launch, and both use read_worker_result for scoped
 result access. Cross-stage links are limited to attempt_result_ref,
 context_result_refs, and predecessor_result_refs.
 

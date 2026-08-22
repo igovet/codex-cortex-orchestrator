@@ -159,6 +159,11 @@ class DatabaseCentricAttemptContractTests(unittest.TestCase):
         )
         self.attempt_id = str(_value(self.started, "attempt_id"))
         self.assertTrue(self.attempt_id and self.attempt_id != "None")
+        self.service.acknowledge_briefing(
+            self.attempt_id,
+            dispatch_ref="dispatch-contract-1",
+            digest="briefing-sha-1",
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()

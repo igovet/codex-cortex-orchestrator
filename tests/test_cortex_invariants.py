@@ -230,7 +230,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertNotIn("manifest_file", handed)
         self.assertFalse(any((task_dir / "handoffs").glob("*-manifest.json")))
 
-    def test_partial_baseline_blocks_reconciliation_and_handoff(self):
+    def test_large_baseline_is_complete_for_reconciliation(self):
         (self.project / "baseline-a.txt").write_text("a\n", encoding="utf-8")
         (self.project / "baseline-b.txt").write_text("b\n", encoding="utf-8")
         state = self.init()["state"]
@@ -238,24 +238,19 @@ class OrchestrationInvariantTests(unittest.TestCase):
         policy = dict(control.TRACKER_POLICY)
         policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
         partial_baseline = control.capture_project_manifest(self.project, policy=policy)
-        self.assertTrue(partial_baseline["partial_manifest"]["partial"])
+        self.assertFalse(partial_baseline["partial_manifest"]["partial"])
+        self.assertGreaterEqual(partial_baseline["entry_count"], 2)
         reference = control.store_manifest_snapshot(task_dir, partial_baseline)
         state["initial_manifest_ref"] = reference
         state["initial_manifest_digest"] = partial_baseline["digest"]
         self.write_task_state(state)
 
         receipt, _ = control.reconcile_manifest(task_dir, state, [])
-        self.assertFalse(receipt["complete"])
-        self.assertFalse(receipt["comparison"]["complete"])
-        self.assertTrue(receipt["partial_manifest"]["baseline"]["partial"])
-        blocked = control.handoff({
-            "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
-            "completed": ["baseline review"], "files": [], "next_action": "resolve capture cutoff",
-        })
-        self.assertFalse(blocked["recorded"])
-        self.assertFalse(blocked["file_manifest_receipt"]["complete"])
+        self.assertTrue(receipt["complete"])
+        self.assertTrue(receipt["comparison"]["complete"])
+        self.assertFalse(receipt["partial_manifest"]["baseline"]["partial"])
 
-    def test_partial_final_manifest_blocks_reconciliation_and_handoff(self):
+    def test_large_final_manifest_is_complete_and_reports_changed_paths(self):
         state = self.init()["state"]
         task_dir = self.ledger / "tasks" / "0001-task"
         policy = dict(control.TRACKER_POLICY)
@@ -270,10 +265,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
         (self.project / "final-b.txt").write_text("b\n", encoding="utf-8")
 
         receipt, current = control.reconcile_manifest(task_dir, state, [])
-        self.assertTrue(current["partial_manifest"]["partial"])
+        self.assertFalse(current["partial_manifest"]["partial"])
         self.assertFalse(receipt["complete"])
-        self.assertFalse(receipt["comparison"]["complete"])
-        self.assertTrue(receipt["partial_manifest"]["current"]["partial"])
+        self.assertTrue(receipt["comparison"]["complete"])
+        self.assertFalse(receipt["partial_manifest"]["current"]["partial"])
+        self.assertIn("final-a.txt", receipt["comparison"]["changed_paths"])
         blocked = control.handoff({
             "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
             "completed": ["final review"], "files": [], "next_action": "resolve capture cutoff",
@@ -281,7 +277,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertFalse(blocked["recorded"])
         self.assertFalse(blocked["file_manifest_receipt"]["complete"])
 
-    def test_partial_final_manifest_blocks_terminal_close(self):
+    def test_large_final_manifest_is_not_marked_partial_before_terminal_close(self):
         created = self.init()
         task_dir = self.ledger / "tasks" / created["task_directory"]
         state = self.task_state(task_dir)
@@ -300,17 +296,20 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.write_task_state(state)
         (self.project / "close-a.txt").write_text("a\n", encoding="utf-8")
         (self.project / "close-b.txt").write_text("b\n", encoding="utf-8")
+        final_manifest = control.capture_project_manifest(self.project, policy=policy)
+        self.assertFalse(final_manifest["partial_manifest"]["partial"])
+        self.assertIn("close-a.txt", final_manifest["entries"])
+        self.assertIn("close-b.txt", final_manifest["entries"])
         evidence = control.record_evidence({
             "task_id": "task", "principal": "owner", "expected_revision": state["revision"],
-            "gate": "close", "summary": "close evidence before bounded capture cutoff",
+            "gate": "close", "summary": "close evidence after complete manifest capture",
         })
-        with self.assertRaisesRegex(ValueError, "incomplete final manifest"):
-            control.record_gate({
-                "task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"],
-                "gate": "close", "outcome": "passed", "summary": "must not close on partial capture",
-            })
-        persisted = self.task_state(task_dir)
-        self.assertNotEqual(persisted["status"], "completed")
+        closed = control.record_gate({
+            "task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"],
+            "gate": "close", "outcome": "passed", "summary": "complete manifest permits close",
+        })
+        self.assertEqual(closed["state"]["status"], "completed")
+        self.assertEqual(self.task_state(task_dir)["status"], "completed")
 
     def test_manifest_snapshots_are_deduplicated_for_unchanged_attempts(self):
         state = self.init()["state"]
@@ -1084,6 +1083,28 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("Do not call wait", context)
         self.assertIn("explorer_auth_01_deadbeef", context)
 
+    def test_continue_hook_requires_the_returned_dispatch_not_a_generic_spawn(self):
+        context = cortex_hook.dispatch_required_context({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__cortex__continue_orchestration",
+            "tool_response": {"structuredContent": {
+                "schema": "cortex/orchestration/v5",
+                "ok": True,
+                "outcome": "ready_to_spawn",
+                "task_ref": "task-live",
+                "dispatches": [{
+                    "call": "spawn_agent",
+                    "arguments": {"task_name": "security_auditor_repository_02_deadbeef"},
+                }],
+            }},
+        })
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertIn("next tool call must invoke dispatches[0].call", context)
+        self.assertIn("generic collaboration spawn", context)
+        self.assertIn("cannot bind to or advance this Cortex attempt", context)
+        self.assertIn("security_auditor_repository_02_deadbeef", context)
+
     def test_hook_manifest_covers_clear_and_agent_tool_contracts(self):
         manifest = json.loads(
             (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")
@@ -1596,9 +1617,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", briefing)
         self.assertNotIn("ATTEMPT_COMPLETED result_ref=", briefing)
 
-    def test_worst_case_briefing_compaction_preserves_fresh_contract(self):
-        """The general assembler bounds large UTF-8 planner and close inputs."""
-        from cortex_runtime.briefings import TARGET_V3_BRIEFING_BYTES
+    def test_worst_case_briefing_preserves_fresh_contract_without_size_rejection(self):
+        """Large fresh-v3 planner and close inputs remain lossless and usable."""
 
         unit = "Юникод🚀漢字—" * 500
         predecessor_refs = [f"result-{index:02d}-" + "r" * 50 for index in range(8)]
@@ -1659,7 +1679,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         for gate, profile in (("plan", "planner"), ("governance_close", "code_reviewer")):
             with self.subTest(gate=gate):
                 prompt = control.host_spawn_prompt(profile, package(gate))
-                self.assertLessEqual(len(prompt.encode("utf-8")), TARGET_V3_BRIEFING_BYTES)
+                self.assertGreater(len(prompt.encode("utf-8")), 14_500)
                 self.assertEqual(prompt.encode("utf-8").decode("utf-8"), prompt)
                 self.assertNotIn("\ufffd", prompt)
                 self.assertTrue(prompt.startswith("# Cortex Worker Briefing v3"))
@@ -1875,7 +1895,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "10.0.4")
+        self.assertEqual(base_version, "10.0.7")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
@@ -2086,6 +2106,22 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 ],
                 title="invalid",
             )
+
+    def test_v3_prompt_volume_is_advisory_and_lossless(self):
+        required = {
+            "assignment": {
+                "mission": "complete payload",
+                "large_result": "😀" * 20_000,
+            },
+            "authority": "a", "hard_constraints": "b", "role_delta": "c",
+            "tool_protocol": "d", "output_contract": "e", "stopping": "f",
+        }
+        prompt = prompt_compiler.compile_v3_briefing(**required)
+        self.assertIn("Prompt volume targets are advisory worker guidance only", prompt)
+        self.assertIn("backend persistence stores the complete submitted content", prompt)
+        self.assertIn(required["assignment"]["large_result"], prompt)
+        self.assertNotIn("safe transport target", prompt)
+        self.assertNotIn("exceeds the 14,500-byte", prompt)
 
 
 if __name__ == "__main__":

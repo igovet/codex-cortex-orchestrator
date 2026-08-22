@@ -90,11 +90,11 @@ DEFAULT_PUBLIC_TOOL_NAMES = tuple(dict.fromkeys(
 
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body.",
+    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if it returns waiting_workers, wait only for the exact persisted workers; if it returns completed, blocked, or a non-dispatch terminal outcome, stop after the required close/result. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is terminal: stop and result the blocker.",
     "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
-    "record_attempt_event": "Worker-only incremental semantic event operation. Persist a bounded finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
-    "complete_attempt": "Worker-only semantic completion operation. Submit only AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
+    "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
+    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may additionally submit the separate planning work breakdown. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
     "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
     "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. The compact internal receipt retains this continuation across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
     "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If a recovery response was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and original non-durable recovery proof; it redelivers the same pending pair until acknowledge_coordinator_recovery presents the old proof plus both replacement values and retires the old pair. Initial start-response loss remains fail-closed because no proof exists. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
@@ -137,20 +137,17 @@ def build_public_schemas(
     PLANNING_STRING_LIST_SCHEMA = {
         "type": "array",
         "minItems": 1,
-        "maxItems": 32,
         "uniqueItems": True,
-        "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "items": {"type": "string", "minLength": 1},
     }
     PLANNING_PATHS_SCHEMA = {
         "type": "array",
         "minItems": 1,
-        "maxItems": 50,
         "uniqueItems": True,
         "items": {"type": "string", "minLength": 1},
     }
     PLANNING_DEPENDENCIES_SCHEMA = {
         "type": "array",
-        "maxItems": 32,
         "uniqueItems": True,
         "items": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
     }
@@ -158,9 +155,9 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "requirement": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "requirement": {"type": "string", "minLength": 1},
             "plan_refs": {
-                "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": True,
+                "type": "array", "minItems": 1, "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1, "maxLength": 160},
             },
             "verification": PLANNING_STRING_LIST_SCHEMA,
@@ -173,8 +170,8 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-            "title": {"type": "string", "minLength": 1, "maxLength": 500},
-            "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "title": {"type": "string", "minLength": 1},
+            "objective": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
             "allowed_paths": PLANNING_PATHS_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
@@ -191,8 +188,8 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-            "title": {"type": "string", "minLength": 1, "maxLength": 500},
-            "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "title": {"type": "string", "minLength": 1},
+            "objective": {"type": "string", "minLength": 1},
             "allowed_paths": PLANNING_PATHS_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
             "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
@@ -201,7 +198,6 @@ def build_public_schemas(
             "microtasks": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": max_microtasks_per_package,
                 "items": PLANNING_MICROTASK_SCHEMA,
             },
         },
@@ -211,9 +207,9 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "overview": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "overview": {"type": "string", "minLength": 1},
             "requirement_coverage": {
-                "type": "array", "maxItems": 100, "uniqueItems": True,
+                "type": "array", "uniqueItems": True,
                 "items": PLANNING_COVERAGE_SCHEMA,
                 "description": (
                     "Optional traceability map. When the user changes an active task, every latest requirement "
@@ -221,14 +217,14 @@ def build_public_schemas(
                 ),
             },
             "recommendation": {"type": "string", "enum": ["approve", "revise"]},
-            "recommendation_rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "recommendation_rationale": {"type": "string", "minLength": 1},
             "resolved_questions": {
-                "type": "array", "maxItems": 32, "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "type": "array", "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
             },
-            "risks": {"type": "array", "maxItems": 64, "items": {"type": "string", "minLength": 1, "maxLength": 2000}},
+            "risks": {"type": "array", "items": {"type": "string", "minLength": 1}},
             "work_packages": {
-                "type": "array", "minItems": 1, "maxItems": max_work_packages,
+                "type": "array", "minItems": 1,
                 "description": (
                     "Planner-only task-local work breakdown. Runtime requires each package to have id, title, objective, "
                     "and non-empty microtasks, and writes the validated artifact to the host-private task projection store."
@@ -243,8 +239,8 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-            "title": {"type": "string", "minLength": 1, "maxLength": 500},
-            "objective": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "title": {"type": "string", "minLength": 1},
+            "objective": {"type": "string", "minLength": 1},
             "paths": PLANNING_PATHS_SCHEMA,
             "context": PLANNING_STRING_LIST_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
@@ -260,13 +256,13 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "overview": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "overview": {"type": "string", "minLength": 1},
             "context_files": {
-                "type": "array", "maxItems": 50, "uniqueItems": True,
+                "type": "array", "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1},
             },
             "discovery_domains": {
-                "type": "array", "minItems": 1, "maxItems": max_discovery_domains,
+                "type": "array", "minItems": 1,
                 "items": SCOPING_DOMAIN_SCHEMA,
             },
         },
@@ -296,12 +292,11 @@ def build_public_schemas(
             "strategy": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 1000,
                 "description": "Optional concise name for the worker approach; Cortex preserves it as rework evidence but never uses it to impose an attempt limit.",
             },
             "paths": {"type": "array", "items": {"type": "string"}},
             "allowed_paths": {
-                "type": "array", "minItems": 1, "maxItems": 50,
+                "type": "array", "minItems": 1,
                 "items": {"type": "string", "minLength": 1},
                 "description": (
                     "Canonical server-owned worker write scope. Paths must be narrow, project-relative, and "
@@ -331,7 +326,6 @@ def build_public_schemas(
             },
             "context_result_refs": {
                 "type": "array",
-                "maxItems": 32,
                 "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1},
                 "description": (
@@ -384,13 +378,13 @@ def build_public_schemas(
                     "requirements": {"type": "array", "items": {"type": "string"}},
                     "constraints": {"type": "array", "items": {"type": "string"}, "description": "Explicit non-negotiable task constraints compiled as first-class canonical context."},
                     "acceptance_criteria": {
-                        "type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1},
+                        "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
                         "description": "Required observable outcomes, except harvest routes where Cortex supplies the exhaustive census contract.",
                     },
                     "scope": {"type": "array", "items": {"type": "string"}},
                     "allowed_paths": {"type": "array", "items": {"type": "string"}},
                     "verification": {
-                        "type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1},
+                        "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
                         "description": "Required authoritative checks, except harvest routes where Cortex supplies the census checks.",
                     },
                     "budget": {"type": "string"},
@@ -466,7 +460,6 @@ def build_public_schemas(
                         "next_strategy": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 1000,
                             "description": "Optional materially different approach when evidence supports it; never required merely to authorize another corrective attempt.",
                         },
                     },
@@ -485,7 +478,7 @@ def build_public_schemas(
     WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Append one bounded semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned.",
+        "description": "Append one lossless semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned; content volume is advisory in prompts only.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1},
             "task_id": {"type": "string", "minLength": 1},
@@ -516,14 +509,20 @@ def build_public_schemas(
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
             "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
-            "summary": {"type": "string", "minLength": 1, "maxLength": 16000},
-            "findings": {"type": "array", "maxItems": 256},
-            "decisions_needed": {"type": "array", "maxItems": 256},
-            "unresolved": {"type": "array", "maxItems": 256},
+            "summary": {"type": "string", "minLength": 1},
+            "findings": {"type": "array"},
+            "decisions_needed": {"type": "array"},
+            "unresolved": {"type": "array"},
             "claims": {
                 "type": "array",
-                "maxItems": 256,
                 "description": "Optional semantic criterion/evidence claims; Cortex maps them into generated acceptance projections without treating them as identity or telemetry.",
+            },
+            "planning": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": "Planner-only work breakdown. Accepted only for the planner profile on the plan gate; Cortex validates and persists it separately from AttemptResult.",
+                "properties": V3_PLANNING_SCHEMA["properties"],
+                "required": V3_PLANNING_SCHEMA["required"],
             },
         },
         "required": [
@@ -544,7 +543,7 @@ def build_public_schemas(
             "batch_ref": {"type": "string", "description": "Exact ref returned by ask_batch; required for poll_batch."},
             "question": {"type": "string", "minLength": 1, "description": "Material user decision; required for ask."},
             "header": {"type": "string"},
-            "options": {"type": "array", "maxItems": 32, "items": question_option_schema},
+            "options": {"type": "array", "items": question_option_schema},
             "multiple": {"type": "boolean"},
             "custom_label": {"type": "string"},
             "context": {},
@@ -558,7 +557,7 @@ def build_public_schemas(
                 "properties": {
                     "batch_key": {"type": "string", "minLength": 1},
                     "questions": {
-                        "type": "array", "minItems": 1, "maxItems": 32,
+                        "type": "array", "minItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
@@ -567,7 +566,7 @@ def build_public_schemas(
                                 "question": {"type": "string", "minLength": 1},
                                 "type": {"type": "string", "enum": ["single_select", "multi_select", "text"]},
                                 "header": {"type": "string"},
-                                "options": {"type": "array", "maxItems": 32, "items": question_option_schema},
+                                "options": {"type": "array", "items": question_option_schema},
                                 "custom_label": {"type": "string"},
                                 "context": {"type": "string", "description": "Evidence or conflict that makes this user decision necessary."},
                                 "recommendation": {"type": "string", "minLength": 1, "description": "Required LLM rationale for the recommended answer; neutrality is expressed in the rationale, never by omission."},
@@ -606,7 +605,7 @@ def build_public_schemas(
             "dispatch_ref": {"type": "string", "minLength": 1},
             "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing; task, worker identity, dispatch and digest remain required on every call."},
-            "max_bytes": {"type": "integer", "minimum": 1, "description": "Requested UTF-8 briefing-part size. Values above the safe 32768-byte transport bound are normalized to 32768 and continued with next_cursor."},
+            "max_bytes": {"type": "integer", "minimum": 1, "description": "Optional caller-selected UTF-8 briefing page size. Omit it to read the complete immutable briefing; Cortex does not clamp it."},
         },
         "required": [
             "project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest",
@@ -823,7 +822,9 @@ def v3_response(
             "dispatch.call exactly once with its exact dispatch.arguments. Until every returned dispatch has been "
             "invoked, do not call start_orchestration, continue_orchestration, manage_orchestration, inspect, or wait. "
             "A worker exists only after the native call returns a child target. Never claim it was sent or call wait "
-            "without the returned child target. Wait only for those targets. Each worker must publish through "
+            "without the returned child target. Do not substitute a generic collaboration spawn, self-authored task "
+            "name, or replacement child: it cannot bind to or advance the issued Cortex attempt. Wait only for those "
+            "returned targets. Each worker must publish through "
             "complete_attempt. For each terminal worker, read its exact returned attempt_result_ref with read_worker_result, "
             "then copy that server-returned read_worker_result.continuation.step and continuation.results verbatim into "
             "continue_orchestration; never increment its step or substitute a projection_ref/formatted reference. Only "

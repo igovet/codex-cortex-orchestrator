@@ -23,8 +23,6 @@ def validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any],
         if not project_doc.is_file() or project_doc.is_symlink():
             missing_project_docs.append(relative)
             continue
-        if project_doc.stat().st_size > 512 * 1024:
-            raise ValueError(f"canonical harvest project document exceeds the 512 KiB validation limit: {relative}")
         if len(re.findall(r"[A-Za-z0-9]+", project_doc.read_text(encoding="utf-8"))) < 12:
             raise ValueError(f"canonical harvest project document is shallow or empty: {relative}")
         project_doc_paths[relative] = project_doc
@@ -55,8 +53,6 @@ def validate_harvest_coverage_manifest(project_root: Path, task: dict[str, Any],
     )
     if not path.is_file() or path.is_symlink():
         raise ValueError("harvest coverage manifest is missing: docs/features/index.md")
-    if path.stat().st_size > 512 * 1024:
-        raise ValueError("harvest coverage manifest exceeds the 512 KiB validation limit")
     raw_text = path.read_text(encoding="utf-8")
     text = raw_text.lower()
     missing = []

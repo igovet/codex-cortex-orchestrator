@@ -46,10 +46,6 @@ EVENT_TYPES = WORKER_EVENT_TYPES | SYSTEM_EVENT_TYPES
 _EVENT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SUBMISSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_MAX_RESULT_SUMMARY_CHARS = 16_000
-_MAX_RESULT_COLLECTION_ITEMS = 256
-_MAX_RESULT_JSON_BYTES = 512 * 1024
-_MAX_EVENT_JSON_BYTES = 128 * 1024
 
 
 @dataclass(frozen=True)
@@ -103,10 +99,14 @@ def _decode_json(text: object, label: str, *, expected: type | tuple[type, ...] 
     return value
 
 
-def _bounded_json(value: Any, *, label: str, maximum: int) -> Any:
-    encoded = _canonical_json(value).encode("utf-8")
-    if len(encoded) > maximum:
-        raise ValueError(f"attempt protocol {label} exceeds the bounded storage limit")
+def _bounded_json(value: Any, *, label: str, maximum: int | None = None) -> Any:
+    """Validate exact JSON without imposing a content-volume quota.
+
+    Attempt rows are canonical SQLite evidence.  Their size is guidance for
+    worker prompts, not a reason to reject a complete result or event.
+    """
+    del label, maximum
+    _canonical_json(value)
     return value
 
 
@@ -115,10 +115,8 @@ def _normalise_collection(value: Any, *, label: str) -> tuple[Any, ...]:
         return ()
     if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
         raise ValueError(f"attempt result {label} must be an array")
-    if len(value) > _MAX_RESULT_COLLECTION_ITEMS:
-        raise ValueError(f"attempt result {label} has too many items")
     values = tuple(value)
-    _bounded_json(values, label=label, maximum=_MAX_RESULT_JSON_BYTES)
+    _bounded_json(values, label=label)
     return values
 
 
@@ -165,8 +163,6 @@ def _normalise_result(
     normalized_summary = candidate.summary.strip()
     if not normalized_summary:
         raise ValueError("attempt result summary is required")
-    if len(normalized_summary) > _MAX_RESULT_SUMMARY_CHARS:
-        raise ValueError("attempt result summary exceeds the bounded storage limit")
     normalized = AttemptResult(
         status=normalized_status,
         summary=normalized_summary,
@@ -175,7 +171,7 @@ def _normalise_result(
         unresolved=_normalise_collection(candidate.unresolved, label="unresolved"),
         claims=_normalise_collection(candidate.claims, label="claims"),
     )
-    _bounded_json(normalized.as_dict(), label="result", maximum=_MAX_RESULT_JSON_BYTES)
+    _bounded_json(normalized.as_dict(), label="result")
     return normalized
 
 
@@ -316,9 +312,7 @@ def _workspace_metadata(attempt: Mapping[str, Any], observation: Mapping[str, An
             raise ValueError("workspace observation contains an unsafe changed file path")
         if path not in changed_files:
             changed_files.append(path)
-    if len(changed_files) > _MAX_RESULT_COLLECTION_ITEMS:
-        raise ValueError("workspace observation has too many changed files")
-    _bounded_json(changed_files, label="changed_files", maximum=_MAX_RESULT_JSON_BYTES)
+    _bounded_json(changed_files, label="changed_files")
     return base, changed_files, "server_observed"
 
 
@@ -347,7 +341,7 @@ def _append_event(
     payload: Any,
     actor: str,
     event_key: str | None = None,
-    maximum_payload_bytes: int = _MAX_EVENT_JSON_BYTES,
+    maximum_payload_bytes: int | None = None,
 ) -> tuple[dict[str, Any], bool]:
     if event_type not in EVENT_TYPES:
         raise ValueError("attempt event type is unsupported")
@@ -386,6 +380,29 @@ def _append_event(
     if created is None:  # Defensive: the insert has a primary key and is in this transaction.
         raise ValueError("attempt event could not be read after persistence")
     return _event_row(created), False
+
+
+def _require_briefing_receipt(connection: Any, *, task_id: str, attempt_id: str) -> None:
+    """Require the server-owned briefing read before worker progress/completion.
+
+    This check deliberately runs inside the same write transaction as the
+    caller's mutation.  A worker that skipped ``read_dispatch_briefing`` must
+    receive a retryable correction and leave neither an event nor a canonical
+    result behind.  Keeping the guard in the protocol (rather than only in a
+    transport facade) protects every runtime ingress, including the small
+    contract adapter used by integration tests and local hosts.
+    """
+    receipt = connection.execute(
+        "SELECT 1 FROM attempt_events "
+        "WHERE task_id=? AND attempt_id=? AND event_type='briefing_acknowledged' "
+        "ORDER BY sequence LIMIT 1",
+        (task_id, attempt_id),
+    ).fetchone()
+    if receipt is None:
+        raise ValueError(
+            "briefing read receipt is required before worker progress or completion; "
+            "retry read_dispatch_briefing on this same attempt"
+        )
 
 
 def _result_row(row: Any) -> dict[str, Any]:
@@ -439,6 +456,7 @@ def record_attempt_event(
     ledger_db.ensure_database(ledger_root)
     with ledger_db.connection(ledger_root, write=True) as connection:
         _load_task_and_attempt(connection, task_id=task_id, attempt_id=attempt_id)
+        _require_briefing_receipt(connection, task_id=task_id, attempt_id=attempt_id)
         result = connection.execute(
             "SELECT lifecycle_status FROM attempt_results WHERE task_id=? AND attempt_id=?",
             (task_id, attempt_id),
@@ -656,6 +674,7 @@ def complete_attempt(
         definition, state, attempt = _load_task_and_attempt(
             connection, task_id=task_id, attempt_id=attempt_id,
         )
+        _require_briefing_receipt(connection, task_id=task_id, attempt_id=attempt_id)
         existing = connection.execute(
             "SELECT * FROM attempt_results WHERE task_id=? AND attempt_id=?", (task_id, attempt_id)
         ).fetchone()
@@ -893,19 +912,25 @@ def list_attempt_events(
     *,
     task_id: str,
     attempt_id: str,
-    limit: int = 256,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return one bounded ordered checkpoint stream for an exact attempt."""
-    if not 1 <= int(limit) <= 1024:
-        raise ValueError("attempt event limit must be from 1 through 1024")
+    """Return the complete ordered checkpoint stream for an exact attempt."""
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        raise ValueError("attempt event limit must be a positive integer when supplied")
     ledger_root = _root(root)
     ledger_db.ensure_database(ledger_root)
     with ledger_db.connection(ledger_root) as connection:
         _load_task_and_attempt(connection, task_id=task_id, attempt_id=attempt_id)
-        rows = connection.execute(
-            "SELECT * FROM attempt_events WHERE task_id=? AND attempt_id=? ORDER BY sequence LIMIT ?",
-            (task_id, attempt_id, int(limit)),
-        ).fetchall()
+        if limit is None:
+            rows = connection.execute(
+                "SELECT * FROM attempt_events WHERE task_id=? AND attempt_id=? ORDER BY sequence",
+                (task_id, attempt_id),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT * FROM attempt_events WHERE task_id=? AND attempt_id=? ORDER BY sequence LIMIT ?",
+                (task_id, attempt_id, limit),
+            ).fetchall()
     return [_event_row(row) for row in rows]
 
 

@@ -34,11 +34,16 @@ _EXPECTED_GATES = frozenset((
     "review", "documentation", "close", "governance_activation", "governance_close",
 ))
 _COORDINATOR_COMPLETION_CONTRACT = (
-    "A native spawn or wait is never completion evidence. For every terminal worker, the coordinator must read its exact "
+    "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned "
+    "dispatch.call with unmodified dispatch.arguments; a generic collaboration spawn, self-authored task name, or "
+    "replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the coordinator must read its exact "
     "canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned "
     "continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only "
     "the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator "
-    "must neither present completion nor close the worker as consumed."
+    "must neither present completion nor close the worker as consumed. A successful continue is one-shot: follow only "
+    "its returned dispatch/wait/terminal outcome; never call continue again with the same step/results, request artifacts, "
+    "add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is terminal: "
+    "stop and result the blocker."
 )
 
 
@@ -148,6 +153,9 @@ def load_prompt_contract(path: Path = PROMPT_CONTRACT_PATH) -> dict[str, Any]:
 
 PROMPT_CONTRACT = load_prompt_contract()
 PROMPT_CONTRACT_DIGEST = _contract_digest(PROMPT_CONTRACT)
+PROMPT_VOLUME_GUIDANCE = str(
+    PROMPT_CONTRACT["v3"].get("prompt_volume_guidance") or ""
+).strip()
 
 
 def prompt_contract_digest(contract: Mapping[str, Any] | None = None) -> str:
@@ -238,10 +246,17 @@ def compile_v3_briefing(
     Task values are accepted only as ``assignment``.  All other parameters are
     policy strings selected by the runtime from canonical bundled sources.
     """
+    # Volume targets belong to the worker prompt as advisory behavior.  Keep
+    # the rule in the canonical v3 compiler so every profile receives the
+    # same no-loss contract; it must never be implemented as a backend gate.
+    effective_constraints = " ".join(
+        part for part in (str(hard_constraints).strip(), PROMPT_VOLUME_GUIDANCE)
+        if part
+    )
     return compile_prompt(
         (
             PromptSection("authority", authority, required=True),
-            PromptSection("hard_constraints", hard_constraints, required=True),
+            PromptSection("hard_constraints", effective_constraints, required=True),
             PromptSection("assignment", assignment_json_block(assignment), required=True),
             PromptSection("role", role_delta, required=True),
             PromptSection("mode", mode_delta),
@@ -328,7 +343,11 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
     expected_budgets = {key: contract["budgets"][key] for key in (
         "bootstrap_target_bytes", "ordinary_briefing_target_bytes", "harvest_briefing_target_bytes",
     )}
-    if shared_budgets != expected_budgets:
+    if (
+        not isinstance(shared_budgets, dict)
+        or {key: shared_budgets.get(key) for key in expected_budgets} != expected_budgets
+        or shared_budgets.get("semantics") != contract.get("prompt_guidance_semantics")
+    ):
         issues.append("profiles.json prompt budgets differ from prompt-contracts.json")
     skill_root = root / "plugins/cortex/skills"
     required_skills = set(contract["lint"]["required_skills"])

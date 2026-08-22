@@ -71,78 +71,51 @@ _GENERIC_NUMBERED_QUESTION = re.compile(
     re.IGNORECASE,
 )
 
-# Durable question records are deliberately small enough to be returned to a
-# coordinator and mirrored into the AttemptEvent stream.  ``redact`` is a
-# safety transformation, not a storage compressor: callers must never be able
-# to smuggle an oversized value through a display limit and leave a truncated
-# canonical question or answer in SQLite.
-_MAX_QUESTION_DOCUMENT_BYTES = 512 * 1024
-_MAX_QUESTION_CONTEXT_BYTES = 64 * 1024
-_MAX_QUESTION_ANSWER_BYTES = 64 * 1024
-_MAX_STRUCTURED_DEPTH = 12
-_MAX_STRUCTURED_LIST_ITEMS = 100
-_MAX_STRUCTURED_STRING_CHARS = 2_000
-
-
 def _canonical_json_bytes(value: object, *, label: str, maximum: int) -> int:
-    """Validate one lossless JSON value before a durable question write."""
+    """Validate one lossless strict JSON value without a size quota."""
     try:
         encoded = json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be JSON-serializable") from exc
-    if len(encoded) > maximum:
-        raise ValueError(f"{label} exceeds the bounded storage limit")
+    del label, maximum
     return len(encoded)
 
 
 def _require_untruncated_text(value: object, *, label: str, maximum_chars: int) -> str:
-    """Reject a value which a legacy display helper would otherwise truncate."""
-    # Measure the exact submitted value.  Some callers trim before storage,
-    # but a long whitespace prefix must not evade a length guard and then be
-    # truncated by a downstream sanitizer.
-    text = str(value or "")
-    if len(text) > maximum_chars:
-        raise ValueError(f"{label} exceeds the bounded storage limit")
-    return text
+    """Preserve exact text; prompt guidance rather than backend owns length."""
+    del label, maximum_chars
+    return str(value or "")
 
 
 def _validate_sanitized_structure(value: object, *, label: str, maximum_bytes: int, depth: int = 0) -> None:
-    """Ensure ``sanitize_structured`` cannot discard part of a canonical value.
+    """Ensure the value is strict JSON without volume/depth quotas.
 
     Sensitive values are still redacted intentionally by the shared safety
-    helper.  The bounds here apply to ordinary content and are checked before
-    that helper runs, so normal size enforcement is lossless and retry-safe.
+    helper; that transformation is not a content-size policy.
     """
-    if depth > _MAX_STRUCTURED_DEPTH:
-        raise ValueError(f"{label} exceeds the bounded storage depth")
+    del depth
     _canonical_json_bytes(value, label=label, maximum=maximum_bytes)
     if isinstance(value, dict):
         for key, item in value.items():
-            _require_untruncated_text(key, label=f"{label} key", maximum_chars=256)
-            _validate_sanitized_structure(
-                item, label=label, maximum_bytes=maximum_bytes, depth=depth + 1,
-            )
+            _require_untruncated_text(key, label=f"{label} key", maximum_chars=0)
+            _validate_sanitized_structure(item, label=label, maximum_bytes=maximum_bytes)
     elif isinstance(value, list):
-        if len(value) > _MAX_STRUCTURED_LIST_ITEMS:
-            raise ValueError(f"{label} has too many items")
         for item in value:
-            _validate_sanitized_structure(
-                item, label=label, maximum_bytes=maximum_bytes, depth=depth + 1,
-            )
+            _validate_sanitized_structure(item, label=label, maximum_bytes=maximum_bytes)
     else:
         # ``sanitize_structured`` stringifies every scalar, not just strings.
         # A huge numeric or other JSON scalar would otherwise be truncated by
         # that conversion even though it passed JSON byte validation.
-        _require_untruncated_text(value, label=label, maximum_chars=_MAX_STRUCTURED_STRING_CHARS)
+        _require_untruncated_text(value, label=label, maximum_chars=0)
 
 
 def _validate_question_options(value: object, *, label: str) -> None:
     if value in (None, "", []):
         return
-    if not isinstance(value, list) or len(value) > 32:
-        raise ValueError(f"{label} must be a list with at most 32 choices")
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
     for option in value:
         if isinstance(option, str):
             _require_untruncated_text(option, label=f"{label} label", maximum_chars=120)
@@ -172,7 +145,7 @@ def _validate_single_question_submission(params: dict[str, Any]) -> None:
         _require_untruncated_text(params.get("recommended_answer"), label="worker question recommended_answer", maximum_chars=1_200)
     _validate_question_options(params.get("options"), label="worker question options")
     _validate_sanitized_structure(
-        params.get("context", {}), label="worker question context", maximum_bytes=_MAX_QUESTION_CONTEXT_BYTES,
+        params.get("context", {}), label="worker question context", maximum_bytes=0,
     )
 
 
@@ -183,19 +156,19 @@ def _validate_question_answer_submission(params: dict[str, Any]) -> None:
     if isinstance(answer, str):
         _require_untruncated_text(answer, label="worker question answer", maximum_chars=8_000)
     else:
-        _validate_sanitized_structure(answer, label="worker question answer", maximum_bytes=_MAX_QUESTION_ANSWER_BYTES)
+        _validate_sanitized_structure(answer, label="worker question answer", maximum_bytes=0)
     if isinstance(answer_en, str):
         _require_untruncated_text(answer_en, label="worker question answer_en", maximum_chars=8_000)
     else:
-        _validate_sanitized_structure(answer_en, label="worker question answer_en", maximum_bytes=_MAX_QUESTION_ANSWER_BYTES)
+        _validate_sanitized_structure(answer_en, label="worker question answer_en", maximum_bytes=0)
     _validate_sanitized_structure(
-        params.get("resume_context"), label="worker question resume_context", maximum_bytes=_MAX_QUESTION_CONTEXT_BYTES,
+        params.get("resume_context"), label="worker question resume_context", maximum_bytes=0,
     )
 
 
 def _validate_question_document(record: dict[str, Any], *, label: str) -> None:
     """Last pre-write guard for every durable question/batch document."""
-    _canonical_json_bytes(record, label=label, maximum=_MAX_QUESTION_DOCUMENT_BYTES)
+    _canonical_json_bytes(record, label=label, maximum=0)
 
 
 # The runtime binding supplies the SQLite writer from ``cortex.py``.  Wrap it
@@ -1580,7 +1553,7 @@ def _refresh_batch_answer_state(record: dict[str, Any], params: dict[str, Any]) 
         supplied = {}
     if not isinstance(supplied, dict):
         raise ValueError("canonical_answers must be an object keyed by a free-text or custom-response question_key")
-    _canonical_json_bytes(supplied, label="canonical_answers", maximum=_MAX_QUESTION_ANSWER_BYTES)
+    _canonical_json_bytes(supplied, label="canonical_answers", maximum=0)
     question_by_key = {str(item["question_key"]): item for item in record.get("questions") or []}
     unknown = sorted(set(supplied) - set(question_by_key))
     if unknown:

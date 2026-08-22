@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex
-from cortex_runtime import attempt_protocol, briefings, governance, ledger_db
+from cortex_runtime import attempt_protocol, governance, ledger_db
 
 
 class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
@@ -99,25 +99,22 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         )
         self.assertEqual(custom_policy["policy_snapshot"]["off_assessment"], self.no_risk_assessment())
 
-    def test_unicode_oversized_approval_basis_is_rejected_before_governance_mutation(self) -> None:
-        """A lifecycle basis is durable content, not an unbounded side channel."""
+    def test_unicode_oversized_approval_basis_is_stored_without_a_content_quota(self) -> None:
+        """Approval basis is canonical durable content, not a size-gated side channel."""
         self.add_task("task-1")
-        # Each string stays below the per-string guard; only the canonical
-        # UTF-8 JSON aggregate exceeds the record/lifecycle budget.
         oversized = ["🙂" * 16_000] * 5
-        with self.assertRaises(governance.GovernanceError) as raised:
-            governance.create_record(
-                self.root,
-                record_type="decision",
-                task_id="task-1",
-                content={"decision": "bounded"},
-                approval_basis={"unicode": oversized},
-            )
-        self.assertEqual(raised.exception.code, "content_size_exceeded")
+        record = governance.create_record(
+            self.root,
+            record_type="decision",
+            task_id="task-1",
+            content={"decision": "lossless"},
+            approval_basis={"unicode": oversized},
+        )
+        self.assertEqual(record["approval_basis_json"], {"unicode": oversized})
         with ledger_db._connection(self.root) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM governance_records").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM governance_record_lifecycle").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM artifact_blobs").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM governance_records").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM governance_record_lifecycle").fetchone()[0], 1)
+            self.assertGreater(connection.execute("SELECT byte_size FROM artifact_blobs ORDER BY rowid DESC LIMIT 1").fetchone()[0], 1)
 
     def test_c3_floor_and_explicit_risk_triggers_cannot_be_lowered(self) -> None:
         self.assertEqual(
@@ -191,26 +188,6 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 [{"wave_id": "bad", "delegations": [{"gate": "governance_activation", "agent": "general"}]}],
                 task,
             )
-
-    def test_governance_pipeline_transport_projection_keeps_full_lifecycle_edges(self) -> None:
-        """A defensive projection must not falsely hide the final close edge."""
-        pipeline = [
-            "governance_activation",
-            *[f"historical_gate_{index:02d}" for index in range(20)],
-            "governance_close",
-            "close",
-        ]
-        projected, metadata = briefings._compact_governance_pipeline(pipeline)
-        self.assertEqual(projected[0], "governance_activation")
-        self.assertEqual(projected[-2:], ["governance_close", "close"])
-        self.assertEqual(metadata, {
-            "schema": "cortex/governance-pipeline-projection/v1",
-            "total_gates": len(pipeline),
-            "selected_gates": len(projected),
-            "omitted_middle_gates": len(pipeline) - len(projected),
-            "truncated": True,
-            "full_pipeline_source": "task_contract",
-        })
 
     def test_activation_briefing_reviews_governance_boundary_not_future_delivery(self) -> None:
         project = Path(self.temp.name) / "activation-briefing"
@@ -288,7 +265,7 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         activation = started["dispatches"][0]
         self.assertEqual(activation["phase"], "governance_activation")
         briefing = Path(activation["briefing_path"]).read_text(encoding="utf-8")
-        self.assertLessEqual(len(briefing.encode("utf-8")), 14_500)
+        self.assertIn("Prompt volume targets are advisory worker guidance only", briefing)
         route = [
             "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>",
             "Answer=>followup_task same child",
@@ -800,23 +777,23 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 content={"sensitive": True, "summary": "bounded", "raw_value": "must not persist"},
                 initiative_ref=field_scoped["initiative_ref"],
             )
-        with self.assertRaisesRegex(governance.GovernanceError, "too many array items"):
-            governance.create_record(
-                self.root,
-                record_type="learning",
-                content={"items": ["bounded"] * 1025},
-                initiative_ref=initiative["initiative_ref"],
-            )
+        large_record = governance.create_record(
+            self.root,
+            record_type="learning",
+            content={"items": ["lossless"] * 1025},
+            initiative_ref=initiative["initiative_ref"],
+        )
+        self.assertEqual(len(large_record["content_json"]["items"]), 1025)
         nested: object = "leaf"
-        for _ in range(governance.MAX_GOVERNANCE_CONTENT_DEPTH + 2):
+        for _ in range(40):
             nested = {"next": nested}
-        with self.assertRaisesRegex(governance.GovernanceError, "nesting exceeds"):
-            governance.create_record(
-                self.root,
-                record_type="learning",
-                content=nested,
-                initiative_ref=initiative["initiative_ref"],
-            )
+        nested_record = governance.create_record(
+            self.root,
+            record_type="learning",
+            content=nested,
+            initiative_ref=initiative["initiative_ref"],
+        )
+        self.assertEqual(nested_record["content_json"], nested)
 
     def test_close_evidence_cannot_reuse_or_import_cross_scope_artifacts(self) -> None:
         self.add_task("task-204")
@@ -901,12 +878,22 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
             "attempt_id": "governance-close-1",
             "gate": "governance_close",
             "agent": "code_reviewer",
+            "dispatch_ref": "dispatch-governance-close-1",
+            "briefing_digest": "briefing-governance-close-1",
+            "briefing_artifact_ref": "artifact-governance-close-1",
             "status": "passed",
             "invalidated": False,
             "result_baseline_ref": "baseline-close-review",
             "result_baseline_digest": "a" * 64,
         }]
         ledger_db.update_task_state(self.root, state)
+        attempt_protocol.acknowledge_briefing(
+            self.root,
+            task_id="task-203",
+            attempt_id="governance-close-1",
+            dispatch_ref="dispatch-governance-close-1",
+            digest="briefing-governance-close-1",
+        )
         attempt_protocol.record_verification_observation(
             self.root,
             task_id="task-203",
