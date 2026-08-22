@@ -93,7 +93,15 @@ MAX_LIFECYCLE_EVENTS = 1000
 MAX_LIFECYCLE_BYTES = 256 * 1024
 MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
 MAX_CACHEABLE_READ_BYTES = 64 * 1024
-CORTEX_START_TOOLS = {"mcp__cortex__start_orchestration", "mcp__cortex__manage_orchestration"}
+# Every response that can create a pending native dispatch must immediately
+# reassert the host-call boundary.  In particular, a successful continue can
+# return ``ready_to_spawn`` for the next wave; treating that response as a
+# generic collaboration request left the durable attempt unbound.
+CORTEX_START_TOOLS = {
+    "mcp__cortex__start_orchestration",
+    "mcp__cortex__continue_orchestration",
+    "mcp__cortex__manage_orchestration",
+}
 READ_ONLY_FILE_TOOLS = {"Read", "Grep", "Glob"}
 CACHEABLE_FILE_READ_TOOLS = {"Read"}
 WAIT_TARGET_KEYS = (
@@ -854,7 +862,9 @@ def dispatch_required_context(event: dict) -> str | None:
         f"CORTEX DISPATCH REQUIRED NOW: {len(dispatches)} top-level dispatch(es) are authorized by this exact "
         "response. Your next tool call must invoke dispatches[0].call with dispatches[0].arguments; continue in "
         "returned order. Do not call wait, inspect, start, or continue before every native spawn call returns its "
-        "child id. A planned dispatch or empty wait is not a spawned worker." + suffix
+        "child id. Do not use a generic collaboration spawn, self-authored task name, or replacement child as a "
+        "substitute: it cannot bind to or advance this Cortex attempt. A planned dispatch or empty wait is not a "
+        "spawned worker." + suffix
     )
 
 

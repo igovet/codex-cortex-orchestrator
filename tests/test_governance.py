@@ -901,12 +901,22 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
             "attempt_id": "governance-close-1",
             "gate": "governance_close",
             "agent": "code_reviewer",
+            "dispatch_ref": "dispatch-governance-close-1",
+            "briefing_digest": "briefing-governance-close-1",
+            "briefing_artifact_ref": "artifact-governance-close-1",
             "status": "passed",
             "invalidated": False,
             "result_baseline_ref": "baseline-close-review",
             "result_baseline_digest": "a" * 64,
         }]
         ledger_db.update_task_state(self.root, state)
+        attempt_protocol.acknowledge_briefing(
+            self.root,
+            task_id="task-203",
+            attempt_id="governance-close-1",
+            dispatch_ref="dispatch-governance-close-1",
+            digest="briefing-governance-close-1",
+        )
         attempt_protocol.record_verification_observation(
             self.root,
             task_id="task-203",

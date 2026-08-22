@@ -205,6 +205,40 @@ def _automatic_governance_close(package: dict[str, Any]) -> bool:
     return True
 
 
+def _governance_projection_instruction(package: Mapping[str, Any]) -> str:
+    """Return the worker rule for an existing or incomplete governance basis."""
+    governance = package.get("governance_context")
+    if not isinstance(governance, Mapping):
+        return ""
+    effective_mode = str(governance.get("effective_mode") or "").strip().lower()
+    if effective_mode not in {"light", "full"}:
+        return ""
+    required = (
+        isinstance(governance.get("policy_snapshot"), Mapping)
+        and bool(governance.get("policy_snapshot"))
+        and bool(re.fullmatch(r"[0-9a-f]{64}", str(governance.get("policy_snapshot_digest") or "").strip().lower()))
+        and bool(str(governance.get("manifest_ref") or "").strip())
+        and bool(str(governance.get("manifest_digest") or "").strip())
+        and isinstance(governance.get("current_pipeline"), list)
+        and bool(governance.get("current_pipeline"))
+    )
+    if required:
+        return (
+            "SERVER-OWNED GOVERNANCE PROJECTION: governance is required. Assignment has "
+            "policy_snapshot/policy_snapshot_digest, manifest_ref/manifest_digest, "
+            "current_pipeline, and effective_mode. Treat present values as final server "
+            "evidence, verify digests, and do not ask the user to choose or reconfirm them."
+        )
+    return (
+        "SERVER-OWNED GOVERNANCE PROJECTION IS INCOMPLETE: governance is required, but "
+        "Assignment is missing a policy snapshot/digest, manifest ref/digest, or current "
+        "pipeline. Do not invent or infer the missing server fact; do not silently continue; "
+        "record one durable worker_question "
+        "for the exact missing server fact and why it blocks verification. Do not ask the "
+        "user to select a policy."
+    )
+
+
 _MAX_GOVERNANCE_PIPELINE_GATES = 16
 
 
@@ -247,6 +281,11 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
     deterministically shortened when the complete rendered briefing is above
     the safe native transport target.
     """
+    governance = assignment.get("governance_context")
+    governance_required = (
+        isinstance(governance, dict)
+        and str(governance.get("effective_mode") or "").strip().lower() in {"light", "full"}
+    )
     # These pairs are the same canonical arrays in ordinary dispatch packages;
     # retain the gate/task-labelled copies used by the worker contract.
     if "gate_acceptance_criteria" in assignment or "task_acceptance_criteria" in assignment:
@@ -257,8 +296,9 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
     assignment.pop("rework_escalation", None)
     assignment.pop("plan_feedback", None)
     assignment.pop("plan_tracker", None)
-    assignment.pop("budget", None)
-    assignment.pop("pause_conditions", None)
+    if not governance_required:
+        assignment.pop("budget", None)
+        assignment.pop("pause_conditions", None)
     contract = assignment.get("task_contract")
     if isinstance(contract, dict):
         projection = assignment.get("task_projection")
@@ -280,6 +320,7 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
         for key in (
             "schema", "requested_mode", "effective_mode", "complexity",
             "initiative_ref", "autonomous_scope_ref", "policy_snapshot_digest",
+            "manifest_ref", "manifest_digest",
         ):
             value = governance.get(key)
             if value not in (None, ""):
@@ -309,6 +350,11 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
         # The canonical handoff and resolved-user-decision projection already
         # carry these duplicate target/decision fields. Keep receipt state and
         # schema, plus compact server-owned transitions for provenance.
+        # Assignment already carries the bounded task fields and the immutable
+        # task-contract ref. Keeping the full compiled task object here would
+        # duplicate requirements/acceptance/verification and force the final
+        # UTF-8 budget pass to clip the user-intent preview unnecessarily.
+        compiled_context.pop("task", None)
         compiled_context.pop("assignment", None)
         transitions = compiled_context.get("event_transitions")
         if isinstance(transitions, list):
@@ -370,14 +416,22 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
         if isinstance(mission, str):
             assignment["mission"] = _utf8_prefix(mission, 120)
         intent = assignment.get("user_intent")
-        if isinstance(intent, dict):
+        if isinstance(intent, dict) and not isinstance(assignment.get("task_contract"), dict):
             intent["projection"] = _utf8_prefix(str(intent.get("projection") or ""), 160)
+
+        # When the immutable contract is present, its digest/ref already
+        # records the full task-derived projection.  Drop only the duplicate
+        # transport metadata so the exact user-intent preview can remain
+        # intact within the UTF-8 budget.
+        if isinstance(assignment.get("task_contract"), dict):
+            assignment.pop("task_projection", None)
 
         for field in (
             "requirements", "scope", "context_files", "knowledge_index_files",
             "task_acceptance_criteria", "task_verification", "gate_acceptance_criteria",
             "gate_verification", "resolved_user_decisions", "selection_rationale",
-            "strategy", "intent_clarification_reason",
+            "strategy", "intent_clarification_reason", "plan_tracker_ref", "budget",
+            "pause_conditions", "intent_clarification_required",
         ):
             assignment.pop(field, None)
         if isinstance(compiled_context, dict):
@@ -388,7 +442,7 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
                 key: governance[key]
                 for key in (
                     "schema", "requested_mode", "effective_mode", "complexity",
-                    "policy_snapshot_digest", "current_pipeline",
+                    "policy_snapshot_digest", "manifest_ref", "manifest_digest", "current_pipeline",
                     "current_pipeline_projection",
                 )
                 if key in governance
@@ -397,7 +451,14 @@ def _compact_assignment_for_transport(assignment: dict[str, Any], *, aggressive:
         if isinstance(handoff, dict):
             assignment["handoff"] = {
                 key: handoff[key]
-                for key in ("schema", "target", "server_receipts", "predecessor_selection")
+                for key in (
+                    "schema", "target", "server_receipts", "predecessor_selection",
+                    # The refs are the handoff's only exact successor lookup
+                    # boundary.  Dropping them during aggressive compaction
+                    # left a valid briefing with a target-specific projection
+                    # that could not identify its dynamic predecessors.
+                    "predecessor_result_refs",
+                )
                 if key in handoff
             }
 
@@ -474,6 +535,7 @@ def _admit_assignment_to_budget(assignment: dict[str, Any]) -> bool:
         "requirements", "scope", "task_acceptance_criteria", "task_verification",
         "gate_acceptance_criteria", "gate_verification", "acceptance_criteria",
         "verification", "context_files", "knowledge_index_files", "allowed_paths",
+        "pause_conditions",
         "predecessor_result_refs", "resolved_user_decisions",
     ):
         value = assignment.get(field)
@@ -493,9 +555,17 @@ def _admit_assignment_to_budget(assignment: dict[str, Any]) -> bool:
     # not expendable display context.  Keep it even under hostile input; its
     # own compiler is already bounded and exposes immutable predecessor refs.
     # ``compiled_context`` contains the server receipt/projection boundary and
-    # is therefore required alongside the handoff.  Only optional governance
-    # display and follow-up prose may be removed at this last stage.
+    # is therefore required alongside the handoff.  A required governance
+    # projection is also a dispatch boundary: its full immutable form is in
+    # task_contract, so only a non-governed display slot may be removed here.
     for field in ("governance_context", "follow_up"):
+        governance = assignment.get("governance_context")
+        governance_required = (
+            isinstance(governance, dict)
+            and str(governance.get("effective_mode") or "").strip().lower() in {"light", "full"}
+        )
+        if field == "governance_context" and governance_required:
+            continue
         if assignment.get(field) not in (None, {}, []):
             assignment.pop(field, None)
             return True
@@ -503,12 +573,11 @@ def _admit_assignment_to_budget(assignment: dict[str, Any]) -> bool:
         if assignment.get(field):
             assignment.pop(field, None)
             return True
-    intent = assignment.get("user_intent")
-    if isinstance(intent, dict) and intent.get("projection"):
-        # The immutable intent artifact/ref/digest remains; only its optional
-        # preview is removed after every complete task field was considered.
-        intent.pop("projection", None)
-        return True
+    # Keep the bounded user-intent preview until the final aggressive pass.
+    # The artifact/ref/digest tuple is authoritative, but dropping the preview
+    # here makes a normal harvest briefing look as if the user request was
+    # absent.  The aggressive pass reduces this preview to a short UTF-8
+    # prefix only after every other optional assignment value is exhausted.
     return False
 
 
@@ -690,6 +759,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Acceptance obligations: " + "; ".join(gate_briefing.get("acceptance") or []),
         "Verification obligations: " + "; ".join(gate_briefing.get("verification") or []),
     ]
+    governance_instruction = _governance_projection_instruction(package)
+    if governance_instruction:
+        gate_parts.append(governance_instruction)
     if gate == "governance_activation":
         gate_parts.append(
             "This is a pre-delivery governance activation gate. Evaluate only governance context and activation criteria; "
@@ -778,6 +850,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "Governance-close status=completed requires unresolved=[]; record residual risk, retrospective notes, uncertainty, and non-blocking gaps in summary, claims, or AttemptEvents instead. "
             "This is a read-only result gate: do not edit files or submit changed_files; Cortex owns identity, receipts, timestamps, and trusted observations."
         )
+        governance_instruction = _governance_projection_instruction(package)
+        if governance_instruction:
+            gate_delta += " " + governance_instruction
         if _automatic_governance_close(package):
             gate_delta += (
                 " AUTOMATIC FULL-GOVERNANCE DECISION POLICY: Assignment governance_context requested_mode=auto and effective_mode=full, "

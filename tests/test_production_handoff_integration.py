@@ -645,6 +645,92 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(governance_close["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in governance_close["dispatches"]], ["governance_close"])
 
+    def test_default_c2_chain_materializes_dynamic_briefings_through_documentation(self) -> None:
+        """Every default C2 successor keeps the exact identity/handoff contract.
+
+        The live failure occurred only after several successful successors, so
+        a one-hop handoff test is not enough here.  This enters through the
+        default C2 planner, acknowledges and completes every issued attempt,
+        reads each predecessor through its public receipt boundary, and checks
+        the newly materialized briefing before the next continuation is
+        derived.  In particular, Documentation is reached with a real dynamic
+        predecessor/handoff chain rather than a hand-authored fixture.
+        """
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Complete the default C2 pipeline with an immutable documentation handoff.",
+                "complexity": "C2",
+                "acceptance_criteria": ["Every default gate reaches a canonical completed AttemptResult."],
+                "verification": ["Each successor briefing is readable with its exact issued identity and digest."],
+                "plan_approval": "auto",
+            },
+        })
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["outcome"], "ready_to_spawn")
+
+        expected_gates = (
+            "discover", "plan", "implementation", "qa", "review", "documentation", "close",
+        )
+        current = started
+        completed_refs: list[str] = []
+        for index, expected_gate in enumerate(expected_gates):
+            _task_dir, state, attempt = self._active_attempt()
+            self.assertEqual(attempt["gate"], expected_gate)
+            self.assertEqual(len(current["dispatches"]), 1, current)
+            dispatch = current["dispatches"][0]
+            self.assertEqual(dispatch["dispatch_ref"], attempt["dispatch_ref"])
+
+            # This is the native worker boundary: the read must validate the
+            # same task/attempt/profile/dispatch/digest tuple that was issued.
+            self._read_briefing(state, attempt)
+            package = control._delegation_package(
+                self._task_state()[0], str(state["task_id"]), str(attempt["attempt_id"]),
+            )
+            self.assertLessEqual(package["briefing_bytes"], 14_500)
+            assignment = self._assignment(current)
+            identity = assignment["worker_identity"]
+            self.assertEqual(identity["task_id"], state["task_id"])
+            self.assertEqual(identity["attempt_id"], attempt["attempt_id"])
+            self.assertEqual(identity["profile"], attempt["profile"])
+            self.assertEqual(identity["dispatch_ref"], attempt["dispatch_ref"])
+            self.assertEqual(identity["facade_managed"], bool(attempt["facade_managed"]))
+            self.assertIn("compiled_context", assignment)
+            self.assertIn("handoff", assignment)
+            self.assertEqual(assignment["handoff"]["target"]["gate"], expected_gate)
+            self.assertEqual(
+                assignment["handoff"].get("predecessor_result_refs", []),
+                list(attempt.get("context_result_refs") or []),
+            )
+
+            predecessor_refs = list(attempt.get("context_result_refs") or [])
+            self.assertLessEqual(len(predecessor_refs), 16)
+            self._read_predecessors(state, attempt, str(current["task_ref"]))
+            result_ref = self._complete_strict(
+                state, attempt, f"{expected_gate} completed in the default C2 chain.",
+            )
+            completed_refs.append(result_ref)
+
+            if index < len(expected_gates) - 1:
+                read = self._read_current_continuation(current, result_ref)
+                continuation = read["continuation"]
+                assert isinstance(continuation, dict)
+                current = self._continue_from_server_continuation(current, continuation)
+                self.assertEqual(current["outcome"], "ready_to_spawn", current)
+
+        # The final close result still advances the server-owned lifecycle
+        # marker; do not infer completion merely from the child result.
+        final_read = self._read_current_continuation(current, completed_refs[-1])
+        final_continuation = final_read["continuation"]
+        assert isinstance(final_continuation, dict)
+        completed = self._continue_from_server_continuation(current, final_continuation)
+        self.assertEqual(completed["outcome"], "completed", completed)
+
+        final_state = self._task_state()[1]
+        self.assertEqual(final_state["status"], "completed")
+        self.assertEqual(final_state["completed_gates"], list(expected_gates))
+        self.assertEqual(len(completed_refs), len(expected_gates))
+
     def test_c3_oversized_requirement_continues_after_completed_attempt_without_loss(self) -> None:
         """A legacy-long requirement must not strand the ledger after worker completion.
 

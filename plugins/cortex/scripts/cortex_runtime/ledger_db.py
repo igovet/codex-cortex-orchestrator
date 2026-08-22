@@ -2153,6 +2153,67 @@ def put_worker_session(root: Path, session: dict[str, Any]) -> dict[str, Any]:
     return {**session, "session_id": session_id, "status": status, "last_seen_at": timestamp}
 
 
+def reconcile_terminal_worker_session(
+    root: Path,
+    *,
+    task_id: str,
+    attempt_id: str,
+    terminated_at: str | None = None,
+) -> dict[str, Any]:
+    """Close every persisted native session for one terminal AttemptResult.
+
+    ``worker_sessions`` is the server-observed lifecycle authority.  Once an
+    exact attempt has produced a terminal canonical result, no session for
+    that attempt may remain presented as awaiting, running, or resumable.
+    This is intentionally a named runtime transition rather than a caller
+    issuing an ad-hoc SQL repair: retries are idempotent, preserve the native
+    identity row, and make the terminal timestamp durable before a coordinator
+    can consume the result.
+
+    A missing session is an authority violation, not an invitation to invent a
+    worker identity.  The caller must fail closed and retry/recover through the
+    normal dispatched attempt instead.
+    """
+    ensure_database(root)
+    normalized_task_id = str(task_id or "")
+    normalized_attempt_id = str(attempt_id or "")
+    if not normalized_task_id or not normalized_attempt_id:
+        raise ValueError("terminal worker-session reconciliation requires task_id and attempt_id")
+    stamp = str(terminated_at or _now())
+    with _connection(root, write=True) as connection:
+        rows = connection.execute(
+            """SELECT session_id, status, resumable, terminated_at
+                 FROM worker_sessions
+                 WHERE task_id=? AND attempt_id=?
+                 ORDER BY generation DESC, last_seen_at DESC""",
+            (normalized_task_id, normalized_attempt_id),
+        ).fetchall()
+        if not rows:
+            raise ValueError("terminal AttemptResult has no persisted worker session")
+        changed = 0
+        for row in rows:
+            if (
+                str(row["status"]) != "completed"
+                or bool(row["resumable"])
+                or not row["terminated_at"]
+            ):
+                changed += 1
+        connection.execute(
+            """UPDATE worker_sessions
+                 SET status='completed', resumable=0,
+                     last_seen_at=?, terminated_at=COALESCE(terminated_at, ?)
+                 WHERE task_id=? AND attempt_id=?""",
+            (stamp, stamp, normalized_task_id, normalized_attempt_id),
+        )
+    return {
+        "task_id": normalized_task_id,
+        "attempt_id": normalized_attempt_id,
+        "session_count": len(rows),
+        "reconciled": changed > 0,
+        "idempotent": changed == 0,
+    }
+
+
 def list_worker_sessions(root: Path, task_id: str) -> list[dict[str, Any]]:
     """Read server-owned native worker identities for one task.
 

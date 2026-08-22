@@ -304,7 +304,7 @@ def main() -> int:
         fail("worker final response must be compact and must not contain projection JSON")
     if (
         shared.get("result_lifecycle")
-        != "record_attempt_event checkpoints then complete_attempt closes one AttemptResult; finalization or human-projection failures retry server-side without respawning the worker"
+        != "read_dispatch_briefing receipt precedes record_attempt_event checkpoints and complete_attempt closes one AttemptResult; missing briefing receipt is retryable and leaves no event/result mutation; finalization or human-projection failures retry server-side without respawning the worker"
         or shared.get("result_projection")
         != "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord"
         or shared.get("caller_correctable_tool_errors")

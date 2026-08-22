@@ -177,8 +177,8 @@ class HandoffCompiler:
             "server_receipts": context.get("server_receipts", {}),
             "predecessor_selection": context.get("predecessor_selection", {}),
             "predecessor_result_refs": [
-                str(item.get("result_ref")) for item in predecessors
-                if isinstance(item, Mapping) and str(item.get("result_ref") or "").strip()
+                str(item.get("attempt_result_ref")) for item in predecessors
+                if isinstance(item, Mapping) and str(item.get("attempt_result_ref") or "").strip()
             ],
         }
         changed = _unique([path for item in predecessors for path in item.get("changed_files", [])], limit=64)

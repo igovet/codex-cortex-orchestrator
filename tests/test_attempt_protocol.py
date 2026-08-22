@@ -42,6 +42,15 @@ class AttemptProtocolTests(unittest.TestCase):
             },
             "tasks/0001-attempt-protocol-task",
         )
+        # A worker may emit progress and completion only after the server has
+        # recorded the exact immutable briefing read receipt.
+        attempt_protocol.acknowledge_briefing(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            dispatch_ref="dispatch-attempt-0001",
+            digest="a" * 64,
+        )
 
     def tearDown(self) -> None:
         self._temporary.cleanup()
@@ -64,7 +73,7 @@ class AttemptProtocolTests(unittest.TestCase):
             },
         )
         self.assertFalse(verification["idempotent"])
-        self.assertEqual(verification["event"]["sequence"], 1)
+        self.assertEqual(verification["event"]["sequence"], 2)
 
         completion = attempt_protocol.complete_attempt(
             self.root,
@@ -126,7 +135,8 @@ class AttemptProtocolTests(unittest.TestCase):
         self.assertEqual(projection["result"]["summary"], "Implemented the durable completion protocol.")
         self.assertEqual(projection["result"]["changed_files"], completion["result"]["changed_files"])
         self.assertEqual(projection["attempt_result_ref"], completion["result"]["result_ref"])
-        self.assertEqual(projection["events"][0]["event_type"], "verification_claimed")
+        self.assertEqual(projection["events"][0]["event_type"], "briefing_acknowledged")
+        self.assertIn("verification_claimed", [event["event_type"] for event in projection["events"]])
         self.assertNotIn("verification_observed", [event["event_type"] for event in projection["events"]])
 
         attempt_protocol.record_finalization_failure(
@@ -149,8 +159,76 @@ class AttemptProtocolTests(unittest.TestCase):
             [event["event_type"] for event in attempt_protocol.list_attempt_events(
                 self.root, task_id=self.task_id, attempt_id=self.attempt_id,
             )],
-            ["verification_claimed", "work_completed", "finalization_failed", "finalizing", "completed"],
+            ["briefing_acknowledged", "verification_claimed", "work_completed", "finalization_failed", "finalizing", "completed"],
         )
+
+    def test_worker_progress_and_completion_are_rejected_before_briefing_receipt(self) -> None:
+        """Implementation and documentation cannot mutate before briefing read."""
+        for number, gate in enumerate(("implementation", "documentation"), 2):
+            with self.subTest(gate=gate):
+                unacknowledged_root = Path(self._temporary.name) / f"unacknowledged-{gate}"
+                ledger_db.ensure_database(unacknowledged_root)
+                unacknowledged_task = f"attempt-protocol-unacknowledged-{gate}"
+                unacknowledged_attempt = f"attempt-unacknowledged-{gate}"
+                fixture = self._attempt_fixture(unacknowledged_attempt)
+                fixture["gate"] = gate
+                ledger_db.create_task(
+                    unacknowledged_root,
+                    {"task_id": unacknowledged_task, "project_root": "/workspace/project"},
+                    {
+                        "task_id": unacknowledged_task,
+                        "task_number": number,
+                        "status": "active",
+                        "revision": 1,
+                        "attempts": [fixture],
+                    },
+                    f"tasks/000{number}-attempt-protocol-unacknowledged-{gate}",
+                )
+                with self.assertRaisesRegex(ValueError, "briefing read receipt is required"):
+                    attempt_protocol.record_attempt_event(
+                        unacknowledged_root,
+                        task_id=unacknowledged_task,
+                        attempt_id=unacknowledged_attempt,
+                        event_type="progress",
+                        payload={"summary": "must wait for the briefing receipt"},
+                    )
+                with self.assertRaisesRegex(ValueError, "briefing read receipt is required"):
+                    attempt_protocol.complete_attempt(
+                        unacknowledged_root,
+                        task_id=unacknowledged_task,
+                        attempt_id=unacknowledged_attempt,
+                        status="completed",
+                        summary="must not be accepted before briefing read",
+                    )
+                self.assertEqual(
+                    attempt_protocol.list_attempt_events(
+                        unacknowledged_root,
+                        task_id=unacknowledged_task,
+                        attempt_id=unacknowledged_attempt,
+                    ),
+                    [],
+                )
+                self.assertIsNone(
+                    attempt_protocol.get_attempt_result(
+                        unacknowledged_root,
+                        task_id=unacknowledged_task,
+                        attempt_id=unacknowledged_attempt,
+                    )
+                )
+
+    def _attempt_fixture(self, attempt_id: str) -> dict[str, object]:
+        return {
+            "attempt_id": attempt_id,
+            "gate": "implementation",
+            "profile": "backend_dev",
+            "agent": "backend_dev",
+            "dispatch_ref": "dispatch-" + attempt_id,
+            "briefing_digest": "a" * 64,
+            "briefing_artifact_ref": "artifact-briefing",
+            "result_baseline_ref": "manifest-" + attempt_id,
+            "result_baseline_digest": "b" * 64,
+            "context_result_refs": [],
+        }
 
     def test_workspace_delta_is_omitted_without_safe_server_attribution(self) -> None:
         completion = attempt_protocol.complete_attempt(
@@ -263,10 +341,10 @@ class AttemptProtocolTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            attempt_protocol.list_attempt_events(
+            [event["event_type"] for event in attempt_protocol.list_attempt_events(
                 self.root, task_id=self.task_id, attempt_id=self.attempt_id,
-            ),
-            [],
+            )],
+            ["briefing_acknowledged"],
         )
 
         with self.assertRaisesRegex(ValueError, "bounded storage limit"):
@@ -278,10 +356,10 @@ class AttemptProtocolTests(unittest.TestCase):
                 payload={"evidence": "🙂" * 40_000},  # >128 KiB in UTF-8.
             )
         self.assertEqual(
-            attempt_protocol.list_attempt_events(
+            [event["event_type"] for event in attempt_protocol.list_attempt_events(
                 self.root, task_id=self.task_id, attempt_id=self.attempt_id,
-            ),
-            [],
+            )],
+            ["briefing_acknowledged"],
         )
 
         # The same attempt remains writable; a rejected oversized retry never

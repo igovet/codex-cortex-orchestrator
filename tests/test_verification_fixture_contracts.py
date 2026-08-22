@@ -111,6 +111,8 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         coordinator_completion = contract["attempt_result_contract"]["coordinator_completion"]
         self.assertIn("native spawn or wait is never completion evidence", coordinator_completion)
+        self.assertIn("Every ready_to_spawn response authorizes only its returned dispatch.call", coordinator_completion)
+        self.assertIn("generic collaboration spawn", coordinator_completion)
         self.assertIn("read_worker_result", coordinator_completion)
         self.assertIn("continue_orchestration", coordinator_completion)
         self.assertIn("then close_agent", coordinator_completion)
@@ -346,6 +348,42 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("use list_agents defensively", prompt)
         self.assertIn('"complexity":"C2"', prompt)
         self.assertIn("Verified note: README heading is Luna high Cortex fixture.", prompt)
+        self.assertIn("This automatic-sequential fixture is decision-complete", prompt)
+        self.assertIn("Workers MUST NOT call worker_question", prompt)
+        self.assertIn("do not invent an answer, guess, route, resume, replace the worker, or widen the scope", prompt)
+        self.assertIn("stop the scenario transparently and let the evaluator mark it FAIL", prompt)
+        self.assertIn("The evaluator rejects any question record for this scenario", prompt)
+
+        # The worker receives only the immutable JSON task contract.  The
+        # coordinator-level instruction after the closing tag cannot prevent a
+        # worker from following the generic question rule, so the
+        # decision-complete policy must be inside the contract itself.
+        contract_text = prompt.rsplit("<cortex_task_contract>", 1)[1].split(
+            "</cortex_task_contract>", 1
+        )[0]
+        contract = json.loads(contract_text)
+        self.assertIn("must not call worker_question", contract["user_request"])
+        self.assertTrue(any(
+            "must not publish a question" in str(item)
+            for item in contract["acceptance_criteria"]
+        ))
+
+    def test_automatic_sequential_question_audit_fails_closed_without_retaining_question_data(self) -> None:
+        self.assertEqual(
+            LUNA_EVAL.automatic_sequential_question_audit([]),
+            {
+                "question_state_available": True,
+                "question_count": 0,
+                "no_unexpected_questions": True,
+            },
+        )
+        failed = LUNA_EVAL.automatic_sequential_question_audit([{"question": "sensitive text"}])
+        self.assertFalse(failed["no_unexpected_questions"])
+        self.assertEqual(failed["question_count"], 1)
+        self.assertNotIn("sensitive text", str(failed))
+        unavailable = LUNA_EVAL.automatic_sequential_question_audit(None)
+        self.assertFalse(unavailable["question_state_available"])
+        self.assertFalse(unavailable["no_unexpected_questions"])
 
     def test_blocked_resume_live_prompt_forces_one_valid_future_wave_reassessment(self) -> None:
         prompt = LUNA_EVAL.live_prompt("blocked_resume", Path("/workspace/cortex-live"))

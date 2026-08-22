@@ -41,7 +41,7 @@ class ContextCompilerTests(unittest.TestCase):
             "resolved_user_decisions": [{"question_en": "Migrate the handoff protocol now?", "answer_en": "Use canonical results"}],
             "read_receipts": {"briefing": {"kind": "briefing_read"}, "predecessors": ["result-impl"]},
             "predecessor_results": [{
-                "result_ref": "result-impl", "attempt_id": "attempt-impl", "gate": "implementation",
+                "attempt_result_ref": "result-impl", "attempt_id": "attempt-impl", "gate": "implementation",
                 "profile": "backend_dev", "summary": "Implemented a server-owned receipt store.",
                 "changed_files": ["plugins/cortex/scripts/cortex_runtime/read_receipts.py"],
                 "checks": ["python -m unittest tests.test_context_compiler"],
@@ -54,7 +54,7 @@ class ContextCompilerTests(unittest.TestCase):
         context = ContextCompiler().compile(self.canonical, target_profile="qa_engineer")
         self.assertEqual(context["schema"], "cortex/compiled-worker-context/v1")
         self.assertTrue(context["server_receipts"]["briefing_read"])
-        self.assertEqual(context["predecessor_facts"][0]["result_ref"], "result-impl")
+        self.assertEqual(context["predecessor_facts"][0]["attempt_result_ref"], "result-impl")
         self.assertNotIn("raw_worker_body", context["predecessor_facts"][0])
         self.assertEqual(context["task"]["constraints"], ["Do not allow worker-authored result projections."])
 

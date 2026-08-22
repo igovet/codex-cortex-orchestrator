@@ -690,6 +690,29 @@ def safe_question_management_metadata(item: dict[str, object], result: object) -
     return metadata
 
 
+def safe_dispatch_authorization_metadata(item: dict[str, object], result: object) -> dict[str, object] | None:
+    """Retain only the count of dispatches authorized by a Cortex response.
+
+    The live evaluator deliberately does not retain dispatch arguments, task
+    names, result refs, or child identities.  A bounded dispatch count is
+    enough to reject an extra generic host spawn: it was never authorized by
+    a successful ``start_orchestration`` or ``continue_orchestration`` result
+    and therefore cannot be treated as a Cortex worker cycle.
+    """
+    tool = safe_tool_name(item.get("tool") or item.get("name"))
+    if tool not in {"start_orchestration", "continue_orchestration"}:
+        return None
+    response = public_response_mapping(result)
+    if response.get("ok") is not True:
+        return None
+    dispatches = response.get("dispatches")
+    if not isinstance(dispatches, list) or len(dispatches) > 32:
+        return None
+    if not all(isinstance(dispatch, dict) for dispatch in dispatches):
+        return None
+    return {"authorized_dispatch_count": len(dispatches)}
+
+
 def _has_safe_resume_contract(value: object) -> bool:
     """Return whether an answer response has one canonical public resume shape.
 
@@ -902,6 +925,9 @@ def sanitize_codex_stream_line(line: str) -> dict[str, object]:
         question_metadata = safe_question_management_metadata(item, result)
         if question_metadata is not None:
             safe.update(question_metadata)
+        dispatch_metadata = safe_dispatch_authorization_metadata(item, result)
+        if dispatch_metadata is not None:
+            safe.update(dispatch_metadata)
         if ok is False:
             failure = safe_public_failure_metadata(item, result)
             if failure is not None:
@@ -974,6 +1000,9 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
     pending_reads = pending_continuations = pending_closes = 0
     violation_count = 0
     ambiguous_observations = 0
+    authorized_dispatches = 0
+    dispatch_authorization_observed = False
+    unmatched_native_spawns = 0
     last_operation: str | None = None
     for event in events:
         operation: str | None = None
@@ -997,6 +1026,15 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
                 operation = "close"
         elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
             tool = str(event.get("tool") or "")
+            authorized_count = event.get("authorized_dispatch_count")
+            if (
+                tool in {"start_orchestration", "continue_orchestration"}
+                and type(authorized_count) is int
+                and 0 <= authorized_count <= 32
+                and event.get("ok") is True
+            ):
+                dispatch_authorization_observed = True
+                authorized_dispatches += authorized_count
             if tool == "read_worker_result":
                 operation = "read_result" if event.get("ok") is True else "read_result_other"
             elif tool == "continue_orchestration":
@@ -1011,6 +1049,12 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
         last_operation = operation
         if operation == "spawn":
             spawned += 1
+            if dispatch_authorization_observed and spawned > authorized_dispatches:
+                # This native child was not returned by a successful Cortex
+                # dispatch response.  It remains generic host work and may
+                # not satisfy a Cortex gate even if it later emits terminal
+                # text resembling a worker result.
+                unmatched_native_spawns += 1
         elif operation in {"wait_result", "wait_provisional_result"}:
             if waited >= spawned:
                 violation_count += 1
@@ -1053,11 +1097,14 @@ def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, obj
         "pending_terminal_closes": pending_closes,
         "protocol_violations": violation_count,
         "ambiguous_native_observations": ambiguous_observations,
+        "authorized_native_dispatches": authorized_dispatches,
+        "dispatch_authorization_observed": dispatch_authorization_observed,
+        "unmatched_native_spawns": unmatched_native_spawns,
         "all_observed_workers_terminally_audited": (
             spawned > 0
             and spawned == waited == read == continued == closed
             and pending_reads == pending_continuations == pending_closes == violation_count == 0
-            and ambiguous_observations == 0
+            and ambiguous_observations == unmatched_native_spawns == 0
         ),
     }
 
@@ -1294,6 +1341,28 @@ def safe_question_resolution_audit(
         "all_question_attempts_resolved_before_result": (
             audited and question_attempt_count == resolved_before_result_count
         ),
+    }
+
+
+def automatic_sequential_question_audit(question_records: object) -> dict[str, object]:
+    """Fail closed when the decision-complete sequential fixture gets a question.
+
+    The automatic-sequential task intentionally has no user decision surface.
+    Keep this audit privacy-safe: only the record count and availability are
+    retained, never question text, refs, or answers. A malformed or unavailable
+    question projection is also a failure rather than evidence that no question
+    occurred.
+    """
+    if not isinstance(question_records, list):
+        return {
+            "question_state_available": False,
+            "question_count": None,
+            "no_unexpected_questions": False,
+        }
+    return {
+        "question_state_available": True,
+        "question_count": len(question_records),
+        "no_unexpected_questions": len(question_records) == 0,
     }
 
 
@@ -2225,15 +2294,23 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
     if scenario == "automatic_sequential":
         return common + (
             "<cortex_task_contract>"
-            "{\"user_request\":\"Inspect README.md and append exactly 'Verified note: README heading is Luna high Cortex fixture.' as one new line to result.md, creating the file if absent.\","
+            "{\"user_request\":\"Inspect README.md and append exactly 'Verified note: README heading is Luna high Cortex fixture.' as one new line to result.md, creating the file if absent. This fixture is decision-complete: no material user decision or clarification is required; workers must apply this exact contract and must not call worker_question.\","
             "\"complexity\":\"C2\","
             "\"acceptance_criteria\":[\"README.md is inspected and its heading is confirmed as Luna high Cortex fixture.\","
             "\"result.md contains exactly one appended line: Verified note: README heading is Luna high Cortex fixture.\","
-            "\"The final handoff identifies the changed file and includes evidence that the append was verified.\"],"
+            "\"The final handoff identifies the changed file and includes evidence that the append was verified.\","
+            "\"No material user decision or clarification is required for this fixture; the worker must not publish a question.\"],"
             "\"verification\":[\"Read README.md and confirm its heading, then read result.md and confirm the exact appended line.\","
             "\"Inspect the resulting diff or equivalent file evidence to verify only result.md received the intended line.\"],"
             "\"plan_approval\":\"auto\"}"
-            "</cortex_task_contract>"
+            "</cortex_task_contract> "
+            "This automatic-sequential fixture is decision-complete: the task contract, the current README.md evidence, "
+            "its acceptance criteria, and its verification instructions are the complete authority and scope. No material "
+            "input, policy choice, clarification, or user decision is missing. Workers MUST NOT call worker_question or "
+            "ask the parent for a material decision. If a worker nevertheless returns QUESTION_RECORDED or any durable "
+            "question is observed, do not invent an answer, guess, route, resume, replace the worker, or widen the scope: "
+            "stop the scenario transparently and let the evaluator mark it FAIL. The evaluator rejects any question record "
+            "for this scenario."
         )
     if scenario == "compact_parallel":
         return common + (
@@ -2452,6 +2529,8 @@ def _live_eval(
         terminal_result_audit = safe_terminal_result_audit(state, result_records)
         native_terminal_audit = safe_native_terminal_audit(events)
         question_resolution_audit = safe_question_resolution_audit(ledger, state, result_records)
+        question_records = cortex._question_records(cortex.question_bus_paths(task_dir), state)
+        sequential_question_audit = automatic_sequential_question_audit(question_records)
         attempt_results_valid = all(
             isinstance(record.get("result"), dict)
             and record["result"].get("lifecycle_status") == "COMPLETED"
@@ -2531,6 +2610,10 @@ def _live_eval(
             checks["parallel_native_identity_verifiable"] = False
         if scenario == "blocked_resume":
             checks["resume_or_reassessment_exercised"] = adaptive_exercised
+        if scenario == "automatic_sequential":
+            checks["decision_complete_fixture_has_no_questions"] = (
+                sequential_question_audit["no_unexpected_questions"] is True
+            )
         if scenario == "planner_work_breakdown":
             package_artifacts = planning_manifest.get("work_packages") if isinstance(planning_manifest, dict) else []
             checks["plan_approval_exercised"] = state.get("plan_approval", {}).get("status") == "approved"
@@ -2773,6 +2856,11 @@ def _live_eval(
             "terminal_result_audit": terminal_result_audit,
             "native_terminal_audit": native_terminal_audit,
             "question_resolution_audit": question_resolution_audit,
+            "question_audit": (
+                sequential_question_audit
+                if scenario == "automatic_sequential"
+                else {"not_applicable": True}
+            ),
             "tool_names": tool_names,
             "native_tool_names": native_tool_names,
             "checks": checks, "failed_public_calls": failed_public_calls,

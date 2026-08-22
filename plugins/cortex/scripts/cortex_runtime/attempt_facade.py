@@ -260,10 +260,45 @@ def _mark_attempt(
     terminal_status: str | None = None,
     finalization_error: str | None = None,
 ) -> None:
+    """Project one canonical result without leaving its native worker live.
+
+    The task projection intentionally remains ``running`` until the
+    coordinator accepts the exact result through ``continue_orchestration``.
+    That is a gate-consumption state, not evidence that the native worker is
+    still runnable.  Terminal AttemptResult lifecycles therefore reconcile the
+    server-owned worker-session row here, before the result can be surfaced to
+    the coordinator.  A missing session fails closed instead of manufacturing
+    a host identity or allowing a stale ``awaiting_spawn``/``running`` row to
+    survive a terminal result.
+    """
     root = _runtime.ledger_root({"project_root": str(project)})
     with _runtime.state_lock(root):
         _, task_dir, state = _runtime.load_state(task_id, {"project_root": str(project)})
         attempt = _runtime._attempt(state, attempt_id)
+        result_lifecycle = str(result.get("lifecycle_status") or "").upper()
+        terminal_lifecycles = {
+            attempt_protocol.LIFECYCLE_COMPLETED,
+            attempt_protocol.LIFECYCLE_BLOCKED,
+            attempt_protocol.LIFECYCLE_FAILED,
+        }
+        if result_lifecycle in terminal_lifecycles:
+            terminal_at = (
+                result.get("completed_at")
+                or result.get("work_completed_at")
+                or _runtime.now()
+            )
+            _runtime.db_reconcile_terminal_worker_session(
+                root,
+                task_id=state["task_id"],
+                attempt_id=attempt_id,
+                terminated_at=str(terminal_at),
+            )
+            # Do not assert an observed SubagentStop: a host stop hook may
+            # arrive later. This state records only the server-side terminal
+            # reconciliation that prevents a durable session from being
+            # recovered as live work.
+            attempt["worker_session_reconciled_at"] = str(terminal_at)
+            attempt["worker_session_terminal_status"] = "completed"
         attempt["lifecycle_status"] = lifecycle_status
         attempt["attempt_result_ref"] = result.get("result_ref")
         attempt["work_completed_at"] = result.get("work_completed_at")

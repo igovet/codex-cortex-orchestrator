@@ -1084,6 +1084,28 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("Do not call wait", context)
         self.assertIn("explorer_auth_01_deadbeef", context)
 
+    def test_continue_hook_requires_the_returned_dispatch_not_a_generic_spawn(self):
+        context = cortex_hook.dispatch_required_context({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__cortex__continue_orchestration",
+            "tool_response": {"structuredContent": {
+                "schema": "cortex/orchestration/v5",
+                "ok": True,
+                "outcome": "ready_to_spawn",
+                "task_ref": "task-live",
+                "dispatches": [{
+                    "call": "spawn_agent",
+                    "arguments": {"task_name": "security_auditor_repository_02_deadbeef"},
+                }],
+            }},
+        })
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertIn("next tool call must invoke dispatches[0].call", context)
+        self.assertIn("generic collaboration spawn", context)
+        self.assertIn("cannot bind to or advance this Cortex attempt", context)
+        self.assertIn("security_auditor_repository_02_deadbeef", context)
+
     def test_hook_manifest_covers_clear_and_agent_tool_contracts(self):
         manifest = json.loads(
             (Path(__file__).parents[1] / "plugins/cortex/hooks/hooks.json").read_text(encoding="utf-8")

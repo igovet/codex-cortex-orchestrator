@@ -388,6 +388,29 @@ def _append_event(
     return _event_row(created), False
 
 
+def _require_briefing_receipt(connection: Any, *, task_id: str, attempt_id: str) -> None:
+    """Require the server-owned briefing read before worker progress/completion.
+
+    This check deliberately runs inside the same write transaction as the
+    caller's mutation.  A worker that skipped ``read_dispatch_briefing`` must
+    receive a retryable correction and leave neither an event nor a canonical
+    result behind.  Keeping the guard in the protocol (rather than only in a
+    transport facade) protects every runtime ingress, including the small
+    contract adapter used by integration tests and local hosts.
+    """
+    receipt = connection.execute(
+        "SELECT 1 FROM attempt_events "
+        "WHERE task_id=? AND attempt_id=? AND event_type='briefing_acknowledged' "
+        "ORDER BY sequence LIMIT 1",
+        (task_id, attempt_id),
+    ).fetchone()
+    if receipt is None:
+        raise ValueError(
+            "briefing read receipt is required before worker progress or completion; "
+            "retry read_dispatch_briefing on this same attempt"
+        )
+
+
 def _result_row(row: Any) -> dict[str, Any]:
     metadata = _decode_json(row["metadata_json"], "result metadata", expected=dict)
     workspace = _decode_json(row["workspace_observation_json"], "workspace observation", expected=dict)
@@ -439,6 +462,7 @@ def record_attempt_event(
     ledger_db.ensure_database(ledger_root)
     with ledger_db.connection(ledger_root, write=True) as connection:
         _load_task_and_attempt(connection, task_id=task_id, attempt_id=attempt_id)
+        _require_briefing_receipt(connection, task_id=task_id, attempt_id=attempt_id)
         result = connection.execute(
             "SELECT lifecycle_status FROM attempt_results WHERE task_id=? AND attempt_id=?",
             (task_id, attempt_id),
@@ -656,6 +680,7 @@ def complete_attempt(
         definition, state, attempt = _load_task_and_attempt(
             connection, task_id=task_id, attempt_id=attempt_id,
         )
+        _require_briefing_receipt(connection, task_id=task_id, attempt_id=attempt_id)
         existing = connection.execute(
             "SELECT * FROM attempt_results WHERE task_id=? AND attempt_id=?", (task_id, attempt_id)
         ).fetchone()

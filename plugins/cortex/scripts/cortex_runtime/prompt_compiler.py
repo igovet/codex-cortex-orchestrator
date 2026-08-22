@@ -34,7 +34,9 @@ _EXPECTED_GATES = frozenset((
     "review", "documentation", "close", "governance_activation", "governance_close",
 ))
 _COORDINATOR_COMPLETION_CONTRACT = (
-    "A native spawn or wait is never completion evidence. For every terminal worker, the coordinator must read its exact "
+    "A native spawn or wait is never completion evidence. Every ready_to_spawn response authorizes only its returned "
+    "dispatch.call with unmodified dispatch.arguments; a generic collaboration spawn, self-authored task name, or "
+    "replacement child cannot bind to or advance a Cortex attempt. For every terminal worker, the coordinator must read its exact "
     "canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned "
     "continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only "
     "the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator "

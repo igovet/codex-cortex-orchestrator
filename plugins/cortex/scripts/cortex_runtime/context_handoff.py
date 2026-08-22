@@ -86,7 +86,11 @@ def _context_handoff(
             })
         if status == AWAITING_HOST_SPAWN:
             pending_dispatches.append({**identity, "target_handoff": _target_handoff(task_dir, state, attempt)})
-        elif status == "running" and not attempt.get("host_stopped_at"):
+        elif (
+            status == "running"
+            and not attempt.get("host_stopped_at")
+            and not attempt.get("worker_session_reconciled_at")
+        ):
             host_spawn = attempt.get("host_spawn") or {}
             session = session_by_attempt.get(str(attempt.get("attempt_id") or ""), {})
             active_workers.append({
@@ -104,14 +108,19 @@ def _context_handoff(
                     160,
                 ) or None,
             })
-        elif attempt.get("host_stopped_at"):
+        elif attempt.get("host_stopped_at") or attempt.get("worker_session_reconciled_at"):
             finalization_pending = str(attempt.get("host_stop_outcome") or "") == "work_completed_finalization_pending"
             stopped_workers.append({
                 **identity,
                 "attempt_result_ref": result_ref,
                 "finalization_pending": finalization_pending,
-                "failure_status": None if finalization_pending else redact(attempt.get("host_stop_outcome", ""), 160) or None,
-                "failure_reason": None if finalization_pending else redact(attempt.get("finalization_reason", ""), 1000) or None,
+                # A result/session reconciliation is terminal worker state,
+                # not a synthetic failure or a claim that a host stop hook
+                # was observed. It must therefore be recoverable only through
+                # the canonical coordinator continuation, never as a live
+                # native worker.
+                "failure_status": None if finalization_pending or attempt.get("worker_session_reconciled_at") else redact(attempt.get("host_stop_outcome", ""), 160) or None,
+                "failure_reason": None if finalization_pending or attempt.get("worker_session_reconciled_at") else redact(attempt.get("finalization_reason", ""), 1000) or None,
                 "resumable": False,
             })
     active = active_gates(state)

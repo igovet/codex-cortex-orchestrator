@@ -69,6 +69,13 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
             self.state,
             "tasks/0001-facade-lifecycle-task",
         )
+        attempt_protocol.acknowledge_briefing(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            dispatch_ref="dispatch-implementation-01",
+            digest="a" * 64,
+        )
         self.params = {
             "project_root": str(self.project),
             "task_id": self.task_id,
@@ -137,7 +144,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
             [event["event_type"] for event in attempt_protocol.list_attempt_events(
                 self.root, task_id=self.task_id, attempt_id=self.attempt_id,
             )],
-            ["work_completed", "finalizing", "finalization_failed"],
+            ["briefing_acknowledged", "work_completed", "finalizing", "finalization_failed"],
         )
 
         recorded_projection = mock.Mock(return_value={"projection_ref": "attempt-result-view-implementation-01"})
@@ -158,7 +165,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
             [event["event_type"] for event in attempt_protocol.list_attempt_events(
                 self.root, task_id=self.task_id, attempt_id=self.attempt_id,
             )],
-            ["work_completed", "finalizing", "finalization_failed", "completed"],
+            ["briefing_acknowledged", "work_completed", "finalizing", "finalization_failed", "completed"],
         )
         self.assertEqual(recorded_projection.call_args.kwargs, {
             "task_id": self.task_id, "attempt_id": self.attempt_id,
@@ -239,9 +246,96 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
                 self.assertEqual(attempt["attempt_result_ref"], canonical_result["result_ref"])
                 self.assertEqual(package["spawn_status"], "stopped_finalization_pending")
                 self.assertFalse(package["resumable"])
-                self.assertEqual(session_write.call_args.args[1]["status"], "completion_pending")
+                self.assertEqual(session_write.call_args.args[1]["status"], "stopped_recoverable")
                 self.assertFalse(session_write.call_args.args[1]["resumable"])
                 self.assertEqual(saved.call_args.args[3], "host_stop_finalization_pending")
+
+    def test_terminal_attempt_result_reconciles_exact_worker_session(self) -> None:
+        """Terminal canonical results cannot leave their native session live."""
+        ledger_db.put_worker_session(self.root, {
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "host_agent_id": "native.Implementation:01",
+            "host_task_name": "implementation-worker",
+            "host_tool": "spawn_agent",
+            "status": "running",
+            "resumable": True,
+        })
+        result = {
+            "result_ref": "attempt-result-terminal-session-01",
+            "lifecycle_status": attempt_protocol.LIFECYCLE_COMPLETED,
+            "work_completed_at": "2026-08-22T00:00:00+00:00",
+            "completed_at": "2026-08-22T00:01:00+00:00",
+        }
+        with mock.patch.object(attempt_facade._runtime, "ledger_root", return_value=self.root), \
+             mock.patch.object(attempt_facade._runtime, "state_lock", return_value=nullcontext()), \
+             mock.patch.object(attempt_facade._runtime, "load_state", return_value=(self.project, self.project, self.state)), \
+             mock.patch.object(attempt_facade._runtime, "save_state"):
+            attempt_facade._mark_attempt(
+                self.project,
+                self.task_id,
+                self.attempt_id,
+                lifecycle_status="result_finalized",
+                result=result,
+            )
+
+        sessions = ledger_db.list_worker_sessions(self.root, self.task_id)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["status"], "completed")
+        self.assertEqual(sessions[0]["resumable"], 0)
+        self.assertEqual(sessions[0]["terminated_at"], result["completed_at"])
+        self.assertEqual(self.attempt["worker_session_terminal_status"], "completed")
+        self.assertEqual(self.attempt["worker_session_reconciled_at"], result["completed_at"])
+
+    def test_terminal_attempt_result_without_worker_session_fails_closed(self) -> None:
+        """A result cannot fabricate a missing native identity during repair."""
+        result = {
+            "result_ref": "attempt-result-missing-session-01",
+            "lifecycle_status": attempt_protocol.LIFECYCLE_BLOCKED,
+            "work_completed_at": "2026-08-22T00:00:00+00:00",
+        }
+        with mock.patch.object(attempt_facade._runtime, "ledger_root", return_value=self.root), \
+             mock.patch.object(attempt_facade._runtime, "state_lock", return_value=nullcontext()), \
+             mock.patch.object(attempt_facade._runtime, "load_state", return_value=(self.project, self.project, self.state)), \
+             mock.patch.object(attempt_facade._runtime, "save_state"):
+            with self.assertRaisesRegex(ValueError, "no persisted worker session"):
+                attempt_facade._mark_attempt(
+                    self.project,
+                    self.task_id,
+                    self.attempt_id,
+                    lifecycle_status="blocked",
+                    result=result,
+                    terminal_status="blocked",
+                )
+
+        self.assertNotIn("worker_session_reconciled_at", self.attempt)
+
+    def test_terminal_result_live_session_is_an_invariant_violation(self) -> None:
+        """Completion checks reject snapshots that still advertise live work."""
+        attempt = {
+            "attempt_id": self.attempt_id,
+            "facade_managed": True,
+            "status": "running",
+            "attempt_result_ref": "attempt-result-live-session-01",
+        }
+        session = {
+            "attempt_id": self.attempt_id,
+            "status": "running",
+            "resumable": 1,
+            "terminated_at": None,
+        }
+        terminal = {
+            "result_ref": attempt["attempt_result_ref"],
+            "lifecycle_status": attempt_protocol.LIFECYCLE_COMPLETED,
+        }
+        with mock.patch.object(cortex, "load_task_definition", return_value={"task_id": self.task_id}), \
+             mock.patch.object(cortex, "_task_document_root", return_value=self.root), \
+             mock.patch.object(cortex, "db_list_worker_sessions", return_value=[session]), \
+             mock.patch.object(cortex.attempt_protocol, "get_attempt_result", return_value=terminal):
+            violations = cortex._terminal_facade_attempts_with_live_sessions(
+                self.project, [attempt],
+            )
+        self.assertEqual(violations, [self.attempt_id])
 
     def test_wait_hook_for_finalization_explicitly_forbids_failed_continuation_and_replacement(self) -> None:
         """Coordinator recovery wording cannot accidentally take the failure path."""

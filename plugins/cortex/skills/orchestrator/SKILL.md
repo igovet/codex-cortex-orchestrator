@@ -229,7 +229,10 @@ Routing is evidence-driven:
 5. Each returned dispatch explains `phase`, `profile`, `capability`, `sandbox`,
    and `selection_reason`. Check that rationale against the latest evidence
    before invoking the dispatch. Never invent a role name or silently replace
-   Cortex's native arguments.
+   Cortex's native arguments. A `ready_to_spawn` response authorizes only its
+   returned `dispatch.call` with those exact `dispatch.arguments`: a generic
+   collaboration spawn, self-authored task name, or replacement child cannot
+   bind to or advance the issued Cortex attempt.
    Do not treat a planned dispatch, commentary, or an empty wait as proof that
    a worker exists. The native call must return a child id before saying it was
    sent; retain those exact ids and wait only on them. A missing or failed

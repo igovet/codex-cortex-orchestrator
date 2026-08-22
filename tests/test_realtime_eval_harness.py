@@ -606,6 +606,9 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
             "pending_terminal_closes": 0,
             "protocol_violations": 0,
             "ambiguous_native_observations": 0,
+            "authorized_native_dispatches": 0,
+            "dispatch_authorization_observed": False,
+            "unmatched_native_spawns": 0,
             "all_observed_workers_terminally_audited": True,
         })
 
@@ -620,6 +623,50 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         ambiguous = self.harness.safe_native_terminal_audit([events[0], events[0], *events[1:]])
         self.assertFalse(ambiguous["all_observed_workers_terminally_audited"])
         self.assertEqual(ambiguous["ambiguous_native_observations"], 1)
+
+    def test_native_terminal_audit_rejects_a_generic_spawn_as_a_cortex_substitute(self) -> None:
+        """An extra host spawn has no durable Cortex attempt to consume."""
+        events = [
+            # Generic collaboration work is visible to the host but was not
+            # returned in a Cortex dispatch response.  It must make the
+            # aggregate terminal proof fail rather than be counted as a gate.
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {
+                "event": "native_tool_call", "tool": "wait", "status": "completed",
+                "outcome": "other_terminal_message",
+            },
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {
+                "event": "native_tool_call", "tool": "wait", "status": "completed",
+                "outcome": "attempt_result_recorded",
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
+                "ok": True,
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed",
+                "ok": True,
+            },
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+        ]
+        audit = self.harness.safe_native_terminal_audit(events)
+        self.assertFalse(audit["all_observed_workers_terminally_audited"])
+        self.assertEqual(audit["spawned_worker_observations"], 2)
+        self.assertEqual(audit["terminal_wait_observations"], 2)
+        self.assertEqual(audit["pending_canonical_reads"], 1)
+
+        # When source telemetry includes the preceding Cortex response, the
+        # failure is explicit rather than merely an aggregate mismatch.
+        authorized = [{
+            "event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed",
+            "ok": True, "authorized_dispatch_count": 1,
+        }, *events]
+        bound_audit = self.harness.safe_native_terminal_audit(authorized)
+        self.assertTrue(bound_audit["dispatch_authorization_observed"])
+        self.assertEqual(bound_audit["authorized_native_dispatches"], 1)
+        self.assertEqual(bound_audit["unmatched_native_spawns"], 1)
+        self.assertFalse(bound_audit["all_observed_workers_terminally_audited"])
 
     def test_native_terminal_audit_correlates_provisional_waits_from_progress_events(self) -> None:
         """A host terminal message is not a result until Cortex confirms it.
@@ -670,6 +717,9 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
             "pending_terminal_closes": 0,
             "protocol_violations": 0,
             "ambiguous_native_observations": 0,
+            "authorized_native_dispatches": 0,
+            "dispatch_authorization_observed": False,
+            "unmatched_native_spawns": 0,
             "all_observed_workers_terminally_audited": True,
         })
 

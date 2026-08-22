@@ -121,6 +121,7 @@ from cortex_runtime.ledger_db import (
     append_attempt_message as db_append_attempt_message,
     list_worker_sessions as db_list_worker_sessions,
     put_worker_session as db_put_worker_session,
+    reconcile_terminal_worker_session as db_reconcile_terminal_worker_session,
     list_task_findings as db_list_task_findings,
     task_findings_blockers as db_task_findings_blockers,
     plan_prune as db_plan_prune,
@@ -357,7 +358,7 @@ if (
     or SHARED_WORKER_CONTRACT.get("codebase_memory_fallback")
     != "one_bounded_attempt_then_repository_native_tools_without_looping"
     or SHARED_WORKER_CONTRACT.get("attempt_result_lifecycle")
-    != "record_attempt_event_checkpoints_then_complete_attempt_closes_one_attempt; finalization_or_projection_failures_retry_server_side_without_respawning_the_worker"
+    != "read_dispatch_briefing_receipt_then_record_attempt_event_checkpoints_then_complete_attempt_closes_one_attempt; missing briefing receipt is retryable and cannot mutate the attempt; finalization_or_projection_failures_retry_server_side_without_respawning_the_worker"
     or SHARED_WORKER_CONTRACT.get("worker_result_fields")
     != ["status", "summary", "findings", "decisions_needed", "unresolved"]
     or SHARED_WORKER_CONTRACT.get("worker_operations")
@@ -3011,7 +3012,12 @@ def finalize_host_worker_stop_from_hook(
         session_status = (
             "completed" if result_finalized
             else "idle_resumable" if open_questions
-            else "completion_pending" if finalization_pending
+            # The native child has stopped but finalization must be retried on
+            # the exact persisted AttemptResult.  ``completion_pending`` is a
+            # public lifecycle label, not a valid worker_sessions status;
+            # storing it here previously failed the SQLite status boundary and
+            # could leave a stale running row behind.
+            else "stopped_recoverable" if finalization_pending
             else "terminated_unavailable"
         )
         db_put_worker_session(root, {
@@ -4919,6 +4925,34 @@ def validate_completion_invariants(
             raise ValueError(
                 "active_attempt_result_pending: " + ", ".join(pending_attempts)
             )
+    # A finalized/blocked/failed canonical result also ends the exact native
+    # worker lifecycle, even while the task projection is still active pending
+    # coordinator consumption.  Prevent an old ``awaiting_spawn`` or
+    # ``running`` worker-session row from being rehydrated as a second live
+    # worker, or from silently surviving a terminal close.
+    terminal_result_attempts = [
+        item for item in state.get("attempts", [])
+        if isinstance(item, dict)
+        and item.get("facade_managed")
+        and not item.get("invalidated")
+    ]
+    if terminal_result_attempts:
+        if artifact_root is None:
+            raise ValueError(
+                "terminal_attempt_session_unreconciled: canonical ledger root is required"
+            )
+        task_dir = db_task_artifact_path(artifact_root, str(state.get("task_id") or ""))
+        if task_dir is None:
+            raise ValueError(
+                "terminal_attempt_session_unreconciled: task artifact directory is unavailable"
+            )
+        live_terminal_sessions = _terminal_facade_attempts_with_live_sessions(
+            task_dir, terminal_result_attempts
+        )
+        if live_terminal_sessions:
+            raise ValueError(
+                "terminal_attempt_session_unreconciled: " + ", ".join(live_terminal_sessions)
+            )
     # The active-attempt guard intentionally excludes terminal rows, but a
     # malformed or historical state can already contain a facade row projected
     # as ``passed`` without its canonical result ever completing. Do not let
@@ -5998,6 +6032,25 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
                 "state": state,
             }
         expected_task_name = str((attempt.get("spawn_request") or {}).get("task_name", ""))
+        # A host child can satisfy this attempt only when it was started from
+        # this exact server-issued dispatch.  Quietly correcting an arbitrary
+        # host task name here would let a coordinator-created generic child be
+        # attached to the pending Cortex attempt after the fact.  Keep the
+        # attempt awaiting the one durable dispatch instead.
+        if host_task_name != expected_task_name:
+            return {
+                "confirmed": False,
+                "attempt_id": attempt_id,
+                "reason": "host_task_name_mismatch",
+                "next_action": (
+                    "invoke the exact returned Cortex dispatch.call with its unmodified dispatch.arguments; "
+                    "a generic host spawn cannot satisfy this attempt"
+                ),
+                "recoverable": True,
+                "expected_task_name": expected_task_name,
+                "revision_correction": revision_correction,
+                "state": state,
+            }
         for existing in state.get("attempts", []):
             if existing.get("attempt_id") == attempt_id:
                 continue
@@ -6021,10 +6074,7 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
                     "recoverable": True,
                     "state": state,
                 }
-        task_name_correction = (
-            {"requested": host_task_name, "used": expected_task_name}
-            if host_task_name != expected_task_name else None
-        )
+        task_name_correction = None
         spawn_request = attempt.get("spawn_request") or {}
         expected_model = str(
             attempt.get("expected_model")
@@ -6314,6 +6364,57 @@ def _active_facade_attempts_missing_finalized_results(
         ):
             pending.append(attempt_id)
     return pending
+
+
+def _terminal_facade_attempts_with_live_sessions(
+    task_dir: Path,
+    attempts: list[dict[str, Any]],
+) -> list[str]:
+    """Return terminal-result facade attempts whose exact session is still live.
+
+    A task attempt can remain active until its coordinator consumes a result;
+    that does *not* keep its native worker live.  The canonical result and the
+    server-observed ``worker_sessions`` row must agree before any gate or
+    terminal transition proceeds.  Missing session rows are violations too:
+    recovery must never invent a native identity after the fact.
+    """
+    relevant = [
+        attempt for attempt in attempts
+        if isinstance(attempt, dict)
+        and attempt.get("facade_managed")
+        and not attempt.get("invalidated")
+    ]
+    if not relevant:
+        return []
+    task = load_task_definition(task_dir)
+    task_id = str(task["task_id"])
+    root = _task_document_root(task_dir, task_id)
+    sessions_by_attempt: dict[str, list[dict[str, Any]]] = {}
+    for session in db_list_worker_sessions(root, task_id):
+        sessions_by_attempt.setdefault(str(session.get("attempt_id") or ""), []).append(session)
+    violations: list[str] = []
+    for attempt in relevant:
+        attempt_id = str(attempt.get("attempt_id") or "")
+        result_ref = str(attempt.get("attempt_result_ref") or "")
+        if not attempt_id or not result_ref:
+            continue
+        result = attempt_protocol.get_attempt_result(root, task_id=task_id, attempt_id=attempt_id)
+        if (
+            result is None
+            or str(result.get("result_ref") or "") != result_ref
+            or str(result.get("lifecycle_status") or "")
+            not in attempt_protocol.TERMINAL_LIFECYCLES
+        ):
+            continue
+        sessions = sessions_by_attempt.get(attempt_id, [])
+        if not sessions or any(
+            str(session.get("status") or "") != "completed"
+            or bool(session.get("resumable"))
+            or not session.get("terminated_at")
+            for session in sessions
+        ):
+            violations.append(attempt_id)
+    return violations
 
 
 def _attempts_with_unresolved_canonical_results(task_dir: Path, attempts: list[dict[str, Any]]) -> list[str]:

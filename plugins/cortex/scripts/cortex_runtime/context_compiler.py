@@ -383,7 +383,7 @@ def _bounded_facts(value: object) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     for raw in values:
         source = _mapping(raw)
-        result_ref = _text(source.get("result_ref"), 128)
+        result_ref = _text(source.get("attempt_result_ref"), 128)
         attempt_id = _text(source.get("attempt_id") or source.get("producer_attempt_id"), 128)
         summary = _text(source.get("summary") or source.get("conclusion"), MAX_TEXT)
         if not (result_ref or attempt_id or summary):
@@ -394,7 +394,7 @@ def _bounded_facts(value: object) -> list[dict[str, Any]]:
             fact = _mapping(item)
             findings.append(_text(fact.get("summary") or fact.get("message") or item, 500))
         item = {
-            "result_ref": result_ref or None,
+            "attempt_result_ref": result_ref or None,
             "attempt_id": attempt_id or None,
             "gate": _text(source.get("gate") or source.get("phase"), 80) or None,
             "profile": _text(source.get("profile"), 120) or None,

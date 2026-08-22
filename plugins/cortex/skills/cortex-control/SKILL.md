@@ -504,6 +504,14 @@ recent set. If the source task is active, use evidence-based `rework` instead;
 summary after durable native completion. Repeated reads remain available for
 evaluation and never create a separate user-facing artifact. Never guess,
 substitute, or use a path to browse unrelated files.
+
+When `continue_orchestration` returns `ready_to_spawn`, invoke only each
+returned `dispatch.call` with its exact `dispatch.arguments`, in order. A
+generic collaboration spawn, self-authored task name, or replacement child is
+not a Cortex dispatch: it cannot bind to or advance the pending attempt. For a
+resumable child, keep the existing native target and use `followup_task`; after
+its result, the required order is `read_worker_result`, successful
+`continue_orchestration`, then `close_agent` for that exact completed child.
 Inspect `available_results` exposes an existing derived path only when its
 optional projection is already materialized; recovery uses the exact result
 ref, and `read_worker_result` remains the publication-eligible link surface.

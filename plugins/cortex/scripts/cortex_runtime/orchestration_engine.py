@@ -22,6 +22,25 @@ class PlanReapprovalRequired(ValueError):
     """A post-plan dispatch cannot use the currently approved evidence basis."""
 
 
+class ReworkRequestIdempotent(ValueError):
+    """A repeated no-op rework request must not create a successor attempt."""
+
+    def __init__(self, state: dict[str, Any], plan: dict[str, Any], digest: str):
+        self.state = state
+        self.plan = plan
+        self.digest = digest
+        super().__init__("identical completed-gate rework is already recorded")
+
+
+class ReworkCircuitBroken(ValueError):
+    """A repeated material rework digest requires a coordinator/user decision."""
+
+    def __init__(self, state: dict[str, Any], digest: str):
+        self.state = state
+        self.digest = digest
+        super().__init__("the same material completed-gate rework was submitted again")
+
+
 class CorrectiveReworkPreflightRequired(ValueError):
     """An origin verifier would be dispatched without its resolution receipt."""
 
@@ -2959,6 +2978,78 @@ def _replace_future_orchestrate_waves(
     rework_gates = sorted(completed_set & requested_future_gates)
     if rework_gates and not params.get("allow_rework", False):
         raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
+    rework_request_digest = digest_text(json.dumps({
+        "completed_gate_rework": rework_gates,
+        "future_pipeline": _semantic_future_pipeline(candidate_plan),
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) if rework_gates else ""
+    rework_history = state.get("rework_history")
+    rework_history = [
+        dict(item) for item in rework_history
+        if isinstance(item, dict) and str(item.get("request_digest") or "").strip()
+    ] if isinstance(rework_history, list) else []
+    matching_history = next(
+        (item for item in reversed(rework_history)
+         if str(item.get("request_digest") or "") == rework_request_digest),
+        None,
+    ) if rework_request_digest else None
+    # A completed gate is not a license to repeatedly reopen the same plan.
+    # The first semantically identical request is a safe no-op.  A materially
+    # changed request is admitted once (and must begin with Planner); replaying
+    # that same material digest is paused before update_pipeline can invalidate
+    # any receipt or mint a successor attempt. Failed-result retries do not
+    # enter this path because their gate is not in completed_set.
+    if matching_history is not None:
+        if matching_history.get("material_change"):
+            state["status"] = "needs_input"
+            state["blocked_reason"] = (
+                "the same material completed-gate rework was submitted again; "
+                "provide a new Planner-first change or explicit user decision"
+            )
+            state.setdefault("rework_pauses", {})
+            state["rework_pauses"][rework_gates[0] if len(rework_gates) == 1 else "completed_gate_rework"] = {
+                "status": "needs_input",
+                "reason": "repeated_material_rework_digest",
+                "request_digest": rework_request_digest,
+                "gate": rework_gates[0] if len(rework_gates) == 1 else None,
+                "at": now(),
+            }
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "rework_circuit_breaker",
+                "paused repeated material completed-gate rework before invalidation",
+            )
+            raise ReworkCircuitBroken(state, rework_request_digest)
+        raise ReworkRequestIdempotent(state, plan, rework_request_digest)
+    if rework_request_digest and not semantic_changed:
+        state.setdefault("rework_history", []).append({
+            "request_digest": rework_request_digest,
+            "rework_gates": list(rework_gates),
+            "semantic_future_pipeline_digest": new_semantic_digest,
+            "material_change": False,
+            "outcome": "idempotent",
+            "at": now(),
+        })
+        state["rework_history"] = [
+            item for item in state["rework_history"][-32:]
+            if isinstance(item, dict)
+        ]
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "rework_idempotent",
+            "recorded identical completed-gate rework without invalidation",
+        )
+        raise ReworkRequestIdempotent(state, plan, rework_request_digest)
+    material_rework = bool(semantic_changed)
+    if rework_gates and material_rework:
+        first_future = future[0] if future else {}
+        if not _is_singleton_recovery_planner(first_future):
+            raise PlanReapprovalRequired(
+                "a material completed-gate rework requires a singleton Planner-first wave"
+            )
     if rework_gates:
         # A material steer can promote a C1 task to full governance while its
         # earliest affected gate is the gate that just completed.  Reworking
@@ -3088,6 +3179,27 @@ def _replace_future_orchestrate_waves(
             state,
             "plan_approval",
             "material future-wave change requires a replacement plan and approval",
+        )
+    if rework_request_digest:
+        history_entry = {
+            "request_digest": rework_request_digest,
+            "rework_gates": list(rework_gates),
+            "semantic_future_pipeline_digest": new_semantic_digest,
+            "material_change": material_rework,
+            "outcome": "applied",
+            "at": now(),
+        }
+        state.setdefault("rework_history", []).append(history_entry)
+        state["rework_history"] = [
+            item for item in state["rework_history"][-32:]
+            if isinstance(item, dict)
+        ]
+        save_state(
+            task_dir,
+            task_dir / "state.sqlite",
+            state,
+            "rework_request",
+            "recorded canonical completed-gate rework digest before dispatch",
         )
     _write_orchestrate_plan(task_dir, plan)
     return state, plan
@@ -4215,6 +4327,52 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             params,
             {**result, "transaction_id": None, "idempotent": False},
         )
+    except ReworkRequestIdempotent as exc:
+        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
+        result = _orchestrate_response(
+            operation,
+            exc.state,
+            wave_id=None,
+            spawn_requests=[],
+            result={
+                "rework": {
+                    "outcome": "idempotent",
+                    "request_digest": exc.digest,
+                    "spawned": False,
+                },
+            },
+            plan=exc.plan,
+        )
+        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+            committed = _commit_orchestrate_transaction(transaction_path, transaction, result)
+            return _materialize_response_result_projection(params, committed)
+        return result
+    except ReworkCircuitBroken as exc:
+        task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
+        error = _orchestrate_error(
+            operation,
+            "rework_loop_detected",
+            exc,
+            phase="rework_preflight",
+            recoverable=True,
+            next_operation=operation,
+            task_id=task_id,
+        )
+        error["state"] = "needs_input"
+        error["rework"] = {
+            "outcome": "needs_input",
+            "request_digest": exc.digest,
+            "spawned": False,
+        }
+        error["next_action"] = (
+            "submit a materially new Planner-first rework contract or provide an explicit user decision; "
+            "the repeated material digest was not dispatched"
+        )
+        if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
+            transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})
+            db_put_operation(transaction_path, safe_id(str(transaction["submission_id"])), transaction)
+            error["transaction_id"] = transaction.get("transaction_id")
+        return error
     except CorrectiveReworkPreflightRequired as exc:
         task_id = str(params.get("task_id") or (params.get("task") or {}).get("task_id") or "") or None
         diagnostics = [

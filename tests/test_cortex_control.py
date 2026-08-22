@@ -2298,6 +2298,40 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIsNone(confirmed["task_name_correction"])
         self.assertEqual(confirmed["host_spawn"]["task_name"], expected_task_name)
 
+    def test_generic_host_spawn_cannot_bind_or_advance_an_issued_cortex_attempt(self):
+        """A self-authored host child must never become a Cortex substitute."""
+        state = self.init(task_id="generic-spawn-cannot-advance")["state"]
+        observed = control.status({"task_id": "generic-spawn-cannot-advance", "principal": "thread-a"})
+        delegated = control.record_delegation({
+            "task_id": "generic-spawn-cannot-advance", "principal": "thread-a",
+            "expected_revision": state["revision"], "status_receipt": observed["status_receipt"],
+            "gate": "discover", "agent": "explorer", "task_kind": "discover", "risk": "low",
+            "objective": "inspect", "ownership": "Read-only discovery", "allowed_paths": ["."],
+            "acceptance_criteria": ["Record findings"], "verification": ["Cite paths"],
+        })
+        generic = control.confirm_host_spawn({
+            "task_id": "generic-spawn-cannot-advance", "principal": "thread-a",
+            "expected_revision": delegated["state"]["revision"], "attempt_id": delegated["attempt_id"],
+            "host_agent_id": "generic-collaboration-child", "host_task_name": "security-audit",
+            "host_model": delegated["spawn_request"]["model"],
+        })
+        self.assertFalse(generic["confirmed"])
+        self.assertTrue(generic["recoverable"])
+        self.assertEqual(generic["reason"], "host_task_name_mismatch")
+        self.assertEqual(generic["state"]["attempts"][-1]["status"], control.AWAITING_HOST_SPAWN)
+        self.assertEqual(generic["state"]["attempts"][-1].get("host_spawn"), None)
+
+        # Without the exact dispatched host target, the generic child cannot
+        # turn the pending attempt into a successful gate receipt either.
+        finalized = control.finalize_attempt({
+            "task_id": "generic-spawn-cannot-advance", "principal": "thread-a",
+            "expected_revision": generic["state"]["revision"], "attempt_id": delegated["attempt_id"],
+            "status": "passed",
+        })
+        self.assertFalse(finalized["recorded"])
+        self.assertEqual(finalized["reason"], "host_spawn_confirmation_required")
+        self.assertEqual(finalized["state"]["attempts"][-1]["status"], control.AWAITING_HOST_SPAWN)
+
     def test_host_spawn_confirmation_rejects_reused_native_child_id(self):
         self.init(task_id="host-id-reuse")
         result = control.prepare_delegations({
@@ -3886,6 +3920,7 @@ class ControlPlaneTests(unittest.TestCase):
         # the unresolved-result scan is limited to the closure verifier rows.
         with mock.patch.object(control, "db_task_artifact_path", return_value=self.project), \
              mock.patch.object(control, "_attempts_missing_result_validation", return_value=[]) as finalized, \
+             mock.patch.object(control, "_terminal_facade_attempts_with_live_sessions", return_value=[]), \
              mock.patch.object(control, "_attempts_with_unresolved_canonical_results", return_value=["governance-close-01"]) as unresolved:
             with self.assertRaisesRegex(ValueError, "closure_attempt_unresolved: governance-close-01"):
                 control.validate_completion_invariants(state, artifact_root=self.ledger)
@@ -3933,6 +3968,7 @@ class ControlPlaneTests(unittest.TestCase):
         }
         with mock.patch.object(control, "db_task_artifact_path", return_value=self.project), \
              mock.patch.object(control, "_attempts_missing_result_validation", return_value=[]), \
+             mock.patch.object(control, "_terminal_facade_attempts_with_live_sessions", return_value=[]), \
              mock.patch.object(control, "_attempts_with_unresolved_canonical_results", return_value=[]) as unresolved, \
              mock.patch.object(control, "validate_governance_obligation_evidence"):
             control.validate_completion_invariants(state, artifact_root=self.ledger)
