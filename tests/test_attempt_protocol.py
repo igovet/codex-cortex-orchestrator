@@ -254,6 +254,40 @@ class AttemptProtocolTests(unittest.TestCase):
         self.assertEqual(view["result"]["changed_files"], [])
         self.assertEqual(view["result"]["changed_files_status"], "not_attributable")
 
+    def test_changed_retry_is_typed_canonical_conflict_without_mutation(self) -> None:
+        first = attempt_protocol.complete_attempt(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            status="completed",
+            summary="The immutable canonical result.",
+        )
+        before_events = attempt_protocol.list_attempt_events(
+            self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+        )
+        with self.assertRaises(attempt_protocol.CanonicalResultConflict) as raised:
+            attempt_protocol.complete_attempt(
+                self.root,
+                task_id=self.task_id,
+                attempt_id=self.attempt_id,
+                status="completed",
+                summary="A changed retry must not replace it.",
+            )
+        self.assertEqual(raised.exception.result_ref, first["result"]["result_ref"])
+        self.assertEqual(raised.exception.diagnostics[0]["code"], "attempt_canonical_result_conflict")
+        self.assertEqual(
+            attempt_protocol.get_attempt_result(
+                self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+            )["result_ref"],
+            first["result"]["result_ref"],
+        )
+        self.assertEqual(
+            attempt_protocol.list_attempt_events(
+                self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+            ),
+            before_events,
+        )
+
     def test_worker_cannot_emit_server_verification_observation(self) -> None:
         """Worker claims are distinct from Cortex-observed verification events."""
         with self.assertRaisesRegex(ValueError, "workers may record"):

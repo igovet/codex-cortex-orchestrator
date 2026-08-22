@@ -25,7 +25,7 @@ import tomllib
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 # Some installer checks load this executable through ``importlib`` rather than
 # by executing it from its own directory.  Keep the bundled runtime package
 # resolvable in both modes; never depend on the caller's current directory.
@@ -149,6 +149,7 @@ from cortex_runtime.governance import (
     manage_governance as manage_governance_service,
     resolve_governance,
 )
+from cortex_runtime.validation import ValidationFailure
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback; atomic replace still applies.
@@ -3322,28 +3323,119 @@ def _planning_paths_list(value: Any, label: str) -> list[str]:
 
 
 def _validate_planning_dependency_graph(nodes: set[str], dependencies: dict[str, list[str]], label: str) -> None:
+    diagnostics: list[dict[str, Any]] = []
     for node, items in dependencies.items():
         unknown = sorted(set(items) - nodes)
         if unknown:
-            raise ValueError(f"{label} {node!r} depends on unknown item(s): " + ", ".join(unknown))
+            diagnostics.append(_planning_diag(
+                f"{label} {node!r} depends on unknown item(s): " + ", ".join(unknown),
+                code="planning_dependency_invalid",
+            ))
         if node in items:
-            raise ValueError(f"{label} {node!r} cannot depend on itself")
+            diagnostics.append(_planning_diag(
+                f"{label} {node!r} cannot depend on itself",
+                code="planning_dependency_invalid",
+            ))
     visiting: set[str] = set()
     visited: set[str] = set()
 
     def visit(node: str) -> None:
         if node in visiting:
-            raise ValueError(f"{label} dependencies must be acyclic")
+            diagnostics.append(_planning_diag(f"{label} dependencies must be acyclic", code="planning_dependency_cycle"))
+            return
         if node in visited:
             return
         visiting.add(node)
         for dependency in dependencies.get(node, []):
-            visit(dependency)
+            if dependency in nodes:
+                visit(dependency)
         visiting.remove(node)
         visited.add(node)
 
     for node in nodes:
         visit(node)
+    if diagnostics:
+        # Stable de-duplication prevents a cycle encountered from several
+        # roots from producing noisy duplicate diagnostics.
+        unique = list({(d.get("code"), d.get("message")): d for d in diagnostics}.values())
+        raise PlanningValidationError(unique)
+
+
+class PlanningValidationError(ValueError):
+    """A deterministic, ordered collection of planner input diagnostics.
+
+    Keeping the collection as an exception lets the public facade reject the
+    entire request before it opens a ledger write transaction, while still
+    exposing every independent correction in one response.
+    """
+
+    def __init__(self, diagnostics: list[dict[str, Any]]) -> None:
+        self.diagnostics = diagnostics
+        super().__init__("; ".join(str(item.get("message") or "") for item in diagnostics))
+
+
+def _planning_diag(message: str, *, path: str | None = None, code: str = "planning_validation_failed") -> dict[str, Any]:
+    item: dict[str, Any] = {"code": code, "message": message}
+    if path:
+        item["path"] = path
+    return item
+
+
+def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
+    """Collect independent shape errors without attempting cross-field checks."""
+    diagnostics: list[dict[str, Any]] = []
+    if not isinstance(value, dict):
+        return [_planning_diag("planning must be an object", path="planning")]
+    allowed = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "resolved_questions", "risks"}
+    for key in sorted(set(value) - allowed):
+        diagnostics.append(_planning_diag("unsupported planning field", path=f"planning.{key}"))
+    for key in ("overview", "work_packages"):
+        if key not in value:
+            diagnostics.append(_planning_diag(f"planning requires {key}", path=f"planning.{key}"))
+    for key, label in (("overview", "planning overview"), ("recommendation_rationale", "planning recommendation_rationale")):
+        if key in value and not isinstance(value[key], str):
+            diagnostics.append(_planning_diag(f"{label} must be a string", path=f"planning.{key}"))
+    recommendation = str(value.get("recommendation") or "approve").strip().lower()
+    if recommendation not in {"approve", "revise"}:
+        diagnostics.append(_planning_diag("planning recommendation must be approve or revise", path="planning.recommendation"))
+    for key in ("resolved_questions", "risks", "requirement_coverage"):
+        if key in value and not isinstance(value[key], list):
+            diagnostics.append(_planning_diag(f"planning {key} must be an array", path=f"planning.{key}"))
+    packages = value.get("work_packages")
+    if not isinstance(packages, list):
+        return diagnostics
+    if not packages:
+        diagnostics.append(_planning_diag("planning work_packages must be a non-empty array", path="planning.work_packages"))
+        return diagnostics
+    package_allowed = {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "microtasks"}
+    micro_allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification"}
+    for pi, package in enumerate(packages):
+        p = f"planning.work_packages[{pi}]"
+        if not isinstance(package, dict):
+            diagnostics.append(_planning_diag(f"{p} must be an object", path=p)); continue
+        for key in sorted(set(package) - package_allowed):
+            diagnostics.append(_planning_diag("unsupported planning package field", path=f"{p}.{key}"))
+        for key in ("id", "title", "objective", "microtasks"):
+            if key not in package:
+                diagnostics.append(_planning_diag(f"planning package requires {key}", path=f"{p}.{key}"))
+        microtasks = package.get("microtasks")
+        if not isinstance(microtasks, list):
+            continue
+        if not microtasks:
+            diagnostics.append(_planning_diag("planning package must contain a non-empty microtasks array", path=f"{p}.microtasks"))
+        for mi, micro in enumerate(microtasks):
+            m = f"{p}.microtasks[{mi}]"
+            if not isinstance(micro, dict):
+                diagnostics.append(_planning_diag(f"{m} must be an object", path=m)); continue
+            for key in sorted(set(micro) - micro_allowed):
+                diagnostics.append(_planning_diag("unsupported planning microtask field", path=f"{m}.{key}"))
+            for key in ("id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"):
+                if key not in micro:
+                    diagnostics.append(_planning_diag(f"planning microtask requires {key}", path=f"{m}.{key}"))
+            for key in ("acceptance_criteria", "verification", "allowed_paths", "depends_on", "gates"):
+                if key in micro and not isinstance(micro[key], list):
+                    diagnostics.append(_planning_diag(f"planning microtask {key} must be an array", path=f"{m}.{key}"))
+    return diagnostics
 
 
 def sanitize_scoping_payload(value: Any, *, persisted: bool = False) -> dict[str, Any]:
@@ -3463,6 +3555,13 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     """Validate the Planner-only work-breakdown artifact without widening AttemptResult."""
     if persisted and isinstance(value, dict) and value.get("schema") == PLANNING_SCHEMA:
         value = {key: item for key, item in value.items() if key != "schema"}
+    # Run all independent shape checks before semantic parsing.  This keeps a
+    # malformed submission atomic and avoids the frustrating one-error-per-
+    # retry loop; dependency/reference checks below run only for a structurally
+    # valid document.
+    base_diagnostics = _planning_base_diagnostics(value)
+    if base_diagnostics:
+        raise PlanningValidationError(base_diagnostics)
     allowed_top_level = {
         "overview", "work_packages", "requirement_coverage", "recommendation",
         "recommendation_rationale", "resolved_questions", "risks",
@@ -3644,13 +3743,16 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     _validate_planning_dependency_graph(package_ids, {item["id"]: item["depends_on"] for item in packages}, "planning package")
     _validate_planning_dependency_graph(microtask_ids, microtask_dependencies, "planning microtask")
     valid_plan_refs = package_ids | microtask_ids
+    coverage_diagnostics: list[dict[str, Any]] = []
     for coverage_index, item in enumerate(coverage, 1):
         unknown_refs = sorted(set(item["plan_refs"]) - valid_plan_refs)
         if unknown_refs:
-            raise ValueError(
+            coverage_diagnostics.append(_planning_diag(
                 f"planning requirement_coverage[{coverage_index - 1}] references unknown plan items: "
-                + ", ".join(unknown_refs)
-            )
+                + ", ".join(unknown_refs), code="planning_coverage_invalid",
+            ))
+    if coverage_diagnostics:
+        raise PlanningValidationError(coverage_diagnostics)
     result = {
         "schema": PLANNING_SCHEMA,
         "overview": overview,
@@ -3773,6 +3875,147 @@ def _plan_tracker_document(
         "updated_at": now(),
         "last_event": "plan_created",
     }
+
+
+def planning_payload_digest(value: Any) -> str:
+    """Return the stable digest used by same-attempt planning repair."""
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def planning_rejected_draft_document(
+    task_dir: Path,
+    state: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    planning: Any,
+    diagnostics: list[dict[str, Any]],
+    result_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist one immutable rejected planner draft, without a result row."""
+    task_id = str(state.get("task_id") or "")
+    root = _task_document_root(task_dir, task_id)
+    digest = planning_payload_digest(planning)
+    document_type = f"planning_rejected_draft:{safe_id(str(attempt.get('attempt_id') or ''))}"
+    existing = db_get_task_document(root, task_id, document_type)
+    if isinstance(existing, dict):
+        if existing.get("base_payload_digest") != digest:
+            raise ValueError("planning rejected draft is immutable; base_payload_digest differs")
+        return existing
+    document = {
+        "schema": "cortex/planning-rejected-draft/v1",
+        "task_id": task_id,
+        "attempt_id": str(attempt.get("attempt_id") or ""),
+        "base_payload_digest": digest,
+        "planning": json.loads(json.dumps(planning, ensure_ascii=False)),
+        "diagnostics": json.loads(json.dumps(diagnostics, ensure_ascii=False)),
+        "result_payload": json.loads(json.dumps(dict(result_payload or {}), ensure_ascii=False)),
+        "created_at": now(),
+    }
+    db_put_task_document(root, task_id, document_type, document)
+    return document
+
+
+def get_planning_rejected_draft(task_dir: Path, task_id: str, attempt_id: str) -> dict[str, Any] | None:
+    root = _task_document_root(task_dir, task_id)
+    return db_get_task_document(root, task_id, f"planning_rejected_draft:{safe_id(attempt_id)}")
+
+
+def _planning_pointer_tokens(path: str) -> list[str]:
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError("planning patch path must be an RFC6901 JSON pointer")
+    return [item.replace("~1", "/").replace("~0", "~") for item in path[1:].split("/")]
+
+
+def apply_planning_repair(draft: Mapping[str, Any], patches: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Apply restricted RFC6902-like patches to a rejected planning draft."""
+    value = json.loads(json.dumps(draft.get("planning"), ensure_ascii=False))
+    allowed_roots = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "resolved_questions", "risks"}
+    for patch in patches:
+        if not isinstance(patch, Mapping) or patch.get("op") not in {"replace", "add", "remove"}:
+            raise ValueError("planning patches support only replace, add, and remove")
+        tokens = _planning_pointer_tokens(str(patch.get("path") or ""))
+        if not tokens or tokens[0] not in allowed_roots:
+            raise ValueError("planning_correction_scope_violation: patch path is outside planning fields")
+        cursor: Any = value
+        for token in tokens[:-1]:
+            if isinstance(cursor, list):
+                if token == "-" or not token.isdigit() or int(token) >= len(cursor):
+                    raise ValueError("planning patch path does not exist")
+                cursor = cursor[int(token)]
+            elif isinstance(cursor, dict) and token in cursor:
+                cursor = cursor[token]
+            else:
+                raise ValueError("planning patch path does not exist")
+        leaf = tokens[-1]
+        if isinstance(cursor, list):
+            if patch.get("op") == "add" and leaf == "-": cursor.append(patch.get("value"))
+            elif leaf.isdigit() and int(leaf) < len(cursor):
+                if patch.get("op") == "remove": cursor.pop(int(leaf))
+                else: cursor[int(leaf)] = patch.get("value")
+            else: raise ValueError("planning patch list index does not exist")
+        elif isinstance(cursor, dict):
+            if patch.get("op") == "remove":
+                if leaf not in cursor: raise ValueError("planning patch field does not exist")
+                del cursor[leaf]
+            elif patch.get("op") == "replace" and leaf not in cursor:
+                raise ValueError("planning patch field does not exist")
+            else: cursor[leaf] = patch.get("value")
+        else: raise ValueError("planning patch parent is not an object or array")
+    return value
+
+
+def planning_changed_paths(before: Any, after: Any, prefix: str = "") -> list[str]:
+    """Return deterministic JSON-pointer paths changed between two drafts."""
+    if type(before) is not type(after):
+        return [prefix or "/"]
+    if isinstance(before, dict):
+        paths: list[str] = []
+        for key in sorted(set(before) | set(after)):
+            child = (prefix + "/" + str(key).replace("~", "~0").replace("/", "~1"))
+            if key not in before or key not in after:
+                paths.append(child)
+            else:
+                paths.extend(planning_changed_paths(before[key], after[key], child))
+        return paths
+    if isinstance(before, list):
+        paths: list[str] = []
+        for index in range(max(len(before), len(after))):
+            child = f"{prefix}/{index}"
+            if index >= len(before) or index >= len(after): paths.append(child)
+            else: paths.extend(planning_changed_paths(before[index], after[index], child))
+        return paths
+    return [] if before == after else [prefix or "/"]
+
+
+def planning_diagnostic_scope_allows(diagnostics: list[Mapping[str, Any]], changed: list[str]) -> bool:
+    def pointer_scope(raw: str) -> str:
+        # Planner diagnostics use human-readable ``items[0].field`` paths;
+        # repair diffs use RFC-6901 JSON pointers.  Normalize both forms to
+        # the same pointer before checking that a repair stays diagnostic-
+        # scoped.  This check is deliberately pure and happens before any
+        # planning materialization or AttemptResult mutation.
+        raw = raw.strip()
+        if raw == "planning":
+            return "/"
+        if raw.startswith("planning."):
+            raw = raw[9:]
+        parts: list[str] = []
+        for segment in raw.split("."):
+            match = re.fullmatch(r"([^\[]+)((?:\[\d+\])*)", segment)
+            if not match:
+                parts.append(segment)
+                continue
+            parts.append(match.group(1))
+            indices = re.findall(r"\[(\d+)\]", match.group(2))
+            parts.extend(indices)
+        return "/" + "/".join(part.replace("~", "~0").replace("/", "~1") for part in parts if part)
+
+    scopes: list[str] = []
+    for diagnostic in diagnostics:
+        raw = str(diagnostic.get("path") or "").strip()
+        if not raw: continue
+        scopes.append(pointer_scope(raw))
+    return bool(scopes) and all(any(scope == "/" or path == scope or path.startswith(scope + "/") for scope in scopes) for path in changed)
 
 
 def _sync_plan_tracker_document(task_dir: Path, state: dict[str, Any], *, event: str, detail: str) -> None:
@@ -4648,8 +4891,16 @@ def canonical_pipeline_gate(gate: Any) -> str:
 _PLANNING_GATE_PROSE_MARKERS = (
     "missing", "timed_out", "inaccessible", "ambiguous", "production",
     "release_blocker", "autonomous", "no_production_mutation", "restart",
-    "deployment", "order",
+    "deployment", "order", "enable", "release", "warmup",
 )
+
+# These are deliberately a closed vocabulary.  A planner sentence such as
+# ``enable release warmup`` may be tokenized into the optional package-gates
+# field, but an arbitrary unknown identifier must continue to fail closed.
+_PLANNING_PACKAGE_PROSE_GATE_TOKENS = frozenset({
+    *_PLANNING_GATE_PROSE_MARKERS,
+    "a_missing", "production_fact", "autonomous_averaging",
+})
 
 
 def _planning_package_gates(
@@ -4671,7 +4922,11 @@ def _planning_package_gates(
     if unknown:
         joined = "_".join(unknown)
         marker_hits = sum(marker in joined for marker in _PLANNING_GATE_PROSE_MARKERS)
-        if len(unknown) >= 3 and marker_hits >= 2:
+        if (
+            len(unknown) >= 3
+            and marker_hits >= 2
+            and set(unknown).issubset(_PLANNING_PACKAGE_PROSE_GATE_TOKENS)
+        ):
             derived = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])})
             return derived or ["implementation"]
         raise ValueError(
@@ -7556,19 +7811,50 @@ V3_STATUS_ALIASES = {
 }
 
 
-def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None, diagnostics: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     result = {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
         "outcome": outcome,
         "code": code,
-        "diagnostics": [{"code": code, "message": redact(message, 1000)}],
+        "diagnostics": diagnostics or [{"code": code, "message": redact(message, 1000)}],
         "dispatches": [],
         "next_action": f"{COORDINATOR_LOCK} {redact(message, 1000)}",
     }
     if candidates is not None:
         result["candidates"] = candidates
     return result
+
+
+def _v3_envelope_error(
+    operation: str,
+    diagnostics: list[dict[str, Any]],
+    *,
+    task_ref: str | None = None,
+) -> dict[str, Any]:
+    """Return one atomic, retryable boundary receipt for independent errors."""
+    # Preserve the established public wire codes while allowing the
+    # diagnostics themselves to identify the precise ingress and path.
+    code = {
+        "start_orchestration": "start_validation_failed",
+    }.get(operation, f"{operation}_validation_failed")
+    result = _v3_error(
+        code,
+        "request failed envelope validation",
+        diagnostics=diagnostics,
+    )
+    if task_ref:
+        result["task_ref"] = task_ref
+    return result
+
+
+def _v3_collect_fields(params: Any, allowed: set[str], *, operation: str) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    if not isinstance(params, dict):
+        return [{"code": f"{operation}_validation_failed", "path": "request", "message": "request must be an object"}]
+    for key in sorted(set(params) - allowed):
+        diagnostics.append({"code": f"{operation}_validation_failed", "path": key, "message": "unsupported field"})
+    return diagnostics
 
 
 def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
@@ -9457,6 +9743,26 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Start public Cortex orchestration without caller-managed lifecycle identifiers."""
     staged_authorization_task_id: str | None = None
     try:
+        envelope = _v3_collect_fields(params, {"project_root", "task", "waves", "_follow_up"}, operation="start_orchestration")
+        raw_task_probe = params.get("task") if isinstance(params, dict) else None
+        if not isinstance(raw_task_probe, dict):
+            envelope.append({"code": "start_orchestration_validation_failed", "path": "task", "message": "task must be an object"})
+        else:
+            allowed_probe = {
+                "user_request", "requirements", "constraints", "acceptance_criteria", "scope", "allowed_paths", "verification", "budget", "pause_conditions", "user_language", "language", "complexity", "replan_limit", "plan_approval", "initiative_ref", "governance_mode", "risk_triggers", "governance_triggers", "multiple_repositories", "related_tasks", "long_lived_lanes", "conflicting_resources", "multi_session_handoff", "communication_profile", "visible_thread_requested",
+            }
+            for key in sorted(set(raw_task_probe) - allowed_probe):
+                envelope.append({
+                    "code": "start_orchestration_validation_failed",
+                    "path": f"task.{key}",
+                    "message": f"unsupported task fields: {key}",
+                })
+            if not str(raw_task_probe.get("user_request") or "").strip():
+                envelope.append({"code": "start_orchestration_validation_failed", "path": "task.user_request", "message": "is required"})
+        if "waves" in params and params.get("waves") is not None and not isinstance(params.get("waves"), list):
+            envelope.append({"code": "start_orchestration_validation_failed", "path": "waves", "message": "must be an array"})
+        if envelope:
+            return _v3_envelope_error("start_orchestration", envelope)
         selected_project_root = select_project_root(params)
         if set(params) - {"project_root", "task", "waves", "_follow_up"}:
             raise ValueError("start_orchestration accepts only project_root, task, and optional waves")
@@ -9909,6 +10215,17 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Advance exactly the active Cortex wave using relative worker slots."""
     resolved_task_ref = str(params.get("task_ref") or "").strip() or None
     try:
+        envelope = _v3_collect_fields(params, {"project_root", "task_ref", "step", "results", "future_waves", "rework", "reason"}, operation="continue_orchestration")
+        if not str(params.get("task_ref") or "").strip():
+            envelope.append({"code": "continue_orchestration_validation_failed", "path": "task_ref", "message": "is required"})
+        if not isinstance(params.get("results"), list) or not params.get("results"):
+            envelope.append({"code": "continue_orchestration_validation_failed", "path": "results", "message": "must be a non-empty array"})
+        if params.get("future_waves") is not None and not isinstance(params.get("future_waves"), list):
+            envelope.append({"code": "continue_orchestration_validation_failed", "path": "future_waves", "message": "must be an array"})
+        if envelope:
+            return _v3_envelope_error(
+                "continue_orchestration", envelope, task_ref=resolved_task_ref,
+            )
         select_project_root(params)
         allowed = {"project_root", "task_ref", "step", "results", "future_waves", "rework", "reason"}
         unknown = sorted(set(params) - allowed)
@@ -10942,6 +11259,11 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Keep recovery and rare control-plane capabilities outside the normal flow."""
     resolved_task_ref = str(params.get("task_ref") or "").strip() or None
     try:
+        envelope = _v3_collect_fields(params, {"project_root", "intent", "task_ref", "reason", "payload"}, operation="manage_orchestration")
+        if "payload" in params and params.get("payload") is not None and not isinstance(params.get("payload"), dict):
+            envelope.append({"code": "manage_orchestration_validation_failed", "path": "payload", "message": "must be an object"})
+        if envelope:
+            return _v3_envelope_error("manage_orchestration", envelope)
         select_project_root(params)
         allowed = {"project_root", "intent", "task_ref", "reason", "payload"}
         unknown = sorted(set(params) - allowed)
@@ -11156,6 +11478,14 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
 def manage_governance(params: dict[str, Any]) -> dict[str, Any]:
     """Expose the additive v11 governance ledger without widening lifecycle calls."""
     try:
+        governance_allowed = {
+            "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof", "previous_coordinator_recovery_proof", "entity", "initiative_ref", "parent_ref", "title", "goal", "owner", "risk", "acceptance_oracle_artifact_ref", "task_id", "lane_id", "relationship", "milestone", "deliverable", "corrective", "expected_revision", "status", "evidence", "source_type", "source_ref", "target_type", "target_ref", "dependency_type", "dependency_ref", "record_ref", "record_type", "content", "created_by", "supersedes", "expires_at", "approval_basis", "content_artifact_ref", "link_ref", "finding_fingerprint", "evidence_ref", "fingerprint", "findings", "threshold", "window_days", "proposal_ref", "trigger", "reason", "limit", "offset", "task_ref", "capability_generation", "submission_id",
+        }
+        envelope = _v3_collect_fields(params, governance_allowed, operation="manage_governance")
+        if not str(params.get("action") or "").strip():
+            envelope.append({"code": "manage_governance_validation_failed", "path": "action", "message": "is required"})
+        if envelope:
+            return _v3_envelope_error("manage_governance", envelope)
         project = select_project_root(params)
         allowed = {
             "project_root", "action", "principal", "thread_id", "coordinator_capability", "coordinator_recovery_proof", "previous_coordinator_recovery_proof", "entity", "initiative_ref", "parent_ref", "title", "goal",
@@ -11325,6 +11655,7 @@ from cortex_runtime.dispatch_briefing import (
 from cortex_runtime import attempt_protocol
 from cortex_runtime.attempt_facade import (
     complete_attempt as complete_worker_attempt,
+    repair_planning,
     record_attempt_event as record_worker_attempt_event,
     read_worker_result,
 )
@@ -11513,6 +11844,10 @@ MANAGE_GOVERNANCE_SCHEMA = PUBLIC_SCHEMA_REGISTRY["manage_governance"]
 WORKER_QUESTION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["worker_question"]
 WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["record_attempt_event"]
 WORKER_COMPLETE_ATTEMPT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
+WORKER_COMPLETE_ATTEMPT_SCHEMA["properties"].update({
+    "base_payload_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "patches": {"type": "array", "items": {"type": "object", "additionalProperties": False, "properties": {"op": {"type": "string", "enum": ["replace", "add", "remove"]}, "path": {"type": "string", "pattern": "^/"}, "value": {}}, "required": ["op", "path"]}},
+})
 READ_DISPATCH_BRIEFING_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_dispatch_briefing"]
 READ_WORKER_RESULT_SCHEMA = PUBLIC_SCHEMA_REGISTRY["read_worker_result"]
 
