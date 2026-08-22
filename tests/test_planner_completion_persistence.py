@@ -1,6 +1,7 @@
 """Deterministic regressions for the Planner completion transport seam."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="cortex-planner-completion-")
         self.project = Path(self.temporary.name) / "project"
         self.project.mkdir()
+        self.host_store = Path(self.temporary.name) / "host-store"
+        self.host_store.mkdir(mode=0o700)
+        self._host_store_env = mock.patch.dict(
+            os.environ, {"CORTEX_HOST_STATE_DIR": str(self.host_store)}, clear=False,
+        )
+        self._host_store_env.start()
         self.root = self.project / "cortex"
         ledger_db.ensure_database(self.root)
         self.task_id = "planner-completion-task"
@@ -43,6 +50,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.attempt = {"attempt_id": "plan-01", "gate": "plan", "profile": "planner"}
 
     def tearDown(self) -> None:
+        self._host_store_env.stop()
         self.temporary.cleanup()
 
     @staticmethod
