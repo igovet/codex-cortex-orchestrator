@@ -1,5 +1,14 @@
 # Changelog
 
+## [10.0.6] - 2026-08-22
+
+### Fixed
+
+- Keep canonical blocked and failed worker results addressable as explicit
+  non-success terminal receipts without allowing fake success continuations.
+- Make the canonical `attempt_result_ref` unambiguous in worker completion and
+  governance-close instructions; projection references remain non-authoritative.
+
 ## [10.0.5] - 2026-08-22
 
 ### Fixed

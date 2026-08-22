@@ -425,8 +425,13 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "attempt_completed",
-            "projection_ref": projection["projection_ref"],
+            # Put the bearer lookup token first and label the generated view
+            # separately.  Native parents frequently serialize this object
+            # verbatim; keeping the canonical token first reduces accidental
+            # selection of the non-authoritative projection ref while the
+            # prompt/schema still require the field name to be copied exactly.
             "attempt_result_ref": canonical["result_ref"],
+            "projection_ref": projection["projection_ref"],
             "summary": canonical["summary"],
             "idempotent": bool(completed.get("idempotent")),
             "worker_replacement_authorized": False,

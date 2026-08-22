@@ -4,13 +4,13 @@
 
 ## Purpose
 
-Cortex 10.0.5 is packaged as a repository-local Codex plugin. Marketplace
+Cortex 10.0.6 is packaged as a repository-local Codex plugin. Marketplace
 metadata, the MCP server, profiles, skills, hooks, schemas, and validators must
 describe the same fresh v10 contract.
 
 ## Package files
 
-- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) declares version 10.0.5 and bundled components.
+- [plugin.json](../../../plugins/cortex/.codex-plugin/plugin.json) declares version 10.0.6 and bundled components.
 - [.mcp.json](../../../plugins/cortex/.mcp.json) launches the Python MCP server.
 - [marketplace.json](../../../.agents/plugins/marketplace.json) is the repository marketplace entry.
 - [validate-cortex-marketplace.py](../../../scripts/validate-cortex-marketplace.py) validates package structure.

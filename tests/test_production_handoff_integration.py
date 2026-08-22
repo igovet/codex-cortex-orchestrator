@@ -323,6 +323,85 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(advanced["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in advanced["dispatches"]], ["review"])
 
+    def test_blocked_canonical_result_remains_a_terminal_receipt_not_success(self) -> None:
+        """A blocked AttemptResult stays addressable without a fake continuation.
+
+        The worker result is authoritative evidence that the current slot is
+        blocked, but it cannot authorize a success continuation.  The parent
+        must submit the exact dispatch identity as a non-success receipt so
+        Cortex can record the blocked gate and expose its recovery path.
+        """
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Exercise a canonical blocked planner handoff.",
+                "acceptance_criteria": ["A blocked worker must stop the current pipeline."],
+                "verification": ["Verify the blocked AttemptResult is durably consumed."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "discover", "profile": "explorer"}]},
+                {"workers": [{"phase": "implementation", "profile": "backend_dev"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        task_dir, state, attempt = self._active_attempt()
+        self._read_briefing(state, attempt)
+        completion = control.complete_worker_attempt({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "status": "blocked",
+            "summary": "Planner is blocked pending the required repository evidence.",
+            "findings": [],
+            "decisions_needed": ["Provide the required repository evidence."],
+            "unresolved": ["The required repository evidence is unavailable."],
+            "claims": [],
+        })
+        self.assertTrue(completion["ok"], completion)
+        self.assertEqual(completion["outcome"], "attempt_blocked")
+        result_ref = str(completion["attempt_result_ref"])
+        blocked_state = control.load_task_state_for_artifact(task_dir)
+        blocked_attempt = next(item for item in blocked_state["attempts"] if item["attempt_id"] == attempt["attempt_id"])
+        self.assertEqual(blocked_attempt["status"], "blocked")
+        self.assertEqual(blocked_attempt["lifecycle_status"], "blocked")
+        self.assertEqual(blocked_attempt["attempt_result_ref"], result_ref)
+
+        read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": result_ref,
+        })
+        self.assertTrue(read["ok"], read)
+        self.assertNotIn("continuation", read)
+        self.assertEqual(read["continuation_unavailable_reason"], "attempt_result_not_finalized")
+
+        fake_success = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"attempt_result_ref": result_ref}],
+        })
+        self.assertFalse(fake_success["ok"], fake_success)
+        self.assertIn("finalized canonical attempt result", fake_success["diagnostics"][0]["message"])
+
+        terminal_receipt = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{
+                "status": "blocked",
+                "dispatch_ref": attempt["dispatch_ref"],
+                "reason": "Planner is blocked pending the required repository evidence.",
+            }],
+        })
+        self.assertTrue(terminal_receipt["ok"], terminal_receipt)
+        self.assertEqual(terminal_receipt["outcome"], "blocked")
+        final_state = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(final_state["status"], "blocked")
+        self.assertEqual(final_state["gates"]["discover"]["outcome"], "blocked")
+
     def test_unresolved_dispatch_cannot_complete_or_close_and_recovers_deterministically(self) -> None:
         """A dispatch without a canonical worker result remains recoverable.
 

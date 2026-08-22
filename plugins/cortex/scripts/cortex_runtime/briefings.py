@@ -846,7 +846,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         )
         gate_delta = (
             "Apply the canonical governance_close gate. Own the independent full-governance close review and evaluate only server-owned governance evidence, current source/tests, and the fresh AttemptResult handoff. "
-            "Downstream audit artifacts and handoff are outputs, not missing prerequisites. Add exactly one typed gate-result payload with decision/failure_class/findings/verification/workspace; pass has no open finding. "
+            "Downstream audit artifacts and handoff are outputs, not missing prerequisites. Add exactly one typed gate-result payload with decision/failure_class/findings/verification/workspace in the semantic claims array when applicable; do not invent a new complete_attempt field or submit a separate gate-result envelope. The public complete_attempt schema accepts only status, summary, findings, decisions_needed, unresolved, claims, and the planner-only planning sibling. Pass has no open finding. "
             "Governance-close status=completed requires unresolved=[]; record residual risk, retrospective notes, uncertainty, and non-blocking gaps in summary, claims, or AttemptEvents instead. "
             "This is a read-only result gate: do not edit files or submit changed_files; Cortex owns identity, receipts, timestamps, and trusted observations."
         )
@@ -909,7 +909,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Residual risk, omitted/environment checks, retrospective notes, uncertainty, and placeholder 'none' belong in summary, claims, or AttemptEvents, never unresolved. "
         "Server adds identity/phase/receipts; exposes attempt_result_ref. "
         "failure_class is product/infrastructure/environment/policy/worker. "
-        "Success: ATTEMPT_COMPLETED attempt_result_ref=<generated id>; +2 sentences; no view."
+        "Success: ATTEMPT_COMPLETED attempt_result_ref=<generated id>; +2 sentences; no view. When complete_attempt returns both attempt_result_ref and projection_ref, copy only the bare value of the attempt_result_ref field into the parent response; projection_ref is never a lookup token and must never be passed to read_worker_result."
     )
     stopping = (
         "Ground claims in evidence; separate fact, inference, and gaps. Continue while acceptance or canonical findings remain unresolved; do not stop because an earlier attempt failed. "

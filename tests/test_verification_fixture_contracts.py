@@ -483,6 +483,9 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             prompt,
         )
         self.assertIn("The terminal close count must equal the native spawn count", prompt)
+        self.assertIn("projection_ref: it is a generated view identifier, never a result lookup token", prompt)
+        self.assertIn("copy only the bare value of the attempt_result_ref field into read_worker_result", prompt)
+        self.assertIn("do not add gate-specific compatibility envelopes", prompt)
         self.assertIn(
             "close_agent, or any management operation for a child from an earlier wave after a later wave has been dispatched",
             prompt,

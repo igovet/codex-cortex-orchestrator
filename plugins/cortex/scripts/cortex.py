@@ -9621,13 +9621,31 @@ def _v3_active_wave_context(
         and item.get("host_stop_outcome") == "native_worker_stopped_without_result"
         and not item.get("invalidated")
     }
+    # A worker may publish a canonical non-success AttemptResult before the
+    # coordinator consumes the current wave.  ``read_worker_result``
+    # intentionally does not manufacture a success continuation for BLOCKED
+    # or FAILED results, but the exact terminal slot must still be addressable
+    # by ``continue_orchestration`` as a non-success receipt.  Without this
+    # set, a blocked Planner disappears from the active-wave cardinality and
+    # the coordinator either submits a fabricated success or receives the
+    # misleading ``requires 0 result(s)`` error.
+    terminal_result_ids = {
+        str(item.get("attempt_id") or "")
+        for item in state.get("attempts", [])
+        if item.get("gate") in wave.get("gates", [])
+        and item.get("status") in {"failed", "blocked", "cancelled", "superseded"}
+        and str(item.get("attempt_result_ref") or "").strip()
+        and str(item.get("lifecycle_status") or "").strip().lower()
+        in {"failed", "blocked", "cancelled", "superseded"}
+        and not item.get("invalidated")
+    }
     wave_attempt_ids = [
         str(attempt_id)
         for attempt_id in (wave.get("attempt_ids") or [])
         if str(attempt_id or "").strip()
     ]
     if active_attempt_ids:
-        eligible = set(active_attempt_ids) | attempt_result_absent_failure_ids
+        eligible = set(active_attempt_ids) | attempt_result_absent_failure_ids | terminal_result_ids
         attempt_ids = [attempt_id for attempt_id in wave_attempt_ids if attempt_id in eligible]
         if not attempt_ids:
             attempt_ids = active_attempt_ids + [
@@ -9639,7 +9657,10 @@ def _v3_active_wave_context(
         # only that current non-invalidated failed slot remains addressable.
         # Older invalidated attempt IDs stay in the immutable wave history but
         # must not inflate the result cardinality for the retry receipt.
-        attempt_ids = [attempt_id for attempt_id in wave_attempt_ids if attempt_id in attempt_result_absent_failure_ids]
+        attempt_ids = [
+            attempt_id for attempt_id in wave_attempt_ids
+            if attempt_id in attempt_result_absent_failure_ids or attempt_id in terminal_result_ids
+        ]
     if not attempt_ids:
         attempt_ids = active_attempt_ids
     return wave, attempt_ids, expected_step

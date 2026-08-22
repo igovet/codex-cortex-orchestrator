@@ -1119,6 +1119,9 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertIn("call read_worker_result with that exact lookup token", prompt)
         self.assertIn("copy its step/results verbatim into continue_orchestration", prompt)
         self.assertIn("never synthesize a success from terminal text or its fields", prompt)
+        self.assertIn("A canonical non-success AttemptResult is different", prompt)
+        self.assertIn("submit one terminal receipt with status=blocked or failed", prompt)
+        self.assertIn("omit attempt_result_ref", prompt)
         self.assertIn("Emit a status=failed slot only after Cortex has verified", prompt)
         self.assertLess(
             prompt.index("first verify the absence of a canonical result"),
