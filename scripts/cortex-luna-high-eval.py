@@ -843,6 +843,24 @@ def classified_result_failure(value: object) -> str | None:
     return None
 
 
+def evaluation_planning_manifest(task_dir: Path | None) -> dict[str, object]:
+    """Read the optional planner projection without turning absence into a crash.
+
+    ``planning_current`` is produced only after the server accepts a valid
+    Planner payload.  A failed or interrupted Planner therefore legitimately
+    leaves no document behind.  The live evaluator must report the resulting
+    scenario checks as FAIL and retain no diagnostic payload, rather than
+    dereferencing ``None`` while building its safe audit.
+    """
+    if task_dir is None:
+        return {}
+    try:
+        value = cortex.current_planning_manifest(task_dir)
+    except (OSError, ValueError, sqlite3.Error):
+        return {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def classified_native_outcome(value: object) -> str | None:
     """Return only a safe durable-result class from native agent state."""
     if not isinstance(value, dict):
@@ -2358,13 +2376,17 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "\"profile\":\"general\",\"allowed_paths\":[\"result.md\"],"
             "\"acceptance_criteria\":[\"result.md contains exactly the required Planner fixture line.\"],"
             "\"verification\":[\"Read result.md and compare its exact content.\"]}]}]}. "
-            "Do not add, remove, rename, or reorder packages or microtasks. Read the plan result, close the completed "
-            "Planner child, then call "
-            "continue_orchestration with that attempt_result_ref. Only after it returns outcome=awaiting_plan_approval and "
-            "plan_review, call manage_orchestration intent=plan_approval with decision=prompt, then submit only the "
-            "embedded Approve action arguments; never call approval before that continue. The user pre-authorized this fixture. Then run implementation, qa, review, "
-            "documentation, and close in the returned order. Implementation creates result.md. Do not bypass approval "
-            "or edit .codex/cortex."
+            "Do not add, remove, rename, or reorder packages or microtasks. After the Planner completes, read its exact "
+            "attempt_result_ref with read_worker_result and treat result_view as a non-authoritative display projection. "
+            "Follow the server-returned next_action and management contract verbatim: call manage_orchestration with "
+            "intent=plan_approval and payload.decision=prompt; do not call continue_orchestration for this plan wave, "
+            "do not invent a step/results continuation, and do not close the Planner before the approval management "
+            "receipt. Render the returned chat_interaction as the bounded plan review. The user pre-authorized this "
+            "fixture, so after that prompt receipt submit only the embedded Approve action arguments (including the "
+            "server-provided request_id), never a self-authored request_id or approval payload. Follow the approval "
+            "response next_action exactly: close the completed Planner child only when the server permits it, then "
+            "invoke every returned implementation dispatch in order. Implementation creates result.md. Do not bypass "
+            "approval or edit .codex/cortex."
         )
     return common + (
         "Exercise a deterministic future-wave reassessment without manufacturing a blocker. "
@@ -2554,7 +2576,7 @@ def _live_eval(
             item.get("gate") == "close" and item.get("verified_execution") and item.get("exit_code") == 0
             for item in state.get("evidence", [])
         )
-        planning_manifest = cortex.current_planning_manifest(task_dir) if task_dir else {}
+        planning_manifest = evaluation_planning_manifest(task_dir)
         checks = {
             "process_ok": streamed["returncode"] == 0,
             "used_start": "start_orchestration" in tool_names,

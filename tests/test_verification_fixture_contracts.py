@@ -385,6 +385,19 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertFalse(unavailable["question_state_available"])
         self.assertFalse(unavailable["no_unexpected_questions"])
 
+    def test_planner_evaluator_treats_missing_manifest_as_safe_failed_evidence(self) -> None:
+        """A missing planning projection is a failed check, never evaluator crash data."""
+        with mock.patch.object(LUNA_EVAL.cortex, "current_planning_manifest", return_value=None):
+            manifest = LUNA_EVAL.evaluation_planning_manifest(Path("/workspace/cortex-live"))
+        self.assertEqual(manifest, {})
+        package_artifacts = manifest.get("work_packages", [])
+        self.assertEqual(package_artifacts, [])
+        planning_check = (
+            manifest.get("schema") == "cortex/planning/v1"
+            and len(package_artifacts) >= 2
+        )
+        self.assertFalse(planning_check)
+
     def test_blocked_resume_live_prompt_forces_one_valid_future_wave_reassessment(self) -> None:
         prompt = LUNA_EVAL.live_prompt("blocked_resume", Path("/workspace/cortex-live"))
         self.assertIn("deterministic future-wave reassessment", prompt)
@@ -412,8 +425,10 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("Do not add, remove, rename, or reorder packages or microtasks", prompt)
         self.assertIn("decision=prompt", prompt)
         self.assertIn("embedded Approve action arguments", prompt)
-        self.assertIn("Only after it returns outcome=awaiting_plan_approval", prompt)
-        self.assertIn("never call approval before that continue", prompt)
+        self.assertIn("Follow the server-returned next_action and management contract verbatim", prompt)
+        self.assertIn("do not call continue_orchestration for this plan wave", prompt)
+        self.assertIn("server-provided request_id", prompt)
+        self.assertNotIn("never call approval before that continue", prompt)
 
     def test_automatic_governance_live_prompt_does_not_force_governance(self) -> None:
         prompt = LUNA_EVAL.live_prompt(
