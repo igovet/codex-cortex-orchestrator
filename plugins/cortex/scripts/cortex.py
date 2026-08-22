@@ -2694,6 +2694,8 @@ def bind_host_worker_from_hook(
                     resumed_attempt["host_resumed_at"] = now()
                     package = _delegation_package(resumed_task_dir, resumed_state["task_id"], str(resumed_attempt["attempt_id"]))
                     package["spawn_status"] = "resumed_existing_worker"
+                    package["lifecycle_status"] = resumed_attempt.get("lifecycle_status")
+                    package["attempt_status"] = resumed_attempt.get("status")
                     package["host_resumed_at"] = resumed_attempt["host_resumed_at"]
                     db_put_worker_session(root, {
                         "task_id": resumed_state["task_id"],
@@ -2876,6 +2878,8 @@ def finalize_host_worker_stop_from_hook(
             attempt["host_resumable"] = False
             attempt["attempt_result_ref"] = result_ref
             package["spawn_status"] = "stopped_after_result"
+            package["lifecycle_status"] = attempt.get("lifecycle_status")
+            package["attempt_status"] = attempt.get("status")
             package["host_stopped_at"] = stopped_at
             package["resumable"] = False
             package["attempt_result_ref"] = result_ref
@@ -2890,6 +2894,8 @@ def finalize_host_worker_stop_from_hook(
             attempt["host_resumable"] = True
             attempt["host_question_refs"] = question_refs
             package["spawn_status"] = "paused_for_question"
+            package["lifecycle_status"] = attempt.get("lifecycle_status")
+            package["attempt_status"] = attempt.get("status")
             package["host_stopped_at"] = stopped_at
             package["resumable"] = True
             package["question_refs"] = question_refs
@@ -2904,6 +2910,8 @@ def finalize_host_worker_stop_from_hook(
             attempt["host_resumable"] = False
             attempt["attempt_result_ref"] = canonical_result.get("result_ref")
             package["spawn_status"] = "stopped_finalization_pending"
+            package["lifecycle_status"] = attempt.get("lifecycle_status")
+            package["attempt_status"] = attempt.get("status")
             package["host_stopped_at"] = stopped_at
             package["resumable"] = False
             package["attempt_result_ref"] = canonical_result.get("result_ref")
@@ -2920,6 +2928,8 @@ def finalize_host_worker_stop_from_hook(
             attempt["lifecycle_status"] = "needs_recovery"
             attempt.pop("worker_lease_expires_at", None)
             package["spawn_status"] = "stopped_without_result"
+            package["lifecycle_status"] = attempt.get("lifecycle_status")
+            package["attempt_status"] = attempt.get("status")
             package["host_stopped_at"] = stopped_at
             package["resumable"] = False
             package["failure_reason"] = reason
@@ -6143,6 +6153,8 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
             package = _delegation_package(task_dir, state["task_id"], attempt_id)
             package["spawn_status"] = "confirmed_model_mismatch"
             package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
+            package["lifecycle_status"] = attempt.get("lifecycle_status")
+            package["attempt_status"] = attempt.get("status")
             package["host_spawn"] = host_spawn
             package["model_verification"] = model_verification
             _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
@@ -6181,6 +6193,8 @@ def confirm_host_spawn(params: dict[str, Any]) -> dict[str, Any]:
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         package["spawn_status"] = "confirmed"
         package["dispatch_correlation"] = "coordinator_recorded_host_spawn"
+        package["lifecycle_status"] = attempt.get("lifecycle_status")
+        package["attempt_status"] = attempt.get("status")
         package["host_spawn"] = host_spawn
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
         db_put_worker_session(root, {
@@ -6555,24 +6569,29 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "independent_reviewer": bool(params.get("independent_reviewer")) if "independent_reviewer" in params else None,
         "created_at": now(),
     }
+    canonical_content = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     artifact = store_immutable_artifact(
         task_dir,
         state["task_id"],
         kind="evidence",
         title=f"evidence/{evidence_id}.json",
         mime_type="application/json",
-        content=json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        content=canonical_content,
         export_path=f"evidence/{evidence_id}.json",
     )
     # Governance close/activation validation must be able to resolve the
     # evidence back to canonical SQLite content.  These fields are produced
     # only after the immutable artifact write and are never accepted from the
-    # public evidence payload.
+    # public evidence payload.  Keep them in the task-state/catalog binding;
+    # do not append them to the export, because the export is an immutable
+    # byte-for-byte projection of the canonical SQLite artifact.
     evidence["artifact_ref"] = artifact["artifact_ref"]
     evidence["artifact_digest"] = artifact["digest_sha256"]
     evidence["artifact_immutable"] = bool(artifact["immutable"])
     evidence["artifact_verified"] = True
-    write_json(task_dir / "evidence" / f"{evidence_id}.json", evidence)
+    # Materialize the export with the exact canonical bytes.  The catalog
+    # binding above belongs to task state, not to the immutable artifact body.
+    write_text_atomic(task_dir / "evidence" / f"{evidence_id}.json", canonical_content)
     state["evidence"].append(evidence)
     if kind == "documentation":
         state["documentation_receipt"] = {"evidence_id": evidence_id, "attempt_id": attempt_id, "decision": decision, "justification": evidence["justification"]}

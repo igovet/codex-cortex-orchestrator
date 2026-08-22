@@ -198,6 +198,24 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         self.assertIn("CORTEX ACTIVE DISPATCH", block)
         self.assertIn("Do not return a final answer", block)
 
+    def test_stop_hook_allows_parent_turn_for_paused_question(self) -> None:
+        """An open durable question takes precedence over a bound child."""
+        state = {
+            "status": "active",
+            "attempts": [{
+                "facade_managed": True,
+                "status": "running",
+                "lifecycle_status": "paused_awaiting_user",
+                "host_stop_outcome": "awaiting_user",
+                "host_question_refs": ["question-0001"],
+                "host_spawn": {"agent_id": "native-question"},
+            }],
+        }
+        block = cortex_hook.active_worker_stop_block(
+            {"hook_event_name": "Stop", "stop_hook_active": False}, state
+        )
+        self.assertIsNone(block)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

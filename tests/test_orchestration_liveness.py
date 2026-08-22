@@ -69,6 +69,32 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                 self.assertNotRegex(visible, communication._TECHNICAL_RE)
                 self.assertTrue(view["quality"]["ok"], view)
 
+    def test_awaiting_user_keeps_short_visible_status_and_machine_guard(self) -> None:
+        """Question pauses expose plain status while retaining internal receipt data."""
+        response = orchestration_engine._segregate_orchestration_output({
+            "schema": "cortex/orchestration/v3",
+            "ok": True,
+            "state": "needs_input",
+            "result": {
+                "outcome": "awaiting_user",
+                "question_ref": "private-question-ref",
+                "next_action": "answer the open question before resuming",
+            },
+            "task_id": "private-task-ref",
+            "wave_id": "wave-question",
+            "next_action": "answer the open question before resuming",
+            "communication_profile": "natural",
+            "user_language": "en",
+        })
+        visible = json.dumps(response["user_view"], sort_keys=True)
+        self.assertEqual(response["user_view"]["message_type"], "decision_required")
+        self.assertTrue(response["user_view"]["requires_user_decision"])
+        self.assertNotIn("private-question-ref", visible)
+        self.assertNotIn("private-task-ref", visible)
+        self.assertNotIn("next_action", visible)
+        self.assertEqual(response["internal"]["result"]["outcome"], "awaiting_user")
+        self.assertEqual(response["internal"]["result"]["question_ref"], "private-question-ref")
+
     def test_remediation_heuristic_ignores_negated_action_but_accepts_later_clause(self) -> None:
         self.assertFalse(
             orchestration_engine._has_non_negated_term(

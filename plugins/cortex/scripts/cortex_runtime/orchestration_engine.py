@@ -2801,6 +2801,8 @@ def _complete_orchestrate_attempt(
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         package["spawn_status"] = "worker_result_received"
         package["dispatch_correlation"] = "worker_result_received"
+        package["lifecycle_status"] = canonical.get("lifecycle_status")
+        package["attempt_status"] = attempt.get("status")
         package["attempt_result_ref"] = result_ref
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
         save_state(task_dir, task_dir / "state.sqlite", state, "worker_result", attempt_id)
@@ -2813,7 +2815,13 @@ def _complete_orchestrate_attempt(
         })
         if finalized.get("recorded") is False:
             raise ValueError(str(finalized.get("reason") or "worker result attempt finalization failed"))
-        return finalized["state"], None
+        finalized_state = finalized["state"]
+        finalized_attempt = _attempt(finalized_state, attempt_id)
+        package = _delegation_package(task_dir, state["task_id"], attempt_id)
+        package["lifecycle_status"] = canonical.get("lifecycle_status")
+        package["attempt_status"] = finalized_attempt.get("status")
+        _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+        return finalized_state, None
     observation_source = str(completion.get("host_observation_source") or "").strip()
     completion_fields = dict(completion)
     if observation_source == "unattested_parent_result" and attempt.get("status") == AWAITING_HOST_SPAWN:

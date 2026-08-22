@@ -995,6 +995,13 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(stopped["outcome"], "awaiting_user")
         state = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(state["attempts"][0]["status"], "running")
+        package = self.task_document(task_dir, f"dispatch:{attempt['attempt_id']}")
+        self.assertEqual(package["spawn_status"], "paused_for_question")
+        self.assertEqual(package["lifecycle_status"], "paused_awaiting_user")
+        self.assertEqual(package["attempt_status"], "running")
+        self.assertIsNone(cortex_hook.active_worker_stop_block(
+            {"hook_event_name": "Stop", "stop_hook_active": False}, state,
+        ))
         inspected = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "inspect",
         })
@@ -2038,6 +2045,23 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(pending["next_action"], "record_evidence")
         evidence = control.record_evidence({"task_id": "demo", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "discover", "attempt_id": delegation["attempt_id"], "kind": "result", "summary": "inspection completed", "command": "Authorization: Bearer <TOKEN>"})
         self.assertIn("<REDACTED>", evidence["state"]["evidence"][0]["command"])
+        evidence_record = evidence["evidence"]
+        artifact = control.db_get_artifact_for_export_path(
+            self.ledger, "demo", "evidence/evidence-0001.json",
+        )
+        self.assertIsNotNone(artifact)
+        export_path = control.db_task_artifact_path(self.ledger, "demo") / "evidence/evidence-0001.json"
+        canonical_content = control.db_read_artifact_content(
+            self.ledger, "demo", str(artifact["artifact_ref"]),
+        )
+        self.assertEqual(export_path.read_text(encoding="utf-8"), canonical_content)
+        self.assertEqual(
+            hashlib.sha256(canonical_content.encode("utf-8")).hexdigest(),
+            artifact["digest_sha256"],
+        )
+        self.assertNotIn("artifact_ref", json.loads(canonical_content))
+        self.assertEqual(evidence_record["artifact_ref"], artifact["artifact_ref"])
+        self.assertEqual(evidence_record["artifact_digest"], artifact["digest_sha256"])
         closed = control.record_gate({"task_id": "demo", "principal": "thread-a", "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed"})
         self.assertEqual(closed["state"]["current_gates"], ["implementation"])
 
@@ -2151,6 +2175,8 @@ class ControlPlaneTests(unittest.TestCase):
             "reasoning_effort": "high",
         }
         package = self.task_document(control.db_task_artifact_path(self.ledger, "spawn-contract"), f"dispatch:{delegation['attempt_id']}")
+        self.assertEqual(package["lifecycle_status"], "running_acknowledged")
+        self.assertEqual(package["attempt_status"], "running")
         self.assertEqual({key: delegation["spawn_request"][key] for key in expected}, expected)
         self.assertRegex(
             delegation["spawn_request"]["task_name"],

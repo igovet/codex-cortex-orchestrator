@@ -1202,6 +1202,22 @@ def active_worker_stop_block(event: dict, state: dict) -> str | None:
     ]
     if not active_facade_attempts:
         return None
+    # A durable open question is a resumable parent-turn boundary, not live
+    # work.  Check it before host identity: the native child may still be
+    # bound in the authenticated snapshot while SubagentStop is being
+    # reconciled, but the coordinator must surface the question and allow the
+    # normal turn to finish instead of emitting ACTIVE WORKER/Remain silent.
+    if any(
+        str(attempt.get("lifecycle_status") or "") == "paused_awaiting_user"
+        or str(attempt.get("host_stop_outcome") or "") == "awaiting_user"
+        or str(attempt.get("status") or "") == "waiting_question"
+        or (
+            bool(attempt.get("question_refs") or attempt.get("host_question_refs"))
+            and str(attempt.get("status") or "") in {"running", "waiting_question"}
+        )
+        for attempt in active_facade_attempts
+    ):
+        return None
     has_live_bound_worker = any(
         isinstance(attempt, dict)
         and attempt.get("status") == "running"
@@ -1430,12 +1446,28 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
             and str(event.get("agent_id") or "").strip()
         ):
             try:
-                finalize_host_worker_stop_from_hook(
+                finalized = finalize_host_worker_stop_from_hook(
                     str(project),
                     task_id,
                     session_id,
                     event.get("agent_id"),
                 )
+                # The snapshot was authenticated before the native child
+                # stopped. Reflect the exact server-owned question pause in
+                # this in-memory copy so the same hook invocation cannot
+                # re-block the parent turn as if the child were still live.
+                if finalized.get("outcome") == "awaiting_user":
+                    question_refs = list(finalized.get("question_refs") or [])
+                    for attempt in state.get("attempts", []):
+                        if not isinstance(attempt, dict):
+                            continue
+                        if str((attempt.get("host_spawn") or {}).get("agent_id") or "") != str(event.get("agent_id") or ""):
+                            continue
+                        attempt["lifecycle_status"] = "paused_awaiting_user"
+                        attempt["host_stop_outcome"] = "awaiting_user"
+                        attempt["host_resumable"] = True
+                        attempt["host_question_refs"] = question_refs
+                        break
                 agent_name, display_name = worker_identity(event, state)
             except Exception:
                 # Lifecycle persistence is fail-open for the host. The
