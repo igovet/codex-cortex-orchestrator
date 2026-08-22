@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from cortex_runtime import ledger_db
+from cortex_runtime.validation import ValidationFailure
 
 
 ATTEMPT_RESULT_SCHEMA = "cortex/attempt-result/v1"
@@ -46,6 +47,23 @@ EVENT_TYPES = WORKER_EVENT_TYPES | SYSTEM_EVENT_TYPES
 _EVENT_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SUBMISSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+AttemptValidationError = ValidationFailure
+
+
+class CanonicalResultConflict(ValueError):
+    """A retry attempted to replace an immutable canonical AttemptResult."""
+
+    def __init__(self, *, result_ref: str) -> None:
+        self.result_ref = str(result_ref)
+        self.diagnostics = [{
+            "code": "attempt_canonical_result_conflict",
+            "path": "result",
+            "message": "attempt already has a different canonical result; read the existing result and do not resubmit a changed payload",
+            "result_ref": self.result_ref,
+        }]
+        super().__init__(self.diagnostics[0]["message"])
 
 
 @dataclass(frozen=True)
@@ -130,6 +148,11 @@ def _normalise_result(
     unresolved: Any,
     claims: Any,
 ) -> AttemptResult:
+    diagnostics: list[dict[str, Any]] = []
+
+    def issue(path: str, message: str) -> None:
+        diagnostics.append({"code": "attempt_result_invalid", "path": path, "message": message})
+
     if isinstance(result, AttemptResult):
         if any(value is not None for value in (status, summary, findings, decisions_needed, unresolved, claims)):
             raise ValueError("pass either result or individual AttemptResult fields, not both")
@@ -139,37 +162,40 @@ def _normalise_result(
             raise ValueError("pass either result or individual AttemptResult fields, not both")
         unexpected = sorted(set(result) - {"status", "summary", "findings", "decisions_needed", "unresolved", "claims"})
         if unexpected:
-            raise ValueError("attempt result has unsupported fields: " + ", ".join(str(item) for item in unexpected))
+            issue("result", "unsupported fields: " + ", ".join(str(item) for item in unexpected))
         candidate = AttemptResult(
             status=str(result.get("status") or ""),
             summary=str(result.get("summary") or ""),
-            findings=_normalise_collection(result.get("findings"), label="findings"),
-            decisions_needed=_normalise_collection(result.get("decisions_needed"), label="decisions_needed"),
-            unresolved=_normalise_collection(result.get("unresolved"), label="unresolved"),
-            claims=_normalise_collection(result.get("claims"), label="claims"),
+            findings=result.get("findings"), decisions_needed=result.get("decisions_needed"),
+            unresolved=result.get("unresolved"), claims=result.get("claims"),
         )
     else:
         candidate = AttemptResult(
             status=str(status or ""),
             summary=str(summary or ""),
-            findings=_normalise_collection(findings, label="findings"),
-            decisions_needed=_normalise_collection(decisions_needed, label="decisions_needed"),
-            unresolved=_normalise_collection(unresolved, label="unresolved"),
-            claims=_normalise_collection(claims, label="claims"),
+            findings=findings, decisions_needed=decisions_needed,
+            unresolved=unresolved, claims=claims,
         )
-    normalized_status = candidate.status.strip().lower()
+    collections: dict[str, tuple[Any, ...]] = {}
+    for label, value in (("findings", candidate.findings), ("decisions_needed", candidate.decisions_needed), ("unresolved", candidate.unresolved), ("claims", candidate.claims)):
+        try:
+            collections[label] = _normalise_collection(value, label=label)
+        except ValueError as exc:
+            issue(label, str(exc))
+            collections[label] = ()
+    normalized_status = str(candidate.status or "").strip().lower()
     if normalized_status not in RESULT_STATUSES:
-        raise ValueError("attempt result status must be completed, blocked, or failed")
-    normalized_summary = candidate.summary.strip()
+        issue("status", "must be completed, blocked, or failed")
+    normalized_summary = str(candidate.summary or "").strip()
     if not normalized_summary:
-        raise ValueError("attempt result summary is required")
+        issue("summary", "is required")
+    if diagnostics:
+        raise AttemptValidationError(diagnostics)
     normalized = AttemptResult(
         status=normalized_status,
         summary=normalized_summary,
-        findings=_normalise_collection(candidate.findings, label="findings"),
-        decisions_needed=_normalise_collection(candidate.decisions_needed, label="decisions_needed"),
-        unresolved=_normalise_collection(candidate.unresolved, label="unresolved"),
-        claims=_normalise_collection(candidate.claims, label="claims"),
+        findings=collections["findings"], decisions_needed=collections["decisions_needed"],
+        unresolved=collections["unresolved"], claims=collections["claims"],
     )
     _bounded_json(normalized.as_dict(), label="result")
     return normalized
@@ -704,7 +730,7 @@ def complete_attempt(
                 "claims": list(normalized.claims),
             }
             if _canonical_json(stored_semantic) != _canonical_json(submitted_semantic):
-                raise ValueError("attempt already has a different canonical result")
+                raise CanonicalResultConflict(result_ref=str(stored["result_ref"]))
             if submission_id is not None and stored["submission_id"] != str(submission_id):
                 raise ValueError("attempt completion retry must reuse its original submission_id")
             return {"ok": True, "result": stored, "idempotent": True, "finalization_required": stored["lifecycle_status"] == LIFECYCLE_WORK_COMPLETED}

@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from cortex_runtime import attempt_protocol, communication
+from cortex_runtime.validation import ValidationFailure, collect_validations
 
 from cortex_runtime.core.runtime_bindings import bind_symbols
 
@@ -134,36 +135,45 @@ def _validate_question_options(value: object, *, label: str) -> None:
 
 def _validate_single_question_submission(params: dict[str, Any]) -> None:
     """Reject any public question input that would be silently shortened."""
-    _require_untruncated_text(params.get("question"), label="worker question", maximum_chars=4_000)
-    if params.get("header") is not None:
-        _require_untruncated_text(params.get("header"), label="worker question header", maximum_chars=120)
-    if params.get("custom_label") is not None:
-        _require_untruncated_text(params.get("custom_label"), label="worker question custom_label", maximum_chars=160)
-    if params.get("recommendation") is not None:
-        _require_untruncated_text(params.get("recommendation"), label="worker question recommendation", maximum_chars=1_200)
-    if params.get("recommended_answer") is not None:
-        _require_untruncated_text(params.get("recommended_answer"), label="worker question recommended_answer", maximum_chars=1_200)
-    _validate_question_options(params.get("options"), label="worker question options")
-    _validate_sanitized_structure(
-        params.get("context", {}), label="worker question context", maximum_bytes=0,
-    )
+    checks: list[tuple[str, Any]] = [
+        ("question", lambda: _require_untruncated_text(params.get("question"), label="worker question", maximum_chars=4_000)),
+        ("context", lambda: _validate_sanitized_structure(params.get("context", {}), label="worker question context", maximum_bytes=0)),
+    ]
+    optional_text = {
+        "header": ("worker question header", 120),
+        "custom_label": ("worker question custom_label", 160),
+        "recommendation": ("worker question recommendation", 1_200),
+        "recommended_answer": ("worker question recommended_answer", 1_200),
+    }
+    for field, (label, maximum) in optional_text.items():
+        if params.get(field) is not None:
+            checks.append((field, lambda field=field, label=label, maximum=maximum: _require_untruncated_text(params.get(field), label=label, maximum_chars=maximum)))
+    checks.append(("options", lambda: _validate_question_options(params.get("options"), label="worker question options")))
+    diagnostics: list[dict[str, Any]] = []
+    for path, check in checks:
+        try:
+            check()
+        except (ValueError, TypeError) as exc:
+            diagnostics.append({"code": "worker_question_request_invalid", "path": f"$.{path}", "message": str(exc)})
+    if diagnostics:
+        raise ValidationFailure(diagnostics)
 
 
 def _validate_question_answer_submission(params: dict[str, Any]) -> None:
     """Keep a durable answer/retry exact rather than silently shortening it."""
-    answer = params.get("answer")
-    answer_en = params.get("answer_en")
-    if isinstance(answer, str):
-        _require_untruncated_text(answer, label="worker question answer", maximum_chars=8_000)
-    else:
-        _validate_sanitized_structure(answer, label="worker question answer", maximum_bytes=0)
-    if isinstance(answer_en, str):
-        _require_untruncated_text(answer_en, label="worker question answer_en", maximum_chars=8_000)
-    else:
-        _validate_sanitized_structure(answer_en, label="worker question answer_en", maximum_bytes=0)
-    _validate_sanitized_structure(
-        params.get("resume_context"), label="worker question resume_context", maximum_bytes=0,
-    )
+    checks: list[tuple[str, Any]] = []
+    for field, label in (("answer", "worker question answer"), ("answer_en", "worker question answer_en")):
+        value = params.get(field)
+        checks.append((field, lambda value=value, label=label: _require_untruncated_text(value, label=label, maximum_chars=8_000) if isinstance(value, str) else _validate_sanitized_structure(value, label=label, maximum_bytes=0)))
+    checks.append(("resume_context", lambda: _validate_sanitized_structure(params.get("resume_context"), label="worker question resume_context", maximum_bytes=0)))
+    diagnostics: list[dict[str, Any]] = []
+    for path, check in checks:
+        try:
+            check()
+        except (ValueError, TypeError) as exc:
+            diagnostics.append({"code": "worker_question_request_invalid", "path": f"$.{path}", "message": str(exc)})
+    if diagnostics:
+        raise ValidationFailure(diagnostics)
 
 
 def _validate_question_document(record: dict[str, Any], *, label: str) -> None:
@@ -617,12 +627,38 @@ def _batch_payload(params: dict[str, Any]) -> tuple[dict[str, Any], str]:
         raise ValueError("ask_batch requires batch")
     unknown = sorted(set(raw_batch) - {"batch_key", "questions"})
     if unknown:
-        raise ValueError("batch contains unsupported fields: " + ", ".join(unknown))
+        raise ValidationFailure([
+            {"code": "worker_question_request_invalid", "path": f"batch.{field}", "message": "unsupported batch field"}
+            for field in unknown
+        ])
     batch_key = safe_id(str(raw_batch.get("batch_key") or ""))
     raw_questions = raw_batch.get("questions")
-    if not batch_key or not isinstance(raw_questions, list) or not raw_questions or len(raw_questions) > 32:
-        raise ValueError("batch requires batch_key and 1..32 questions")
-    questions = [_batch_question_config(item) for item in raw_questions]
+    collect_validations(
+        (
+            ("batch.batch_key", lambda: None if batch_key else "batch requires batch_key"),
+            ("batch.questions", lambda: None if isinstance(raw_questions, list) and bool(raw_questions) else "batch requires 1..32 questions"),
+        ),
+        code="worker_question_request_invalid",
+    )
+    if len(raw_questions) > 32:
+        raise ValueError("batch requires no more than 32 questions")
+    questions: list[dict[str, Any]] = []
+    item_diagnostics: list[dict[str, Any]] = []
+    for ordinal, item in enumerate(raw_questions, 1):
+        try:
+            questions.append(_batch_question_config(item))
+        except (ValueError, TypeError) as exc:
+            collected = getattr(exc, "diagnostics", None)
+            if isinstance(collected, list) and collected:
+                item_diagnostics.extend({**diagnostic, "path": f"batch.questions[{ordinal - 1}].{diagnostic.get('path', '$')}"} for diagnostic in collected)
+            else:
+                item_diagnostics.append({
+                    "code": "worker_question_request_invalid",
+                    "path": f"batch.questions[{ordinal - 1}]",
+                    "message": redact(str(exc), 1000),
+                })
+    if item_diagnostics:
+        raise ValidationFailure(item_diagnostics)
     keys = [item["question_key"] for item in questions]
     if len(keys) != len(set(keys)):
         raise ValueError("batch question_key values must be unique")
@@ -892,6 +928,20 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
     action = str(params.get("action") or "").strip().lower()
     if action not in {"ask", "poll", "ask_batch", "poll_batch"}:
         raise ValueError("worker question action must be ask, poll, ask_batch, or poll_batch")
+    # These are independent caller/schema checks.  Aggregate them before any
+    # state lookup so malformed requests never partially write or consume an
+    # attempt.  Semantic/cross-field checks below run only after this passes.
+    if action in {"ask", "ask_batch"}:
+        checks = [
+            ("task_id", lambda: None if str(params.get("task_id") or "").strip() else "task_id is required"),
+            ("attempt_id", lambda: None if str(params.get("attempt_id") or "").strip() else "attempt_id is required"),
+            ("profile", lambda: None if str(params.get("profile") or "").strip() else "profile is required"),
+        ]
+        if action == "ask":
+            checks.append(("question", lambda: None if str(params.get("question") or "").strip() else "ask requires question"))
+        else:
+            checks.append(("batch", lambda: None if isinstance(params.get("batch"), (dict, list)) else "ask_batch requires batch"))
+        collect_validations(checks, code="worker_question_request_invalid")
     profile = canonical_profile(params.get("profile") or "")
     if profile not in AGENTS:
         raise ValueError("profile must be an exact Cortex worker profile")
@@ -1068,22 +1118,27 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
         ))
         code = "worker_question_unavailable" if terminal else "worker_question_request_invalid"
         path = _worker_question_error_path(message)
-        return {
-            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": False,
-            "outcome": "blocked" if terminal else "needs_correction",
-            "code": code,
-            "diagnostics": [{
+        diagnostics = getattr(exc, "diagnostics", None)
+        if not isinstance(diagnostics, list) or not diagnostics:
+            diagnostics = [{
                 "code": code,
                 "path": path,
                 "message": message,
                 "fix": (
                     "The worker attempt is no longer active; do not create a replacement or guess another identity."
                     if terminal else
-                    "Correct only this field from the active briefing or the last worker_question response, then "
-                    "retry worker_question on this same worker attempt."
+                    "Correct only this field from the active briefing or the last worker_question response, then retry worker_question on this same worker attempt."
                 ),
-            }],
+            }]
+        else:
+            for item in diagnostics:
+                item.setdefault("fix", "Correct this field and retry worker_question on this same attempt; no write or replacement worker was created.")
+        return {
+            "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+            "ok": False,
+            "outcome": "blocked" if terminal else "needs_correction",
+            "code": code,
+            "diagnostics": diagnostics,
             "retryable": not terminal,
             "attempt_budget_consumed": False,
             "next_action": (

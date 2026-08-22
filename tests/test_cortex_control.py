@@ -4480,6 +4480,19 @@ class ControlPlaneTests(unittest.TestCase):
         sanitized = control.sanitize_planning_payload(planning)
         self.assertEqual(sanitized["work_packages"][0]["gates"], ["implementation"])
 
+    def test_planning_release_safety_prose_gate_projection_preserves_microtask_gates(self):
+        planning = self.v3_planning()
+        package = planning["work_packages"][0]
+        package["id"] = "release_and_safety"
+        package["gates"] = ["enable", "release", "warmup"]
+        package["microtasks"][0]["gates"] = ["implementation", "qa"]
+
+        sanitized = control.sanitize_planning_payload(planning)
+        self.assertEqual(
+            sanitized["work_packages"][0]["gates"],
+            ["implementation", "qa"],
+        )
+
     def test_planning_package_unknown_gate_still_fails_closed(self):
         planning = self.v3_planning()
         planning["work_packages"][0]["gates"] = ["not_a_real_gate"]

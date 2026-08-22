@@ -27,6 +27,7 @@ from cortex import (
     select_project_root,
 )
 from cortex_runtime import attempt_protocol
+from cortex_runtime.validation import ValidationFailure, collect_validations
 
 
 _MISSING = object()
@@ -56,12 +57,15 @@ def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
     """Return safe retryable argument diagnostics or an integrity blocker."""
     message = redact(str(exc), 1000)
     lowered = message.lower()
-    caller_correctable = isinstance(exc, ValueError) and any(fragment in lowered for fragment in (
+    collected = getattr(exc, "diagnostics", None)
+    caller_correctable = isinstance(exc, ValueError) and (
+        isinstance(collected, list) and bool(collected)
+    ) or (isinstance(exc, ValueError) and any(fragment in lowered for fragment in (
         "unsupported read_dispatch_briefing fields", "is required; copy the exact value",
         "profile must be an exact cortex worker profile", "profile does not match",
         "dispatch_ref does not match", "briefing_digest must be", "briefing_digest does not match",
         "briefing cursor", "briefing max_bytes",
-    ))
+    )))
     if caller_correctable:
         path = _dispatch_briefing_error_path(message)
         fix = (
@@ -69,10 +73,16 @@ def _dispatch_briefing_failure(exc: BaseException) -> dict[str, Any]:
             if path == "max_bytes" else
             "Copy the exact field from the native dispatch bootstrap or the last returned next_cursor, then retry read_dispatch_briefing on this same worker attempt."
         )
+        diagnostics = getattr(exc, "diagnostics", None)
+        if not isinstance(diagnostics, list) or not diagnostics:
+            diagnostics = [{"code": "dispatch_briefing_request_invalid", "path": path, "message": message, "fix": fix}]
+        else:
+            for item in diagnostics:
+                item.setdefault("fix", fix)
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "needs_correction",
             "code": "dispatch_briefing_request_invalid",
-            "diagnostics": [{"code": "dispatch_briefing_request_invalid", "path": path, "message": message, "fix": fix}],
+            "diagnostics": diagnostics,
             "retryable": True, "attempt_budget_consumed": False,
             "next_action": "Apply the diagnostic fix and retry read_dispatch_briefing on this same attempt. Stop only if a later response explicitly returns retryable=false or outcome=blocked.",
         }
@@ -94,10 +104,12 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
         allowed = {"project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest", "cursor", "max_bytes"}
         unknown = sorted(set(params) - allowed)
         if unknown:
-            raise ValueError("unsupported read_dispatch_briefing fields: " + ", ".join(unknown))
-        for field in {"project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest"}:
-            if not str(params.get(field) or "").strip():
-                raise ValueError(f"{field} is required; copy the exact value from the native dispatch bootstrap")
+            raise ValidationFailure([{"code": "dispatch_briefing_request_invalid", "path": f"$.{field}", "message": "unsupported read_dispatch_briefing field", "fix": "Remove this field and retry on the same worker attempt."} for field in unknown])
+        collect_validations(
+            ((field, lambda field=field: None if str(params.get(field) or "").strip() else f"{field} is required; copy the exact value from the native dispatch bootstrap")
+             for field in ("project_root", "task_id", "attempt_id", "profile", "dispatch_ref", "briefing_digest")),
+            code="dispatch_briefing_request_invalid",
+        )
         project = select_project_root(params)
         task_id = safe_id(str(params["task_id"]))
         attempt_id = safe_id(str(params["attempt_id"]))

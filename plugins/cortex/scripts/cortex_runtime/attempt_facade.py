@@ -142,12 +142,14 @@ def _worker_context(params: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any]
 def _public_failure(operation: str, exc: Exception, *, finalization: bool = False) -> dict[str, Any]:
     message = _runtime.redact(str(exc), 1000)
     code = "attempt_finalization_pending" if finalization else f"{operation}_invalid"
+    collected = getattr(exc, "diagnostics", None)
+    diagnostics = collected if isinstance(collected, list) and collected else [{"code": code, "message": message}]
     return {
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
         "outcome": "finalization_pending" if finalization else "needs_correction",
         "code": code,
-        "diagnostics": [{"code": code, "message": message}],
+        "diagnostics": diagnostics,
         "retryable": True,
         "attempt_budget_consumed": False,
         "worker_replacement_authorized": False,
@@ -329,15 +331,30 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     try:
         allowed = _PUBLIC_IDENTITY_FIELDS | {
             "status", "summary", "findings", "decisions_needed", "unresolved", "claims",
-            "planning",
+            "planning", "base_payload_digest", "patches",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError("unsupported complete_attempt fields: " + ", ".join(unknown))
         project, task_dir, state, attempt, profile = _worker_context(params)
+        if "base_payload_digest" in params or "patches" in params:
+            return repair_planning(params)
         plan_attempt = profile == "planner" and str(attempt.get("gate") or "") == "plan"
         if "planning" in params and not plan_attempt:
             raise ValueError("planning is supported only for planner attempts on the plan gate")
+        # Validate the planner-only sibling before any receipt or canonical
+        # completion work.  A malformed/missing plan must remain a correction
+        # on this attempt, never a partially committed AttemptResult.
+        normalized_planning = None
+        if plan_attempt:
+            if "planning" not in params:
+                current = _runtime.current_planning_manifest(task_dir)
+                if not isinstance(current, dict):
+                    raise ValueError("planner plan attempts require a planning payload")
+            else:
+                normalized_planning = _runtime.sanitize_planning_payload(
+                    params["planning"], persisted=True,
+                )
         root = _runtime.ledger_root({"project_root": str(project)})
         _receipt_guard(root, state, attempt)
         semantic_result = {
@@ -359,6 +376,10 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
             if existing is not None else
             _workspace_observation(project, task_dir, state, attempt)
         )
+        # Every retry, including planner materialization retries, must pass
+        # through the protocol's immutable semantic comparison.  A corrected
+        # planning sibling may be materialized, but it may not smuggle a new
+        # AttemptResult into an already completed attempt.
         completed = attempt_protocol.complete_attempt(
             root,
             task_id=state["task_id"],
@@ -389,13 +410,13 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                 "next_action": "Return this semantic non-success to the coordinator; Cortex retained the attempt facts.",
             }
         if plan_attempt:
-            if "planning" in params:
+            if normalized_planning is not None:
                 _runtime.materialize_planning_payload(
                     task_dir,
                     state,
                     attempt,
                     str(canonical["result_ref"]),
-                    params["planning"],
+                    normalized_planning,
                 )
             else:
                 current = _runtime.current_planning_manifest(task_dir)
@@ -438,6 +459,37 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
             "next_action": "Return only ATTEMPT_COMPLETED, attempt_result_ref, and at most a two-sentence summary to the coordinator.",
         }
     except (ValueError, TypeError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+        if isinstance(exc, attempt_protocol.CanonicalResultConflict):
+            return {
+                "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
+                "ok": False,
+                "outcome": "canonical_result_conflict",
+                "code": "attempt_canonical_result_conflict",
+                "diagnostics": exc.diagnostics,
+                "retryable": False,
+                "attempt_budget_consumed": False,
+                "worker_replacement_authorized": False,
+                "next_action": "Read the existing canonical AttemptResult by result_ref; do not resubmit the changed payload and do not spawn a replacement worker.",
+            }
+        # Planning validation is deliberately persisted before returning the
+        # correction response.  This is a draft only: no AttemptResult,
+        # worker replacement, or mutable planning pointer is created.
+        if (
+            state is not None and attempt is not None and project is not None
+            and profile == "planner" and str(attempt.get("gate") or "") == "plan"
+            and "planning" in params
+            and not (root is not None and attempt_protocol.get_attempt_result(root, task_id=state["task_id"], attempt_id=attempt["attempt_id"]))
+        ):
+            try:
+                diagnostics = getattr(exc, "diagnostics", None)
+                if not isinstance(diagnostics, list) or not diagnostics:
+                    diagnostics = [{"code": "planning_validation_failed", "message": _runtime.redact(str(exc), 1000), "path": "planning"}]
+                _runtime.planning_rejected_draft_document(
+                    task_dir, state, attempt, params["planning"], diagnostics,
+                    {key: params.get(key) for key in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims")},
+                )
+            except (ValueError, TypeError, OSError, RuntimeError):
+                pass
         if root is not None and state is not None and attempt is not None:
             existing = attempt_protocol.get_attempt_result(
                 root, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
@@ -460,6 +512,43 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                     pass
                 return _public_failure("complete_attempt", exc, finalization=True)
         return _public_failure("complete_attempt", exc)
+
+
+def repair_planning(params: dict[str, Any]) -> dict[str, Any]:
+    """Repair a rejected planner draft and finalize the same worker attempt."""
+    try:
+        allowed = _PUBLIC_IDENTITY_FIELDS | {"base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError("unsupported repair_planning fields: " + ", ".join(unknown))
+        project, task_dir, state, attempt, profile = _worker_context(params)
+        if profile != "planner" or str(attempt.get("gate") or "") != "plan":
+            raise ValueError("repair_planning is supported only for planner attempts on the plan gate")
+        draft = _runtime.get_planning_rejected_draft(task_dir, state["task_id"], attempt["attempt_id"])
+        if not isinstance(draft, dict):
+            raise ValueError("no rejected planning draft exists for this attempt")
+        if str(params.get("base_payload_digest") or "") != str(draft.get("base_payload_digest") or ""):
+            raise ValueError("planning_correction_digest_mismatch")
+        if "planning" in params and "patches" in params:
+            raise ValueError("provide either planning or patches, not both")
+        if "patches" in params:
+            patches = params["patches"]
+            if not isinstance(patches, list):
+                raise ValueError("patches must be an array")
+            repaired = _runtime.apply_planning_repair(draft, patches)
+        elif "planning" in params:
+            repaired = params["planning"]
+            changed = _runtime.planning_changed_paths(draft.get("planning"), repaired)
+            if not changed or not _runtime.planning_diagnostic_scope_allows(draft.get("diagnostics") or [], changed):
+                raise ValueError("planning_correction_scope_violation")
+        else:
+            raise ValueError("repair_planning requires planning or patches")
+        normalized = _runtime.sanitize_planning_payload(repaired, persisted=True)
+        semantic = {key: params[key] if key in params else draft.get("result_payload", {}).get(key) for key in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims")}
+        completion_params = {**{key: params[key] for key in _PUBLIC_IDENTITY_FIELDS}, **semantic, "planning": normalized}
+        return complete_attempt(completion_params)
+    except (ValueError, TypeError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+        return _public_failure("repair_planning", exc)
 
 
 def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:

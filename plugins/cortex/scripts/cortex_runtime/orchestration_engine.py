@@ -228,6 +228,13 @@ def _orchestrate_error(
     diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     resolved_next_operation = next_operation or (operation if operation in ORCHESTRATE_OPERATIONS else None)
+    # A recoverable validation failure is a machine-retryable error, not a
+    # request for a user decision.  Keeping it in ``needs_input`` causes the
+    # public adapter to render a Question/user_message even when an active
+    # worker is merely protected from a malformed coordinator payload (for
+    # example a future_waves replacement).  Preserve the diagnostic and
+    # retryability, but expose the correct non-question lifecycle state.
+    validation_error = code == "orchestrate_validation_failed"
     return _segregate_orchestration_output({
         "schema": ORCHESTRATE_SCHEMA,
         "ok": False,
@@ -235,7 +242,7 @@ def _orchestrate_error(
         "transaction_id": None,
         "task_id": task_id,
         "wave_id": None,
-        "state": "blocked" if not recoverable else "needs_input",
+        "state": "blocked" if not recoverable else ("error" if validation_error else "needs_input"),
         "spawn_requests": [],
         "phase": phase,
         "code": code,
@@ -1839,6 +1846,23 @@ def _pipeline_obligation_gates(
                 _semantic_pipeline_gates(entry.get("semantic_future_pipeline") or [])
             )
     obligations.update(str(gate) for gate in state.get("current_pipeline", []) if str(gate))
+    # A blocked delivery attempt is itself durable evidence that the delivery
+    # obligation still exists.  Older task states may not have copied the
+    # implementation phase into ``pipeline_obligations`` before the worker
+    # stopped, so relying only on the projected pipeline can manufacture a
+    # planner-only recovery wave and then fail the retention invariant.  Keep
+    # only non-invalidated, unfinished attempts here; completed attempts are
+    # deliberately not allowed to re-enter the recovery graph implicitly.
+    obligations.update(
+        str(attempt.get("gate") or "")
+        for attempt in state.get("attempts", [])
+        if isinstance(attempt, dict)
+        and str(attempt.get("gate") or "") == "implementation"
+        and not attempt.get("invalidated")
+        and str(attempt.get("status") or "") in {
+            "blocked", "failed", "running", "waiting_question", AWAITING_HOST_SPAWN,
+        }
+    )
     return obligations
 
 
@@ -1953,7 +1977,20 @@ def _delivery_recovery_waves(
     """Build Planner-first recovery for every historically required delivery gate."""
     task = load_task_definition(task_dir, state)
     obligations = _pipeline_obligation_gates(state, plan, task)
-    required = required_gates or [gate for gate in _DELIVERY_RECOVERY_ORDER if gate in obligations]
+    required = list(required_gates or [gate for gate in _DELIVERY_RECOVERY_ORDER if gate in obligations])
+    # Callers may pass a previously computed delivery gap.  Reconcile it with
+    # the durable blocked-attempt evidence as a final boundary so a recovery
+    # payload can never silently omit implementation.  The historical worker
+    # contract (including its narrow context_gates) is retained below.
+    if (
+        "implementation" in obligations
+        and "implementation" not in required
+        and "implementation" not in state.get("completed_gates", [])
+        and "implementation" not in state.get("skipped_gates", [])
+    ):
+        required.append("implementation")
+    required_set = set(required)
+    required = [gate for gate in _DELIVERY_RECOVERY_ORDER if gate in required_set]
     return [
         {"wave_id": "recovery-plan", "delegations": [{"gate": "plan", "agent": "planner"}]},
         *[
