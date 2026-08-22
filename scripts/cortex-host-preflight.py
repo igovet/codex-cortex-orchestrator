@@ -31,6 +31,7 @@ EXPECTED_HOOK_KEYS = {
         "session_start",
         "subagent_start",
         "subagent_stop",
+        "stop",
     )
 }
 HOOK_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -756,7 +757,7 @@ def inspect_hook_trust(
     codex_home: Path,
     interpreter: Path | None,
 ) -> dict[str, Any]:
-    """Require all five enabled, trusted Cortex hooks and persisted hashes."""
+    """Require all six enabled, trusted Cortex hooks and persisted hashes."""
     if codex_path is None or not regular_executable(codex_path):
         return check(
             "cortex_hook_trust",
@@ -788,7 +789,7 @@ def inspect_hook_trust(
     cortex_hooks = [row for row in hooks if row.get("pluginId") == CORTEX_PLUGIN_ID]
     keys = [str(row.get("key") or "") for row in cortex_hooks]
     if len(cortex_hooks) != len(set(keys)) or set(keys) != EXPECTED_HOOK_KEYS:
-        return check("cortex_hook_trust", False, "same-user Cortex lifecycle hook registration is incomplete or duplicated", "Run the approved Cortex installer to refresh all five Cortex hooks, then rerun the preflight.")
+        return check("cortex_hook_trust", False, "same-user Cortex lifecycle hook registration is incomplete or duplicated", "Run the approved Cortex installer to refresh all six Cortex hooks, then rerun the preflight.")
     expected_source = str(hooks_path.absolute())
     expected_launcher = str(launcher.absolute())
     expected_script = str(hook_script.absolute())
@@ -817,7 +818,7 @@ def inspect_hook_trust(
         record = state.get(key)
         if not isinstance(record, dict) or record.get("trusted_hash") != digest:
             return check("cortex_hook_trust", False, f"same-user Cortex hook trust hash is missing or stale for {key}", "Run the approved Cortex installer to refresh hook trust, then rerun the preflight.")
-    return check("cortex_hook_trust", True, "all five same-user Cortex lifecycle hooks are enabled, trusted, and hash-matched")
+    return check("cortex_hook_trust", True, "all six same-user Cortex lifecycle hooks are enabled, trusted, and hash-matched")
 
 
 def summarize_mcp(checks: list[dict[str, Any]]) -> dict[str, Any]:

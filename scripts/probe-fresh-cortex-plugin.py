@@ -141,7 +141,7 @@ def main() -> int:
             for registration in registrations
             for hook in registration.get("hooks", [])
         ]
-        if len(hook_commands) != 5 or any(
+        if len(hook_commands) != 6 or any(
             '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
             or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
             for command in hook_commands
@@ -163,19 +163,17 @@ def main() -> int:
         tools = {item["name"]: item for item in rows[1]["result"]["tools"]}
         expected_tools = {
             "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance", "worker_question",
-            "get_report_template", "record_report",
-            "read_dispatch_briefing", "read_worker_report",
+            "record_attempt_event", "complete_attempt",
+            "read_dispatch_briefing", "read_worker_result",
         }
         if set(tools) != expected_tools:
             raise SystemExit("fresh plugin probe: Cortex public tool set is incomplete")
-        record_schema = tools["record_report"]["inputSchema"]
-        if not {"draft_ref", "patch"}.issubset(record_schema["properties"]):
-            raise SystemExit("fresh plugin probe: atomic report schema lacks draft identity or merge-patch correction")
-        if not any(
-            isinstance(branch, dict) and branch.get("required") == ["draft_ref"]
-            for branch in record_schema.get("oneOf", [])
-        ):
-            raise SystemExit("fresh plugin probe: atomic report schema does not require a draft or report payload")
+        event_schema = tools["record_attempt_event"]["inputSchema"]
+        result_schema = tools["complete_attempt"]["inputSchema"]
+        if not {"event_type", "payload"}.issubset(event_schema["properties"]):
+            raise SystemExit("fresh plugin probe: attempt-event schema lacks semantic event fields")
+        if not {"status", "summary", "findings"}.issubset(result_schema["properties"]):
+            raise SystemExit("fresh plugin probe: attempt-result schema lacks semantic result fields")
         workspace = base / "workspace"
         workspace.mkdir()
         rejected = mcp_tool(launcher, entrypoint, environment, workspace, "start_orchestration", {

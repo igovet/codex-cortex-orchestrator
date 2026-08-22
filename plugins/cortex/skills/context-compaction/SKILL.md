@@ -14,7 +14,7 @@ Do not pass raw transcripts by default. Create a compact handoff containing only
 5. Commands run and decisive outputs.
 6. Open questions, blockers, and next action.
 
-Use short summaries for older logs and reports. Preserve exact error output only when the next agent needs it to reproduce or diagnose the issue. Never summarize secrets into the handoff. The parent thread should integrate the handoff; do not depend on private host databases or resume a failed subagent session.
+Use short summaries for older logs and results. Preserve exact error output only when the next agent needs it to reproduce or diagnose the issue. Never summarize secrets into the handoff. The parent thread should integrate the handoff; do not depend on private host databases or resume a failed subagent session.
 
 ## Cortex recovery after context reset or compaction
 
@@ -23,31 +23,35 @@ When the coordinator resumes after automatic/manual compaction or a host
 do not assume that the active skill version, transient protocol reminders, or
 the last visible lifecycle response survived. Preserve the opaque `task_ref`
 and call `manage_orchestration` with `intent="inspect"` exactly once for that
-task. Treat the returned `context_handoff`, current pipeline, report refs, and
+task. Treat the returned `context_handoff`, current pipeline, result refs, and
 relative step as the authoritative recovery snapshot. Reconcile
 `pending_dispatches` against the top-level inspect `dispatches` and invoke only
 those exact still-unstarted requests. Treat `active_workers[].host_agent_id` as
 the exact persisted native wait targets; never respawn them. A host wait-any
 form may omit explicit targets only while one of those bound workers is
-running. Treat `stopped_workers` as non-waitable: consume their persisted
-report refs, surface durable question refs, or submit their exact failed result
+running. If an exact targeted wait receives a host identity-unavailable proof,
+the `PostToolUse` hook retires only that child as a terminal resultless stop;
+inspect it once, then use its exact failed continuation. A timeout, transport
+failure, generic error, or ambiguous multi-target error does not prove a child
+ended and never authorizes a replacement. Treat `stopped_workers` as non-waitable: consume their persisted
+result refs, surface durable question refs, or submit their exact failed result
 to `continue_orchestration` with its `worker` slot, `status`, `reason`, and
 the matching stopped-worker `dispatch_ref` so Cortex applies rework to that
 attempt only. Never use
-`followup_task` to repair a stopped worker's report error; it is permitted only
+`followup_task` to repair a stopped worker's result error; it is permitted only
 for the same question-paused worker after the durable answer is recorded. Each pending dispatch retains its `dispatch_ref`, immutable
 `briefing_path`, and `briefing_digest`, but the coordinator must not read or
 inline the briefing. Do not call
 `start_orchestration` again, replay completed dispatches, or reconstruct state
-from a raw transcript. After rehydration, continue the existing task. Publish a
-report link only when `read_worker_report.publication_required=true`, together
-with its completion summary and next-step explanation; never republish a link
-on recovery rereads.
+from a raw transcript. After rehydration, continue the existing task. Consume
+only the exact server-returned AttemptResult refs and completion summary; do
+not create, publish, or republish a separate human projection artifact during
+recovery.
 
 When the resumed session is a worker (`SubagentStart`/worker `SessionStart`),
 the lifecycle hook rehydrates only the exact attempt-bound immutable briefing
 (assignment), compiled plan unit, and user-intent artifact, each with its
 SHA-256 digest. The worker must verify those artifacts and continue the same
 attempt; ambiguous identity or missing artifacts is a blocker. It must not
-reconstruct assignment, plan, intent, or report contract from the transcript,
+reconstruct assignment, plan, intent, or result contract from the transcript,
 or read the shared ledger.

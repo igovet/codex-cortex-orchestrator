@@ -87,19 +87,35 @@ def profile_names() -> set[str]:
 
 
 PROFILES = profile_names()
-HOOK_NAMES = {"SessionStart", "SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse"}
+HOOK_NAMES = {"SessionStart", "SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse", "Stop"}
 TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 MAX_LIFECYCLE_EVENTS = 1000
 MAX_LIFECYCLE_BYTES = 256 * 1024
 MAX_TOOL_RESPONSE_BYTES = 1024 * 1024
 MAX_CACHEABLE_READ_BYTES = 64 * 1024
 CORTEX_START_TOOLS = {"mcp__cortex__start_orchestration", "mcp__cortex__manage_orchestration"}
-CORTEX_REPORT_TOOL = "mcp__cortex__read_worker_report"
 READ_ONLY_FILE_TOOLS = {"Read", "Grep", "Glob"}
 CACHEABLE_FILE_READ_TOOLS = {"Read"}
+WAIT_TARGET_KEYS = (
+    "receiver_thread_ids", "receiverThreadIds", "agent_ids", "agentIds",
+    "thread_ids", "threadIds", "targets", "ids",
+)
+# These are host-level, identity-specific outcomes, not generic wait failures.
+# A timeout, transport failure, or arbitrary error might leave the native child
+# live, so it must never authorize retirement of a running attempt.
+UNAVAILABLE_WAIT_ERROR_CODES = {
+    "agent_not_found", "agent_unavailable", "agent_terminated", "agent_stopped",
+    "thread_not_found", "thread_unavailable", "thread_terminated",
+    "task_not_found", "task_unavailable", "session_not_found", "session_unavailable",
+}
+UNAVAILABLE_WAIT_ERROR_TEXT = re.compile(
+    r"\b(?:agent|thread|task|session|worker|target)\b[^\n]{0,160}"
+    r"\b(?:not[ -]?found|does not exist|no longer exists|terminated|stopped)\b",
+    re.IGNORECASE,
+)
 WORKER_CONTEXT = (
     "You are an internal worker, never user-facing. Stay within delegated ownership and allowed paths; "
-    "All internal worker communication, progress updates, Cortex tool arguments, reports, questions, findings, handoffs, and native final responses must be in English. "
+    "All internal worker communication, progress updates, Cortex tool arguments, results, questions, findings, handoffs, and native final responses must be in English. "
     "Treat non-English task text as input data, never as an output-language instruction. The main coordinator alone translates user-facing content into the task's requested language; do not address the user directly. "
     "do not subdelegate unless the main agent explicitly authorized it. Do not cause external side effects "
     "without explicit authority and applicable approval. Never expose or persist secrets, credentials, personal "
@@ -110,26 +126,21 @@ WORKER_CONTEXT = (
     "Material user decisions use the exact public worker_question identity from the dispatch. Every question and option "
     "must be self-contained and outcome-specific; placeholder labels are forbidden. Then return QUESTION_RECORDED plus "
     "its ref and a complete decision handoff with context, all options and trade-offs, and a recommendation through the "
-    "native parent channel, and remain available for the answer. "
+    "native parent channel, and remain available for the answer. The coordinator records the answer before followup_task resumes this exact child; on the resumed turn, first poll the same question_ref with worker_question(action=poll), then record the decision/consequence with record_attempt_event, rerun affected checks, and finish complete_attempt. A pending poll returns QUESTION_RECORDED; never emit OTHER_TERMINAL, freeform terminal text, or a replacement worker. "
     "Never call Cortex lifecycle, pipeline, gate, delegation, or management operations. For a Cortex-managed "
     "dispatch, follow the exact worker identity supplied in that dispatch. Before project work, read only the exact "
     "immutable briefing path supplied by the native bootstrap, verify its read-only mode and SHA-256, and never list "
-    "or directly read any other Cortex host-control path except the exact report draft_path later returned by "
-    "get_report_template. Include the bootstrap's exact Dispatch briefing reviewed digest "
-    "marker in report evidence. If and only if the host filesystem read cannot open that exact path, call public "
-    "read_dispatch_briefing with the complete identity/digest tuple from the bootstrap; if its bounded response is incomplete, continue only with its exact next_cursor. You may call public read_worker_report "
-    "only for predecessor refs explicitly listed in the dispatch, public worker_question when needed, public get_report_template, and public "
-    "record_report after all blocking questions are answered. "
+    "or directly read any other Cortex host-control path. If and only if the host filesystem read cannot open that exact path, call public "
+    "read_dispatch_briefing with the complete identity/digest tuple from the bootstrap; if its bounded response is incomplete, continue only with its exact next_cursor. You may call public read_worker_result "
+    "only for predecessor refs explicitly listed in the dispatch, public worker_question when needed, public record_attempt_event for bounded semantic checkpoints, and public "
+    "complete_attempt for the final semantic result. Successful briefing and predecessor reads create server-owned receipts; do not author digest, predecessor, changed-file, timestamp, identity, or evidence markers. "
     "For every allowed worker tool, a caller/input/schema validation error or retryable=true result must be corrected "
     "from its diagnostic and retried on the same attempt. Such rejected calls consume no worker attempt and must "
     "never end the worker. Stop only for explicit retryable=false/outcome=blocked or genuinely unavailable exact "
-    "identity. get_report_template creates a private temporary JSON "
-    "file containing the current skeleton and returns draft_path plus draft_ref. Replace its placeholders, then call "
-    "record_report with that same ref. If the sandbox cannot edit it, send a small merge patch or complete replacement "
-    "through record_report. An invalid record keeps the file and consumes no worker attempt, so correct the named "
-    "diagnostics and retry record_report. The tool validates, persists, and deletes the same file only after successful "
-    "commit. After it succeeds, return only REPORT_RECORDED report_ref=<value> plus at most a two-sentence "
-    "summary; never paste the report JSON into the parent channel. If exact report identity is absent or a tool "
+    "identity. During work, checkpoint semantic facts with record_attempt_event and finish with complete_attempt using only "
+    "status, summary, findings, decisions_needed, unresolved, and any advertised typed gate payload. Invalid input is corrected "
+    "and retried on the same attempt; finalization/projection failures never authorize a replacement worker. After it succeeds, return only ATTEMPT_COMPLETED attempt_result_ref=<generated id> plus at most a two-sentence "
+    "summary; never paste a generated result view into the parent channel. If exact attempt identity is absent or a tool "
     "returns an explicit non-retryable blocker, do not invent task, wave, attempt, project, or tool identifiers: "
     "return only the exact error and a short blocker. Use only tools actually available in this worker context and record unavailable capabilities as "
     "limitations."
@@ -314,7 +325,7 @@ def pending_task_from_subagent_start(ledger: Path, event: dict, snapshot: sqlite
     hashes are approved.  SubagentStart may still be trusted and delivered. In
     that case the native start event is stronger evidence than coordinator
     prose: bind only when exactly one active task has an awaiting dispatch that
-    matches the native task key, or (for hosts reporting ``default``) the
+    matches the native task key, or (for hosts designating ``default``) the
     observed model. Ambiguity fails closed.
     """
     if str(event.get("hook_event_name")) != "SubagentStart":
@@ -560,6 +571,92 @@ def tool_call_failed(event: dict) -> bool:
     return False
 
 
+def _wait_target_ids(event: dict) -> list[str]:
+    """Return bounded, explicit native wait targets without inferring aliases."""
+    tool_input = _event_tool_input(event)
+    targets: list[str] = []
+    for key in WAIT_TARGET_KEYS:
+        value = tool_input.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            candidate = str(item or "").strip()
+            if candidate and len(candidate) <= 256 and candidate not in targets:
+                targets.append(candidate)
+    return targets
+
+
+def _unavailable_wait_error(event: dict) -> tuple[bool, str]:
+    """Recognize only a bounded host proof that a wait target is gone.
+
+    Hook payloads are host-controlled and may contain private diagnostics.  The
+    predicate retains no response text: it accepts an enumerated error code or
+    a narrowly scoped identity-unavailable phrase, and callers emit only the
+    stable Cortex recovery reason.
+    """
+    if not tool_call_failed(event):
+        return False, ""
+    response = event.get("tool_response")
+    try:
+        rendered = json.dumps(response, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return False, ""
+    if len(rendered.encode("utf-8")) > MAX_TOOL_RESPONSE_BYTES:
+        return False, ""
+    codes: set[str] = set()
+    queue: list[object] = [response]
+    visited = 0
+    while queue and visited < 64:
+        value = queue.pop(0)
+        visited += 1
+        if isinstance(value, dict):
+            for key in ("code", "error_code", "errorCode"):
+                candidate = str(value.get(key) or "").strip().lower().replace("-", "_")
+                if candidate:
+                    codes.add(candidate)
+            queue.extend(value.get(key) for key in ("error", "result", "structuredContent", "content") if key in value)
+        elif isinstance(value, list):
+            queue.extend(value[:8])
+        elif isinstance(value, str) and len(value.encode("utf-8")) <= MAX_TOOL_RESPONSE_BYTES:
+            try:
+                queue.append(json.loads(value))
+            except (json.JSONDecodeError, TypeError):
+                pass
+    if codes.intersection(UNAVAILABLE_WAIT_ERROR_CODES):
+        return True, rendered.lower()
+    return bool(UNAVAILABLE_WAIT_ERROR_TEXT.search(rendered)), rendered.lower()
+
+
+def unavailable_wait_target_ids(event: dict, state: dict | None = None) -> list[str]:
+    """Return running child ids that a failed host wait proved unavailable.
+
+    A code that does not name a target may be used only for a single exact
+    target.  In a multi-target wait, each retired child must be named by the
+    host response; otherwise the event is deliberately non-terminal.
+    """
+    if (
+        str(event.get("hook_event_name")) != "PostToolUse"
+        or str(event.get("tool_name")) not in {"Agent", "wait"}
+    ):
+        return []
+    targets = _wait_target_ids(event)
+    unavailable, response_text = _unavailable_wait_error(event)
+    if not unavailable or not targets:
+        return []
+    if len(targets) == 1:
+        candidates = targets
+    else:
+        candidates = [target for target in targets if target.lower() in response_text]
+    running_ids = {
+        str((attempt.get("host_spawn") or {}).get("agent_id") or "").strip()
+        for attempt in (state or {}).get("attempts", [])
+        if isinstance(attempt, dict)
+        and not attempt.get("invalidated")
+        and attempt.get("status") == "running"
+    }
+    return [target for target in candidates if target in running_ids]
+
+
 def attempt_for_tool_observation(event: dict, state: dict) -> str:
     """Bind observations to an exact worker attempt, or the coordinator lane."""
     candidates = {
@@ -586,7 +683,7 @@ def attempt_for_tool_observation(event: dict, state: dict) -> str:
 
 
 def context_epoch_for_tool_observation(ledger: Path, task_id: str, event: dict, snapshot: sqlite3.Connection | None = None) -> int:
-    """Use a durable epoch, rolling it on an explicitly reported compaction."""
+    """Use a durable epoch, rolling it on an explicitly recorded compaction."""
     if db_hook_snapshot is None or db_hook_snapshot_tool_context_epoch is None:
         return 0
     try:
@@ -742,30 +839,6 @@ def bind_post_tool_session(event: dict, project: Path, session_id: str | None) -
         bind_host_session_from_hook(str(project), task_ref_value, session_id)
 
 
-def report_publication_context(event: dict) -> str | None:
-    if str(event.get("hook_event_name")) != "PostToolUse" or str(event.get("tool_name")) != CORTEX_REPORT_TOOL:
-        return None
-    result = structured_tool_result(event)
-    if not isinstance(result, dict) or result.get("publication_required") is not True:
-        return None
-    link = str(result.get("report_markdown_link") or "") if isinstance(result, dict) else ""
-    if not link or len(link) > 4096 or "\n" in link or not link.startswith("["):
-        return None
-    completion = result.get("completion_update")
-    if not isinstance(completion, dict):
-        return None
-    summary = str(completion.get("summary") or "").strip()
-    next_step = str(completion.get("next") or "").strip()
-    if not summary or not next_step or len(summary) > 1000 or len(next_step) > 1000:
-        return None
-    return (
-        "REPORT COMPLETION PUBLICATION REQUIRED: the native subagent durably completed and this is the one allowed "
-        "publication. In one main-chat message, briefly explain in the user's language what completed using only "
-        f"this bounded summary ({summary}), what happens next using this bounded next-step basis ({next_step}), and "
-        f"include this exact report_markdown_link once: {link}. Never publish the link alone or on a later reread."
-    )
-
-
 def dispatch_required_context(event: dict) -> str | None:
     """Put the native spawn action after a potentially large MCP result."""
     if str(event.get("hook_event_name")) != "PostToolUse" or str(event.get("tool_name")) not in CORTEX_START_TOOLS:
@@ -806,11 +879,7 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
         or tool_input.get("command")
         or ""
     ).strip().lower()
-    target_keys = (
-        "receiver_thread_ids", "receiverThreadIds", "agent_ids", "agentIds",
-        "thread_ids", "threadIds", "targets", "ids",
-    )
-    present_targets = [tool_input.get(key) for key in target_keys if key in tool_input]
+    present_targets = [tool_input.get(key) for key in WAIT_TARGET_KEYS if key in tool_input]
     # The dedicated ``wait`` host tool is inherently wait-shaped even when
     # the host sends an empty input object.  Without this branch a failed
     # spawn could fall through as an ordinary tool call and allow an
@@ -834,7 +903,7 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
     return (
         "CORTEX DISPATCH FAILURE: the native Agent wait had no child target. No worker was spawned. Do not claim "
         "dispatch success, do not advance Cortex, and do not return task success. Invoke the exact pending "
-        "spawn_agent dispatch now; if spawn_agent is unavailable or fails to return a child id, stop and report that "
+        "spawn_agent dispatch now; if spawn_agent is unavailable or fails to return a child id, stop and surface that "
         "host blocker. Never retry an empty wait."
     )
 
@@ -850,7 +919,7 @@ def coordinator_read_advisory(event: dict, state: dict | None = None) -> str | N
         return None
     return (
         "CORTEX COORDINATOR READ ADVISORY: read-only project inspection is non-blocking but outside coordinator "
-        "ownership. Remain on the control plane, use the exact Cortex lifecycle and worker-report tools, and do not "
+        "ownership. Remain on the control plane, use the exact Cortex lifecycle and worker-result tools, and do not "
         "infer a task, read task content, credentials, or delegated files from this hook."
     )
 
@@ -1008,7 +1077,7 @@ def worker_context_recovery(
         " CONTEXT RECOVERY: host resumed this exact worker after compaction. "
         f"Attempt {str(attempt.get('attempt_id') or '')!r} remains authoritative. "
         "Re-read only these exact immutable artifacts, verify mode and SHA-256, then continue the same attempt: "
-        + "; ".join(fields) + ". Preserve the report contract and do not spawn a replacement worker."
+        + "; ".join(fields) + ". Preserve the AttemptResult contract and do not spawn a replacement worker."
     )
 
 
@@ -1027,7 +1096,13 @@ def stopped_worker_after_wait_context(
     state: dict,
     public_task_ref: str | None,
 ) -> str | None:
-    """Reassert bounded recovery after a reportless native stop."""
+    """Reassert the exact recovery boundary after a stopped native worker.
+
+    A canonical ``WORK_COMPLETED``/``FINALIZING`` attempt is special: its
+    worker work already succeeded and only a server-side projection retry is
+    pending. It must never inherit the ordinary resultless-stop instruction
+    that creates a failed continuation/replacement path.
+    """
     if (
         str(event.get("hook_event_name")) != "PostToolUse"
         or str(event.get("tool_name")) not in {"Agent", "wait"}
@@ -1041,9 +1116,30 @@ def stopped_worker_after_wait_context(
         str(item) for item in (state.get("current_gates") or [])
         if str(item).strip()
     }
+    finalization_pending = [
+        item for item in attempts
+        if item.get("host_stop_outcome") == "work_completed_finalization_pending"
+        and (not current_gates or str(item.get("gate") or "") in current_gates)
+    ]
+    if finalization_pending:
+        pending = finalization_pending[-1]
+        attempt_id = str(pending.get("attempt_id") or "unknown")
+        result_ref = str(pending.get("attempt_result_ref") or "").strip()
+        inspect = (
+            f"Call manage_orchestration(intent='inspect', task_ref={public_task_ref!r}) once"
+            if public_task_ref
+            else "Call manage_orchestration(intent='inspect') once with the preserved task_ref"
+        )
+        result_note = f" (attempt_result_ref={result_ref!r})" if result_ref else ""
+        return (
+            f"CORTEX FINALIZATION RECOVERY: attempt {attempt_id!r} already recorded a successful canonical "
+            f"AttemptResult{result_note}, but its generated projection is pending. Do not submit status='failed', "
+            "wait on or follow up the stopped native worker, or spawn a replacement. "
+            f"{inspect}; retry complete_attempt only for this same persisted attempt."
+        )
     stopped_attempts = [
         item for item in attempts
-        if item.get("host_stop_outcome") == "native_worker_stopped_without_report"
+        if item.get("host_stop_outcome") == "native_worker_stopped_without_result"
         and (not current_gates or str(item.get("gate") or "") in current_gates)
     ]
     if not stopped_attempts:
@@ -1062,11 +1158,57 @@ def stopped_worker_after_wait_context(
         else "Call manage_orchestration(intent='inspect') once with the preserved task_ref"
     )
     return (
-        f"CORTEX WAIT RECOVERY: attempt {attempt_id!r} stopped without a report and is terminal failed "
-        f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_report'). Do not wait on, respawn, "
+        f"CORTEX WAIT RECOVERY: attempt {attempt_id!r} stopped without an AttemptResult and is terminal failed "
+        f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_result'). Do not wait on, respawn, "
         f"or follow up the stopped native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). "
         f"{inspect}; then submit exactly one result with status='failed', this dispatch_ref, and this reason so Cortex can apply its "
         "unbounded corrective policy and raise effort after repeated failures."
+    )
+
+
+def active_worker_stop_block(event: dict, state: dict) -> str | None:
+    """Return a bounded continuation prompt before a live coordinator can finish.
+
+    ``SubagentStop`` is delivered to the host after a native child ends, but
+    cannot itself inject coordinator context.  A coordinator that emits a
+    final answer instead of waiting can therefore become idle before the child
+    completes. Codex's ``Stop`` hook can block that finalization and ask the
+    same turn to wait for its already-bound child.  Do not disclose task or
+    host identifiers in this prompt, and never block the hook's own retry:
+    the latter is the host's loop escape if the coordinator cannot make
+    progress.
+    """
+    if str(event.get("hook_event_name")) != "Stop" or bool(event.get("stop_hook_active")):
+        return None
+    if str(state.get("status") or "") != "active":
+        return None
+    active_facade_attempts = [
+        attempt for attempt in state.get("attempts", [])
+        if isinstance(attempt, dict)
+        and attempt.get("facade_managed")
+        and not attempt.get("invalidated")
+        and attempt.get("status") in {"awaiting_host_spawn", "running", "waiting_question"}
+        and str(attempt.get("lifecycle_status") or "") != "completed"
+    ]
+    if not active_facade_attempts:
+        return None
+    has_live_bound_worker = any(
+        isinstance(attempt, dict)
+        and attempt.get("status") == "running"
+        and str((attempt.get("host_spawn") or {}).get("agent_id") or "").strip()
+        for attempt in active_facade_attempts
+    )
+    if has_live_bound_worker:
+        return (
+            "CORTEX ACTIVE WORKER: a durably bound native worker is still running. Do not return a final answer, "
+            "declare the task complete, or emit a progress update. Remain silent and wait only for the exact persisted "
+            "child. After it stops, inspect the Cortex state and consume the matching AttemptResult or recovery receipt."
+        )
+    return (
+        "CORTEX ACTIVE DISPATCH: a canonical worker attempt is pending but does not yet have a finalized "
+        "AttemptResult. Do not return a final answer, declare the task complete, or create a completed handoff. "
+        "Inspect the Cortex state and either invoke its exact pending dispatch or recover the exact attempt; do not "
+        "replace it with a new worker."
     )
 
 
@@ -1290,6 +1432,43 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
                 # warning remains private and the next inspect call will
                 # expose any still-running inconsistency.
                 print("orchestration_hook warning: SubagentStop persistence failed", file=sys.stderr)
+        # A native child can become unreachable after compaction without a
+        # corresponding SubagentStop event.  When the host itself returns an
+        # exact, identity-specific unavailable result for a persisted wait
+        # target, use the same terminal resultless-stop transition. Generic
+        # wait errors remain observational: they do not prove that a child is
+        # gone and must not authorize a duplicate replacement dispatch.
+        if (
+            str(event.get("hook_event_name")) == "PostToolUse"
+            and finalize_host_worker_stop_from_hook is not None
+        ):
+            for unavailable_worker_id in unavailable_wait_target_ids(event, state):
+                try:
+                    finalized = finalize_host_worker_stop_from_hook(
+                        str(project), task_id, session_id, unavailable_worker_id,
+                    )
+                except Exception:
+                    # The hook is telemetry/recovery assistance only.  Do not
+                    # surface host response text or turn a persistence failure
+                    # into an inferred child lifecycle transition.
+                    print("orchestration_hook warning: unavailable wait persistence failed", file=sys.stderr)
+                    continue
+                if finalized.get("outcome") != "native_worker_stopped_without_result":
+                    continue
+                # ``state`` is the authenticated pre-write snapshot. Update
+                # only the exact entry needed for the static post-wait
+                # recovery instruction below; durable state remains the
+                # authoritative saved transition from the finalizer.
+                for attempt in state.get("attempts", []):
+                    if not isinstance(attempt, dict):
+                        continue
+                    if str((attempt.get("host_spawn") or {}).get("agent_id") or "") != unavailable_worker_id:
+                        continue
+                    attempt["status"] = "failed"
+                    attempt["lifecycle_status"] = "needs_recovery"
+                    attempt["host_stop_outcome"] = "native_worker_stopped_without_result"
+                    attempt["host_resumable"] = False
+                    break
         safe = {
             "at": datetime.now(timezone.utc).isoformat(),
             "hook": str(event.get("hook_event_name")) if str(event.get("hook_event_name")) in HOOK_NAMES else "unknown",
@@ -1310,6 +1489,13 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
         if safe["hook"] == "SessionStart" and is_context_recovery(event):
             bump_context_epoch_for_recovery(ledger, task_id, event)
         append_lifecycle_event(task_dir, safe)
+        stop_block = active_worker_stop_block(event, state)
+        if stop_block:
+            # ``Stop`` has its own command-hook schema.  It accepts a block
+            # decision and reason, not the additional-context envelope used
+            # by session and tool hooks.
+            print(json.dumps({"decision": "block", "reason": stop_block}, ensure_ascii=False))
+            return
         dedupe = apply_tool_deduplication(event, project, ledger, task_id, state, snapshot)
         if dedupe and dedupe.get("duplicate") and safe["hook"] == "PreToolUse":
             print(json.dumps(duplicate_read_advisory(dedupe.get("resource_kind")), ensure_ascii=False))
@@ -1321,10 +1507,6 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
         dispatch_context = dispatch_required_context(event)
         if dispatch_context:
             print(json.dumps(hook_context("PostToolUse", dispatch_context), ensure_ascii=False))
-            return
-        publication_context = report_publication_context(event)
-        if publication_context:
-            print(json.dumps(hook_context("PostToolUse", publication_context), ensure_ascii=False))
             return
         dispatch_failure_reason = empty_agent_wait_reason(event, state)
         if dispatch_failure_reason and safe["hook"] == "PreToolUse":
@@ -1362,7 +1544,7 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
             context = f"Active orchestration task: {task_id}; status: {state.get('status', 'unknown')}; current executable gates: {', '.join(str(item) for item in current_gates)}. Use cortex before dispatching or closing a gate."
             context += (
                 " COORDINATOR LOCK: the main/root agent must not inspect, search, read, edit, patch, build, test, or run the target project. "
-                "Use only Cortex lifecycle calls, exact returned worker dispatches, waiting, report evaluation, user communication, and safe recovery. "
+                "Use only Cortex lifecycle calls, exact returned worker dispatches, waiting, result evaluation, user communication, and safe recovery. "
                 "Remain idle while workers run; worker delay or failure is never permission for direct coordinator work."
             )
             if is_context_recovery(event):
@@ -1370,16 +1552,15 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
                 if public_ref:
                     context += (
                         f" CONTEXT RECOVERY: the host resumed this task after a context reset or compaction; preserve opaque task_ref={public_ref!r}. "
-                        f"Call manage_orchestration(intent='inspect', task_ref={public_ref!r}) exactly once before any other lifecycle, dispatch, or report-read call. "
-                        "Treat the returned context_handoff, current pipeline, report refs, and relative step as authoritative. "
+                        f"Call manage_orchestration(intent='inspect', task_ref={public_ref!r}) exactly once before any other lifecycle, dispatch, or result-read call. "
+                        "Treat the returned context_handoff, current pipeline, AttemptResult refs, and relative step as authoritative. "
                         "Do not call start_orchestration again, replay completed dispatches, or reconstruct state from the transcript. "
-                        "Publish a report link only when read_worker_report returns publication_required=true; include "
-                        "its completion summary and next-step explanation in the same message, and never republish on reread."
+                        "Read a completed predecessor only through read_worker_result and retain its machine read receipt."
                     )
                 else:
                     context += (
                         " CONTEXT RECOVERY: the host resumed this task after a context reset or compaction. Preserve the opaque task_ref from the durable task context "
-                        "and call manage_orchestration(intent='inspect') exactly once before any other lifecycle, dispatch, or report-read call. "
+                        "and call manage_orchestration(intent='inspect') exactly once before any other lifecycle, dispatch, or result-read call. "
                         "Treat context_handoff and the current ledger as authoritative; do not restart, replay completed dispatches, or use the raw transcript."
                     )
             print(json.dumps(hook_context(safe["hook"], context), ensure_ascii=False))

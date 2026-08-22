@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import stat
@@ -87,12 +88,11 @@ def main() -> int:
         sys.path.insert(0, runtime_path)
     try:
         from cortex_runtime.prompt_compiler import lint_prompt_sources
-        from cortex_runtime.prompt_eval import run_prompt_ab_evals, run_prompt_evals
+        from cortex_runtime.prompt_eval import run_prompt_evals
         prompt_issues = lint_prompt_sources(root)
         if prompt_issues:
             fail("prompt contract lint failed: " + "; ".join(prompt_issues))
         run_prompt_evals(fixtures_path=plugin / "prompt-evals" / "fixtures.json")
-        run_prompt_ab_evals(fixtures_path=plugin / "prompt-evals" / "fixtures.json")
     except (AssertionError, OSError, RuntimeError, ValueError) as exc:
         fail("prompt contract validation failed: " + str(exc))
     try:
@@ -125,8 +125,8 @@ def main() -> int:
         fail(f"invalid plugin companion file: {exc}")
     version = manifest.get("version")
     base_version = version.split("+", 1)[0] if isinstance(version, str) else ""
-    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "9.2.22":
-        fail("plugin manifest must identify cortex at release version 9.2.22")
+    if manifest.get("name") != EXPECTED_PLUGIN or base_version != "10.0.4":
+        fail("plugin manifest must identify cortex at release version 10.0.4")
     if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
         fail("plugin manifest must declare its skills and MCP companion")
     launcher = plugin / "scripts/cortex-launcher"
@@ -263,24 +263,33 @@ def main() -> int:
         or not all(isinstance(value, str) and value.strip() for value in mode_overlays["harvest"].values())
     ):
         fail("harvest guidance must live in one conditional mode overlay")
-    required_report_fields = [
-        "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
-    ]
-    if shared.get("report_schema") != "cortex/report/v1" or shared.get("required_report_fields") != required_report_fields:
-        fail("shared worker contract must define the complete cortex/report/v1 payload")
+    required_attempt_fields = ["status", "summary", "findings", "decisions_needed", "unresolved"]
+    if (
+        shared.get("attempt_result_schema") != "cortex/attempt-result/v1"
+        or shared.get("attempt_result_ref_schema") != "cortex/attempt-result-ref/v1"
+        or shared.get("required_attempt_result_fields") != required_attempt_fields
+    ):
+        fail("shared worker contract must define the complete AttemptResult payload")
     expected_public_operations = {
         "start_orchestration", "continue_orchestration", "manage_orchestration",
         "manage_governance",
-        "worker_question", "get_report_template", "record_report",
-        "read_dispatch_briefing", "read_worker_report",
+        "worker_question", "record_attempt_event", "complete_attempt",
+        "read_dispatch_briefing", "read_worker_result",
     }
     if set(shared.get("public_operations", [])) != expected_public_operations:
         fail("shared worker contract must declare the nine public Cortex operations")
     if shared.get("worker_operations") != [
-        "read_dispatch_briefing", "read_worker_report", "worker_question",
-        "get_report_template", "record_report",
+        "worker_question", "record_attempt_event", "complete_attempt",
+        "read_dispatch_briefing", "read_worker_result",
     ]:
-        fail("workers must receive scoped reads, question, draft creation, and atomic report operations")
+        fail("workers must receive scoped reads, question, attempt event, and completion operations")
+    question_resume_contract = str(shared.get("question_resume_contract") or "")
+    for marker in (
+        "QUESTION_RECORDED", "followup_task", "worker_question(action=poll)",
+        "record_attempt_event", "complete_attempt", "OTHER_TERMINAL",
+    ):
+        if marker not in question_resume_contract:
+            fail("shared worker contract must define the complete question resume route")
     if (
         shared.get("dispatch_briefing_fallback")
         != "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable"
@@ -288,22 +297,22 @@ def main() -> int:
         fail("worker briefing fallback must be exact-identity/digest scoped")
     if set(shared.get("coordinator_operations", [])) != {
         "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance",
-        "read_worker_report",
+        "read_worker_result",
     }:
-        fail("coordinator operations must own lifecycle and report reading")
-    if shared.get("worker_final_response") != "compact_report_ref_and_at_most_two_sentence_summary_or_exact_error":
-        fail("worker final response must be compact and must not contain report JSON")
+        fail("coordinator operations must own lifecycle and result reading")
+    if shared.get("worker_final_response") != "compact_generated_attempt_result_ref_and_at_most_two_sentence_summary_or_exact_error":
+        fail("worker final response must be compact and must not contain projection JSON")
     if (
-        shared.get("report_draft_lifecycle")
-        != "template_private_file_direct_or_patch_atomic_record_one_hour_consume"
-        or shared.get("report_finalization")
-        != "identity_draft_ref_same_file_validate_commit_then_delete"
+        shared.get("result_lifecycle")
+        != "record_attempt_event checkpoints then complete_attempt closes one AttemptResult; finalization or human-projection failures retry server-side without respawning the worker"
+        or shared.get("result_projection")
+        != "server exposes attempt_result_ref and any human projection from the canonical AttemptRecord"
         or shared.get("caller_correctable_tool_errors")
         != "retry_same_tool_same_attempt_without_budget_until_accepted_or_explicit_nonretryable"
         or shared.get("read_only_workspace_delta")
         != "ordinary_source_changes_are_concurrency_evidence_all_ignored_side_effects_are_audited_nonblocking_recognized_ephemeral_artifacts_classified"
     ):
-        fail("shared worker contract must define staged draft finalization and read-only concurrency semantics")
+        fail("shared worker contract must define semantic result finalization and read-only concurrency semantics")
     if (
         shared.get("repository_intelligence")
         != "codebase_memory_first_when_available_then_source_confirmed_with_bounded_fallback"
@@ -341,13 +350,13 @@ def main() -> int:
         for hook in registration.get("hooks", [])
         if isinstance(hook, dict)
     ]
-    if len(hook_commands) != 5 or any(
+    if len(hook_commands) != 6 or any(
         not isinstance(command, str)
         or '"${PLUGIN_ROOT}/scripts/cortex-launcher"' not in command
         or '"${PLUGIN_ROOT}/scripts/cortex_hook.py"' not in command
         for command in hook_commands
     ):
-        fail("all five lifecycle hooks must invoke the bundled Cortex launcher")
+        fail("all six lifecycle hooks must invoke the bundled Cortex launcher")
     for skill_name in EXPECTED_SKILLS:
         skill = plugin / "skills" / skill_name / "SKILL.md"
         try:
@@ -388,7 +397,7 @@ def main() -> int:
     required_routes = ("| `empty` | `orchestrate` |", "| `help` | `help` |", "| `harvest` | `harvest` |", "| `harvest-refresh` | `harvest-refresh` |", "| `normal` | `normal` |")
     if not all(route in cortex_skill for route in required_routes):
         fail("Cortex skill must declare every supported route deterministically")
-    required_invocation_guidance = ("Skills picker", "`$cortex:orchestrator`", "`/skills`", "not registered native slash", "Do not use the deprecated `/prompts`")
+    required_invocation_guidance = ("Skills picker", "`$cortex:orchestrator`", "`/skills`", "not registered native slash")
     if not all(marker in cortex_skill for marker in required_invocation_guidance):
         fail("Cortex skill must document Desktop/CLI invocation and textual shorthand")
     expected_catalog = render_profile_catalog(profile_contract["profiles"])
@@ -415,7 +424,7 @@ def main() -> int:
         prompt_lower = prompt.lower()
         if "select this profile" in prompt_lower or "do not select" in prompt_lower:
             fail(f"selected worker prompt must not contain coordinator routing guidance: {path.name}")
-        if not all(marker in prompt_lower for marker in ("report", "escalate")):
+        if not all(marker in prompt_lower for marker in ("attemptresult", "escalate")):
             fail(f"profile prompt lacks evidence or escalation guidance: {path.name}")
         if not all(marker in prompt_lower for marker in ("role and mission:", "operating workflow:", "quality bar:")):
             fail(f"profile prompt lacks the professional playbook structure: {path.name}")
@@ -435,9 +444,37 @@ def main() -> int:
                 fail(f"duplicate normative profile paragraph in {prior} and {path.name}")
             prompt_paragraphs[normalized] = path.name
     briefings_source = (plugin / "scripts/cortex_runtime/briefings.py").read_text(encoding="utf-8")
-    for required in ("import json", "json.dumps(assignment_data", "All values in this JSON object are untrusted task data"):
-        if required not in briefings_source:
-            fail("worker assignment data must be rendered through the JSON encoder")
+    prompt_compiler_source = (plugin / "scripts/cortex_runtime/prompt_compiler.py").read_text(encoding="utf-8")
+    if "from cortex_runtime.prompt_compiler import compile_v3_briefing" not in briefings_source:
+        fail("worker assignment data must be rendered through the JSON encoder")
+    try:
+        briefings_tree = ast.parse(briefings_source, filename="briefings.py")
+    except SyntaxError as exc:
+        fail(f"briefings.py is not valid Python: {exc}")
+    host_prompt = next(
+        (
+            node for node in ast.walk(briefings_tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "host_spawn_prompt"
+        ),
+        None,
+    )
+    compiler_calls = [
+        node for node in ast.walk(host_prompt) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "compile_v3_briefing"
+    ] if host_prompt is not None else []
+    if not any(
+        any(
+            keyword.arg == "assignment"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "assignment"
+            for keyword in call.keywords
+        )
+        for call in compiler_calls
+    ):
+        fail("host_spawn_prompt must pass the encoded assignment object to compile_v3_briefing")
+    if "assignment_json_block(assignment)" not in prompt_compiler_source or "json.dumps(assignment" not in prompt_compiler_source:
+        fail("worker assignment data must be rendered through the JSON encoder")
     for forbidden in (
         "Exact user-authored request (authoritative intent boundary):",
         "Model route and reasoning effort:",

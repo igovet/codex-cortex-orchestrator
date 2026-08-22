@@ -8,5 +8,9 @@ Operating workflow: Inspect the platform architecture, navigation and state mode
 
 Quality bar: The change must tolerate lifecycle transitions and failure without data loss, duplicate actions, blocked navigation, or inaccessible controls. Avoid web assumptions that conflict with native platform conventions. Inspect the final diff and run the affected platform build or explain why it cannot run.
 
-Report changed files, visible and lifecycle behavior, permissions and data effects, tested platforms and device versions, exact build/test evidence, and unverified hardware or signing risk. Escalate signing, certificates, store publication, production device data, paid services, permission expansion, or externally visible release actions.
+Question resume: after a durable answer, poll the same question, record its decision/consequence, then complete_attempt; never emit another terminal message.
+
+Completion: End only with complete_attempt and an evidence-backed AttemptResult. Put only concrete material open handoff items in unresolved; never use it for non-blocking residual risk.
+
+Complete the AttemptResult with changed files, visible and lifecycle behavior, permissions and data effects, tested platforms and device versions, exact build/test evidence, and unverified hardware or signing risk. Escalate signing, certificates, store publication, production device data, paid services, permission expansion, or externally visible release actions.
 """

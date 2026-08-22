@@ -36,9 +36,9 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
     def test_stdio_ledger_busy_is_structured_and_skips_tool_error_log(self) -> None:
         def busy_handler(_arguments: dict[str, object]) -> dict[str, object]:
             raise cortex.LedgerBusyError(
-                "report_publication",
+                "attempt_result_commit",
                 37,
-                holder={"pid": 123, "operation": "report_publication", "task_id": "task-1"},
+                holder={"pid": 123, "operation": "attempt_result_commit", "task_id": "task-1"},
             )
 
         request = {
@@ -65,7 +65,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         data = response["error"]["data"]
         self.assertEqual(data["schema"], "cortex/ledger-busy/v1")
         self.assertTrue(data["retryable"])
-        self.assertEqual(data["operation"], "report_publication")
+        self.assertEqual(data["operation"], "attempt_result_commit")
         self.assertEqual(data["held_duration_ms"], 37)
         self.assertNotIn("token", data["holder"])
         log_error.assert_not_called()
@@ -122,32 +122,32 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         start = next(iter(registry["tasks"].values()))["start"]
         return result, authorization, start
 
-    def test_default_registry_is_compatible_while_explicit_audiences_remain_strict(self) -> None:
-        expected_compatibility = {
+    def test_default_registry_is_fresh_only_while_explicit_audiences_remain_strict(self) -> None:
+        expected_default = {
             "start_orchestration",
             "continue_orchestration",
             "manage_orchestration",
             "manage_governance",
             "worker_question",
-            "get_report_template",
-            "record_report",
+            "record_attempt_event",
+            "complete_attempt",
             "read_dispatch_briefing",
-            "read_worker_report",
+            "read_worker_result",
         }
         expected_worker = {
             "worker_question",
-            "get_report_template",
-            "record_report",
+            "record_attempt_event",
+            "complete_attempt",
             "read_dispatch_briefing",
-            "read_worker_report",
+            "read_worker_result",
         }
-        for audience in (None, "compat"):
+        for audience in (None, "default"):
             response = self._rpc(
                 audience,
                 {"jsonrpc": "2.0", "id": f"{audience or 'default'}-list", "method": "tools/list", "params": {}},
             )
             names = {item["name"] for item in response["result"]["tools"]}
-            self.assertEqual(names, expected_compatibility)
+            self.assertEqual(names, expected_default)
 
         worker = self._rpc(
             "worker",
@@ -170,11 +170,11 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "continue_orchestration",
                 "manage_orchestration",
                 "manage_governance",
-                "read_worker_report",
+                "read_worker_result",
             },
         )
 
-    def test_compatibility_recovery_requires_non_durable_proof_and_worker_is_denied(self) -> None:
+    def test_recovery_requires_non_durable_proof_and_worker_is_denied(self) -> None:
         started, authorization, durable_start = self._start_coordinator_task()
         task_ref = str(started["task_ref"])
         principal = str(durable_start["principal"])
@@ -190,7 +190,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             "thread_id": thread_id,
             "capability_generation": initial_generation,
         }
-        compatibility_response = self._rpc(
+        recovery_response = self._rpc(
             None,
             {
                 "jsonrpc": "2.0",
@@ -199,11 +199,11 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "params": {"name": "manage_governance", "arguments": recovery_arguments},
             },
         )["result"]["structuredContent"]
-        self.assertFalse(compatibility_response["ok"])
-        self.assertEqual(compatibility_response["code"], "coordinator_recovery_proof_required")
-        serialized_compatibility_response = json.dumps(compatibility_response, sort_keys=True)
-        self.assertNotIn(str(authorization["coordinator_capability"]), serialized_compatibility_response)
-        self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_compatibility_response)
+        self.assertFalse(recovery_response["ok"])
+        self.assertEqual(recovery_response["code"], "coordinator_recovery_proof_required")
+        serialized_recovery_response = json.dumps(recovery_response, sort_keys=True)
+        self.assertNotIn(str(authorization["coordinator_capability"]), serialized_recovery_response)
+        self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_recovery_response)
 
         worker_response = self._rpc(
             "worker",

@@ -62,6 +62,7 @@ class CortexHostPreflightTests(unittest.TestCase):
                 "session_start": "sha256:" + "3" * 64,
                 "subagent_start": "sha256:" + "4" * 64,
                 "subagent_stop": "sha256:" + "5" * 64,
+                "stop": "sha256:" + "6" * 64,
             }
             hook_rows = []
             for name, digest in hashes.items():
@@ -126,6 +127,7 @@ class CortexHostPreflightTests(unittest.TestCase):
             ("session_start", "3"),
             ("subagent_start", "4"),
             ("subagent_stop", "5"),
+            ("stop", "6"),
         ):
             config_lines.extend(
                 [
@@ -146,7 +148,7 @@ class CortexHostPreflightTests(unittest.TestCase):
         )
         return environment, codex_home
 
-    def test_reports_missing_codex_and_incompatible_python_without_writes(self) -> None:
+    def test_diagnoses_missing_codex_and_incompatible_python_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             bin_dir = base / "bin"
@@ -179,7 +181,7 @@ class CortexHostPreflightTests(unittest.TestCase):
             self.assertIn("MCP registration and orchestration are blocked", payload["mcp"]["detail"])
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
 
-    def test_reports_python_version_before_missing_tomllib(self) -> None:
+    def test_diagnoses_python_version_before_missing_tomllib(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             bin_dir = base / "bin"
@@ -254,7 +256,7 @@ class CortexHostPreflightTests(unittest.TestCase):
             self.assertEqual(checks["cortex_mcp_config"]["status"], "PASS")
             self.assertNotIn("cortex_mcp_config", payload["mcp"]["blocking_checks"])
 
-    def test_reports_missing_codex_independently_when_other_checks_pass(self) -> None:
+    def test_diagnoses_missing_codex_independently_when_other_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             plugin = base / "plugin"
@@ -272,7 +274,7 @@ class CortexHostPreflightTests(unittest.TestCase):
             self.assertEqual(checks["plugin_root"]["status"], "PASS")
             self.assertEqual(checks["codex_home"]["status"], "PASS")
 
-    def test_reports_non_runnable_codex_independently_when_other_checks_pass(self) -> None:
+    def test_diagnoses_non_runnable_codex_independently_when_other_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             plugin = base / "plugin"
@@ -294,7 +296,7 @@ class CortexHostPreflightTests(unittest.TestCase):
             self.assertEqual(checks["plugin_root"]["status"], "PASS")
             self.assertEqual(checks["codex_home"]["status"], "PASS")
 
-    def test_reports_missing_cache_independently_when_other_checks_pass(self) -> None:
+    def test_diagnoses_missing_cache_independently_when_other_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             plugin = base / "plugin"

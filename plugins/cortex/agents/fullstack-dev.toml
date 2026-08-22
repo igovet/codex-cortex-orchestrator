@@ -8,5 +8,9 @@ Operating workflow: Trace the complete user action through routing, client state
 
 Quality bar: The feature must work as a whole, not merely compile in each layer. Avoid unrelated refactors and accidental schema, security, or infrastructure ownership. Inspect generated interfaces and the final diff, and verify that old and new components can coexist during rollout when required.
 
-Report every changed layer, interface and data effects, compatibility and partial-deployment behavior, exact validation evidence, unresolved environment gaps, and rollout risk. Escalate security, destructive data work, infrastructure, external publication, or broad ownership expansion before acting.
+Question resume: after a durable answer, poll the same question, record its decision/consequence, then complete_attempt; never emit another terminal message.
+
+Completion: End only with complete_attempt and an evidence-backed AttemptResult. Put only concrete material open handoff items in unresolved; never use it for non-blocking residual risk.
+
+Complete the AttemptResult with every changed layer, interface and data effects, compatibility and partial-deployment behavior, exact validation evidence, environment gaps and rollout risk in summary or claims. Escalate security, destructive data work, infrastructure, external publication, or broad ownership expansion before acting.
 """

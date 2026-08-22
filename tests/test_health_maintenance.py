@@ -25,7 +25,7 @@ class HealthMaintenanceTests(unittest.TestCase):
         ledger_db.ensure_database(root)
         return directory, root
 
-    def test_health_is_read_only_and_reports_schema_checks_and_projection_state(self) -> None:
+    def test_health_is_read_only_and_exposes_schema_checks_and_projection_state(self) -> None:
         directory, root = self.make_root()
         self.addCleanup(directory.cleanup)
         database = ledger_db.database_path(root)
@@ -41,7 +41,7 @@ class HealthMaintenanceTests(unittest.TestCase):
         self.assertFalse(result["checkpoint"]["performed"])
         self.assertEqual(database.stat().st_mtime_ns, before)
 
-    def test_health_reports_physical_lock_state_without_conflating_task_blockers(self) -> None:
+    def test_health_exposes_physical_lock_state_without_conflating_task_blockers(self) -> None:
         directory, root = self.make_root()
         self.addCleanup(directory.cleanup)
         lock_path = root / ".state.lock"
@@ -58,7 +58,7 @@ class HealthMaintenanceTests(unittest.TestCase):
             self.assertFalse(lock["held"])
         self.assertIn("task/gate blockers", result["availability"]["meaning"])
 
-    def test_health_lock_probe_reports_busy_without_waiting(self) -> None:
+    def test_health_lock_probe_exposes_busy_without_waiting(self) -> None:
         directory, root = self.make_root()
         self.addCleanup(directory.cleanup)
         lock_path = root / ".state.lock"
@@ -117,7 +117,7 @@ class HealthMaintenanceTests(unittest.TestCase):
         self.assertTrue(verified["governance"]["fresh_host_root"])
         self.assertEqual(verified["governance"]["verified_records"], 1)
 
-    def test_backup_verification_rejects_tampered_key_or_legacy_sqlite_snapshot(self) -> None:
+    def test_backup_verification_rejects_tampered_key_or_prior_sqlite_snapshot(self) -> None:
         directory, root = self.make_root()
         self.addCleanup(directory.cleanup)
         health_maintenance.manage_health_maintenance(root, {
@@ -132,7 +132,7 @@ class HealthMaintenanceTests(unittest.TestCase):
             })
         with self.assertRaisesRegex(ValueError, "safe .cortex-backup bundle name"):
             health_maintenance.manage_health_maintenance(root, {
-                "action": "backup", "confirmation": "BACKUP", "backup_name": "legacy.sqlite",
+                "action": "backup", "confirmation": "BACKUP", "backup_name": "prior.sqlite",
             })
 
     def test_backup_verification_uses_governance_authority_not_only_manifest_hashes(self) -> None:

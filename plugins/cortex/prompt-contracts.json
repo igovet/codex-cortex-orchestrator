@@ -1,5 +1,5 @@
 {
-  "schema": "cortex/prompt-contract/v2",
+  "schema": "cortex/prompt-contract/v3",
   "compiler": {
     "format": "markdown",
     "assignment_boundary": "json",
@@ -39,7 +39,7 @@
     "gate": {"source": "profiles.json.gate_briefings + compiler.gate_contracts", "task_data": false, "conditional": true},
     "context": {"source": "compiler.context_contracts", "task_data": false, "conditional": true},
     "tool_protocol": {"source": "profiles.json.shared_worker_contract + runtime MCP schema", "task_data": false},
-    "output_contract": {"source": "profiles.json.shared_worker_contract + report schema", "task_data": false},
+    "output_contract": {"source": "profiles.json.shared_worker_contract + AttemptResult/Event schemas + result and human projections", "task_data": false},
     "stopping": {"source": "compiler.stopping_contract", "task_data": false}
   },
   "sources": {
@@ -51,23 +51,25 @@
     "tool_schema": "runtime MCP schema"
   },
   "v3": {
-    "title": "Cortex Worker Briefing v3 (artifact-backed)",
+    "title": "Cortex Worker Briefing v3 (artifact-backed, attempt-result protocol)",
     "required_sections": ["authority", "hard_constraints", "assignment", "role", "tool_protocol", "output_contract", "stopping"],
     "conditional_sections": ["mode", "gate", "context"],
-    "artifact_contract": "immutable_briefing_digest_bootstrap_and_report_transport_remain_authoritative"
+    "artifact_contract": "immutable_briefing_digest_bootstrap_remains_authoritative; AttemptResult/Event are the worker semantic transport; attempt_result_ref and any server-built human projection are derived outputs"
   },
-  "legacy_compatibility": {
-    "adapter": "_expanded_host_spawn_prompt",
-    "deprecated": true,
-    "title": "Cortex Worker Briefing v2",
-    "required_markers": ["## Authority", "## Assignment data", "## Worker protocol", "record_report"],
-    "parity": "legacy_adapter_preserves_v2_required_markers_and_assignment_json_boundary"
+  "attempt_result_contract": {
+    "schema": "cortex/attempt-result/v1",
+    "required_fields": ["status", "summary", "findings", "decisions_needed", "unresolved"],
+    "optional_payload": "typed gate payloads when a gate requires them",
+    "worker_authority": "semantic facts only; the worker result is never authoritative for identity, task revision, dispatch, profile, phase, predecessors, changed_files, timestamps, verification metadata, receipts, or evidence markers",
+    "server_receipts": ["briefing_read", "predecessor_read"],
+    "projection": "attempt_result_ref and any human projection generated from the canonical AttemptRecord",
+    "coordinator_completion": "A native spawn or wait is never completion evidence. For every terminal worker, the coordinator must read its exact canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed."
   },
   "role_delta_required_markers": [
     "Role and mission:",
     "Operating workflow:",
     "Quality bar:",
-    "Report",
+    "AttemptResult",
     "Escalate"
   ],
   "skill_section_requirements": {
@@ -99,8 +101,10 @@
     "forbidden_prompt_protocol_duplicates": [
       "start_orchestration",
       "continue_orchestration",
-      "record_report",
-      "worker_question"
+      "record_attempt_event",
+      "complete_attempt",
+      "worker_question",
+      "read_worker_result"
     ]
   },
   "prompt_eval": {
@@ -123,7 +127,7 @@
       "max_output_tokens": 4096,
       "response_schema": "cortex/prompt-live-eval-response/v1",
       "required_route": "worker",
-      "required_completion": "report_ready",
+      "required_completion": "attempt_completed",
       "forbidden_models": ["gpt-5.6-terra", "gpt-5.6-sol"],
       "live_default": false
     }

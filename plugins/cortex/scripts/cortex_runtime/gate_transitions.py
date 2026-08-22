@@ -21,7 +21,9 @@ bind_symbols(
     (
         "AWAITING_HOST_SPAWN",
         "TERMINAL_ATTEMPT_STATUSES",
+        "_active_facade_attempts_missing_finalized_results",
         "_attempts_missing_result_validation",
+        "_attempts_with_unresolved_canonical_results",
         "_validated_evidence_records",
         "active_gates",
         "append_pipeline_change",
@@ -31,7 +33,6 @@ bind_symbols(
         "cleanup_completed_manifest_snapshots",
         "db_list_task_findings",
         "db_task_findings_blockers",
-        "invalidate_reworked_report_receipts",
         "ledger_root",
         "load_state",
         "load_task_definition",
@@ -50,6 +51,9 @@ bind_symbols(
 
 
 _OUTCOMES = {"passed", "failed", "blocked", "skipped"}
+_CLOSURE_VERIFIER_GATES = frozenset({
+    "review", "governance_activation", "governance_close", "close",
+})
 
 
 def _recoverable(
@@ -225,6 +229,43 @@ def _validate_pass_evidence(
         for item in gate_evidence
     ):
         raise ValueError("cannot pass a gate with failed or self-attested command evidence; use execute_verification_command")
+    pending_attempt_ids = _active_facade_attempts_missing_finalized_results(
+        task_dir, gate_attempts
+    )
+    if pending_attempt_ids:
+        # Evidence can be recorded while a worker is running (for example a
+        # server-observed verification command), but it cannot turn that live
+        # worker into a pass. The exact child must publish and finalize its
+        # AttemptResult first; otherwise `_apply_transition` would coerce the
+        # mutable attempt projection to `passed` without canonical proof.
+        return [], _recoverable(
+            state,
+            revision_correction,
+            reason="active_attempt_result_pending",
+            gate=gate,
+            next_action="wait_for_exact_worker_or_recover_attempt",
+            candidate_attempt_ids=pending_attempt_ids,
+        )
+    # ``completed`` is scoped to a worker's assignment: ordinary implementation
+    # and documentation results may intentionally carry unresolved work forward
+    # to their successor.  A closure verifier is different.  Its own immutable
+    # canonical result is the assertion that the remaining work is acceptably
+    # closed, so it cannot pass while it still records unresolved items.
+    #
+    # Keep this check before every state mutation and restrict it to the exact
+    # passed attempts for this gate.  In particular, do not reinterpret an
+    # earlier implementation/documentation result as a closure failure.
+    if gate in _CLOSURE_VERIFIER_GATES:
+        unresolved = _attempts_with_unresolved_canonical_results(task_dir, passed_attempts)
+        if unresolved:
+            return [], _recoverable(
+                state,
+                revision_correction,
+                reason="closure_attempt_unresolved",
+                gate=gate,
+                next_action="rework_current_gate",
+                candidate_attempt_ids=unresolved,
+            )
     if not state.get("require_delegation"):
         return gate_evidence, None
     if not gate_attempts:
@@ -245,18 +286,18 @@ def _validate_pass_evidence(
         if gate == "documentation":
             return [], _documentation_recovery(state, revision_correction, "documentation_evidence_required", gate, missing)
         raise ValueError("every passed attempt needs linked evidence before the gate can pass: " + ", ".join(missing))
-    missing_reports = [
+    missing_result_bindings = [
         item["attempt_id"] for item in passed_attempts
         if not any(
             evidence.get("attempt_id") == item["attempt_id"]
-            and evidence.get("report_id") and evidence.get("report_receipt")
+            and evidence.get("attempt_result_ref") == item.get("attempt_result_ref")
             for evidence in gate_evidence
         )
     ]
-    if missing_reports:
+    if missing_result_bindings:
         if gate == "documentation":
-            return [], _documentation_recovery(state, revision_correction, "documentation_report_receipt_required", gate, missing_reports)
-        raise ValueError("every passed attempt needs a consumed report receipt before the gate can pass: " + ", ".join(missing_reports))
+            return [], _documentation_recovery(state, revision_correction, "documentation_attempt_result_required", gate, missing_result_bindings)
+        raise ValueError("every passed attempt needs evidence bound to its canonical attempt result before the gate can pass: " + ", ".join(missing_result_bindings))
     unvalidated_results = _attempts_missing_result_validation(task_dir, passed_attempts)
     if unvalidated_results:
         raise ValueError(
@@ -391,9 +432,9 @@ def _apply_transition(
     else:
         for attempt in state["attempts"]:
             # A gate can fail after a worker submitted a syntactically valid
-            # pass report: for example, when its inherited corrective finding
-            # remains open.  Retire that report with the failed gate so the
-            # next bounded attempt is a new worker, never the same stale pass.
+            # canonical result: for example, when its inherited corrective
+            # finding remains open. Retire that result with the failed gate so
+            # the next bounded attempt is a new worker, never the same stale pass.
             if (
                 attempt["gate"] == gate
                 and not attempt.get("invalidated")
@@ -412,9 +453,6 @@ def _apply_transition(
             change,
             str(params.get("pipeline_reason", "adaptive gate outcome")),
             params.get("signals", []),
-        )
-        invalidate_reworked_report_receipts(
-            task_dir, state
         )
     if outcome in {"passed", "skipped"}:
         candidate_wave = sync_current_wave(state)
@@ -448,7 +486,7 @@ def _persist_transition(
                 "recapture the project after the manifest limit is resolved"
             )
         closed_paths = list(closed_receipt["comparison"]["changed_paths"])
-        closed_receipt["reported_paths"] = closed_paths
+        closed_receipt["observed_paths"] = closed_paths
         closed_receipt["unaccounted_paths"] = []
         closed_receipt["complete"] = True
         state["closed_manifest_receipt"] = closed_receipt
@@ -481,7 +519,7 @@ def _closure_rework_target(
 ) -> str:
     """Choose the corrective gate from canonical state and observed impact.
 
-    Worker reports carry findings, not instructions.  The control plane owns
+    Worker AttemptResults carry findings, not instructions. The control plane owns
     wave selection: environment/policy conditions block upstream, documented
     impact returns to documentation, and product/review debt fails back to
     implementation when that gate exists.
@@ -534,6 +572,14 @@ def _closure_rework_target(
         and pipeline.index("documentation") <= gate_index
     ):
         return "documentation"
+    # A generic governance review finding is not evidence that the completed
+    # documentation decision is wrong.  Retrying it through the historical
+    # fallback below would invalidate an otherwise-passed documentation
+    # attempt and send the state machine back through an unrelated writer.
+    # Keep the originating governance verifier active unless the canonical
+    # finding explicitly scopes every affected path to documentation.
+    if gate in {"governance_activation", "governance_close"}:
+        return gate
     if gate == "documentation" and "documentation" in pipeline:
         return "documentation"
     if gate == "qa" and "implementation" in pipeline:
@@ -546,12 +592,11 @@ def _closure_rework_target(
 
 
 def _activate_closure_rework(
-    task_dir: Path,
     state: dict[str, Any],
     *,
     gate: str,
     findings: list[dict[str, Any]],
-    source_report_refs: list[str],
+    source_result_refs: list[str],
 ) -> str:
     """Make canonical closure debt an executable non-terminal rework chain.
 
@@ -606,11 +651,10 @@ def _activate_closure_rework(
         "Canonical closure finding requires corrective work followed by fresh review and close.",
         [f"closure finding blocked {gate}"],
     )
-    invalidate_reworked_report_receipts(task_dir, state)
     state["status"] = "active"
     fingerprints = sorted({str(item["fingerprint"]) for item in findings})
-    report_refs = list(dict.fromkeys(
-        str(item).strip() for item in source_report_refs if str(item).strip()
+    result_refs = list(dict.fromkeys(
+        str(item).strip() for item in source_result_refs if str(item).strip()
     ))
     rework = state.setdefault("closure_rework", {})
     prior = rework.get(gate)
@@ -618,20 +662,20 @@ def _activate_closure_rework(
     if (
         not isinstance(prior, dict)
         or prior.get("finding_fingerprints") != fingerprints
-        or prior.get("source_report_refs") != report_refs
+        or prior.get("source_result_refs") != result_refs
     ):
         rework[gate] = {
             "status": "rework_required",
             "target_gate": target_gate,
             "rerun_gates": list(final_checks),
             "finding_fingerprints": fingerprints,
-            # Rework invalidates the review/close receipt that raised the
-            # finding.  Keep its immutable report reference in durable state
-            # as historical provenance, rather than as current gate evidence,
+            # Rework invalidates the review/close result that raised the
+            # finding. Keep its immutable AttemptResult reference in durable
+            # state as historical provenance, rather than as current gate evidence,
             # so the corrective worker receives the exact defect rather than
             # a generic implementation assignment.  The semantic revision
             # binds this exceptional handoff to the task meaning it reviewed.
-            "source_report_refs": report_refs,
+            "source_result_refs": result_refs,
             "task_revision": int(state.get("task_revision") or 1),
             "iteration": iteration,
             "at": now(),
@@ -709,18 +753,17 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             blockers = db_task_findings_blockers(root, state["task_id"])
             if blockers:
                 actionable = blockers
-                source_report_refs = list(dict.fromkeys(
-                    str(report_ref)
+                source_result_refs = list(dict.fromkeys(
+                    str(result_ref)
                     for attempt in inputs[4]
-                    for report_ref in attempt.get("report_ids", [])
-                    if str(report_ref).strip()
+                    for result_ref in [attempt.get("attempt_result_ref")]
+                    if str(result_ref).strip()
                 ))
                 target_gate = _activate_closure_rework(
-                    task_dir,
                     state,
                     gate=gate,
                     findings=actionable,
-                    source_report_refs=source_report_refs,
+                    source_result_refs=source_result_refs,
                 )
                 save_state(task_dir, task_dir / "state.sqlite", state, "gate_rework", f"{gate}: canonical gate blockers require rework")
                 # Returning a normal transition shape lets the v3 adapter

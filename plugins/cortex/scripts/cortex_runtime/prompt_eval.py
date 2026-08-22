@@ -25,9 +25,6 @@ def load_prompt_eval_fixtures(path: Path = FIXTURES_PATH) -> dict[str, Any]:
         or not isinstance(payload.get("cases"), list)
         or not payload["cases"]
         or len(payload["cases"]) > int(PROMPT_CONTRACT["prompt_eval"]["max_cases"])
-        or not isinstance(payload.get("ab_cases"), list)
-        or not payload["ab_cases"]
-        or len(payload["ab_cases"]) > int(PROMPT_CONTRACT["prompt_eval"]["max_cases"])
     ):
         raise RuntimeError("prompt-eval fixture contract is invalid")
     return payload
@@ -87,85 +84,6 @@ def prompt_eval_metrics(prompt: str, *, assignment_markers: list[str]) -> dict[s
             for marker in assignment_markers
         ),
     }
-
-
-def render_prompt_ab_pair(case: Mapping[str, Any]) -> dict[str, str]:
-    """Render the identical dispatch package through retained v2 and canonical v3.
-
-    The compatibility path is intentionally evaluated as a baseline, not as a
-    second source of policy.  The pair is deterministic because fixture task
-    values and package identifiers are fixed.
-    """
-    # Briefings are a runtime-bound component.  Loading the facade first is
-    # deliberate: it binds the exact bundled collaborators before importing
-    # the renderer, rather than creating an unbound second runtime module.
-    import cortex  # noqa: F401
-    from cortex_runtime.briefings import _expanded_host_spawn_prompt, host_spawn_prompt
-
-    profile = case.get("profile")
-    package = case.get("package")
-    if not isinstance(profile, str) or not profile or not isinstance(package, dict):
-        raise RuntimeError("prompt A/B case has no profile/package")
-    return {
-        "legacy_v2": _expanded_host_spawn_prompt(profile, package),
-        "canonical_v3": host_spawn_prompt(profile, package),
-    }
-
-
-def _validate_ab_expected(case_id: str, metrics: Mapping[str, Any], expected: Mapping[str, Any], version: str) -> None:
-    if metrics.get("sha256") != expected.get("sha256"):
-        raise AssertionError(f"prompt A/B golden digest drifted: {case_id}/{version}")
-    for key in ("section_count", "assignment_markers_only_in_data"):
-        if metrics.get(key) != expected.get(key):
-            raise AssertionError(f"prompt A/B metric drifted: {case_id}/{version}/{key}")
-
-
-def run_prompt_ab_evals(*, fixtures_path: Path = FIXTURES_PATH) -> list[dict[str, Any]]:
-    """Compare legacy v2 and canonical v3 with deterministic, structural metrics.
-
-    No model is called.  The retained legacy adapter is measured for
-    compatibility and boundary delta; the canonical compiler must keep every
-    fixture marker inside the assignment data block.
-    """
-    fixtures = load_prompt_eval_fixtures(fixtures_path)
-    results: list[dict[str, Any]] = []
-    for case in fixtures["ab_cases"]:
-        if not isinstance(case, dict) or not isinstance(case.get("id"), str):
-            raise RuntimeError("prompt A/B case has no stable id")
-        markers = case.get("assignment_markers")
-        expected = case.get("expected")
-        if (
-            not isinstance(markers, list)
-            or not all(isinstance(marker, str) and marker for marker in markers)
-            or not isinstance(expected, dict)
-            or set(expected) != {"legacy_v2", "canonical_v3"}
-            or not all(isinstance(expected.get(version), dict) for version in expected)
-        ):
-            raise RuntimeError("prompt A/B case has an invalid metric contract")
-        rendered = render_prompt_ab_pair(case)
-        metrics = {
-            version: prompt_eval_metrics(prompt, assignment_markers=markers)
-            for version, prompt in rendered.items()
-        }
-        for version in ("legacy_v2", "canonical_v3"):
-            _validate_ab_expected(case["id"], metrics[version], expected[version], version)
-        if not metrics["canonical_v3"]["assignment_markers_only_in_data"]:
-            raise AssertionError("canonical v3 task-data boundary failed: " + case["id"])
-        results.append({
-            "id": case["id"],
-            "legacy_v2": metrics["legacy_v2"],
-            "canonical_v3": metrics["canonical_v3"],
-            "delta": {
-                "bytes": metrics["canonical_v3"]["bytes"] - metrics["legacy_v2"]["bytes"],
-                "section_count": metrics["canonical_v3"]["section_count"] - metrics["legacy_v2"]["section_count"],
-                "assignment_boundary_improved": (
-                    not metrics["legacy_v2"]["assignment_markers_only_in_data"]
-                    and metrics["canonical_v3"]["assignment_markers_only_in_data"]
-                ),
-            },
-        })
-    return results
-
 
 def assert_live_prompt_eval_configuration(
     *, model: str | None, reasoning_effort: str | None, allow_model_fallback: bool = False,
@@ -263,7 +181,5 @@ __all__ = [
     "assert_live_prompt_eval_configuration",
     "load_prompt_eval_fixtures",
     "prompt_eval_metrics",
-    "render_prompt_ab_pair",
-    "run_prompt_ab_evals",
     "run_prompt_evals",
 ]

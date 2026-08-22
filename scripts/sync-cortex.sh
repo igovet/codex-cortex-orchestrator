@@ -180,8 +180,8 @@ spec = importlib.util.spec_from_file_location("cortex_sync_check", server)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 base_version = version.split("+", 1)[0]
-if module.SERVER_VERSION != version or base_version != "9.2.22":
-    raise SystemExit("plugin/server version must match the 9.2.22 release manifest")
+if module.SERVER_VERSION != version or base_version != "10.0.4":
+    raise SystemExit("plugin/server version must match the 10.0.4 release manifest")
 PY
 }
 
@@ -296,7 +296,7 @@ sync_cortex_hook_trust() {
   config_path="${codex_home}/config.toml"
   codex_binary="$(command -v codex)"
   if [[ "${mode}" == "dry-run" ]]; then
-    echo "would trust the five exact installed Cortex lifecycle hook content hashes"
+    echo "would trust the six exact installed Cortex lifecycle hook content hashes"
     return 0
   fi
   if [[ "${mode}" == "check" ]]; then

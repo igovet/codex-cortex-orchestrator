@@ -152,5 +152,5 @@ Fail the harvest or return a blocker instead of claiming completion when:
   exclusion;
 - feature pages omit consequential behavior, state, configuration, failure,
   integration, operations, or verification details;
-- documentation claims were copied from reports without source/test checks;
+- documentation claims were copied from AttemptResult projections without source/test checks;
 - refresh lacks an independent post-write census and no-change second pass.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the deterministic Cortex Prompt Contract Architecture v2 linter."""
+"""Run the deterministic Cortex Prompt Contract Architecture v3 linter."""
 from __future__ import annotations
 
 import sys

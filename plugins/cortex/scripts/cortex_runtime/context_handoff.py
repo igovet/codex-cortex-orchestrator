@@ -1,10 +1,11 @@
-"""Durable context-compaction handoff rendering."""
+"""Fresh-only, bounded context-compaction handoffs."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
 from cortex_runtime.core.runtime_bindings import bind_symbols
+from cortex_runtime.handoff_compiler import build_dispatch_handoff
 
 
 bind_symbols(
@@ -12,25 +13,27 @@ bind_symbols(
     globals(),
     (
         "AWAITING_HOST_SPAWN",
-        "MAX_CONTEXT_REPORTS",
-        "_contained_path",
+        "_delegation_package",
         "_open_blocking_questions",
         "_orchestrate_pipeline_snapshot",
         "_orchestrate_summary",
-        "_plan_approval",
-        "_report_index",
         "_v3_task_ref",
-        "_wave_for_gates",
         "active_gates",
+        "db_list_worker_sessions",
         "now",
         "redact",
-        "report_bus_paths",
-        "report_markdown_link",
-        "report_markdown_path",
-        "safe_id",
-        "sanitize_structured",
     ),
 )
+
+
+def _target_handoff(task_dir: Path, state: dict[str, Any], attempt: dict[str, Any]) -> dict[str, Any] | None:
+    """Rebuild one role-targeted semantic handoff from its dispatch package."""
+    try:
+        package = _delegation_package(task_dir, state["task_id"], str(attempt.get("attempt_id") or ""))
+        return build_dispatch_handoff(package, str(attempt.get("profile") or ""))
+    except (OSError, ValueError):
+        return None
+
 
 def _context_handoff(
     task_dir: Path,
@@ -38,323 +41,106 @@ def _context_handoff(
     task: dict[str, Any],
     plan: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a bounded, ledger-backed recovery handoff after context compaction.
+    """Build a read-only recovery snapshot from attempts and canonical results.
 
-    The host may compact or replay the conversation without preserving the
-    exact skill version or the coordinator's transient protocol state.  This
-    handoff is deliberately derived from the task ledger and report index, so
-    the coordinator can rehydrate from durable evidence instead of trusting a
-    raw transcript or starting a duplicate task.
+    No predecessor artifact or generic worker body is consulted. A
+    successor receives only the target-specific handoff already granted by
+    the dispatch package.
     """
-    report_index = _report_index(report_bus_paths(task_dir), state["task_id"])
-    report_items = [
-        item for item in report_index.get("reports", [])
-        if isinstance(item, dict)
-    ][-MAX_CONTEXT_REPORTS:]
-    report_handoffs: list[dict[str, Any]] = []
-    changed_files: list[str] = []
-    verified_facts: list[dict[str, Any]] = []
-    for item in report_items:
-        report_ref = safe_id(str(item.get("report_id") or ""))
-        phase = redact(item.get("gate", "report"), 128) or "report"
-        summary = redact(item.get("summary", ""), 2400)
-        raw_files = item.get("changed_files")
-        files: list[Any] = raw_files if isinstance(raw_files, list) else []
-        compact_files = [redact(value, 500) for value in files[:32]]
-        for value in compact_files:
-            if value and value not in changed_files:
-                changed_files.append(value)
-        report_handoff = {
-            "report_ref": report_ref,
-            "phase": phase,
-            "profile": redact((item.get("producer") or {}).get("profile", ""), 128),
-            "summary": summary,
-            "changed_files": compact_files,
-        }
-        try:
-            # A normal context handoff is a read-only recovery snapshot.  It
-            # may expose an existing Desktop export, but it must not enqueue
-            # or repair a projection while a coordinator is merely trying to
-            # discover the durable state after compaction.
-            markdown_path = report_markdown_path(task_dir, report_ref)
-            report_handoff.update({
-                "report_markdown_path": str(markdown_path),
-                "report_markdown_link": report_markdown_link(task_dir, report_ref, phase),
-            })
-        except (OSError, ValueError) as exc:
-            # A report reference is still readable from its canonical SQLite
-            # artifact.  Do not turn a rebuildable Desktop export into a
-            # context-recovery failure.
-            report_handoff["projection_error"] = redact(str(exc), 500)
-        report_handoffs.append(report_handoff)
-        verified_facts.append({
-            "source": report_ref,
-            "phase": phase,
-            "fact": summary,
-            "changed_files": compact_files,
-        })
-
-    decisions: list[dict[str, Any]] = []
-    for collection_name in ("pipeline_changes", "adaptive_events"):
-        collection = state.get(collection_name)
-        if not isinstance(collection, list):
-            continue
-        for value in collection[-8:]:
-            if isinstance(value, dict):
-                decisions.append(sanitize_structured({
-                    "source": collection_name,
-                    "at": value.get("at"),
-                    "reason": redact(value.get("reason", ""), 1200),
-                    "signals": [redact(item, 800) for item in (value.get("signals") or [])[:8]],
-                    "from": value.get("from"),
-                    "to": value.get("to") or value.get("pipeline"),
-                    "operations": value.get("operations") or [],
-                }))
-    approval = _plan_approval(state)
-    if approval.get("policy") == "required" or approval.get("plan_report_ref"):
-        decisions.append({
-            "source": "plan_approval",
-            "status": redact(approval.get("status", ""), 64),
-            "plan_report_ref": redact(approval.get("plan_report_ref", ""), 128) or None,
-            "feedback": redact(approval.get("feedback", ""), 1200) or None,
-        })
-
-    commands: list[dict[str, Any]] = []
-    for evidence in state.get("evidence", [])[-8:]:
-        if not isinstance(evidence, dict):
-            continue
-        command = redact(evidence.get("command", ""), 1000)
-        argv = [redact(value, 300) for value in (evidence.get("argv") or [])[:32]]
-        if not command and not argv:
-            continue
-        commands.append({
-            "gate": redact(evidence.get("gate", ""), 64),
-            "command": command or None,
-            "argv": argv,
-            "cwd": redact(evidence.get("cwd", ""), 500) or None,
-            "exit_code": evidence.get("exit_code"),
-            "verified_execution": bool(evidence.get("verified_execution")),
-            "stdout": redact(evidence.get("stdout", ""), 1200),
-            "stderr": redact(evidence.get("stderr", ""), 1200),
-        })
-
-    open_questions = [
-        {
-            "question_ref": redact(item.get("question_id", ""), 128),
-            "attempt_id": redact(item.get("attempt_id", ""), 128),
-            "header": redact(item.get("header", ""), 300),
-            "question": redact(item.get("question", ""), 1600),
-        }
-        for item in _open_blocking_questions(task_dir, state)
-        if isinstance(item, dict)
-    ][:8]
-    blockers: list[str] = []
-    if state.get("status") == "blocked":
-        blockers.append(redact(state.get("blocked_reason", "The task is blocked."), 2000))
-    blockers.extend(
-        redact(item.get("reason", ""), 1200)
-        for item in state.get("recovery_events", [])[-8:]
-        if isinstance(item, dict) and item.get("reason")
-    )
-
+    completed_results: list[dict[str, Any]] = []
     pending_dispatches: list[dict[str, Any]] = []
     active_workers: list[dict[str, Any]] = []
     stopped_workers: list[dict[str, Any]] = []
-    current_wave = _wave_for_gates(plan, active_gates(state))
-    wave_attempt_ids = list((current_wave or {}).get("attempt_ids") or [])
-    worker_slots = {str(attempt_id): index for index, attempt_id in enumerate(wave_attempt_ids, 1)}
-    for attempt in state.get("attempts", []):
+    # The state projection is normally sufficient, but the SQLite worker
+    # session table is the server-owned identity source.  Keep it as the
+    # recovery fallback for task projections written before host_spawn was
+    # persisted into the attempt record.
+    session_by_attempt: dict[str, dict[str, Any]] = {}
+    try:
+        ledger_root = task_dir.parent.parent
+        for session in db_list_worker_sessions(ledger_root, str(state.get("task_id") or "")):
+            attempt_key = str(session.get("attempt_id") or "").strip()
+            if attempt_key and attempt_key not in session_by_attempt:
+                session_by_attempt[attempt_key] = session
+    except (OSError, ValueError, TypeError):
+        session_by_attempt = {}
+    for attempt in state.get("attempts") or []:
         if not isinstance(attempt, dict) or attempt.get("invalidated"):
             continue
-        spawn_request = attempt.get("spawn_request") or {}
-        common = {
-            "attempt_id": redact(attempt.get("attempt_id", ""), 128),
-            "phase": redact(attempt.get("gate", ""), 64),
-            "profile": redact(attempt.get("profile", ""), 128),
-            "display_name": redact(attempt.get("display_name", ""), 128),
-            "dispatch_ref": redact(attempt.get("dispatch_ref", ""), 128),
-            "task_name": redact(spawn_request.get("task_name", ""), 128),
-            "worker": worker_slots.get(str(attempt.get("attempt_id") or "")),
-            "lifecycle_status": redact(attempt.get("lifecycle_status", ""), 64) or None,
-            "spawn_lease_expires_at": attempt.get("spawn_lease_expires_at"),
-            "worker_lease_expires_at": attempt.get("worker_lease_expires_at"),
-            "last_heartbeat_at": attempt.get("last_heartbeat_at"),
+        attempt_id = redact(attempt.get("attempt_id", ""), 128)
+        phase = redact(attempt.get("gate", ""), 128)
+        profile = redact(attempt.get("profile", ""), 128)
+        result_ref = redact(attempt.get("attempt_result_ref", ""), 160) or None
+        status = str(attempt.get("status") or "")
+        identity = {
+            "attempt_id": attempt_id,
+            "phase": phase,
+            "profile": profile,
+            "dispatch_ref": redact(attempt.get("dispatch_ref", ""), 160) or None,
         }
-        if attempt.get("status") == AWAITING_HOST_SPAWN:
-            briefing_file = str(attempt.get("briefing_file") or "")
-            briefing_path = _contained_path(task_dir, task_dir / briefing_file, "dispatch briefing")
-            pending_dispatches.append({
-                **common,
-                "briefing_path": str(briefing_path),
-                "briefing_digest": redact(attempt.get("briefing_digest", ""), 128),
-                "recovery_authority": "invoke_only_the_matching_top_level_inspect_dispatch",
+        if result_ref:
+            completed_results.append({
+                **identity,
+                "attempt_result_ref": result_ref,
+                "lifecycle_status": redact(attempt.get("lifecycle_status", ""), 128) or None,
+            })
+        if status == AWAITING_HOST_SPAWN:
+            pending_dispatches.append({**identity, "target_handoff": _target_handoff(task_dir, state, attempt)})
+        elif status == "running" and not attempt.get("host_stopped_at"):
+            host_spawn = attempt.get("host_spawn") or {}
+            session = session_by_attempt.get(str(attempt.get("attempt_id") or ""), {})
+            active_workers.append({
+                **identity,
+                # Host identity is server-observed at SubagentStart and is
+                # durably stored in the immutable spawn observation, never in
+                # worker-authored attempt data.  Recovery must surface that
+                # exact native child id so a compacted coordinator can wait on
+                # the existing worker instead of dispatching a replacement.
+                "host_agent_id": redact(
+                    attempt.get("host_agent_id")
+                    or host_spawn.get("agent_id")
+                    or session.get("host_agent_id")
+                    or "",
+                    160,
+                ) or None,
             })
         elif attempt.get("host_stopped_at"):
-            attempt_id = str(attempt.get("attempt_id") or "")
-            report_refs = []
-            for item in (attempt.get("host_report_refs") or []):
-                report_ref = redact(item, 128)
-                if report_ref and report_ref not in report_refs:
-                    report_refs.append(report_ref)
-            # The report index is canonical, while host_stop metadata is only
-            # a lifecycle projection.  Recover reports from the index when a
-            # stop hook persisted the stop before copying its refs into the
-            # attempt record; otherwise a durable report could be mistaken for
-            # a reportless stop and retried as a failure.
-            for item in report_index.get("reports", []):
-                if not isinstance(item, dict) or str(item.get("attempt_id") or "") != attempt_id:
-                    continue
-                report_ref = redact(item.get("report_id", ""), 128)
-                if report_ref and report_ref not in report_refs:
-                    report_refs.append(report_ref)
-            report_refs = report_refs[:8]
-            # Only currently open questions authorize follow-up.  Do not let
-            # stale host_question_refs from an answered question resurrect a
-            # dead native child during compaction recovery.
-            question_refs = []
-            for item in _open_blocking_questions(task_dir, state, attempt_id):
-                if not isinstance(item, dict):
-                    continue
-                question_ref = redact(item.get("question_id", ""), 128)
-                if question_ref and question_ref not in question_refs:
-                    question_refs.append(question_ref)
-            question_refs = question_refs[:8]
-            # A stop record can predate the terminal reportless-stop fix, or
-            # have incomplete host metadata after an interrupted hook.  Once
-            # the native worker has stopped, the absence of both durable
-            # evidence kinds is enough to make it a terminal failure.  Do not
-            # let a stale ``native_worker_stopped_recoverable`` or an
-            # ``awaiting_user`` flag without question refs reintroduce a
-            # follow-up target for a dead child.
-            reportless_stop = not report_refs and not question_refs
+            finalization_pending = str(attempt.get("host_stop_outcome") or "") == "work_completed_finalization_pending"
             stopped_workers.append({
-                **common,
-                "status": redact(attempt.get("status", ""), 64),
-                "outcome": redact(attempt.get("host_stop_outcome", ""), 128),
-                "report_refs": report_refs,
-                "question_refs": question_refs,
-                "reason": redact(attempt.get("finalization_reason", ""), 1000) or None,
-                "failure_status": (
-                    "failed"
-                    if reportless_stop
-                    else None
-                ),
-                "failure_reason": (
-                    "native_worker_stopped_without_report"
-                    if reportless_stop
-                    else None
-                ),
-                "host_agent_id": redact((attempt.get("host_spawn") or {}).get("agent_id", ""), 256),
-                "host_task_name": redact((attempt.get("host_spawn") or {}).get("task_name", ""), 128),
-                "resumable": bool(
-                    # A native spawn starts as provisionally resumable, but a
-                    # stopped worker is resumable only when its durable
-                    # question is still open. Reports are consumed and
-                    # reportless stops are failed; neither may become a
-                    # follow-up target through stale host metadata.
-                    bool(question_refs)
-                ),
-                "stopped_at": attempt.get("host_stopped_at"),
+                **identity,
+                "attempt_result_ref": result_ref,
+                "finalization_pending": finalization_pending,
+                "failure_status": None if finalization_pending else redact(attempt.get("host_stop_outcome", ""), 160) or None,
+                "failure_reason": None if finalization_pending else redact(attempt.get("finalization_reason", ""), 1000) or None,
+                "resumable": False,
             })
-        elif attempt.get("status") == "running":
-            host_spawn = attempt.get("host_spawn") or {}
-            active_workers.append({
-                **common,
-                "host_agent_id": redact(host_spawn.get("agent_id", ""), 256),
-                "host_task_name": redact(host_spawn.get("task_name", ""), 128),
-                "host_model": redact(host_spawn.get("model", ""), 128),
-                "reasoning_effort": redact(host_spawn.get("reasoning_effort", ""), 64),
-                "started_at": host_spawn.get("confirmed_at") or attempt.get("started_at"),
-            })
-
-    task_ref = _v3_task_ref(state["task_id"])
-    recovery_actions = []
-    if pending_dispatches:
-        recovery_actions.append(
-            "Invoke only the matching top-level inspect dispatches; this handoff is descriptive and never itself "
-            "authorizes spawn."
-        )
-    if active_workers:
-        active_ids = [item["host_agent_id"] for item in active_workers if item.get("host_agent_id")]
-        recovery_actions.append(
-            "Do not respawn active workers; wait only on these exact persisted child ids: "
-            + ", ".join(active_ids)
-            + "."
-        )
-    if stopped_workers:
-        terminal_failures = [
-            item for item in stopped_workers
-            if item.get("failure_status") == "failed" and item.get("dispatch_ref")
-        ]
-        if terminal_failures:
-            recovery_actions.append(
-                "For each stopped worker without a report, submit exactly one failed continuation using its "
-                "dispatch_ref and failure_reason; never wait on, follow up, or respawn that stopped child: "
-                + ", ".join(
-                    f"{item['dispatch_ref']} (reason={item['failure_reason']})"
-                    for item in terminal_failures
-                )
-                + "."
-            )
-        resumable_ids = [
-            item["host_agent_id"] for item in stopped_workers
-            if item.get("resumable") and item.get("host_agent_id")
-        ]
-        if resumable_ids:
-            recovery_actions.append(
-                "Do not respawn stopped resumable workers; resume only their exact persisted child ids with "
-                "followup_task when the returned action authorizes it: " + ", ".join(resumable_ids) + "."
-            )
-        recovery_actions.append(
-            "For stopped workers with reports, consume the report refs. For durable questions, surface and answer "
-            "the question before resuming the same worker."
-        )
-    next_action = (
-        f"Call manage_orchestration(intent=inspect, task_ref={task_ref}) once after context compaction; "
-        "treat the returned context_handoff and current ledger as authoritative. Do not call "
-        "start_orchestration again, do not replay completed dispatches, and do not use a raw transcript. "
-        "After rehydration, follow the returned relative step. Publish a report link only when "
-        "read_worker_report returns publication_required=true, with its completion summary and next step in the "
-        "same message; never republish on reread. "
-        + " ".join(recovery_actions)
-    )
+    active = active_gates(state)
+    finalizing = [item for item in stopped_workers if item["finalization_pending"]]
+    if finalizing:
+        next_action = "retry complete_attempt on that exact persisted attempt only; do not spawn or submit a replacement worker."
+    elif pending_dispatches:
+        next_action = "Invoke only the returned pending dispatches, then follow the current canonical step."
+    else:
+        next_action = "Follow the current canonical lifecycle state; use only attempt_result_ref values for completed predecessors."
     return {
-        "schema": "cortex/context-handoff/v1",
-        "task_ref": task_ref,
+        "schema": "cortex/context-handoff/v2",
+        "task_ref": _v3_task_ref(state),
         "task_id": redact(state.get("task_id", ""), 128),
         "generated_at": now(),
-        "goal": redact(
-            task.get("user_request_projection") or task.get("user_request") or task.get("objective", ""),
-            4000,
-        ),
-        "user_intent": {
-            "artifact_ref": task.get("user_intent_artifact_ref"),
-            "artifact_path": task.get("user_intent_artifact_path"),
-            "digest_sha256": task.get("user_request_digest"),
-            "byte_size": task.get("user_intent_byte_size"),
-            "exact": True,
-        },
+        "goal": redact(task.get("user_request_projection") or task.get("user_request", ""), 4000),
         "acceptance_criteria": [redact(item, 1000) for item in (task.get("acceptance_criteria") or [])[:32]],
-        "verified_facts": verified_facts[-MAX_CONTEXT_REPORTS:],
-        "decisions": decisions[-16:],
-        "changed_files": changed_files[:64],
-        "commands": commands,
-        "open_questions": open_questions,
-        "blockers": [item for item in blockers if item][:16],
+        "verification": [redact(item, 1000) for item in (task.get("verification") or [])[:32]],
         "state": _orchestrate_summary(state),
         "pipeline": _orchestrate_pipeline_snapshot(state, plan),
-        "reports": report_handoffs,
+        "active_gates": active,
+        "completed_results": completed_results[-64:],
         "pending_dispatches": pending_dispatches,
         "active_workers": active_workers,
         "stopped_workers": stopped_workers,
         "protocol": {
             "coordinator": "The main/root agent is the sole user-facing coordinator; project operations belong to workers.",
-            "worker_language": "Worker-authored commentary, tool arguments, reports, questions, and native final output are English-only.",
-            "hidden_dispatch": "Hidden spawn_agent requests retain fork_turns=none so the coordinator transcript is not inherited.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",
-            "dispatch_recovery": "Only top-level dispatches returned by inspect authorize an unstarted spawn. Active workers are waitable exact child ids. A stopped worker without a report is terminal and requires one exact failed continuation; it is never waitable, followup-resumable, or respawned. A worker paused on a durable question may be resumed only through followup_task to its persisted host_agent_id when the returned action authorizes that resume.",
-            "report_publication": "After a native worker completes, read each report_ref. Publish a link only when read_worker_report returns publication_required=true, in the same message as a concise completion summary and next step. Rereads never republish.",
-            "instruction_source": "cortex:orchestrator and cortex-control skills; this handoff restores state and invariants, not a replacement skill source.",
+            "result_transport": "Read canonical AttemptResult views with read_worker_result by exact attempt_result_ref. Generated result views are non-authoritative.",
         },
         "next_action": next_action,
     }

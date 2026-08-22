@@ -38,7 +38,7 @@ ACTOR_ROLES = {"coordinator", "worker", "reviewer"}
 HARD_TRIGGER_KEYS = {
     "security", "privacy", "credentials", "sensitive_data", "destructive",
     "migration", "external_action", "public_contract", "authorization",
-    "artifact_integrity", "report_integrity", "verification_integrity",
+    "artifact_integrity", "result_integrity", "verification_integrity",
 }
 OFF_ASSESSMENT_KEYS = HARD_TRIGGER_KEYS | {
     "multiple_repositories", "related_tasks", "long_lived_lanes",
@@ -85,6 +85,35 @@ def _canonical(value: Any) -> str:
         )
     except (TypeError, ValueError) as exc:
         raise GovernanceError("governance content must be strict JSON", code="content_invalid") from exc
+
+
+def _bounded_content_json(value: Any, *, label: str) -> str:
+    """Return strict canonical JSON after enforcing the durable byte budget.
+
+    ``approval_basis`` is persisted twice (the record projection and its
+    append-only lifecycle entry), so it must obey the same trust-boundary
+    budget as record content.  Validate before opening a writer: a rejected
+    payload must never create a partial governance record, artifact, or
+    lifecycle transition.
+    """
+    _validate_content_shape(value)
+    encoded = _canonical(value).encode("utf-8")
+    if len(encoded) > MAX_GOVERNANCE_CONTENT_BYTES:
+        raise GovernanceError(
+            f"{label} exceeds the bounded size limit",
+            code="content_size_exceeded",
+        )
+    return encoded.decode("utf-8")
+
+
+def _bounded_governance_text(value: Any, *, label: str, required: bool = False) -> str:
+    """Normalize a scalar governance field without admitting a large TEXT row."""
+    text = str(value or "").strip()
+    if required and not text:
+        raise GovernanceError(f"{label} is required", code="initiative_fields_required")
+    if len(text.encode("utf-8")) > MAX_GOVERNANCE_STRING_BYTES:
+        raise GovernanceError(f"{label} exceeds the bounded size limit", code="content_size_exceeded")
+    return text
 
 
 def _digest(value: Any) -> str:
@@ -225,11 +254,11 @@ def _validate_governance_artifact(
     expected_digest: str | None = None,
     initiative_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve a governance artifact/report reference to immutable content.
+    """Resolve a governance artifact reference to immutable content.
 
-    A close receipt may point at a canonical blob, a logical artifact from a
-    task, or a governance record.  Record references are only accepted when
-    their record belongs to the same initiative and their own immutable
+    A close-evidence binding may point at a canonical blob, a logical artifact
+    from a task, or a governance record. Record references are accepted only
+    when their record belongs to the same initiative and their own immutable
     content artifact validates recursively.
     """
     ref = str(artifact_ref or "").strip()
@@ -246,7 +275,7 @@ def _validate_governance_artifact(
         if initiative_ref and record["initiative_ref"] != initiative_ref:
             raise GovernanceError("governance evidence record is outside the initiative scope", code="artifact_scope_mismatch")
         if expected_digest and str(record["content_digest"]) != str(expected_digest):
-            raise GovernanceError("governance evidence record digest does not match its receipt", code="artifact_integrity_failed")
+            raise GovernanceError("governance evidence record digest does not match its binding", code="artifact_integrity_failed")
         return _validate_governance_artifact(
             connection,
             record["content_artifact_ref"],
@@ -269,7 +298,7 @@ def _validate_governance_artifact(
         if not bool(logical["immutable"]):
             raise GovernanceError("governance evidence logical artifact is mutable", code="artifact_integrity_failed")
         if expected_digest and str(logical["digest_sha256"]) != str(expected_digest):
-            raise GovernanceError("governance logical artifact digest does not match its receipt", code="artifact_integrity_failed")
+            raise GovernanceError("governance logical artifact digest does not match its binding", code="artifact_integrity_failed")
         metadata = _validate_blob_with_connection(
             connection,
             str(logical["blob_id"]),
@@ -567,8 +596,8 @@ def _append_record_lifecycle_transition(
 def _record_from_storage(root: Path, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     """Read a record from its immutable artifact and verify the cache.
 
-    ``content_json`` remains in the v9 table only for indexed migration
-    compatibility.  It is never authoritative after v10: any disagreement
+    ``content_json`` remains in the v9 table only as an indexed migration
+    cache.  It is never authoritative after v10: any disagreement
     between that cache and the immutable artifact is ledger corruption.
     """
     _validate_record_lifecycle(root, connection, row)
@@ -607,10 +636,10 @@ def _text_trigger_hits(values: Iterable[Any]) -> dict[str, str]:
         "destructive": ("destructive", "delete", "remove", "irreversible", "hard to reverse", "удалени", "удалить", "необратим", "разрушительн"),
         "migration": ("migration", "migrate data", "schema change", "database change", "data move", "миграц", "перенос данн", "изменени схем", "изменить схем"),
         "external_action": ("external action", "publish", "deploy", "send email", "billing", "outside workspace", "публикац", "развертыв", "развёртыв", "внешн", "вне рабочего пространства", "отправк письм"),
-        "public_contract": ("public api", "public contract", "compatibility", "wire format", "data format", "публичн api", "публичного api", "публичный api", "публичн контракт", "совместим", "формат данн"),
+        "public_contract": ("public api", "public contract", "wire format", "data format", "публичн api", "публичного api", "публичный api", "публичн контракт", "формат данн"),
         "authorization": ("authorization", "access control", "permission model", "контроль доступ", "модел разрешени"),
         "artifact_integrity": ("artifact integrity", "immutable history", "ledger integrity"),
-        "report_integrity": ("report contract", "report integrity"),
+        "result_integrity": ("result contract", "result integrity"),
         "verification_integrity": ("verification invariant", "verification integrity"),
         "multiple_repos": ("multiple repositories", "several repositories", "multi-repository"),
         "linked_tasks": ("linked tasks", "related tasks", "several cortex tasks", "multiple tasks"),
@@ -803,10 +832,9 @@ def create_initiative(
     parent_ref: str | None = None,
     acceptance_oracle_artifact_ref: str | None = None,
 ) -> dict[str, Any]:
-    ledger_db.ensure_database(root)
-    title_value, goal_value, owner_value = str(title or "").strip(), str(goal or "").strip(), str(owner or "").strip()
-    if not title_value or not goal_value or not owner_value:
-        raise GovernanceError("initiative title, goal, and owner are required", code="initiative_fields_required")
+    title_value = _bounded_governance_text(title, label="initiative title", required=True)
+    goal_value = _bounded_governance_text(goal, label="initiative goal", required=True)
+    owner_value = _bounded_governance_text(owner, label="initiative owner", required=True)
     risk_value = str(risk or "moderate").strip().lower()
     if risk_value not in {"low", "moderate", "high", "critical"}:
         raise GovernanceError("initiative risk is invalid", code="initiative_risk_invalid")
@@ -817,6 +845,9 @@ def create_initiative(
     if not ref:
         ref = "initiative-" + hashlib.sha256(f"{title_value}\0{goal_value}\0{owner_value}\0{_now()}".encode()).hexdigest()[:20]
     _safe_ref(ref, "initiative_ref", prefix="initiative-")
+    # Validate all caller-controlled persistent text before creating/opening
+    # the ledger writer.
+    ledger_db.ensure_database(root)
     now = _now()
     with _connection(root, write=True) as connection:
         if connection.execute("SELECT 1 FROM initiatives WHERE initiative_ref = ?", (ref,)).fetchone() is not None:
@@ -1079,14 +1110,9 @@ def _validate_independent_review_attestation(
     """Bind close review evidence to the canonical reviewer attempt/session."""
     task_id = str(metadata.get("task_id") or payload.get("task_id") or "").strip()
     attempt_id = str(payload.get("attempt_id") or "").strip()
-    report_ref = str(
-        payload.get("report_id")
-        or payload.get("report_ref")
-        or payload.get("report_receipt")
-        or ""
-    ).strip()
-    if not task_id or str(payload.get("task_id") or task_id).strip() != task_id or not attempt_id or not report_ref:
-        raise GovernanceError("independent review evidence lacks a canonical task, attempt, or report", code="review_attestation_invalid")
+    result_ref = str(payload.get("attempt_result_ref") or "").strip()
+    if not task_id or str(payload.get("task_id") or task_id).strip() != task_id or not attempt_id or not result_ref:
+        raise GovernanceError("independent review evidence lacks a canonical task, attempt, or result", code="review_attestation_invalid")
     if connection.execute(
         "SELECT 1 FROM initiative_task_links WHERE initiative_ref=? AND task_id=? LIMIT 1",
         (initiative_ref, task_id),
@@ -1108,18 +1134,41 @@ def _validate_independent_review_attestation(
         ),
         None,
     )
-    report_refs = set()
-    if isinstance(attempt, dict):
-        report_refs.update(str(item) for item in (attempt.get("report_ids") or []) if item)
-        report_refs.update(str(item) for item in (attempt.get("host_report_refs") or []) if item)
     if (
         not isinstance(attempt, dict)
         or str(attempt.get("gate") or "") != "governance_close"
         or str(attempt.get("agent") or "") != "code_reviewer"
         or str(attempt.get("status") or "") != "passed"
-        or report_ref not in report_refs
+        or result_ref != str(attempt.get("attempt_result_ref") or "")
     ):
         raise GovernanceError("independent review is not backed by a passed governance_close reviewer attempt", code="review_attestation_invalid")
+    canonical_result = connection.execute(
+        "SELECT result_ref,result_status,lifecycle_status,workspace_observation_json,changed_files_status "
+        "FROM attempt_results WHERE result_ref=? AND task_id=? AND attempt_id=?",
+        (result_ref, task_id, attempt_id),
+    ).fetchone()
+    if (
+        canonical_result is None
+        or str(canonical_result["result_status"]) != "completed"
+        or str(canonical_result["lifecycle_status"]) != "COMPLETED"
+        or str(canonical_result["changed_files_status"]) != "server_observed"
+    ):
+        raise GovernanceError("independent review is not backed by a finalized server-observed attempt result", code="review_attestation_invalid")
+    workspace_observation = _strict_json_loads(
+        str(canonical_result["workspace_observation_json"]), "attempt workspace observation",
+    )
+    if not isinstance(workspace_observation, dict) or not (
+        workspace_observation.get("complete") is True
+        and workspace_observation.get("safe_to_attribute") is True
+    ):
+        raise GovernanceError("independent review requires a complete server workspace observation", code="review_attestation_invalid")
+    observed_verification = connection.execute(
+        "SELECT 1 FROM attempt_events WHERE task_id=? AND attempt_id=? "
+        "AND event_type='verification_observed' AND actor='cortex' LIMIT 1",
+        (task_id, attempt_id),
+    ).fetchone()
+    if observed_verification is None:
+        raise GovernanceError("independent review requires a server verification observation", code="review_attestation_invalid")
     session = connection.execute(
         "SELECT host_agent_id, host_task_name, status FROM worker_sessions "
         "WHERE task_id=? AND attempt_id=? AND status='completed' ORDER BY generation DESC LIMIT 1",
@@ -1353,12 +1402,11 @@ def create_record(
     # Promotion evaluation may call this helper while holding the one-writer
     # connection. Re-running migration setup on a nested connection would
     # try to acquire a second BEGIN IMMEDIATE and self-deadlock SQLite.
-    if not ledger_db.in_transaction(root):
-        ledger_db.ensure_database(root)
     kind = str(record_type or "").lower()
     if kind not in RECORD_TYPES:
         raise GovernanceError("record_type is invalid", code="invalid_record_type")
-    role = str(actor_role or ("coordinator" if str(created_by or "").strip().lower() in {"", "coordinator", "system"} else "worker")).strip().lower()
+    created_by_value = _bounded_governance_text(created_by or "coordinator", label="governance created_by") or "coordinator"
+    role = str(actor_role or ("coordinator" if created_by_value.lower() in {"coordinator", "system"} else "worker")).strip().lower()
     if role not in ACTOR_ROLES:
         raise GovernanceError("actor_role must be coordinator, worker, or reviewer", code="invalid_actor_role")
     initiative = str(initiative_ref or "").strip() or None
@@ -1380,19 +1428,22 @@ def create_record(
     if role != "coordinator" and kind in {"policy", "promotion", "exception"} and status_value in {"active", "approved"}:
         raise GovernanceError("worker and reviewer proposals cannot approve or activate policy governance records", code="coordinator_approval_required")
     body = content
-    _validate_content_shape(body)
-    body_json = _canonical(body)
-    if len(body_json.encode("utf-8")) > MAX_GOVERNANCE_CONTENT_BYTES:
-        raise GovernanceError("governance content exceeds the bounded size limit", code="content_size_exceeded")
+    body_json = _bounded_content_json(body, label="governance content")
     digest = _digest(body)
     ref = str(record_ref or "").strip() or "record-" + hashlib.sha256(f"{kind}:{initiative}:{task}:{digest}:{_now()}".encode()).hexdigest()[:24]
     _safe_ref(ref, "record_ref", prefix="record-")
     submission = str(submission_id or "").strip() or None
     if submission:
         _safe_ref(submission, "submission_id")
-    if approval_basis is not None:
-        _validate_content_shape(approval_basis)
-    approval_json = _canonical(approval_basis) if approval_basis is not None else None
+    approval_json = (
+        _bounded_content_json(approval_basis, label="governance approval_basis")
+        if approval_basis is not None
+        else None
+    )
+    # All direct caller content has now passed its strict byte/shape boundary.
+    # Only then may this helper initialize or enter the durable ledger.
+    if not ledger_db.in_transaction(root):
+        ledger_db.ensure_database(root)
     scope = _scope_key(initiative, task)
     # Submission idempotency represents caller intent, not server-derived
     # retention timestamps or generated record refs.  In particular, retries
@@ -1408,7 +1459,7 @@ def create_record(
         "content_digest": digest,
         "content_artifact_ref": str(content_artifact_ref or "").strip() or None,
         "approval_basis_json": approval_json,
-        "created_by": str(created_by or "coordinator"),
+        "created_by": created_by_value,
         "expires_at_requested": str(expires_at or "").strip() or None,
     })
     with _connection(root, write=True) as connection:
@@ -1474,7 +1525,7 @@ def create_record(
             "content_digest": digest,
             "content_artifact_ref": str(content_artifact_ref or "").strip() or None,
             "approval_basis_json": approval_json,
-            "created_by": str(created_by or "coordinator"),
+            "created_by": created_by_value,
             "expires_at": record_expires_at,
         }
         command_digest = submission_command_digest
@@ -1573,7 +1624,7 @@ def create_record(
         ).hexdigest()[:32]
         connection.execute(
             "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at,scope_key,lifecycle_sequence,lifecycle_binding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, str(created_by or "coordinator"), created, record_expires_at, scope, 0, lifecycle_binding),
+            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, created_by_value, created, record_expires_at, scope, 0, lifecycle_binding),
         )
         connection.execute(
             "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -1706,7 +1757,7 @@ def active_snapshot(
         limit=limit,
         offset=offset,
     )
-    # An unapproved policy is never active, even if a legacy caller supplied
+    # An unapproved policy is never active, even if a caller supplied
     # status=active.  The explicit approval status is the policy activation
     # boundary and is checked again here at projection time.
     records = [item for item in records if item.get("record_type") != "policy" or item.get("status") == "approved"]
@@ -1784,8 +1835,7 @@ def _contains_sensitive_marker(content: Any) -> bool:
 
 
 def _path_allowed(path: str, allowed: Iterable[str]) -> bool:
-    """Match explicit JSON Pointer policies and legacy top-level field names."""
-    top_level = path.split("/", 2)[1] if path.startswith("/") and path.count("/") >= 1 else ""
+    """Match explicit JSON Pointer policies."""
     for raw in allowed:
         value = str(raw or "").strip()
         if not value:
@@ -1793,8 +1843,6 @@ def _path_allowed(path: str, allowed: Iterable[str]) -> bool:
         if value == path or value == "*":
             return True
         if value.startswith("/") and path.startswith(value.rstrip("/") + "/"):
-            return True
-        if not value.startswith("/") and value == top_level:
             return True
     return False
 
@@ -2009,7 +2057,6 @@ def evaluate_promotion(
     root: Path,
     *,
     fingerprint: str,
-    findings: Iterable[dict[str, Any]] | None = None,
     threshold: int = 3,
     window_days: int = 90,
     created_by: str = "coordinator",
@@ -2017,9 +2064,8 @@ def evaluate_promotion(
 ) -> dict[str, Any]:
     """Create one pending proposal after repeated equivalent findings.
 
-    ``findings`` is retained as a compatibility hint for callers, but it is
-    never promotion evidence.  The ledger's immutable risk records and
-    canonical task findings are the only authoritative candidate sources.
+    The ledger's immutable risk records and canonical task findings are the
+    only authoritative candidate sources.
     """
     if threshold < 1 or window_days < 1:
         raise GovernanceError("promotion threshold and window must be positive", code="invalid_promotion_policy")
@@ -2033,9 +2079,8 @@ def evaluate_promotion(
         body = record.get("content_json") if isinstance(record.get("content_json"), dict) else {}
         if str(body.get("fingerprint") or body.get("finding_fingerprint") or "") == needle:
             candidates.append({"task_id": record.get("task_id"), "created_at": record.get("created_at"), "record_ref": record.get("record_ref")})
-    # Closure findings are canonical in task_findings.  Callers may supply a
-    # projection for UI context, but it must never manufacture promotion
-    # evidence absent from this durable source of truth.
+    # Closure findings are canonical in task_findings and cannot be
+    # manufactured outside this durable source of truth.
     with _connection(root) as connection:
         for row in connection.execute(
             "SELECT task_id, fingerprint, first_seen_at, updated_at FROM task_findings WHERE fingerprint = ?",
@@ -2242,7 +2287,7 @@ def manage_governance(root: Path, payload: dict[str, Any], *, actor_role: str = 
             if payload.get("record_ref"):
                 records = [item for item in records if item.get("record_ref") == payload.get("record_ref")]
             return {"proposals": records}
-        return evaluate_promotion(root, fingerprint=payload.get("fingerprint", ""), findings=payload.get("findings"), threshold=int(payload.get("threshold", 3)), window_days=int(payload.get("window_days", 90)), created_by=payload.get("created_by", actor_role), initiative_ref=payload.get("initiative_ref"))
+        return evaluate_promotion(root, fingerprint=payload.get("fingerprint", ""), threshold=int(payload.get("threshold", 3)), window_days=int(payload.get("window_days", 90)), created_by=payload.get("created_by", actor_role), initiative_ref=payload.get("initiative_ref"))
     if action in {"approve_promotion", "promotion_approve", "approve"}:
         return approve_promotion(root, proposal_ref=payload.get("proposal_ref") or payload.get("record_ref", ""), actor_role=role, approval_basis=payload.get("approval_basis"), created_by=payload.get("created_by", role))
     if action in {"reject_promotion", "promotion_reject", "reject"}:

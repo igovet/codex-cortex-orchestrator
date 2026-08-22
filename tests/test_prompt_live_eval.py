@@ -1,4 +1,4 @@
-"""Unit coverage for the opt-in Luna-high prompt A/B runner (no network/model calls)."""
+"""Unit coverage for the bounded Luna-high prompt evaluator (no network/model calls)."""
 from __future__ import annotations
 
 import json
@@ -18,12 +18,12 @@ from cortex_runtime import prompt_live_eval  # noqa: E402
 def valid_response() -> dict[str, object]:
     return {
         "route": "worker",
-        "report": {
-            "summary": "generic", "findings": [], "questions": [], "changed_files": [],
-            "tests": [], "evidence": [], "uncertainty": [],
+        "attempt_result": {
+            "status": "completed", "summary": "generic", "findings": [],
+            "decisions_needed": [], "unresolved": [],
         },
-        "next_action": "report_ready", "question_count": 0, "tool_calls": [], "metadata": [],
-        "retryable": False, "replayed": False, "completion": "report_ready",
+        "next_action": "attempt_completed", "question_count": 0, "tool_calls": [], "metadata": [],
+        "retryable": False, "replayed": False, "completion": "attempt_completed",
     }
 
 
@@ -159,25 +159,6 @@ class PromptLiveEvalTests(unittest.TestCase):
         metrics = result["metrics"]
         self.assertGreater(metrics["stream_bytes"], 16_384)
         self.assertLess(metrics["output_bytes"], 16_384)
-
-    def test_live_ab_is_disabled_by_default_and_uses_one_luna_high_executor_when_enabled(self) -> None:
-        self.assertEqual(prompt_live_eval.run_live_prompt_ab_evals(), [{
-            "status": "SKIP", "reason": "live flag not supplied; no live prompt evidence",
-        }])
-
-        class FakeExecutor:
-            def __init__(self) -> None:
-                self.calls: list[tuple[str, str]] = []
-
-            def execute(self, prompt: str, *, model: str, reasoning_effort: str, assignment_markers: object) -> dict[str, object]:
-                self.calls.append((model, reasoning_effort))
-                return {"status": "PASS", "metrics": {"checks": {"structured_response": True}}}
-
-        fake = FakeExecutor()
-        results = prompt_live_eval.run_live_prompt_ab_evals(enabled=True, executor=fake)  # type: ignore[arg-type]
-        self.assertEqual(results[0]["status"], "PASS")
-        self.assertEqual(fake.calls, [("gpt-5.6-luna", "high"), ("gpt-5.6-luna", "high")])
-
 
 if __name__ == "__main__":
     unittest.main()

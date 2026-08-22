@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -11,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 
-from cortex_runtime.prompt_eval import run_prompt_ab_evals, run_prompt_evals  # noqa: E402
+from cortex_runtime.prompt_eval import run_prompt_evals  # noqa: E402
 
 
 def main() -> int:
@@ -26,12 +25,10 @@ def main() -> int:
             model=args.model,
             reasoning_effort=args.reasoning_effort,
         )
-        ab_results = run_prompt_ab_evals()
     except (AssertionError, RuntimeError, ValueError) as exc:
         print("prompt-eval: " + str(exc), file=sys.stderr)
         return 2
     print("prompt-eval: passed " + ", ".join(case_ids))
-    print("prompt-eval A/B: " + json.dumps(ab_results, sort_keys=True))
     return 0
 
 

@@ -17,12 +17,12 @@ PROFILES = ("natural", "compact", "technical")
 DEFAULT_PROFILE = "natural"
 PROFILE_ENV = "CORTEX_COMMUNICATION_PROFILE"
 _INTERNAL_RE = re.compile(
-    r"\b(?:attempt[_ -]?id|task[_ -]?ref|dispatch[_ -]?ref|report[_ -]?ref|"
+    r"\b(?:attempt[_ -]?id|task[_ -]?ref|dispatch[_ -]?ref|"
     r"sha256|digest|ledger|mcp|native worker|spawn_agent|followup_task)\b",
     re.IGNORECASE,
 )
 _INTERNAL_IDENTIFIER_RE = re.compile(
-    r"\b(?:attempt[_ -]?id|task[_ -]?ref|dispatch[_ -]?ref|report[_ -]?ref|sha256|digest)\b",
+    r"\b(?:attempt[_ -]?id|task[_ -]?ref|dispatch[_ -]?ref|sha256|digest)\b",
     re.IGNORECASE,
 )
 _TECHNICAL_RE = re.compile(
@@ -31,7 +31,7 @@ _TECHNICAL_RE = re.compile(
     re.IGNORECASE,
 )
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-_INTERNAL_VALUE_RE = re.compile(r"(?:codex://[^\s]+|\b(?:attempt|task|dispatch|report)[_-]?(?:id|ref)\s*[:=]\s*[^\s,.;]+|\b[a-f0-9]{16,}\b)", re.IGNORECASE)
+_INTERNAL_VALUE_RE = re.compile(r"(?:codex://[^\s]+|\b(?:attempt|task|dispatch)[_-]?(?:id|ref)\s*[:=]\s*[^\s,.;]+|\b[a-f0-9]{16,}\b)", re.IGNORECASE)
 _PATH_VALUE_RE = re.compile(
     r"(?:\b[\w.-]+/[\w./-]+\b|\b[\w.-]+\.(?:py|md|json|toml|ya?ml|ts|tsx|js|jsx|sql|cs|cpp|h|hpp)\b|"
     r"(?<!\w)/(?:[^\s,.;]+))",
@@ -322,7 +322,7 @@ def render(message: str, *, kind: object = "progress", next_step: str = "Continu
     public_next_step = _public_text(raw_next_step, profile)
     # Validate the caller's original candidate before redaction.  Redacting
     # first can turn unsafe text into misleading fragments such as ``Use`` or
-    # ``Keep .`` and incorrectly report quality.ok=true.
+    # ``Keep .`` and incorrectly set quality.ok=true.
     failures = quality_checks(raw_message, profile=profile, next_step=raw_next_step)
     fallback_applied = bool(failures)
     if fallback_applied:

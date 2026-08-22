@@ -1,4 +1,4 @@
-"""Deterministic Cortex Prompt Contract Architecture v2 compiler.
+"""Deterministic Cortex Prompt Contract Architecture v3 compiler.
 
 The worker briefing has two deliberately different content classes.  Stable
 protocol policy is emitted as canonical Markdown sections.  Dispatch-specific
@@ -33,6 +33,13 @@ _EXPECTED_GATES = frozenset((
     "implementation", "qa", "security", "performance", "accessibility", "ux",
     "review", "documentation", "close", "governance_activation", "governance_close",
 ))
+_COORDINATOR_COMPLETION_CONTRACT = (
+    "A native spawn or wait is never completion evidence. For every terminal worker, the coordinator must read its exact "
+    "canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned "
+    "continuation or failed-result route, then close_agent for that completed child before any successor dispatch. Only "
+    "the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator "
+    "must neither present completion nor close the worker as consumed."
+)
 
 
 @dataclass(frozen=True)
@@ -52,7 +59,7 @@ def _contract_digest(contract: Mapping[str, Any]) -> str:
 
 
 def _validate_contract(payload: object) -> dict[str, Any]:
-    if not isinstance(payload, dict) or payload.get("schema") != "cortex/prompt-contract/v2":
+    if not isinstance(payload, dict) or payload.get("schema") != "cortex/prompt-contract/v3":
         raise RuntimeError("bundled Cortex prompt contract schema is invalid")
     compiler = payload.get("compiler")
     if not isinstance(compiler, dict):
@@ -96,14 +103,12 @@ def _validate_contract(payload: object) -> dict[str, Any]:
         or set(v3.get("conditional_sections") or []) != {"mode", "gate", "context"}
     ):
         raise RuntimeError("bundled Cortex v3 prompt contract is invalid")
-    legacy = payload.get("legacy_compatibility")
+    attempt_result_contract = payload.get("attempt_result_contract")
     if (
-        not isinstance(legacy, dict)
-        or legacy.get("adapter") != "_expanded_host_spawn_prompt"
-        or legacy.get("deprecated") is not True
-        or not isinstance(legacy.get("required_markers"), list)
+        not isinstance(attempt_result_contract, dict)
+        or attempt_result_contract.get("coordinator_completion") != _COORDINATOR_COMPLETION_CONTRACT
     ):
-        raise RuntimeError("bundled Cortex legacy prompt compatibility contract is invalid")
+        raise RuntimeError("bundled Cortex coordinator completion contract is invalid")
     budgets = payload.get("budgets")
     if not isinstance(budgets, dict) or not all(isinstance(value, int) and value > 0 for value in budgets.values()):
         raise RuntimeError("bundled Cortex prompt budgets are invalid")
@@ -121,7 +126,7 @@ def _validate_contract(payload: object) -> dict[str, Any]:
         or live_runner.get("sandbox") != "read-only"
         or live_runner.get("response_schema") != "cortex/prompt-live-eval-response/v1"
         or live_runner.get("required_route") != "worker"
-        or live_runner.get("required_completion") != "report_ready"
+        or live_runner.get("required_completion") != "attempt_completed"
         or live_runner.get("live_default") is not False
         or set(live_runner.get("forbidden_models") or []) != {"gpt-5.6-terra", "gpt-5.6-sol"}
         or not all(
@@ -250,18 +255,6 @@ def compile_v3_briefing(
     )
 
 
-def assert_legacy_prompt_parity(prompt: str) -> None:
-    """Reject a broken v2 adapter while callers migrate to the v3 compiler."""
-    legacy = PROMPT_CONTRACT["legacy_compatibility"]
-    if not prompt.startswith("# " + legacy["title"]):
-        raise ValueError("legacy briefing title parity failed")
-    missing = [marker for marker in legacy["required_markers"] if marker not in prompt]
-    if missing:
-        raise ValueError("legacy briefing required-marker parity failed: " + ", ".join(missing))
-    if "```json\n" not in prompt:
-        raise ValueError("legacy briefing assignment boundary parity failed")
-
-
 def _find_function(tree: ast.AST, name: str) -> ast.FunctionDef | None:
     return next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name), None)
 
@@ -274,33 +267,6 @@ def _has_package_fstring(function: ast.FunctionDef) -> bool:
             if isinstance(value, ast.Name) and value.id == "package":
                 return True
     return False
-
-
-def _uses_symbol(node: ast.AST, symbol: str) -> bool:
-    """Return whether a source node directly imports or calls ``symbol``.
-
-    The prompt linter deliberately works on syntax rather than importing every
-    runtime module.  That keeps the production-v3 boundary deterministic and
-    prevents a validation check from acquiring ledger or host state.
-    """
-    for item in ast.walk(node):
-        if isinstance(item, ast.ImportFrom) and any(alias.name == symbol for alias in item.names):
-            return True
-        if isinstance(item, ast.Import) and any(alias.name.endswith("." + symbol) for alias in item.names):
-            return True
-        if isinstance(item, ast.Call):
-            target = item.func
-            if isinstance(target, ast.Name) and target.id == symbol:
-                return True
-            if isinstance(target, ast.Attribute) and target.attr == symbol:
-                return True
-    return False
-
-
-def _function_uses_symbol(tree: ast.AST, function_name: str, symbol: str) -> bool:
-    """Return whether one named function is the direct caller of ``symbol``."""
-    function = _find_function(tree, function_name)
-    return function is not None and _uses_symbol(function, symbol)
 
 
 def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
@@ -390,7 +356,6 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
         issues.append("briefings.py is unreadable")
     else:
         v3 = _find_function(tree, "host_spawn_prompt")
-        legacy = _find_function(tree, "_expanded_host_spawn_prompt")
         retired_v3 = _find_function(tree, "_pre_contract_v3_prompt_assembly")
         if retired_v3 is not None:
             issues.append("retired pre-contract v3 prompt assembly must not remain beside the canonical compiler")
@@ -400,55 +365,6 @@ def lint_prompt_sources(root: Path = PLUGIN_ROOT.parent.parent) -> list[str]:
             issues.append("v3 briefing does not use the canonical compiler")
         elif _has_package_fstring(v3):
             issues.append("v3 briefing interpolates task data into normative prose")
-        if legacy is None or not any(
-            isinstance(node, ast.Name) and node.id == "_compile_legacy_v2_briefing" for node in ast.walk(legacy)
-        ):
-            issues.append("legacy briefing is not a compatibility adapter")
-        elif not any(
-            isinstance(node, ast.Name) and node.id == "assert_legacy_prompt_parity" for node in ast.walk(legacy)
-        ):
-            issues.append("legacy briefing has no explicit parity check")
-        if legacy is not None and not _function_uses_symbol(
-            tree, "_expanded_host_spawn_prompt", "_compile_legacy_v2_briefing",
-        ):
-            issues.append("legacy v2 compiler must be called only by the compatibility adapter")
-
-    # Production dispatch must compile only v3.  The private v2 adapter stays
-    # bundled solely as the explicit baseline for deterministic/offline and
-    # opt-in Luna-high A/B evaluation; it cannot be reintroduced into a
-    # runtime orchestration path by an accidental import or method call.
-    runtime_root = root / "plugins/cortex/scripts/cortex_runtime"
-    legacy_adapter = "_expanded_host_spawn_prompt"
-    for path in sorted(runtime_root.rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, SyntaxError):
-            issues.append(f"{path.relative_to(root)} is unreadable")
-            continue
-        relative = path.relative_to(runtime_root).as_posix()
-        if relative == "briefings.py":
-            legacy_compiler = "_compile_legacy_v2_briefing"
-            for function in (
-                node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ):
-                if function.name != legacy_adapter and _uses_symbol(function, legacy_compiler):
-                    issues.append("legacy v2 compiler may only be called by the compatibility adapter")
-            # Its definition is the retained adapter; the preceding checks
-            # establish that it calls the v2 compiler plus parity check.
-            continue
-        if relative == "prompt_eval.py":
-            if not _function_uses_symbol(tree, "render_prompt_ab_pair", legacy_adapter):
-                issues.append("prompt A/B baseline no longer calls the legacy compatibility adapter")
-            for function in (
-                node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ):
-                if function.name != "render_prompt_ab_pair" and _uses_symbol(function, legacy_adapter):
-                    issues.append("legacy v2 adapter may only be used by the prompt A/B baseline")
-            continue
-        if _uses_symbol(tree, legacy_adapter):
-            issues.append(
-                "production runtime references deprecated v2 prompt adapter: " + path.relative_to(root).as_posix()
-            )
     if set(contract["compiler"]["xml_boundaries"]) & {"all", "prompt"}:
         issues.append("XML must remain selective; whole-prompt XML is forbidden")
     return issues
@@ -459,7 +375,6 @@ __all__ = [
     "PROMPT_CONTRACT_DIGEST",
     "PROMPT_CONTRACT_PATH",
     "PromptSection",
-    "assert_legacy_prompt_parity",
     "assignment_json_block",
     "compile_prompt",
     "compile_v3_briefing",

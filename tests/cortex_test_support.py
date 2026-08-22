@@ -37,7 +37,7 @@ class HostPrivateControlStoreTestMixin:
         }
         os.environ[HOST_CONTROL_STORE_ENV] = str(host_state_dir)
         # Test execution must not inherit an unrelated caller's unsupported
-        # legacy override. Individual rejection tests can still patch it.
+        # test override. Individual rejection tests can still patch it.
         os.environ.pop("CORTEX_ROOT", None)
         self.host_state_dir = host_state_dir
         return host_state_dir

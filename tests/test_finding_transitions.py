@@ -194,7 +194,7 @@ class FindingTransitionTests(unittest.TestCase):
             "documentation-link-b": "open",
         })
 
-    def test_concurrent_open_reports_retain_maximum_severity_and_blocking(self) -> None:
+    def test_concurrent_open_findings_retain_maximum_severity_and_blocking(self) -> None:
         severities = ("info", "P3", "P2", "P1", "P0", "P3", "P2", "P1")
 
         def submit(index: int) -> None:
@@ -205,7 +205,7 @@ class FindingTransitionTests(unittest.TestCase):
                     severity=severities[index],
                     blocking=index % 3 == 0,
                 ),
-                source={"report_id": f"report-{index}"},
+                source={"attempt_result_ref": f"attempt-result-{index}"},
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(severities)) as pool:

@@ -1,5 +1,112 @@
 # Changelog
 
+## [10.0.4] - 2026-08-22
+
+### Fixed
+
+- Bind parallel-wave continuation to the complete ordered set of canonical
+  results, rejecting partial or cross-slot result submissions before mutation.
+
+## [10.0.3] - 2026-08-22
+
+### Fixed
+
+- Require every native worker to be closed only after its canonical result was
+  read and successfully consumed by the server continuation, before any
+  successor dispatch.
+
+## [10.0.2] - 2026-08-22
+
+This patch closes terminal replay and live-evaluation gaps found by the
+10.0.1 end-only C3 source-mode gate.
+
+- Reject a facade attempt projected `passed` without its exact finalized
+  canonical result in finalization, terminal invariants, and close audit.
+- Correlate neutral native terminal waits only after an ordered successful
+  result-read, server continuation, and child-close sequence.
+- Permit an evaluator answer only through a narrow, explicit scenario fixture
+  authority; require the durable question presentation, answer, resume, and
+  same-attempt terminal sequence before acceptance.
+
+## [10.0.1] - 2026-08-22
+
+This patch makes orchestration completion fail closed whenever a dispatched
+facade attempt lacks its finalized canonical `AttemptResult`.
+
+- Block gate passes, generic handoffs, terminal acceptance, and coordinator
+  stop completion while an active non-invalidated attempt has no finalized
+  result; a native child binding remains recovery metadata, not completion
+  evidence.
+- Require the coordinator protocol to read the canonical result, obtain a
+  successful server-derived continuation, and only then close the exact child.
+- Make live source-mode acceptance audit the complete native sequence and one
+  matching terminal result per accepted attempt; ambiguous native identity in
+  parallel source-mode observation fails closed.
+
+## [10.0.0] - 2026-08-22
+
+This breaking release makes the database-centric attempt protocol the only
+worker transport. The public v10 registry contains nine operations; workers
+checkpoint `AttemptEvent` facts with `record_attempt_event` and close a
+semantic `AttemptResult` with `complete_attempt`. Cortex owns identity,
+timestamps, changed paths, verification observations, read receipts, and
+result projections. The prior 9.x draft/report transport is historical and is
+not part of the v10 public contract.
+
+- Added the fresh-only nine-operation public registry and strict coordinator /
+  worker projections.
+- Promoted SQLite schema v15 and the Prompt Contract v3 compiler.
+- Separated `WORK_COMPLETED` from finalization and projection retries so
+  infrastructure failures never respawn a completed worker.
+- Replaced text acknowledgement markers with server-owned briefing and
+  predecessor-result receipts.
+
+## [9.3.0] - 2026-08-22
+
+This additive release introduces the database-centric worker attempt protocol.
+Workers publish semantic attempt events and one compact completion result while
+Cortex owns durable attempt state, server-observed receipts, and generated
+human/compatibility projections. Legacy draft/report operations remain
+available only as compatibility adapters for older workers.
+
+## [9.2.24] - 2026-08-21
+
+This source-tree patch keeps a coordinator turn alive while its durably bound
+native worker is still running, and makes missing worker bootstrap inputs a
+durable question/resume boundary.
+
+- Register the Codex `Stop` hook and block coordinator finalization only when
+  the active ledger contains a durably bound running worker. The prompt is
+  identifier-free, directs the same turn to wait only for the exact persisted
+  child, and honors the host's re-entrant stop-hook escape.
+- Keep `SubagentStop` as terminal-state telemetry rather than a synthetic
+  parent wakeup. An already-idle coordinator is resumed safely through one
+  state inspection and its existing child/report/recovery receipt; no child is
+  replayed or respawned.
+- Require the immutable worker bootstrap to validate briefing, applicable
+  acceptance/verification, predecessor references, and gate evidence before
+  project work. A missing or unreadable required input produces one durable
+  `worker_question`, then the same worker polls its answer and reruns the full
+  bootstrap validation before proceeding.
+- Extend hook-trust/preflight and marketplace validation to the six-hook
+  contract, and add lifecycle, prompt-contract, and trust regressions.
+
+## [9.2.23] - 2026-08-21
+
+This source-tree patch prevents a host-proven lost native worker from pinning
+the Cortex task ledger until its lease expires.
+
+- Treat only an exact targeted wait's identity-unavailable result as the
+  existing terminal reportless-stop transition, then require the normal failed
+  continuation before any corrective dispatch.
+- Keep timeouts, transport/generic failures, ambiguous multi-target results,
+  and unrelated identities non-terminal; no such result authorizes a worker
+  replacement.
+- Preserve the host diagnostic boundary: response text is neither persisted in
+  lifecycle telemetry nor injected into coordinator context.
+- Align the manifest cachebuster, source validators, and current-contract
+  documentation with 9.2.23.
+
 ## [9.2.22] - 2026-08-21
 
 This source-tree patch clarifies the public start-task contract without

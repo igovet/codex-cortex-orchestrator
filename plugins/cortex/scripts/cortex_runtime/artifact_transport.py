@@ -9,6 +9,10 @@ import cortex as _runtime
 MAX_ARTIFACT_PAGE_SIZE = 50
 DEFAULT_ARTIFACT_PAGE_SIZE = 20
 DEFAULT_ARTIFACT_READ_BYTES = 16 * 1024
+# Keep a text page large enough for one complete UTF-8 scalar.  This lets the
+# lower storage transport keep its strict effective-byte ceiling without
+# returning a broken fragment or stalling on a four-byte scalar.
+MIN_ARTIFACT_READ_BYTES = 4
 
 
 def _payload(params: dict[str, Any]) -> dict[str, Any]:
@@ -24,7 +28,9 @@ def _payload(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cursor(root, *, cursor: object, expected: dict[str, Any]) -> dict[str, Any]:
-    decoded = _runtime.db_decode_artifact_cursor(root, str(cursor or ""))
+    if not isinstance(cursor, str) or not cursor:
+        raise ValueError("artifact cursor must be a non-empty opaque string returned by this server")
+    decoded = _runtime.db_decode_artifact_cursor(root, cursor)
     for key, value in expected.items():
         if decoded.get(key) != value:
             raise ValueError("artifact cursor is not valid for this task, artifact, permission scope, or content version")
@@ -61,7 +67,7 @@ def manage_task_artifacts(
         if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= MAX_ARTIFACT_PAGE_SIZE:
             raise ValueError(f"artifact page_size must be an integer from 1 through {MAX_ARTIFACT_PAGE_SIZE}")
         offset = 0
-        if payload.get("cursor"):
+        if "cursor" in payload:
             decoded = _cursor(root, cursor=payload["cursor"], expected={
                 "type": "artifact_list", "task_id": task_id, "kind": kind, "audience": "coordinator",
             })
@@ -112,9 +118,9 @@ def manage_task_artifacts(
         raise ValueError("artifact max_bytes must be an integer")
     if requested_max_bytes < 1:
         raise ValueError("artifact max_bytes must be at least 1")
-    max_bytes = min(requested_max_bytes, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES)
+    max_bytes = max(MIN_ARTIFACT_READ_BYTES, min(requested_max_bytes, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES))
     byte_offset = 0
-    if payload.get("cursor"):
+    if "cursor" in payload:
         decoded = _cursor(root, cursor=payload["cursor"], expected={
             "type": "artifact_read", "task_id": task_id, "artifact_ref": artifact_ref,
             "digest_sha256": metadata["digest_sha256"], "audience": "coordinator",
@@ -139,6 +145,6 @@ def manage_task_artifacts(
         result["next_cursor"] = _read_cursor(root, metadata, byte_offset=part["next_byte_offset"])
     result["next_action"] = (
         "If complete is false, use next_cursor with the same artifact_ref to fetch only the next bounded part; "
-        "larger max_bytes values are safely normalized to the server limit."
+        "max_bytes is safely normalized to the UTF-8-safe server range."
     )
     return result

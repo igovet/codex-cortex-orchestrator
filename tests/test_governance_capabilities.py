@@ -96,7 +96,7 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         other_task = "other-task-1"
         ledger_db.create_task(
             self.ledger,
-            {"schema": "cortex/v3", "task_id": other_task, "objective": "other", "created_at": cortex.now()},
+            {"schema": "cortex/v3", "task_id": other_task, "user_request": "other", "created_at": cortex.now()},
             {"schema": "cortex/v3", "task_id": other_task, "task_number": 99, "status": "active", "revision": 1, "updated_at": cortex.now()},
             f"tasks/{other_task}",
         )
@@ -343,7 +343,7 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         must not mutate the durable generation or replace its verifier.  The
         assertion is also a guard against accidentally making ``task_ref`` or
         the public principal/thread tuple a recovery capability (the P0
-        regression that the default ``compat`` surface must not reintroduce).
+        regression that the default public surface must not reintroduce).
         """
         started, _, start = self._start("Reject invalid recovery material.")
         task_ref = str(started["task_ref"])

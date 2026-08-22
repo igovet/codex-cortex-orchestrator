@@ -8,7 +8,7 @@ description: Protect secrets, credentials, personal data, and sensitive operatio
 Before sharing, storing, or delegating an artifact, check for credentials, API keys, bearer tokens, private keys, session cookies, connection strings, personal data, customer exports, and internal operational identifiers.
 
 - Redact the sensitive value while retaining the minimum useful structure, such as `<REDACTED_TOKEN>`.
-- Do not put secrets in prompts, reports, documentation, tests, fixtures, source files, command output, or commits.
+- Do not put secrets in prompts, AttemptResults, documentation, tests, fixtures, source files, command output, or commits.
 - Prefer references to secure environment variables and secret managers over literal values.
-- If a secret is already exposed, stop propagating it; report the location and recommend rotation or revocation through the authorized owner.
+- If a secret is already exposed, stop propagating it; record only its sanitized location in the AttemptResult and recommend rotation or revocation through the authorized owner.
 - Keep security findings concise and avoid giving exploit instructions beyond what is needed to remediate an authorized codebase.

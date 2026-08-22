@@ -106,7 +106,7 @@ class ToolDedupeTests(unittest.TestCase):
         self.assertIn("exact bundled skill", output["additionalContext"])
         self.assertIn("remains allowed", output["additionalContext"])
 
-        # A host-reported compaction starts a new durable context epoch.  The
+        # A host-observed compaction starts a new durable context epoch. The
         # same immutable skill may legitimately load again after that boundary.
         after_compaction = self.event(
             hook="PreToolUse",

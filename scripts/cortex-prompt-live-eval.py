@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicitly run the real Luna-high v2-versus-v3 prompt A/B evaluation."""
+"""Explicitly run the real Luna-high canonical prompt evaluation."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 
-from cortex_runtime.prompt_live_eval import run_live_prompt_ab_evals  # noqa: E402
+from cortex_runtime.prompt_live_eval import run_live_prompt_evals  # noqa: E402
 
 
 def main() -> int:
@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--reasoning-effort", default="high")
     args = parser.parse_args()
     try:
-        results = run_live_prompt_ab_evals(
+        results = run_live_prompt_evals(
             enabled=args.live, model=args.model, reasoning_effort=args.reasoning_effort,
         )
     except (AssertionError, RuntimeError, ValueError) as exc:

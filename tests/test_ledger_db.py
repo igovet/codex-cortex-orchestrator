@@ -390,7 +390,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "schema is inconsistent"):
                     ledger_db.ensure_database(root)
 
-    def test_legacy_name_checksum_is_upgraded_after_schema_validation(self) -> None:
+    def test_prior_name_checksum_is_upgraded_after_schema_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             ledger_db.ensure_database(root)
@@ -451,16 +451,16 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 list(range(1, ledger_db.DATABASE_SCHEMA_VERSION + 1)),
             )
 
-    def test_restart_from_prepared_legacy_v6_state_upgrades_checksums_and_applies_v7(self) -> None:
-        """A restart must resume a released legacy ledger rather than rebuild it."""
+    def test_restart_from_prepared_v6_state_upgrades_checksums_and_applies_v7(self) -> None:
+        """A restart must resume a released ledger rather than rebuild it."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             migrations = ledger_db._migration_plan()
-            legacy_plan = migrations[:6]
-            with mock.patch.object(ledger_db, "_migration_plan", return_value=legacy_plan):
+            migration_plan = migrations[:6]
+            with mock.patch.object(ledger_db, "_migration_plan", return_value=migration_plan):
                 ledger_db.ensure_database(root)
             with sqlite3.connect(root / "cortex.db") as connection:
-                for migration in legacy_plan:
+                for migration in migration_plan:
                     connection.execute(
                         "UPDATE schema_migrations SET checksum=? WHERE version=?",
                         (ledger_db._migration_checksum(migration.name), migration.version),
@@ -513,6 +513,38 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             second_task = ledger_db.load_task(root, "active-v8-task")
             self.assertEqual(second_task, first_task)
 
+    def test_v14_to_v15_rebuild_preserves_attempt_events_and_is_idempotent(self) -> None:
+        """The v15 CHECK-constraint rebuild must retain every prior event row."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            migrations = ledger_db._migration_plan()
+            with mock.patch.object(ledger_db, "_migration_plan", return_value=migrations[:14]):
+                ledger_db.ensure_database(root)
+                self.create_task(root, "v14-attempt-task")
+                with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                    connection.execute(
+                        "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            "attempt-event-v14", "v14-attempt-task", "attempt-v14", "verification-v14", 1,
+                            "verification_observed", '{"exit_code":0}', "cortex",
+                            "2026-08-22T00:00:00+00:00", "2026-08-22T00:00:00+00:00",
+                        ),
+                    )
+                    connection.commit()
+
+            ledger_db.ensure_database(root)
+            with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 15)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT event_type,payload_json,actor FROM attempt_events WHERE event_ref='attempt-event-v14'"
+                    ).fetchone(),
+                    ("verification_observed", '{"exit_code":0}', "cortex"),
+                )
+            first_history = ledger_db.migration_history(root)
+            ledger_db.ensure_database(root)
+            self.assertEqual(ledger_db.migration_history(root), first_history)
+
     def test_projection_ack_requires_the_current_nonexpired_lease_owner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
@@ -557,8 +589,8 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.create_task(root)
             content = ("# Harvest section\n\n" + ("verified behavior line\n" * 4000)).strip() + "\n"
             artifact = ledger_db.put_artifact(
-                root, "artifact-task", kind="report_markdown", title="reports/markdown/report-0001.md",
-                mime_type="text/markdown", content=content, export_path="reports/markdown/report-0001.md",
+                root, "artifact-task", kind="canonical_markdown", title="artifacts/markdown/item-0001.md",
+                mime_type="text/markdown", content=content, export_path="artifacts/markdown/item-0001.md",
             )
             self.assertGreater(artifact["byte_size"], 64 * 1024)
             self.assertGreater(artifact["chunk_count"], 2)
@@ -577,7 +609,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             tampered_cursor = ("A" if cursor[0] != "A" else "B") + cursor[1:]
             with self.assertRaisesRegex(ValueError, "signature"):
                 ledger_db.decode_artifact_cursor(root, tampered_cursor)
-            listed, next_offset = ledger_db.list_artifacts(root, "artifact-task", kind="report_markdown", page_size=1)
+            listed, next_offset = ledger_db.list_artifacts(root, "artifact-task", kind="canonical_markdown", page_size=1)
             self.assertEqual(next_offset, None)
             self.assertEqual(listed, [artifact])
             with sqlite3.connect(root / "cortex.db") as connection:
@@ -591,8 +623,8 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             ledger_db.ensure_database(root)
             self.create_task(root)
             artifact = ledger_db.put_artifact(
-                root, "artifact-task", kind="report_markdown", title="reports/markdown/unicode.md",
-                mime_type="text/markdown", content="😀 verified", export_path="reports/markdown/unicode.md",
+                root, "artifact-task", kind="canonical_markdown", title="artifacts/markdown/unicode.md",
+                mime_type="text/markdown", content="😀 verified", export_path="artifacts/markdown/unicode.md",
             )
 
             first = ledger_db.read_artifact_range(
@@ -603,6 +635,79 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertEqual(first["returned_bytes"], len("😀".encode("utf-8")))
             self.assertEqual(first["next_byte_offset"], len("😀".encode("utf-8")))
 
+    def test_artifact_transport_keeps_utf8_pages_bounded_and_cursor_continuous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            self.create_task(root)
+            # The four-byte scalar starts exactly where a 32 KiB page would
+            # otherwise split it.  The page must stop before it, not exceed
+            # the hard cap and not emit replacement text.
+            content = "a" * (ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES - 1) + "😀tail"
+            artifact = ledger_db.put_artifact(
+                root, "artifact-task", kind="canonical_markdown", title="artifacts/markdown/boundary.md",
+                mime_type="text/markdown", content=content, export_path="artifacts/markdown/boundary.md",
+            )
+            first = ledger_db.read_artifact_range(
+                root, "artifact-task", artifact["artifact_ref"], max_bytes=ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES,
+            )
+            self.assertEqual(first["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES - 1)
+            self.assertLessEqual(first["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES)
+            self.assertFalse(first["complete"])
+            self.assertEqual(first["next_byte_offset"], first["returned_bytes"])
+            self.assertNotIn("\ufffd", first["content_part"])
+
+            offsets = [first["byte_offset"]]
+            parts = [first["content_part"]]
+            offset = first["next_byte_offset"]
+            while offset is not None:
+                part = ledger_db.read_artifact_range(
+                    root, "artifact-task", artifact["artifact_ref"], byte_offset=offset, max_bytes=1,
+                )
+                self.assertLessEqual(part["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MIN_BYTES)
+                self.assertGreater(part["returned_bytes"], 0)
+                self.assertEqual(part["byte_offset"], offset)
+                self.assertNotIn("\ufffd", part["content_part"])
+                offsets.append(offset)
+                parts.append(part["content_part"])
+                offset = part["next_byte_offset"]
+            self.assertEqual("".join(parts), content)
+            self.assertEqual(offsets, sorted(offsets))
+            self.assertEqual(len(offsets), len(set(offsets)))
+
+            with self.assertRaisesRegex(ValueError, "UTF-8 boundary"):
+                ledger_db.read_artifact_range(
+                    root, "artifact-task", artifact["artifact_ref"],
+                    byte_offset=ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES,
+                )
+
+    def test_artifact_transport_binary_eof_and_malformed_cursor_do_not_create_or_mutate_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            # Syntactically valid but untrusted cursor input cannot bootstrap
+            # a SQLite ledger merely by being rejected.
+            with self.assertRaisesRegex(ValueError, "cursor"):
+                ledger_db.decode_artifact_cursor(root, "e30.AAAA")
+            self.assertFalse((root / "cortex.db").exists())
+            with self.assertRaisesRegex(ValueError, "cursor"):
+                ledger_db.decode_artifact_cursor(root, "e30." + "A" * 43)
+            self.assertFalse((root / "cortex.db").exists())
+            with self.assertRaisesRegex(ValueError, "safe transport length"):
+                ledger_db.encode_artifact_cursor(root, {"padding": "x" * 5000})
+            self.assertFalse((root / "cortex.db").exists())
+
+            ledger_db.ensure_database(root)
+            self.create_task(root)
+            artifact = ledger_db.put_artifact(
+                root, "artifact-task", kind="canonical_binary", title="artifacts/binary/empty.bin",
+                mime_type="application/octet-stream", content=b"", export_path="artifacts/binary/empty.bin",
+            )
+            eof = ledger_db.read_artifact_range(root, "artifact-task", artifact["artifact_ref"], max_bytes=1)
+            self.assertTrue(eof["complete"])
+            self.assertIsNone(eof["next_byte_offset"])
+            self.assertEqual(eof["encoding"], "base64")
+            self.assertEqual(eof["content_base64"], "")
+
     def test_normalized_artifacts_share_one_blob_but_keep_logical_identity_and_exports(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
@@ -610,13 +715,13 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.create_task(root)
             content = "# Same body\n\nThe bytes are intentionally identical.\n"
             first = ledger_db.put_artifact(
-                root, "artifact-task", kind="report_markdown", title="reports/first.md",
-                mime_type="text/markdown", content=content, export_path="reports/first.md",
+                root, "artifact-task", kind="canonical_markdown", title="artifacts/first.md",
+                mime_type="text/markdown", content=content, export_path="artifacts/first.md",
                 created_at="2026-01-01T00:00:00+00:00",
             )
             second = ledger_db.put_artifact(
-                root, "artifact-task", kind="report_markdown", title="reports/second.md",
-                mime_type="text/markdown", content=content, export_path="reports/second.md",
+                root, "artifact-task", kind="canonical_markdown", title="artifacts/second.md",
+                mime_type="text/markdown", content=content, export_path="artifacts/second.md",
                 created_at="2026-01-01T00:00:01+00:00",
             )
 
@@ -629,13 +734,13 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertEqual(ledger_db.read_artifact_content(root, "artifact-task", first["artifact_ref"]), content)
             self.assertEqual(ledger_db.read_artifact_content(root, "artifact-task", second["artifact_ref"]), content)
 
-            ledger_db.register_artifact_export(root, "artifact-task", first["artifact_ref"], "reports/archive/first.md")
+            ledger_db.register_artifact_export(root, "artifact-task", first["artifact_ref"], "artifacts/archive/first.md")
             self.assertEqual(
                 [item["export_path"] for item in ledger_db.list_artifact_exports(root, "artifact-task", first["artifact_ref"])],
-                ["reports/archive/first.md", "reports/first.md"],
+                ["artifacts/archive/first.md", "artifacts/first.md"],
             )
             self.assertEqual(
-                ledger_db.get_artifact_for_export_path(root, "artifact-task", "reports/archive/first.md")["artifact_ref"],
+                ledger_db.get_artifact_for_export_path(root, "artifact-task", "artifacts/archive/first.md")["artifact_ref"],
                 first["artifact_ref"],
             )
             with sqlite3.connect(root / "cortex.db") as connection:
@@ -643,22 +748,22 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM artifact_blobs").fetchone()[0], 1)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM artifact_blob_chunks").fetchone()[0], 1)
 
-    def test_v7_backfills_v2_artifact_ids_content_and_export_records(self) -> None:
+    def test_v7_backfills_artifact_ids_content_and_export_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             migrations = ledger_db._migration_plan()
             with mock.patch.object(ledger_db, "_migration_plan", return_value=migrations[:6]):
                 ledger_db.ensure_database(root)
-                self.create_task(root, "legacy-artifact")
-            content = b"legacy canonical bytes"
+                self.create_task(root, "migration-artifact")
+            content = b"canonical migration bytes"
             digest = hashlib.sha256(content).hexdigest()
-            artifact_id = "artifact-legacy-v2-id"
+            artifact_id = "artifact-migration-id"
             with sqlite3.connect(root / "cortex.db") as connection:
                 connection.execute(
                     """INSERT INTO artifacts(artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (artifact_id, "legacy-artifact", "report_markdown", "reports/legacy.md", "text/markdown",
-                     digest, len(content), 1, 1, "reports/legacy.md", "2026-01-01T00:00:00+00:00"),
+                    (artifact_id, "migration-artifact", "artifact_markdown", "artifacts/archive/first.md", "text/markdown",
+                     digest, len(content), 1, 1, "artifacts/archive/first.md", "2026-01-01T00:00:00+00:00"),
                 )
                 connection.execute(
                     "INSERT INTO artifact_chunks(artifact_id, chunk_no, text_content, blob_content, byte_size, digest_sha256) VALUES (?, ?, ?, ?, ?, ?)",
@@ -667,23 +772,23 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 connection.commit()
 
             ledger_db.ensure_database(root)
-            metadata = ledger_db.get_artifact_metadata(root, "legacy-artifact", artifact_id)
+            metadata = ledger_db.get_artifact_metadata(root, "migration-artifact", artifact_id)
             self.assertIsNotNone(metadata)
             self.assertEqual(metadata["artifact_ref"], artifact_id)
-            self.assertEqual(ledger_db.read_artifact_content(root, "legacy-artifact", artifact_id), content)
+            self.assertEqual(ledger_db.read_artifact_content(root, "migration-artifact", artifact_id), content)
             self.assertEqual(
-                ledger_db.get_artifact_for_export_path(root, "legacy-artifact", "reports/legacy.md")["artifact_ref"],
+                ledger_db.get_artifact_for_export_path(root, "migration-artifact", "artifacts/archive/first.md")["artifact_ref"],
                 artifact_id,
             )
-            blob = ledger_db.get_artifact_blob_metadata(root, "legacy-artifact", artifact_id)
+            blob = ledger_db.get_artifact_blob_metadata(root, "migration-artifact", artifact_id)
             self.assertEqual(blob["digest_sha256"], digest)
             self.assertEqual(blob["encoding"], "binary")
             later_logical = ledger_db.put_artifact(
-                root, "legacy-artifact", kind="report_markdown", title="reports/reused-legacy.md",
-                mime_type="text/markdown", content=content, export_path="reports/reused-legacy.md",
+                root, "migration-artifact", kind="artifact_markdown", title="artifacts/reused-first.md",
+                mime_type="text/markdown", content=content, export_path="artifacts/reused-first.md",
             )
             self.assertEqual(
-                ledger_db.get_artifact_blob_metadata(root, "legacy-artifact", later_logical["artifact_ref"])["blob_ref"],
+                ledger_db.get_artifact_blob_metadata(root, "migration-artifact", later_logical["artifact_ref"])["blob_ref"],
                 blob["blob_ref"],
             )
 
@@ -735,6 +840,47 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                     ))
                 with self.assertRaises(sqlite3.OperationalError):
                     snapshot.execute("DELETE FROM tasks WHERE task_id = 'snapshot-task'")
+
+    def test_unicode_oversized_mutable_documents_reject_before_replacing_existing_values(self) -> None:
+        """Document budgets are UTF-8 byte budgets and leave existing rows intact."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            self.create_task(root, "bounded-document-task")
+            ledger_db.put_global(root, "bounded-global", {"value": "before"})
+            ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"value": "before"})
+            oversized = "🙂" * (ledger_db.MAX_DURABLE_DOCUMENT_BYTES // len("🙂".encode("utf-8")) + 1)
+            with self.assertRaisesRegex(ValueError, "SQLite global document 'bounded-global' exceeds"):
+                ledger_db.put_global(root, "bounded-global", {"unicode": oversized})
+            with self.assertRaisesRegex(ValueError, "SQLite task document 'bounded-task' exceeds"):
+                ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"unicode": oversized})
+            self.assertEqual(ledger_db.get_global(root, "bounded-global"), {"value": "before"})
+            self.assertEqual(
+                ledger_db.get_task_document(root, "bounded-document-task", "bounded-task"),
+                {"value": "before"},
+            )
+
+    def test_oversized_observation_metadata_rejects_before_a_row_is_written(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            self.create_task(root, "bounded-observation-task")
+            with self.assertRaisesRegex(ValueError, "workspace_generation exceeds"):
+                ledger_db.record_tool_observation(
+                    root,
+                    task_id="bounded-observation-task",
+                    attempt_id="attempt-1",
+                    context_epoch=0,
+                    fingerprint="f" * 64,
+                    tool_name="Read",
+                    normalized_arguments="{}",
+                    workspace_generation="🙂" * 100,
+                    result_digest=None,
+                    coverage="full",
+                    status="success",
+                )
+            with ledger_db._connection(root) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0], 0)
 
 
 if __name__ == "__main__":  # pragma: no cover

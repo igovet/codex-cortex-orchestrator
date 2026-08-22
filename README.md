@@ -9,14 +9,14 @@
       <p>
         Cortex turns a large task into a verifiable pipeline. It selects the
         right profile, model, and reasoning effort for every stage, isolates
-        workers, preserves decisions and reports in a local ledger, and does
+        workers, preserves decisions, semantic events, and results in a local ledger, and does
         not declare the work complete without evidence.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-9.2.22-7c3aed" alt="Cortex 9.2.22" />
+        <img src="https://img.shields.io/badge/Cortex-10.0.4-7c3aed" alt="Cortex 10.0.4" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
-        <img src="https://img.shields.io/badge/Ledger-tasks%20v8%20%7C%20governance%20v12-0f766e" alt="task schema v8 and governance schema v12" />
+        <img src="https://img.shields.io/badge/Ledger-SQLite%20schema%20v15-0f766e" alt="SQLite ledger schema v15" />
       </p>
     </td>
   </tr>
@@ -99,10 +99,10 @@ choice is required, explain exactly what is needed and ask me before proceeding.
 
 | Component | Requirement | Why it is needed |
 | --- | --- | --- |
-| Codex | Desktop or CLI with Plugins and multi-agent v2 support | Loads the plugin, skills, MCP server, and internal agents |
+| Codex | Desktop or CLI with Plugins and multi-agent support | Loads the plugin, skills, MCP server, and internal agents |
 | Python | **3.11+**, with the standard-library `tomllib` module | Runs the local Cortex MCP server, hooks, and validators |
 | Git | A current version | Fetches and refreshes the GitHub Marketplace source |
-| Bash | **3.2+** | The launcher is compatible with the Bash shipped by macOS; no Bash 4.2+ install is required |
+| Bash | **3.2+** | The launcher supports the Bash shipped by macOS; no Bash 4.2+ install is required |
 | Operating system | macOS or Linux; WSL is recommended on Windows | The current runtime launcher is Bash-based |
 
 No additional Python packages are required through `pip`: the Cortex runtime
@@ -201,7 +201,7 @@ provides environment variables, configure the same values there instead.
 
 > [!IMPORTANT]
 > Configure Codex before the first orchestration, then start a **new task**.
-> Cortex requires multi-agent v2, and the global default model for internal
+> Cortex requires the Codex multi-agent runtime, and the global default model for internal
 > subagents must be **Luna**. Without a confirmed Luna default, the host cannot
 > reliably apply the standard hidden-worker routing policy.
 
@@ -271,7 +271,7 @@ approvals_reviewer = "user"
 > the user. That review is an additional model request with its own context,
 > latency, token usage, and model-budget cost.
 >
-> Cortex already has its own evidence, report, and gate-review pipeline. Adding
+> Cortex already has its own evidence, result, and gate-review pipeline. Adding
 > a second model-based approval reviewer increases cost and makes the execution
 > path harder to reason about without improving the Cortex orchestration
 > contract. Keep `approvals_reviewer = "user"` and select the manual user-review
@@ -292,15 +292,15 @@ for the separate reviewer-agent flow.
 > a new plugin build may require renewed approval even when the hook names have
 > not changed.
 
-Cortex registers exactly five lifecycle hooks:
+Cortex registers exactly six lifecycle hooks:
 
 | Hook | Purpose |
 | --- | --- |
 | `SessionStart` | Restores coordinator context on startup, resume, clear, and compaction |
 | `SubagentStart` | Binds the native worker identity to the issued Cortex dispatch |
-| `SubagentStop` | Records whether a worker reported, paused for a question, or failed |
+| `SubagentStop` | Records whether a worker completed, paused for a question, or failed |
 | `PreToolUse` | Enforces coordinator and worker safety guards before relevant tools run |
-| `PostToolUse` | Records lifecycle results and injects bounded recovery/report context |
+| `PostToolUse` | Records lifecycle observations and injects bounded result context |
 
 For a Marketplace installation, accept the hook trust prompt shown by Codex
 after installing or enabling Cortex. Before approving it, confirm that:
@@ -309,7 +309,7 @@ after installing or enabling Cortex. Before approving it, confirm that:
 - the source is the installed plugin's `hooks/hooks.json`;
 - the command invokes the same installed cache's `scripts/cortex-launcher` and
   `scripts/cortex_hook.py`;
-- the set contains the five hooks listed above and no unexpected additional
+- the set contains the six hooks listed above and no unexpected additional
   hooks.
 
 Do not approve a hook whose plugin ID, source path, command, or hook set differs
@@ -317,7 +317,7 @@ from this contract. Resolve the mismatch or reinstall the plugin first.
 
 If trust is missing, stale, rejected, or cannot be verified, do not start
 Cortex orchestration. Untrusted hooks can prevent durable worker binding,
-coordinator isolation, report recovery, and compaction-safe resume from working
+coordinator isolation, result recovery, and compaction-safe resume from working
 as designed. After trust is approved, fully restart Codex and open a new task.
 
 ### 2. Install on Codex Desktop
@@ -350,7 +350,7 @@ user workflow is documented in the
    not search for it in the public directory.
 8. Open the Cortex details page and select **+ / Install**.
 9. Review the requested permissions and bundled hooks/MCP server.
-10. Approve the exact five Cortex hooks described in
+10. Approve the exact six Cortex hooks described in
    [Required post-install hook trust](#required-post-install-hook-trust).
 11. Verify the [required configuration](#required-codex-configuration).
 12. Start a **new Codex task**. Existing tasks do not load newly installed
@@ -365,7 +365,7 @@ user workflow is documented in the
 3. Return to **Plugins → Installed → Cortex**.
 4. Install the available newer Cortex version. If the UI offers only uninstall
    and install actions, uninstall Cortex and install it again from **Personal**.
-5. Reapprove or verify trust for the updated five hook content hashes.
+5. Reapprove or verify trust for the updated six hook content hashes.
 6. Recheck `multi_agent_v2` and the Luna default.
 7. Start a **new Codex task**. An existing task may retain absolute paths to the
    previous cachebusted plugin installation.
@@ -396,7 +396,7 @@ Then:
 1. Switch to the newly added **cortex** Marketplace tab.
 2. Open **Cortex** and install it.
 3. If needed, press `Space` to enable the installed plugin.
-4. Approve the exact five Cortex hooks described in
+4. Approve the exact six Cortex hooks described in
    [Required post-install hook trust](#required-post-install-hook-trust).
 5. Verify the [required configuration](#required-codex-configuration).
 6. Exit the current CLI session and start `codex` again.
@@ -590,7 +590,7 @@ flowchart LR
     GA --> P
 
     P --> W["Ordered worker waves"]
-    W --> B["Immutable reports and evidence"]
+    W --> B["Canonical results and evidence"]
     B --> G{"Gate result"}
     G -- "rework" --> P
     G -- "user decision" --> Q["Ordinary-chat user question"]
@@ -599,7 +599,7 @@ flowchart LR
     G -- "passed: full" --> GC["governance_close<br/>code_reviewer"]
     GC --> C
 
-    R <--> L[("Host-private SQLite ledger<br/>task v8 + governance v12")]
+    R <--> L[("Host-private SQLite ledger<br/>task v10 + governance v15")]
 ```
 
 ### Governance resolution
@@ -626,8 +626,8 @@ alone do not raise the governance mode.
 In `full` mode, the server owns the two additional read-only review gates:
 `governance_activation` runs first, and `governance_close` runs immediately
 before final `close`. Both are assigned to `code_reviewer`; the server binds
-their evidence to immutable artifacts and report receipts. The close review
-also requires the matching linked task, report, and completed independent
+their evidence to immutable artifacts and result receipts. The close review
+also requires the matching linked task, result, and completed independent
 native reviewer session. The coordinator cannot omit either gate from a
 full-governance pipeline. For the record model, capability boundary, and
 integrity rules, see the [orchestration ledger documentation](docs/features/orchestration-ledger/index.md).
@@ -640,7 +640,7 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
    C3 and knowledge harvest start with a read-only Planner **scope** phase that
    publishes a discovery brief and up to eight non-overlapping domains. The
    final Planner **plan** phase runs after discovery and all design gates, and
-   consumes their predecessor reports before publishing the decision-complete
+   consumes their predecessor result references before publishing the decision-complete
    `planning` artifact. `scope` gathers evidence but never closes a user-intent
    question; material decisions still use the worker-question flow.
 3. **Canonical ordering.** C1 is `discover → implementation → review → close`.
@@ -658,20 +658,20 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 5. **Isolated execution.** The root remains a coordinator and does not mix its
    own project changes with worker work. Independent read-only tasks run in
    parallel, while overlapping writes are serialized.
-6. **Reports instead of trust.** Every worker publishes the unchanged strict
-   seven-field `cortex/report/v1` contract. Planner Scope may additionally
-   publish the top-level `scoping` sibling (`overview`, `context_files`, and
-   up to eight validated discovery domains); Planner Plan may publish
-   `planning`. The server also attaches the task-wide
-   `resolved_user_decisions` snapshot. These siblings do not alter the seven
-   worker-authored report fields.
-   A report read is repeatable, but its user-facing completion link is not:
+6. **Results instead of trust.** Every worker publishes the canonical
+   `cortex/attempt-result/v1` payload. Planner Scope may additionally
+   publish a bounded `scoping` projection (`overview`, `context_files`, and up
+   to eight validated discovery domains); Planner Plan may publish a bounded
+   `planning` projection. The server also attaches the task-wide
+   `resolved_user_decisions` snapshot. These projections never widen the
+   worker-authored AttemptResult fields.
+   A result read is repeatable, but its user-facing completion link is not:
    only the first complete coordinator read after the matching native worker
    stop may publish the link. That same message summarizes what completed and
    what happens next; early reads and rereads remain link-free.
 7. **Fresh approvals and adaptive replanning.** Required approval is available
    only after the final plan. The review records the plan revision, planner
-   report reference, verified-predecessor digest, and semantic future-pipeline
+   result reference, verified-predecessor digest, and semantic future-pipeline
    digest. A material future-wave change or any pipeline operation that reopens
    `plan` preserves history,
    resets approval to `pending_plan`, and requires a replacement Planner plus a
@@ -691,177 +691,166 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
 9. **Verified close.** A task completes only after the required gates are
    satisfied and the final handoff is ready.
 
-### 9.2.22 start-contract clarification
+### 10.0.4 canonical AttemptResult and AttemptEvent protocol
 
-The public start-task contract now explicitly distinguishes the required
-`task.verification` array of concrete authoritative checks from a mode setting:
-`verification_mode` is not a supported task field. Cortex continues to reject
-unknown task fields before reserving or creating a task; coordinators correct
-the payload and retry rather than attempting task recovery.
+Cortex 10.0.4 uses one database-centric worker protocol. A worker checkpoints
+bounded semantic facts with `record_attempt_event` and closes exactly one
+attempt with `complete_attempt`. `AttemptEvent` is append-only and keyed for
+idempotent retries; its event kinds cover findings, decision evidence,
+blockers, verification observations, progress, and notes. `AttemptResult`
+contains only `status`, `summary`, `findings`, `decisions_needed`, `unresolved`,
+and optional typed `claims`.
 
-### 9.2.21 prompt-contract and dispatch-authority release
+The server adds facts that a worker cannot authoritatively assert: the opaque
+attempt identity, exact native dispatch identity, task revision, profile,
+phase, predecessor scope, timestamps, changed files from baseline/current
+workspace observation, executed checks, and verification observations. A
+missing observation remains explicit and cannot be turned into a pass by
+including a sentence in a result. The result and event rows are committed in
+SQLite schema v15 before any user-facing result is materialized.
 
-This source-tree patch prepares report drafts outside the mutation lease and
-revalidates the task revision, draft registration, file identity, and content
-digest before the final commit. Lock acquisition is bounded to five seconds;
-the commit itself remains serialized and may still perform canonical artifact,
-finding, and index writes. All ledger mutation paths now use the same bounded
-lock-acquisition policy by default, with non-secret holder metadata in
-retryable `ledger_busy` diagnostics. Contention returns retryable
-`ledger_busy`; stale preparation preserves the draft and returns retryable
-`stale_preparation`. The `CORTEX_REPORT_PREPARE_COMMIT=off` environment flag
-retains the serialized legacy path for rollback without invalidating committed
-artifacts or queued projections.
+The lifecycle is deliberately explicit:
 
-Lifecycle hooks read one existing SQLite database through a bounded read-only
-snapshot and keep optional telemetry writes fail-open with a 100 ms busy
-timeout. Coordinator targetless waits and read-only file inspection receive
-non-blocking advisories; worker identity and all mutation boundaries remain
-fail-closed.
+```text
+RUNNING → WORK_COMPLETED → FINALIZING → COMPLETED
+     ├── BLOCKED
+     └── FAILED
+```
 
-Prompt Contract Architecture v2 compiles each v3 briefing from the canonical
-ownership matrix: stable authority and worker policy are Markdown sections,
-while every dispatch-controlled value is fenced, untrusted assignment JSON.
-The old expanded v2 path is a deprecated compatibility adapter only. Offline
-prompt fixtures compare stable SHA-256 goldens and structural metrics (heading
-order/count, byte ceiling, one assignment boundary, and data-boundary markers),
-including a fixed v2-versus-v3 delta; they do not make model-quality claims.
-The separate live A/B runner is disabled unless explicitly selected. It sends
-both versions of the same fixture through Codex with exactly Luna at `high`
-reasoning, no fallback, and scores only structured response, report shape,
-question/tool/metadata leakage, route/retry/replay/completion signals, and
-bounded output/token/time observations. Missing Luna or authentication is
-`SKIP`/`BLOCKED`, never evidence of a pass.
+`WORK_COMPLETED` means the worker's semantic result is durable. `FINALIZING`
+represents server-owned result views, handoff compilation, and other bounded
+infrastructure work. `COMPLETED` is reached only after required finalization
+passes. `BLOCKED` and `FAILED` are semantic worker outcomes; a missing file,
+transport error, or lost native acknowledgement does not invent either status.
+A serialization, view, or infrastructure failure after `WORK_COMPLETED` is
+retried against the same attempt and never creates a replacement worker.
+An active dispatched attempt without a finalized canonical result blocks gate
+pass, handoff, terminal acceptance, and coordinator completion. A native child
+binding is recovery metadata only; the coordinator must read the result,
+receive the server-derived continuation, and only then close that child.
 
-Planner revisions preserve the complete requirement history and the latest
-user steer, require explicit requirement-to-plan coverage, and maintain one
-task-local tracker for package and microtask status, order, dependencies, gates,
-acceptance, and verification. Worker sessions rehydrate their exact immutable
-assignment, compiled plan unit, and user-intent artifact after compaction.
-User-facing updates use the configured `natural`, `compact`, or `technical`
-communication profile; internal identifiers remain in separate metadata, and
-start/progress/approval/question/problem/blocker/completion messages pass the
-same quality checks. Report validation returns all correctable diagnostics
-together.
+### 10.0.4 ContextCompiler and HandoffCompiler boundaries
 
-### 9.2.18 orchestration recovery hardening release
+`ContextCompiler` is the only normal coordinator-to-worker context boundary.
+It compiles task intent, requirements, constraints, decisions, assigned scope,
+allowed paths, acceptance criteria, verification requirements, validated
+predecessor result references, and server observations into a bounded,
+immutable dispatch briefing. The briefing is a private capability export: its
+path, identity, and digest are checked, but it is not mutable task state.
 
-This source-tree patch removes dispatch-briefing size rejection from report
-acceptance and dispatch preparation: complete plans remain immutable artifacts
-addressed by ref/path/SHA-256, while briefings carry only compact guidance.
-It also scopes no-progress retries to the failed gate, so an unpaused sibling
-in the current parallel wave can finish. Multi-gate recovery remains
-Planner-first and releases only the explicitly named paused gate.
+`HandoffCompiler` creates target-specific projections rather than copying an
+unbounded prior worker payload. Implementation workers receive requirements,
+decisions, scope, and allowed paths. QA workers receive changed files,
+acceptance and verification needs, observed checks, unresolved findings, and
+risk areas. Review workers receive the change inventory, requirements,
+verification evidence, open findings, and relevant decisions. Cross-stage links
+are limited to `attempt_result_ref`, `context_result_refs`, and
+`predecessor_result_refs`.
 
-### 9.2.17 skill-read deduplication advisory release
+A successful `read_dispatch_briefing` and an assigned predecessor
+`read_worker_result` call create idempotent server-owned read observations
+scoped to the exact task, attempt, dispatch, result identity, and digest. The
+worker does not prove a read with prose. The coordinator and compiler consume
+canonical result references and observations, never an arbitrary file selected
+from a project directory.
 
-This source-tree patch makes duplicate full reads of an unchanged bundled
-Cortex skill advisory and context-aware. A repeated read in the same context
-is recorded for diagnosis but remains allowed; compaction or a new context
-epoch permits a fresh read. Host-internal UI skill loads are outside the
-project-tool hook's accounting boundary.
+### 10.0.4 same-attempt finalization and recovery
 
-### 9.2.16 coordinator recovery and report-contract hardening release
+The `SubagentStop` hook binds the exact native child to its server-issued
+attempt. If a child stops before `WORK_COMPLETED`, recovery inspects that exact
+attempt and may request a semantic `FAILED` or `BLOCKED` close. Timeouts,
+generic transport errors, ambiguous multi-target failures, and unrelated child
+identities leave the active attempt unresolved; they do not authorize a
+replacement.
 
-This source-tree patch closes three recovery and contract gaps. Coordinator
-recovery no longer asks a reviewer to retry an impossible resolution report;
-review and close now preserve honest `BLOCKED` markers when corrective work is
-still required; and the `record_report` schema branch matches the runtime
-validation branch, keeping its public contract aligned.
-Report intake retains complete submitted strings and list items instead of
-applying the former 64 KiB and 100-item sanitization caps. The explicit atomic
-artifact boundary is 8 MiB; private report drafts allow 17 MiB so envelope
-metadata cannot reject an otherwise valid report. Reports are immutable
-cursor-paged artifacts, with 32 KiB limiting transport pages only. Detailed
-plans are passed by their exact artifact ref/path/SHA-256 tuple in the worker
-briefing.
+If canonical state already contains `WORK_COMPLETED`, recovery chooses that
+same result and continues `FINALIZING`. The server retries projection,
+serialization, and handoff work without dispatching the worker again. This
+prevents duplicate edits and keeps the original evidence, event sequence,
+checks, and workspace observations authoritative across compaction and resume.
 
-### 9.2.15 report, hook, and governance-rework hardening release
+The `Stop` hook blocks a coordinator final answer while a durably bound worker
+is still active. `SessionStart`, `SubagentStart`, `PreToolUse`, and
+`PostToolUse` keep the native identity and the ledger state aligned. Optional
+telemetry is bounded and fail-open when SQLite is busy; lifecycle authority
+remains fail-closed at the canonical mutation boundary.
 
-The current source-tree hardening draft retains the 9.2.10 stopped-report and
-plan-approval recovery guarantees, and additionally hardens worker reporting,
-lifecycle-hook loading, and multi-hop corrective handoff. `record_report` accepts only the worker identity
-from its briefing/template plus `draft_ref` and an optional patch or report
-payload; `task_ref`, `dispatch_ref`, and `submission_id` are coordinator
-transport fields. A direct draft must remain a current-user regular
-non-symlink file with exact `0600` permissions; it is rejected for correction
-rather than being path-repaired after an untrusted replacement. Evidence
-marker diagnostics now state the exact required marker and criterion, and
-`changed_files` must describe only paths changed since that exact attempt's
-baseline. The lifecycle hook resolves its bundled runtime when a host loads it
-through `importlib`. While a closure rework is active, the exact
-server-bound corrective report remains in later QA/security and final-verifier
-handoffs even when normal transitive frontier compaction would otherwise cover
-them; the originating verifier therefore has every receipt required to resolve
-each finding. Before it dispatches that verifier, Cortex proves all active
-closure-rework routes have a current passed, server-bound corrective receipt.
-If one is missing, it returns a recoverable preflight result without creating a
-worker or a report draft, instead of issuing a reviewer an impossible
-resolution contract. An empty `required_missing` list is scoped to the current
-gate: it cannot silently resolve a server-created verification blocker from a
-different gate or charge that worker with a provenance transition it never
-submitted. The controller keeps that blocker open and, for governance-origin
-findings, places the fresh originating governance gate and all later closure
-verifiers after corrective work before any resolution can be recorded.
-Malformed JSON values at the public report boundary are converted to bounded,
-same-attempt validation diagnostics rather than leaking interpreter exceptions.
-An explicitly external `codex://threads/...` ledger-continuation request that
-does not ask to mutate the project also avoids write-required implementation
-and QA gates; a request that names project changes keeps the ordinary strict
-implementation path.
+### 10.0.4 public API and audience boundary
 
-Governance record bodies are read from verified
-immutable content artifacts; exact normalized scope, task/initiative links,
-linear revisions, strict JSON, immutable-field triggers, and idempotent
-submission receipts fail closed on corruption or replay conflict. Schema v11
-adds the append-only lifecycle chain for status and approval-basis authority;
-schema v12 adds host-keyed authentication for the complete lifecycle envelope,
-requires terminal success for linked milestone/deliverable tasks before an
-initiative can complete, and prevents deletion of initiative-task links that
-are referenced by governance records. Pre-v10 upgrades deterministically
-reconcile safe v9 duplicate revisions/sibling successors and fail closed on
-ambiguous scope or predecessor graphs. Coordinator capabilities are
-short-lived scoped claims carrying principal, thread, generation, expiry, and
-allowed actions. A lost bearer enters two-phase recovery on the normal
-compatibility or explicit coordinator audience with the same active identity
-and non-durable recovery proof returned by authorization. Cortex redelivers
-the same derived replacement pair until acknowledgement presents both
-replacements and the prior proof; only then is the old generation revoked.
-Plaintext is never stored. A lost *initial start* response remains fail-closed
-until a host-attested delivery channel exists. An explicit worker audience
-cannot call either recovery phase.
+The public registry contains exactly nine operations. A strict coordinator
+process exposes `start_orchestration`, `continue_orchestration`,
+`manage_orchestration`, `manage_governance`, and `read_worker_result`. A strict
+worker process exposes `worker_question`, `record_attempt_event`,
+`complete_attempt`, `read_dispatch_briefing`, and `read_worker_result`. The
+launch-time audience is immutable and every task-scoped call carries the exact
+opaque `task_ref`.
 
-Corrective work remains open-ended while acceptance or findings require work,
-but a repeated materially identical no-progress signature pauses autonomous
-retries for an explicit user strategy without producing a false pass. The
-pause belongs only to its failed gate: unpaused siblings in the same parallel
-wave continue, while later dependent waves do not leapfrog it. A finding from
-another gate cannot reset or alter its repeat signature. The pause can be
-released only by a Planner-first recovery whose downstream pipeline, strategy,
-or verification contract materially changes, or whose Planner wave names a
-class-matched infrastructure/environment remediation; when multiple gates are
-paused, recovery explicitly names the one gate to release. Free-text reason
-prose is retained only as audit evidence. Material steer
-classifies the earliest affected gate and invalidates downstream proof;
-worker questions are bound to task/plan revision and strategy generation.
-Manifest capture is bounded by entries, hashed bytes, and elapsed time and may
-reuse a bounded digest cache. A partial capture remains diagnostic evidence
-only: it cannot authorize read-only mutation reconciliation, a handoff, or
-terminal close. CI runs the 50,000-file manifest benchmark and requires
-`target_met: true`. A stopped native worker that has already recorded reports
-is completion-pending rather than live: Cortex requires an explicit
-receipt-attested report selection, refuses stale Planner revisions, and falls
-back to a fresh Planner-first recovery when none can be safely consumed. The
-historical 9.2.18 cachebuster and release/live result slots belong to that
-prior candidate. Current 9.2.22 release evidence remains pending until the
-release commit is validated. The
-repository's [CODEOWNERS](.github/CODEOWNERS) file requires maintainer review
-for runtime, release workflow, scripts, tests, and documentation changes.
+There are no alternate public operation names, transport aliases, or result
+submission surfaces. Workers cannot call lifecycle or governance-management
+operations. Coordinators cannot manufacture worker identity, timestamps,
+changed paths, predecessor reads, or verification observations. Result JSON,
+Markdown, journals, plans, and indexes are rebuildable projections; their
+existence, links, filenames, or prose cannot authorize a gate, read, resume,
+handoff, or completion.
+
+Durable worker questions are bound to the exact task, attempt, and revision.
+The root coordinator projects one self-contained ordinary-chat question with
+outcome-based options and a recommendation, ends the turn, records the next
+user message, and resumes the same attempt. Silence never implies approval.
+
+### 10.0.4 Prompt Contract v3 and dispatch authority
+
+Prompt Contract v3 is the sole stable prompt path. Static authority and worker
+policy live in the bundled skills and profiles; every dispatch-controlled value
+is fenced assignment JSON with explicit byte and structure bounds. The renderer
+has one ownership matrix, one section order, one data boundary, and one current
+fixture format. Offline lint and deterministic evaluation verify the source,
+headings, byte ceiling, fence width, and hostile-value containment. They are
+structural checks and do not make model-quality claims.
+
+The worker reads the exact immutable briefing before project work and verifies
+its SHA-256 digest. A detailed compiled plan is an immutable artifact addressed
+by one exact reference, path, and digest; it is not copied into mutable task
+state or silently truncated to fit a prompt. Ordinary profiles receive only
+their target-specific mode and scope. Harvest routes add their explicit mode
+overlay only when selected; ordinary worker prompts remain focused on the
+assigned task.
+
+Prompt and skill files describe only the current v3 protocol. Every example,
+fixture, validator, and profile contract names `AttemptResult`, `AttemptEvent`,
+`read_worker_result`, and the server-owned observation boundary. A prompt
+change is not complete until prompt lint, deterministic evaluation, marketplace
+validation, and the affected focused tests pass.
+
+### 10.0.4 governance, security, and verification
+
+Governance state, immutable artifacts, exact scope, revision chains, and
+authenticated lifecycle transitions are server-owned in schema v15. Required
+approval is bound to the final plan revision, verified predecessor result
+references, and a semantic future-pipeline digest. A material future-wave
+change reopens planning, preserves history, invalidates downstream approval,
+and requires a new plan and approval. No-op or infrastructure-only
+finalization retries do not alter semantic approval.
+
+Cortex stores task state under the host-private content-addressed SQLite root.
+An explicit `CORTEX_HOST_STATE_DIR` override must be private, outside the
+workspace, and owned by the current user. WAL/SHM files and advisory locks are
+SQLite machinery, not application evidence. Filesystem views are private,
+regular, digest-checked, and rebuildable. Pruning commits a tombstone before
+removing a view; it never repairs canonical state by deleting rows.
+
+Release checks cover Python compilation, schema and migration parity, the
+exact nine-operation registry, six hook commands, prompt v3 lint/evaluation,
+marketplace validation, focused protocol/facade/context/handoff/governance
+regressions, the full source test suite, `git diff --check`, and Markdown link
+and command review. Source-mode checks do not claim that a user's installed
+cache, hook trust, or live model route is current; unavailable host checks are
+recorded explicitly.
 
 ### Why this is more reliable than ordinary multi-agent work
 
 - **State survives compaction and resume.** The goal, decisions, workers,
-  reports, checks, and blockers are recovered from the ledger rather than
+  results, checks, and blockers are recovered from the ledger rather than
   guessed from a shortened chat history.
 - **No accidental duplicate dispatch.** Idempotent lifecycle calls and opaque
   `task_ref` values prevent an active wave from being started twice.
@@ -869,7 +858,7 @@ for runtime, release workflow, scripts, tests, and documentation changes.
   writers can use separate worktrees when isolation is required.
 - **Material decisions are not invented.** A worker can persist a question,
   pause, and resume the same attempt after the user answers. Every later
-  report carries that canonical question and answer so a successor cannot
+  result carries that canonical question and answer so a successor cannot
   treat changed wording or a new key as a new decision.
 - **Verification is contractual.** Executed checks record the command, working
   directory, exit code, and decisive result.
@@ -879,8 +868,8 @@ for runtime, release workflow, scripts, tests, and documentation changes.
 - **Knowledge stays current automatically.** After the initial harvest,
   behavior- or architecture-changing tasks synchronize the affected durable
   documentation before the close gate.
-- **Privacy is the default.** The ledger and internal reports remain local.
-  Secrets and sensitive data must not be included in dispatches, reports, or logs.
+- **Privacy is the default.** The ledger and internal results remain local.
+  Secrets and sensitive data must not be included in dispatches, results, or logs.
 
 ### Internal structure
 
@@ -897,148 +886,56 @@ plugins/cortex/
 ```
 
 The public MCP surface is deliberately small. The coordinator uses
-`start_orchestration`, `continue_orchestration`, `manage_orchestration`, and
-the coordinator-only `manage_governance` surface; it reads predecessor reports
-with `read_worker_report`. Workers use
-`read_dispatch_briefing`, `worker_question`, `get_report_template`,
-`record_report`, and scoped `read_worker_report` for explicitly granted
-predecessor refs.
+`start_orchestration`, `continue_orchestration`, `manage_orchestration`,
+`manage_governance`, and `read_worker_result`. Workers use
+`worker_question`, `record_attempt_event`, `complete_attempt`,
+`read_dispatch_briefing`, and scoped `read_worker_result`. The strict public
+union is exactly nine operations and the audience is fixed for the stdio
+process.
 
-Worker briefings carry the verified transitive predecessor frontier, not inline
-report bodies or the entire task history. A passed report covers only the exact
-refs its attempt read and acknowledged, so long-running tasks may retain
-thousands of immutable reports without growing every successor prompt or
-discarding evidence. Compact inspect and recovery responses independently
-retain the newest eight summaries; full history remains in SQLite.
+Every worker assignment is an immutable, digest-checked briefing. The native
+bootstrap carries only the exact task and dispatch identity, briefing path, and
+digest; the worker reads and verifies the briefing before project work. Result
+links are `attempt_result_ref`, `context_result_refs`, and
+`predecessor_result_refs`. Compact inspect and recovery responses keep bounded
+summaries, while the complete canonical result remains in SQLite. No worker
+scans a project directory for a task or selects an unrelated result.
 
 Material worker questions are handed off with more than a bare reference:
-`QUESTION_RECORDED` is followed by why input is needed, full self-contained
-questions, concrete outcome-based options, descriptions, trade-offs, and a
-recommendation. Cortex returns one detailed ordinary-chat projection in the
-user's language; the root sends it as the final assistant message and ends the
-turn without calling any UI/input/approval/elicitation tool. The user's next
-message is recorded before the same worker resumes. Every question explicitly
-names the option(s) the LLM recommends—or a concrete recommended text answer—
-and explains why. Localized batch
-items use `localized_question`, `localized_header`, `localized_options`, and
-`localized_custom_label`; `question`, `header`, `options`, and `custom_label`
-remain compatibility aliases. Generic numbered, A/B, or
-recommended/alternative placeholders are rejected, and option descriptions
-may be rendered with the choices. Every choice also permits optional free-form
-constraints. That text is preserved beside the stable option IDs
-and translated to canonical English before a worker resumes when necessary.
+`QUESTION_RECORDED` is followed by why input is needed, a full self-contained
+question, concrete outcome-based options, trade-offs, and a recommendation.
+Cortex returns one detailed ordinary-chat projection in the user's language;
+the root sends it as the final assistant message and ends the turn without
+calling any UI/input/approval/elicitation tool. The user's next message is
+recorded before the same attempt resumes. Internal protocol messages and
+canonical result fields remain English; user-facing prose may be localized.
 
-The complete worker assignment is stored in an immutable briefing protected by
-a SHA-256 digest. The constructor transmits only a compact bootstrap plus the
-exact `dispatch_ref`, briefing path, and digest; the worker reads and verifies
-that briefing before project work. Worker Briefing v3 JSON-serializes every
+The complete worker assignment is stored in a private immutable briefing
+protected by a SHA-256 digest. Worker Briefing v3 JSON-serializes every
 task-controlled assignment value inside one explicitly untrusted data block;
 the surrounding authority, bounded role contract, optional mode overlay,
 evidence rules, and worker protocol remain fixed instructions. Its byte budget
-is enforced before dispatch. Full Planner microtasks are not embedded in that
-bounded assignment: Cortex writes an immutable compiled-plan artifact and
-places only its exact artifact ref/path/SHA-256, byte size, and compact counts
-in the briefing and native bootstrap. The implementation worker reads that
-one authorized artifact and verifies its digest, so a detailed valid plan is
-not rejected or silently truncated merely to fit a worker prompt. Ordinary profiles do not carry
-harvest specialization; exact harvest routes add a conditional mode overlay.
-A worker never browses unrelated Cortex coordination data. Canonical state is
-stored in the host-private SQLite `cortex/v8` task ledger plus its additive v12
-governance ledger. By default the ledger lives below
-`~/.codex/cortex/projects/p-<sha256>/`; `CORTEX_HOST_STATE_DIR` is a host-only
-override and must resolve to a private directory outside the workspace. A
-legacy project-local `.codex/cortex` database is eligible only for a
-same-filesystem atomic rename after ancestry, database, and split-state checks;
-unsafe, non-database, or cross-filesystem legacy state fails closed.
-Ordinary opens preserve an already-matching host-project identity without
-rewriting its metadata; an identity or rename-provenance change remains a
-durable control-plane transition.
-Briefings have non-blocking compactness targets: 1.5 KiB for the bootstrap,
-16 KiB for ordinary work, and 18 KiB for harvest work. They are template
-guidance, not dispatch or Planner-report validators. Full plans remain
-immutable artifacts, and plan-backed implementation briefings carry only an
-exact digest-bound reference; cursor paging handles transport without asking a
-planner to shorten evidence.
-New tasks use pipeline contract v2; active v1 tasks without that field resume
-their persisted pipeline unchanged.
-
-The v5 registry contains nine MCP operations. An unspecified or unknown
-transport audience uses a compatibility projection exposing all nine, so an
-ordinary Desktop launch makes `$cortex:orchestrator` operational. Explicit
-`worker` and `coordinator` audiences remain strict five-operation projections:
-the worker projection contains `worker_question`, `get_report_template`,
-`record_report`, `read_dispatch_briefing`, and scoped `read_worker_report`; the
-coordinator projection contains `start_orchestration`,
-`continue_orchestration`, `manage_orchestration`, `manage_governance`, and
-scoped `read_worker_report`. The audience is fixed for the stdio process and
-cannot be selected through
-JSON-RPC initialization or tool arguments. Coordinators also use the server-owned `manage_governance` surface for initiatives, dependencies,
-immutable governance records, active snapshots, constrained exceptions, and
-coordinator-approved policy promotion. Workers build from
-`get_report_template`, which creates a private fully structured JSON file and
-returns its short `draft_ref` and absolute `draft_path` without echoing the
-body. A worker fills that file and calls `record_report` with the same
-`draft_ref`; read-only workers can provide a small JSON Merge Patch or a
-complete replacement through `record_report` when their sandbox cannot edit
-the file. A draft must be a current-user regular non-symlink file with exact
-`0600` mode; the server rejects an unsafe direct edit rather than repairing it
-by path. `record_report` uses only `project_root`, `task_id`, `attempt_id`,
-`profile`, `draft_ref`, and optional patch/report fields—never coordinator
-`task_ref`, `dispatch_ref`, or `submission_id`. Invalid records keep the draft
-and consume no worker attempt. Caller/input/schema validation
-from any allowed worker tool is also corrected and retried on the same attempt
-without consuming recovery budget; only explicit `retryable: false` integrity
-or storage blockers are terminal. Successful finalization revalidates the
-current draft and state, commits the durable report atomically, and deletes the
-draft post-commit. Bounded briefing and coordinator artifact reads clamp
-oversized `max_bytes` requests to 32768 and continue with cursors. Report reads
-expose the complete immutable report artifact through the same cursor protocol;
-32768 is only the transport page size, not a report-content cap.
-QA, review, implementation, and corrective pipeline rework are unbounded while
-acceptance criteria, required verification, or canonical findings remain
-unresolved. Failure counts are audit and routing inputs, never a completion
-shortcut. Cortex raises the next worker's reasoning effort to `high`, `xhigh`,
-then `max`; after two unresolved attempts it selects Terra for ordinary
-adaptive/deep work unless the user explicitly chose another model. An optional
-`next_strategy` or evidence-backed replan may improve the approach but is never
-required merely to continue fixing defects.
-Drafts expire after one hour and a new template supersedes
-the prior attempt draft. Read-only
-workers do not claim source changes observed in the shared checkout as their
-own; Cortex records those paths as concurrency evidence while still rejecting
-claimed writes and arbitrary `.gitignore` outputs. The read-only result check
-tolerates only manifest-recognized cross-language ephemeral outputs—
-conventional generated directories/roots/files, virtual environments,
-recognized build-output directories, and bytecode suffixes, including matching
-conventional paths listed in `.gitignore`—so unrecognized generated, cache,
-coverage, snapshot, or ignored artifacts remain failures. Tool-side questions and
-approval prompts are projected into the original user language by the root
-coordinator; worker protocol messages and durable reports remain English.
-Sensitive MCP exceptions are appended to
-`~/.codex/logs/cortex-tool-errors.jsonl`; the writer retains complete newest
-records and caps the file at 10 MiB by dropping oldest records first.
+is enforced before dispatch. Full Planner microtasks are represented by one
+immutable compiled-plan artifact and an exact digest-bound reference, so a
+valid plan is not silently truncated merely to fit a worker prompt. Ordinary
+profiles do not carry harvest specialization; exact harvest routes add a
+conditional mode overlay. Briefings have non-blocking compactness targets:
+1.5 KiB for the bootstrap, 16 KiB for ordinary work, and 18 KiB for harvest
+work. They are prompt guidance, not lifecycle authority.
 
 Governance authorization is returned once by the original successful start;
 the project ledger stores only its SHA-256 digest and a separate digest for a
 non-durable coordinator recovery proof. An idempotent start retry does not
-recover or reissue either value. Capability recovery is available through the
-compatibility or explicit coordinator MCP audience and requires the exact task,
-principal, thread, and original recovery proof. It stages/redelivers one
-deterministically derived replacement pair until acknowledgement returns the
-prior proof plus both replacement values; only acknowledgement rotates the
-generation. Neither raw value is durable. A lost initial start response stays
-fail-closed rather than treating public identifiers as recovery authority. An
-explicit worker audience cannot call this surface. Legacy plaintext
-capabilities are removed and invalidated on first registry access. Explicit
-`governance_mode=off` is accepted only for C1 after an exhaustive boolean
-assessment of every documented hard and topology trigger; prose detection may
-raise the floor but can never authorize `off`. Sensitive governance records
-require an approved exact-type policy with `retention_days` and
-`allowed_roles`; the server derives or bounds `expires_at`, enforces optional
-field/redaction lists, and retains expired rows only in append-only audit
-history. Initiative close review is accepted only when its immutable artifact
-resolves to a passed `code_reviewer` `governance_close` attempt, matching report
-reference, and completed independent native worker session.
+recover or reissue either value. Capability recovery requires the exact task,
+principal, thread, and original recovery proof, and an explicit worker audience
+cannot call it. Plaintext credentials are never stored. Governance mode `off`
+is accepted only for C1 after an exhaustive boolean assessment of every
+hard and topology trigger; prose detection may raise the floor but can never
+authorize `off`. Sensitive governance records require an approved exact-type
+policy with bounded retention and allowed roles. Initiative close requires the
+matching completed independent reviewer result and server-owned lifecycle
+state.
+
 
 ---
 
@@ -1093,7 +990,7 @@ auditable without silently reinterpreting a completed wave.
 The root coordinator (the conductor for the orchestration) is an operator
 choice separate from worker routing. Use **Terra** with `high` reasoning effort
 as the default. Raise the conductor to **Terra** with `xhigh` only for very
-large or unusually tangled tasks—for example, when reports conflict, strategy
+large or unusually tangled tasks—for example, when results conflict, strategy
 is unclear, or a routing/completion mistake would be expensive. This setting
 does not change Cortex's per-worker model policy.
 
@@ -1145,7 +1042,7 @@ python3 scripts/cortex-host-preflight.py
 
 `sync-cortex.sh` validates the Marketplace and manifest, registers the local
 Marketplace, reinstalls `cortex@cortex`, detects same-version content drift,
-verifies trust for the five lifecycle hooks, and enforces the required Luna
+verifies trust for the six lifecycle hooks, and enforces the required Luna
 default. It does not import, clean, or modify user Cortex ledgers or unrelated
 plugin data.
 
@@ -1162,12 +1059,12 @@ When changing the plugin, update the version in
 `plugins/cortex/.codex-plugin/plugin.json` according to SemVer:
 
 - patch for a fix without new functionality;
-- minor for a backward-compatible feature;
+- minor for a non-breaking feature;
 - major for a large or breaking change.
 
 Do not publish an ordinary fix or feature as a major release. Build metadata
-after `+` may be used as a cachebuster, while SemVer communicates public
-compatibility.
+after `+` may be used as a cachebuster, while SemVer communicates the public
+version contract.
 
 ### Development agreements
 
@@ -1216,20 +1113,13 @@ does **not** install or update the user's plugin:
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
 # Prove C3 automatically activates and completes full governance.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
-# Narrow live handoff smoke: a deterministic public-API source prelude opens
-# the finding; real Documentation and fresh Review workers must resolve it
-# through the exact handoff route (hard 300 s).
-python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation
-# Full C2 real-host lifecycle: opening Review → corrective Documentation →
-# fresh Review → Close → completed server-owned handoff (hard 1800 s).
-python3 scripts/cortex-luna-high-eval.py --live --scenario finding_rework_documentation_full
 ```
 
-The full source-mode scenario is a release-gate candidate only on a host that
+The full source-mode scenarios are release-gate candidates only on a host that
 can provision strict MCP access **per native process**: the parent may receive
 an explicit `coordinator` endpoint, while every spawned child may receive the
 `worker` endpoint. An ordinary static launch uses the nine-operation
-compatibility projection, so `$cortex:orchestrator` works even when the host
+current projection, so `$cortex:orchestrator` works even when the host
 does not provide per-agent audiences. Strict per-agent provisioning remains
 the higher-assurance integration check. Because
 the source command uses `--ignore-user-config`, it also deliberately does not
@@ -1269,5 +1159,5 @@ chat, issue, or external system.
 
 <p align="center">
   <strong>Cortex makes multi-agent work reproducible:</strong><br />
-  exact goal → specialist workers → verifiable reports → proven completion.
+  exact goal → specialist workers → verifiable results → proven completion.
 </p>

@@ -1,59 +1,5 @@
 {
   "schema": "cortex/prompt-eval-fixtures/v1",
-  "ab_cases": [
-    {
-      "id": "legacy-v2-vs-canonical-v3-data-boundary",
-      "profile": "explorer",
-      "assignment_markers": ["ab-marker-unique"],
-      "package": {
-        "task_id": "ab-marker-unique",
-        "task_ref": "task-ab-fixture",
-        "gate": "discover",
-        "attempt_id": "discover-01",
-        "dispatch_ref": "dispatch-ab-0000000000000000",
-        "project_root": "/workspace/prompt-ab-fixture",
-        "facade_managed": false,
-        "user_owned_thread": false,
-        "task_user_request": "Inspect the deterministic prompt A/B fixture.",
-        "task_objective": "Inspect the deterministic prompt A/B fixture.",
-        "objective": "Inspect the deterministic prompt A/B fixture.",
-        "ownership": "Read-only discovery.",
-        "selection_reason": "Fixture profile selection.",
-        "task_kind": "reading",
-        "risk": "low",
-        "strategy": "fixture",
-        "allowed_paths": ["."],
-        "acceptance_criteria": ["Report fixture findings."],
-        "verification": ["Cite fixture evidence."],
-        "task_acceptance_criteria": [],
-        "task_verification": [],
-        "context_files": [],
-        "knowledge_index_files": [],
-        "context_report_ids": [],
-        "task_requirements": [],
-        "task_scope": [],
-        "pause_conditions": [],
-        "budget": "fixture",
-        "plan_feedback": null,
-        "intent_clarification_required": false,
-        "intent_clarification_reason": null,
-        "coordinator_principal": "fixture-principal",
-        "coordinator_thread_id": "fixture-thread"
-      },
-      "expected": {
-        "legacy_v2": {
-          "sha256": "afddaa5dbcf56a3f68cf821b993ecec8b3ca92b89e539a8f2c11475c79e73272",
-          "section_count": 9,
-          "assignment_markers_only_in_data": false
-        },
-        "canonical_v3": {
-          "sha256": "cfd2094bb3eff72faaef357efeff536016b0457e726392afb90fb86bfa828159",
-          "section_count": 9,
-          "assignment_markers_only_in_data": true
-        }
-      }
-    }
-  ],
   "cases": [
     {
       "id": "canonical-v3-order",
@@ -82,7 +28,7 @@
       ],
       "must_contain": ["assignment-boundary=json", "__fixture_hostile_marker__"],
       "must_not_contain": ["## Mode delta"],
-      "golden_sha256": "b573fd681e60f38bd621720a376d3f6f2fc0244827637db9f5c5fbf457e42d75",
+      "golden_sha256": "a83d80c7a84df409aca3b458f0599cf72c9d6c8373eac561ba403f13f464e5f8",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 9,
@@ -118,7 +64,7 @@
       ],
       "must_contain": ["Mode fixture."],
       "must_not_contain": [],
-      "golden_sha256": "e587cca3c7f775d54a38e50844df1f0ea5cdb0ca4aae194111aff446e0b48f57",
+      "golden_sha256": "daf1d2455ebfaa1b4c8f7cdca5372821b0d149504957344a4c5521ff07bd1883",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 10,
@@ -151,7 +97,7 @@
       ],
       "must_contain": ["minimal-assignment-only"],
       "must_not_contain": ["## Mode delta", "## Gate delta", "## Context delta"],
-      "golden_sha256": "8f0fd3cffb0b1488ff5df251892a9c901b541081f407f76611cc5fd32dacd92e",
+      "golden_sha256": "b254c95416736655c01bbea6b3b57d594a47a4274a96956815c84fcb593295bc",
       "heuristics": {
         "max_bytes": 4096,
         "section_count": 7,

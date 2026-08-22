@@ -11,6 +11,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
+import cortex_hook
+from cortex_runtime import gate_transitions
 
 
 class RuntimeBindingRegressionTests(unittest.TestCase):
@@ -81,6 +83,120 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         payload = handoff.call_args.args[0]
         self.assertEqual(payload["principal"], state["principal"])
         self.assertEqual(payload["thread_id"], state["thread_id"])
+
+    def _handoff_params(self, state: dict) -> dict:
+        return {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "thread_id": state["thread_id"],
+            "expected_revision": state["revision"],
+            "completed": ["coordinator checkpoint"],
+            "files": [],
+            "next_action": "continue only through the canonical worker lifecycle",
+        }
+
+    def test_handoff_refuses_pending_facade_attempt_without_mutating_state(self) -> None:
+        """A generic handoff cannot replace a pending native worker result."""
+        task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+
+        response = control.handoff(self._handoff_params(state))
+
+        self.assertFalse(response["recorded"])
+        self.assertTrue(response["recoverable"])
+        self.assertEqual(response["reason"], "active_attempt_result_pending")
+        self.assertEqual(response["candidate_attempt_ids"], [attempt["attempt_id"]])
+        self.assertEqual(response["active_host_checkpoint_attempt_ids"], [])
+        persisted = control.load_task_state_for_artifact(task_dir)
+        self.assertFalse(persisted.get("handoff_created"))
+        self.assertEqual(persisted["revision"], state["revision"])
+
+    def test_bound_host_child_is_recovery_checkpoint_not_handoff_completion(self) -> None:
+        """A known child id still needs its finalized AttemptResult."""
+        task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+        attempt.update({
+            "status": "running",
+            "lifecycle_status": "running",
+            "host_spawn": {"agent_id": "native.RuntimeGuard:01"},
+        })
+        control.db_update_task_state(self.ledger, state)
+
+        response = control.handoff(self._handoff_params(state))
+
+        self.assertFalse(response["recorded"])
+        self.assertEqual(response["reason"], "active_attempt_result_pending")
+        self.assertEqual(response["candidate_attempt_ids"], [attempt["attempt_id"]])
+        self.assertEqual(response["active_host_checkpoint_attempt_ids"], [attempt["attempt_id"]])
+        self.assertFalse(control.load_task_state_for_artifact(task_dir).get("handoff_created"))
+
+    def test_gate_and_terminal_backstops_refuse_unfinalized_facade_attempt(self) -> None:
+        """Evidence cannot coerce a live facade row to passed or terminal."""
+        task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+        gate = str(attempt["gate"])
+        evidence = [{"evidence_id": "evidence-runtime-guard", "attempt_id": attempt["attempt_id"]}]
+
+        current, recovery = gate_transitions._validate_pass_evidence(
+            task_dir,
+            state,
+            {},
+            requested_gate=gate,
+            gate=gate,
+            outcome="passed",
+            revision_correction=None,
+            gate_evidence=evidence,
+            gate_attempts=[attempt],
+            non_terminal_attempts=[attempt],
+            terminal_non_success_attempts=[],
+            passed_attempts=[],
+        )
+
+        self.assertEqual(current, [])
+        self.assertIsNotNone(recovery)
+        assert recovery is not None
+        self.assertEqual(recovery["reason"], "active_attempt_result_pending")
+        self.assertEqual(recovery["candidate_attempt_ids"], [attempt["attempt_id"]])
+        with self.assertRaisesRegex(ValueError, "active_attempt_result_pending"):
+            control.validate_completion_invariants(state, artifact_root=self.ledger)
+
+    def test_facade_finalizer_refuses_resultless_success_before_projection(self) -> None:
+        """The host finalizer cannot create the terminal-status guard bypass."""
+        task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+        attempt.update({"status": "running", "lifecycle_status": "running"})
+        control.db_update_task_state(self.ledger, state)
+
+        response = control.finalize_attempt({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "thread_id": state["thread_id"],
+            "expected_revision": state["revision"],
+            "attempt_id": attempt["attempt_id"],
+            "status": "passed",
+        })
+
+        self.assertFalse(response["recorded"])
+        self.assertTrue(response["recoverable"])
+        self.assertEqual(response["reason"], "passed_attempt_result_required")
+        self.assertEqual(response["next_action"], "complete_attempt")
+        persisted = control.load_task_state_for_artifact(task_dir)
+        self.assertEqual(persisted["attempts"][0]["status"], "running")
+
+    def test_stop_hook_blocks_pending_unbound_facade_dispatch(self) -> None:
+        """A coordinator cannot silently end a turn before a spawn is bound."""
+        _task_dir, state = self._started_task()
+
+        block = cortex_hook.active_worker_stop_block(
+            {"hook_event_name": "Stop", "stop_hook_active": False}, state
+        )
+
+        self.assertIsNotNone(block)
+        assert block is not None
+        self.assertIn("CORTEX ACTIVE DISPATCH", block)
+        self.assertIn("Do not return a final answer", block)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -36,9 +36,21 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 12
+DATABASE_SCHEMA_VERSION = 15
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
+# A UTF-8 scalar can use up to four bytes.  Public transports normalize tiny
+# requested pages to this floor so every successful text page can be both
+# complete UTF-8 and strictly bounded by its advertised effective maximum.
+ARTIFACT_TRANSPORT_MIN_BYTES = 4
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
+ARTIFACT_CURSOR_MAX_CHARS = 4096
+# Mutable documents are coordination metadata, never an artifact transport.
+# Bound each durable value before acquiring a write connection so rejection
+# cannot partially update an existing document (or a pruning transaction).
+MAX_DURABLE_DOCUMENT_BYTES = 256 * 1024
+MAX_DURABLE_DOCUMENT_KEY_BYTES = 160
+MAX_TOOL_OBSERVATION_NAME_BYTES = 128
+MAX_TOOL_OBSERVATION_GENERATION_BYTES = 256
 _LOCAL = threading.local()
 _MIGRATION_GUARD = threading.Lock()
 _MIGRATION_LOCKS: dict[str, threading.RLock] = {}
@@ -110,6 +122,45 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _bounded_document_json(value: Any, *, label: str) -> str:
+    """Serialize one mutable document without allowing post-write overflow.
+
+    This deliberately does not reuse the general ``_canonical_json`` helper:
+    durable documents are an ingress boundary and must reject non-finite JSON
+    values as well as oversized UTF-8 encodings.  Callers invoke it before
+    opening a write transaction.
+    """
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be strict JSON") from exc
+    if len(encoded) > MAX_DURABLE_DOCUMENT_BYTES:
+        raise ValueError(f"{label} exceeds the {MAX_DURABLE_DOCUMENT_BYTES}-byte limit")
+    return encoded.decode("utf-8")
+
+
+def _bounded_document_key(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"{label} is invalid")
+    if len(value.encode("utf-8")) > MAX_DURABLE_DOCUMENT_KEY_BYTES:
+        raise ValueError(f"{label} exceeds the {MAX_DURABLE_DOCUMENT_KEY_BYTES}-byte limit")
+    return value
+
+
+def _bounded_observation_text(value: Any, *, label: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"tool observation {label} is invalid")
+    if len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"tool observation {label} exceeds the {maximum}-byte limit")
+    return value
+
+
 def governance_lifecycle_binding(
     *,
     record_ref: str,
@@ -139,12 +190,12 @@ def governance_lifecycle_binding(
 def _governance_lifecycle_key_path(root: Path) -> Path:
     """Return the host-private sidecar key path for one project ledger.
 
-    The ledger's project directory is movable (legacy project-local state is
+    The ledger's project directory is movable (prior-release project-local state is
     migrated into ``<host>/projects/<opaque-id>``), while the host control
     store is not part of the project checkout.  Keep the HMAC key beside that
     control store rather than in the SQLite ledger it authenticates.  The
     opaque ledger directory name is stable for the normal host-private layout;
-    a digest fallback keeps source-mode/legacy fixtures collision-free.
+    a digest fallback keeps source-mode/prior-release fixtures collision-free.
     """
     resolved = root.resolve()
     host_root = resolved.parent.parent if resolved.parent.name == "projects" else resolved.parent
@@ -218,8 +269,8 @@ def governance_lifecycle_envelope_hmac(
 ) -> str:
     """Authenticate the complete immutable lifecycle event envelope.
 
-    v11's public SHA-256 chain intentionally remains readable for backwards
-    compatibility.  v12 seals every field omitted by that chain with an HMAC
+    v11's public SHA-256 chain remains readable for historical verification.
+    v12 seals every field omitted by that chain with an HMAC
     whose key lives outside the project ledger.
     """
     payload = _canonical_json({
@@ -435,7 +486,7 @@ def hook_snapshot(root: Path, *, timeout_ms: int = 100) -> Iterator[sqlite3.Conn
 
     Hooks are observational and must never bootstrap a ledger, validate or
     apply migrations, acquire the filesystem state lock, or wait behind a
-    report commit.  The database must already exist and advertise the current
+    result commit.  The database must already exist and advertise the current
     schema; any missing, busy, unreadable, or incompatible database is a
     fail-open ``None`` snapshot.  Callers may perform all of their reads while
     this single deferred transaction is open, then the connection is closed.
@@ -591,15 +642,6 @@ def hook_snapshot_pending_subagent(
         if len(candidates) == 1:
             matches.append(str(row["task_id"]))
     return matches
-
-
-def hook_snapshot_pending_subagent_task(
-    connection: sqlite3.Connection,
-    agent_type: str,
-    model: str = "",
-) -> list[str]:
-    """Compatibility spelling for the pending-subagent snapshot reader."""
-    return hook_snapshot_pending_subagent(connection, agent_type, model)
 
 
 def hook_snapshot_find_successful_tool_observation(
@@ -928,7 +970,7 @@ _PRUNE_SCHEMA_STATEMENTS = (
 # intact.  They are migration evidence and preserve every historic artifact id
 # while this migration backfills an explicitly split logical/blob model.  New
 # writes and all reads use the tables below; a later, separately-versioned
-# retention migration may reclaim legacy duplicate chunks only after it has a
+# retention migration may reclaim prior-release duplicate chunks only after it has a
 # safe export/projection retention policy.
 _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS artifact_blobs(blob_id TEXT PRIMARY KEY, digest_sha256 TEXT NOT NULL, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), encoding TEXT NOT NULL CHECK(encoding IN ('utf-8', 'binary')), created_at TEXT NOT NULL, UNIQUE(digest_sha256, mime_type, byte_size))",
@@ -1018,8 +1060,8 @@ _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS = (
     "OR (NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL AND NOT EXISTS "
     "(SELECT 1 FROM initiative_task_links WHERE initiative_ref=NEW.initiative_ref AND task_id=NEW.task_id)) "
     "BEGIN SELECT RAISE(ABORT, 'governance scope integrity violation'); END",
-    # Re-evaluate legacy v9 rows through the just-installed trigger.  A
-    # legacy record with a cross-initiative task link must fail closed instead
+    # Re-evaluate prior-release v9 rows through the just-installed trigger.  A
+    # prior-release record with a cross-initiative task link must fail closed instead
     # of silently becoming valid in a wider scope after upgrade.
     "UPDATE governance_records SET scope_key = scope_key",
     "CREATE UNIQUE INDEX governance_records_scope_revision_unique ON governance_records(scope_key, record_type, revision)",
@@ -1116,6 +1158,48 @@ _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS = (
     "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication is append-only'); END",
     "CREATE TRIGGER governance_record_lifecycle_auth_immutable_delete BEFORE DELETE ON governance_record_lifecycle_auth FOR EACH ROW "
     "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication is append-only'); END",
+)
+
+# v13 separates the small semantic result supplied by a worker from the
+# server-observed attempt metadata and from rebuildable result projections.
+# ``attempt_results`` is deliberately one row per dispatched attempt: a
+# completed worker must never be replaced merely because a later result
+# materialization or other finalization step is unavailable.  The append-only
+# ``attempt_events`` stream checkpoints useful facts while work is in flight.
+_ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS = (
+    "CREATE TABLE attempt_results(result_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, result_status TEXT NOT NULL CHECK(result_status IN ('completed','blocked','failed')), lifecycle_status TEXT NOT NULL CHECK(lifecycle_status IN ('WORK_COMPLETED','FINALIZING','COMPLETED','BLOCKED','FAILED')), summary TEXT NOT NULL, findings_json TEXT NOT NULL, decisions_needed_json TEXT NOT NULL, unresolved_json TEXT NOT NULL, claims_json TEXT NOT NULL, metadata_json TEXT NOT NULL, workspace_observation_json TEXT NOT NULL, changed_files_json TEXT NOT NULL, changed_files_status TEXT NOT NULL CHECK(changed_files_status IN ('server_observed','unavailable','incomplete','not_attributable')), content_digest TEXT NOT NULL, submission_id TEXT NOT NULL, work_completed_at TEXT, finalizing_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(task_id, attempt_id), UNIQUE(task_id, attempt_id, submission_id))",
+    "CREATE INDEX attempt_results_task_lifecycle_idx ON attempt_results(task_id, lifecycle_status, updated_at)",
+    "CREATE INDEX attempt_results_attempt_idx ON attempt_results(task_id, attempt_id)",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
+    "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
+)
+
+# v14 makes verification authority explicit: workers can claim a check, but
+# only Cortex may emit the observed verification event consumed by gates.
+_ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS = (
+    "DROP INDEX attempt_events_task_type_idx",
+    "DROP INDEX attempt_events_task_attempt_sequence_idx",
+    "ALTER TABLE attempt_events RENAME TO attempt_events_v13",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) SELECT event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at FROM attempt_events_v13",
+    "DROP TABLE attempt_events_v13",
+    "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
+    "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
+)
+
+# v15 makes durable question/decision transitions first-class AttemptEvents.
+# The question documents remain the detailed interaction records; this table
+# is the immutable attempt-local timeline consumed by canonical compilers.
+_ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
+    "DROP INDEX attempt_events_task_type_idx",
+    "DROP INDEX attempt_events_task_attempt_sequence_idx",
+    "ALTER TABLE attempt_events RENAME TO attempt_events_v14",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','question_created','question_answered','decision_resolved','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) SELECT event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at FROM attempt_events_v14",
+    "DROP TABLE attempt_events_v14",
+    "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
+    "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
 )
 
 
@@ -1225,7 +1309,7 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             raise _v9_governance_upgrade_error("v9_supersedes_graph_incomplete")
         # Move every revision out of the old range before assigning its
         # canonical number, avoiding transient uniqueness conflicts for
-        # non-null legacy scopes.
+        # non-null prior-release scopes.
         offset = max([int(item["revision"]) for item in group_rows] + [0]) + len(group_rows) + 1
         for item in group_rows:
             connection.execute("UPDATE governance_records SET revision=revision+? WHERE record_ref=?", (offset, item["record_ref"]))
@@ -1373,6 +1457,9 @@ def _migration_plan() -> tuple[_Migration, ...]:
         _Migration(10, "governance-integrity-hardening", _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS),
         _Migration(11, "governance-lifecycle-authority", _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS),
         _Migration(12, "governance-lifecycle-envelope-authentication", _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS),
+        _Migration(13, "attempt-result-event-protocol", _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS),
+        _Migration(14, "attempt-verification-authority", _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS),
+        _Migration(15, "attempt-question-decision-events", _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS),
     )
 
 
@@ -1432,6 +1519,16 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "governance_record_lifecycle_auth_insert_integrity",
             "governance_record_lifecycle_auth_immutable_update",
             "governance_record_lifecycle_auth_immutable_delete",
+        },
+        13: {
+            "attempt_results", "attempt_results_task_lifecycle_idx", "attempt_results_attempt_idx",
+            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
+        },
+        14: {
+            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
+        },
+        15: {
+            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
         },
     }
     present = {
@@ -1503,6 +1600,24 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
         },
         12: {
             "governance_record_lifecycle_auth": {"lifecycle_ref", "envelope_hmac"},
+        },
+        13: {
+            "attempt_results": {
+                "result_ref", "task_id", "attempt_id", "result_status", "lifecycle_status", "summary",
+                "findings_json", "decisions_needed_json", "unresolved_json", "claims_json", "metadata_json",
+                "workspace_observation_json", "changed_files_json", "changed_files_status", "content_digest",
+                "submission_id", "work_completed_at", "finalizing_at", "completed_at", "created_at", "updated_at",
+            },
+            "attempt_events": {
+                "event_ref", "task_id", "attempt_id", "event_key", "sequence", "event_type", "payload_json",
+                "actor", "occurred_at", "created_at",
+            },
+        },
+        15: {
+            "attempt_events": {
+                "event_ref", "task_id", "attempt_id", "event_key", "sequence", "event_type", "payload_json",
+                "actor", "occurred_at", "created_at",
+            },
         },
     }
     for table, expected_columns in column_requirements.get(version, {}).items():
@@ -1691,7 +1806,7 @@ def ensure_database(root: Path) -> None:
                 if known is not None:
                     if known == (migration.name, checksum):
                         continue
-                    # Databases from the pre-atomic release used a legacy
+                    # Databases from the pre-atomic release used a prior-release
                     # name-only checksum. Upgrade it only after confirming
                     # the migration's known schema is actually present.
                     if known == (migration.name, _migration_checksum(migration.name)):
@@ -1857,7 +1972,7 @@ def create_task(root: Path, definition: dict[str, Any], state: dict[str, Any], a
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_revisions'"
         ).fetchone() is not None:
-            original = str(definition.get("user_request") or definition.get("objective") or "")
+            original = str(definition.get("user_request") or "")
             language = str(definition.get("user_language") or "en")
             connection.execute(
                 """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
@@ -1952,7 +2067,7 @@ def append_task_revision(
             if task is None:
                 raise ValueError("task revision refers to an unknown task")
             definition = _decode_json(str(task["definition_json"]), "task definition")
-            initial = str(definition.get("user_request") or definition.get("objective") or "")
+            initial = str(definition.get("user_request") or "")
             initial_language = str(definition.get("user_language") or "en").lower()
             connection.execute(
                 """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
@@ -2038,6 +2153,29 @@ def put_worker_session(root: Path, session: dict[str, Any]) -> dict[str, Any]:
     return {**session, "session_id": session_id, "status": status, "last_seen_at": timestamp}
 
 
+def list_worker_sessions(root: Path, task_id: str) -> list[dict[str, Any]]:
+    """Read server-owned native worker identities for one task.
+
+    Compaction recovery must be able to rehydrate a native child even when an
+    older task projection does not carry the nested ``host_spawn`` object.
+    ``worker_sessions`` is the canonical server-observed identity table, so
+    this read is deliberately scoped to one exact task and returns no other
+    host/session metadata.
+    """
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            """SELECT session_id, task_id, attempt_id, host_agent_id, host_task_name,
+                      host_tool, generation, status, resumable, started_at,
+                      last_seen_at, terminated_at
+               FROM worker_sessions
+               WHERE task_id = ?
+               ORDER BY attempt_id, generation DESC, last_seen_at DESC""",
+            (str(task_id),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def append_attempt_message(root: Path, message: dict[str, Any]) -> dict[str, Any]:
     ensure_database(root)
     created_at = _now()
@@ -2080,11 +2218,15 @@ def get_global(root: Path, name: str, default: dict[str, Any] | None = None) -> 
 
 
 def put_global(root: Path, name: str, value: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("SQLite global document must be an object")
+    name_value = _bounded_document_key(name, label="SQLite global document identity")
+    payload_json = _bounded_document_json(value, label=f"SQLite global document {name_value!r}")
     with _connection(root, write=True) as connection:
         connection.execute(
             "INSERT INTO global_documents(name, payload_json, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(name) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
-            (name, _canonical_json(value), _now()),
+            (name_value, payload_json, _now()),
         )
 
 
@@ -2105,13 +2247,17 @@ def get_task_document(root: Path, task_id: str, document_key: str) -> dict[str, 
 
 
 def put_task_document(root: Path, task_id: str, document_key: str, value: dict[str, Any]) -> None:
-    if not task_id or not document_key or len(document_key) > 160:
+    if not isinstance(task_id, str) or not task_id or "\x00" in task_id:
         raise ValueError("SQLite task document identity is invalid")
+    if not isinstance(value, dict):
+        raise ValueError("SQLite task document must be an object")
+    key = _bounded_document_key(document_key, label="SQLite task document identity")
+    payload_json = _bounded_document_json(value, label=f"SQLite task document {key!r}")
     with _connection(root, write=True) as connection:
         connection.execute(
             "INSERT INTO task_documents(task_id, document_key, payload_json, updated_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(task_id, document_key) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
-            (task_id, document_key, _canonical_json(value), str(value.get("updated_at") or value.get("answered_at") or _now())),
+            (task_id, key, payload_json, str(value.get("updated_at") or value.get("answered_at") or _now())),
         )
 
 
@@ -2288,9 +2434,16 @@ def list_artifacts(
     offset: int = 0,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int | None]:
-    ensure_database(root)
-    if offset < 0 or not 1 <= page_size <= 100:
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or offset < 0
+        or not 1 <= page_size <= 100
+    ):
         raise ValueError("SQLite artifact page bounds are invalid")
+    ensure_database(root)
     values: list[Any] = [task_id]
     query = (
         "SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at "
@@ -2317,69 +2470,94 @@ def read_artifact_range(
     byte_offset: int = 0,
     max_bytes: int = 16 * 1024,
 ) -> dict[str, Any]:
-    """Return a bounded range of one immutable artifact with an exact next offset."""
+    """Return one exact, UTF-8-safe range within the advertised byte bound.
+
+    The cursor offset is always a byte offset into the canonical immutable
+    blob.  Text pages never split a UTF-8 scalar.  Requests below
+    :data:`ARTIFACT_TRANSPORT_MIN_BYTES` are normalized to that UTF-8-safe
+    floor, so the returned page never exceeds the effective transport bound.
+    """
+    if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
+        raise ValueError("SQLite artifact byte offset is invalid")
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or not 1 <= max_bytes <= ARTIFACT_TRANSPORT_MAX_BYTES
+    ):
+        raise ValueError(
+            "SQLite artifact max_bytes must be from "
+            f"1 through {ARTIFACT_TRANSPORT_MAX_BYTES}"
+        )
     metadata = get_artifact_metadata(root, task_id, artifact_ref)
     if metadata is None:
         raise ValueError("SQLite artifact is unavailable for the selected task")
-    if byte_offset < 0 or byte_offset > metadata["byte_size"]:
+    if byte_offset > metadata["byte_size"]:
         raise ValueError("SQLite artifact byte offset is invalid")
-    if not 1 <= max_bytes <= ARTIFACT_TRANSPORT_MAX_BYTES:
-        raise ValueError(f"SQLite artifact max_bytes must be from 1 through {ARTIFACT_TRANSPORT_MAX_BYTES}")
     remaining_offset = byte_offset
-    budget = max_bytes
+    effective_max_bytes = max(ARTIFACT_TRANSPORT_MIN_BYTES, max_bytes)
+    budget = effective_max_bytes
     text_parts: list[str] = []
     blob_parts: list[bytes] = []
-    is_text: bool | None = None
     with _connection(root) as connection:
         rows = connection.execute(
-            """SELECT c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256
-               FROM logical_artifacts a JOIN artifact_blob_chunks c ON c.blob_id = a.blob_id
+            """SELECT b.encoding, c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256
+               FROM logical_artifacts a
+               JOIN artifact_blobs b ON b.blob_id = a.blob_id
+               JOIN artifact_blob_chunks c ON c.blob_id = a.blob_id
                WHERE a.task_id = ? AND a.artifact_id = ? ORDER BY c.chunk_no""",
             (task_id, artifact_ref),
         ).fetchall()
-    for row in rows:
+    if len(rows) != int(metadata["chunk_count"]):
+        raise ValueError("SQLite artifact chunk count is invalid")
+    if not rows:
+        raise ValueError("SQLite artifact has no chunks")
+
+    encoding = str(rows[0]["encoding"])
+    if encoding not in {"utf-8", "binary"}:
+        raise ValueError("SQLite artifact encoding is invalid")
+    is_text = encoding == "utf-8"
+    total_bytes = 0
+    content_digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    for expected_chunk_no, row in enumerate(rows):
+        if int(row["chunk_no"]) != expected_chunk_no or str(row["encoding"]) != encoding:
+            raise ValueError("SQLite artifact chunk sequence is invalid")
         size = int(row["byte_size"])
-        if remaining_offset >= size:
-            remaining_offset -= size
-            continue
         text_value = row["text_content"]
         chunk_is_text = text_value is not None
-        if is_text is None:
-            is_text = chunk_is_text
         if is_text != chunk_is_text:
             raise ValueError("SQLite artifact chunk encoding is inconsistent")
         data = str(text_value).encode("utf-8") if chunk_is_text else bytes(row["blob_content"])
-        if hashlib.sha256(data).hexdigest() != str(row["digest_sha256"]):
+        if len(data) != size or hashlib.sha256(data).hexdigest() != str(row["digest_sha256"]):
             raise ValueError("SQLite artifact chunk digest is invalid")
+        total_bytes += len(data)
+        content_digest.update(data)
+        chunks.append(data)
+    if total_bytes != int(metadata["byte_size"]) or content_digest.hexdigest() != str(metadata["digest_sha256"]):
+        raise ValueError("SQLite artifact digest is invalid")
+
+    for data in chunks:
+        size = len(data)
+        if remaining_offset >= size:
+            remaining_offset -= size
+            continue
+        if is_text and remaining_offset < size and data[remaining_offset] & 0b11000000 == 0b10000000:
+            raise ValueError("SQLite artifact byte offset does not align to a UTF-8 boundary")
         start = remaining_offset
         available = len(data) - start
         take = min(available, budget)
         end = start + take
-        if chunk_is_text and end < len(data):
+        if is_text and end < len(data):
             while end > start and data[end] & 0b11000000 == 0b10000000:
                 end -= 1
             if end == start:
-                # A caller may intentionally request fewer bytes than one
-                # UTF-8 code point (for example ``max_bytes=1``).  Cursor
-                # transport must still make forward progress and must never
-                # emit a broken text fragment.  Return that one complete
-                # code point even though it can exceed the requested budget
-                # by at most three bytes; the server's 32 KiB hard ceiling
-                # remains authoritative for every normal page.
-                leading = data[start]
-                if leading & 0b10000000 == 0:
-                    codepoint_bytes = 1
-                elif leading & 0b11100000 == 0b11000000:
-                    codepoint_bytes = 2
-                elif leading & 0b11110000 == 0b11100000:
-                    codepoint_bytes = 3
-                elif leading & 0b11111000 == 0b11110000:
-                    codepoint_bytes = 4
-                else:  # ``content`` originated as Python text, so fail closed on corruption.
-                    raise ValueError("SQLite artifact text encoding is invalid")
-                end = min(len(data), start + codepoint_bytes)
+                # The remaining budget cannot contain one complete scalar.
+                # Stop this page before the scalar rather than exceeding the
+                # transport ceiling.  The next server-issued cursor starts at
+                # this same scalar and its normalized floor guarantees progress.
+                break
         piece = data[start:end]
-        if chunk_is_text:
+        if is_text:
             text_parts.append(piece.decode("utf-8"))
         else:
             blob_parts.append(piece)
@@ -2387,7 +2565,7 @@ def read_artifact_range(
         remaining_offset = 0
         if budget == 0:
             break
-    delivered = max_bytes - budget
+    delivered = effective_max_bytes - budget
     next_offset = byte_offset + delivered
     if delivered == 0 and byte_offset < metadata["byte_size"]:
         raise ValueError("SQLite artifact transport could not form a safe text range")
@@ -2398,7 +2576,7 @@ def read_artifact_range(
         "complete": next_offset >= metadata["byte_size"],
         "next_byte_offset": None if next_offset >= metadata["byte_size"] else next_offset,
     }
-    if is_text is not False:
+    if is_text:
         result["content_part"] = "".join(text_parts)
         result["encoding"] = "utf-8"
     else:
@@ -2460,23 +2638,44 @@ def _artifact_cursor_secret(connection: sqlite3.Connection) -> bytes:
 
 def encode_artifact_cursor(root: Path, payload: dict[str, Any]) -> str:
     """Sign an opaque cursor bound to task, artifact/version and reader scope."""
-    ensure_database(root)
+    if not isinstance(payload, dict):
+        raise ValueError("artifact cursor payload must be an object")
     encoded = _canonical_json(payload).encode("utf-8")
+    encoded_token = base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+    # SHA-256 signatures have a fixed unpadded URL-safe width of 43 chars.
+    # Reject an unusable oversized cursor before opening/bootstrapping SQLite.
+    if len(encoded_token) + 1 + 43 > ARTIFACT_CURSOR_MAX_CHARS:
+        raise ValueError("artifact cursor exceeds its safe transport length")
+    ensure_database(root)
     with _connection(root) as connection:
         signature = hmac.new(_artifact_cursor_secret(connection), encoded, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=") + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    cursor = encoded_token + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    if len(cursor) > ARTIFACT_CURSOR_MAX_CHARS:
+        raise ValueError("artifact cursor exceeds its safe transport length")
+    return cursor
 
 
 def decode_artifact_cursor(root: Path, cursor: str) -> dict[str, Any]:
-    ensure_database(root)
-    if not isinstance(cursor, str) or cursor.count(".") != 1 or len(cursor) > 4096:
+    if (
+        not isinstance(cursor, str)
+        or cursor.count(".") != 1
+        or len(cursor) > ARTIFACT_CURSOR_MAX_CHARS
+    ):
         raise ValueError("artifact cursor is invalid")
     raw, signature = cursor.split(".", 1)
+    if not raw or not signature or not re.fullmatch(r"[A-Za-z0-9_-]+", raw) or not re.fullmatch(r"[A-Za-z0-9_-]+", signature):
+        raise ValueError("artifact cursor is invalid")
     try:
         encoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
         supplied = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
     except (TypeError, UnicodeError, ValueError) as exc:
         raise ValueError("artifact cursor is invalid") from exc
+    if len(supplied) != hashlib.sha256().digest_size:
+        raise ValueError("artifact cursor is invalid")
+    # A malformed or stale cursor must not bootstrap a new durable ledger.
+    # Normal callers already resolved an existing task before cursor decode.
+    if not database_path(root).is_file():
+        raise ValueError("artifact cursor is unavailable")
     with _connection(root) as connection:
         expected = hmac.new(_artifact_cursor_secret(connection), encoded, hashlib.sha256).digest()
     if not hmac.compare_digest(supplied, expected):
@@ -2927,6 +3126,18 @@ def finalize_prunes(
     ids = sorted({str(value) for value in tombstone_ids if str(value)})
     if not ids:
         return {"finalized": [], "removed_operations": 0, "removed_classifications": 0, "removed_manifest_snapshots": 0}
+    # Preflight every replacement before starting the transaction that removes
+    # task rows.  A global-document overflow must leave the prune untouched.
+    serialized_global_updates: dict[str, str | None] = {}
+    for name, value in global_updates.items():
+        name_value = _bounded_document_key(name, label="SQLite global document identity")
+        if value is not None and not isinstance(value, dict):
+            raise ValueError("SQLite global document must be an object")
+        serialized_global_updates[name_value] = (
+            None
+            if value is None
+            else _bounded_document_json(value, label=f"SQLite global document {name_value!r}")
+        )
     ensure_database(root)
     with _connection(root, write=True) as connection:
         placeholders = ",".join("?" for _ in ids)
@@ -2975,14 +3186,14 @@ def finalize_prunes(
             ).rowcount
         else:
             removed_classifications = 0
-        for name, value in global_updates.items():
-            if value is None:
+        for name, payload_json in serialized_global_updates.items():
+            if payload_json is None:
                 connection.execute("DELETE FROM global_documents WHERE name=?", (name,))
             else:
                 connection.execute(
                     "INSERT INTO global_documents(name, payload_json, updated_at) VALUES (?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
-                    (name, _canonical_json(value), _now()),
+                    (name, payload_json, _now()),
                 )
         for definition, state, event, detail in lane_updates:
             lane_id = str(state.get("lane_id") or definition.get("lane_id") or "")
@@ -3014,12 +3225,6 @@ def finalize_prunes(
         "removed_classifications": int(removed_classifications),
         "removed_manifest_snapshots": int(removed_snapshots),
     }
-
-
-def finalize_prune(root: Path, tombstone_id: str) -> dict[str, Any]:
-    """Compatibility wrapper for a metadata-free one-tombstone finalization."""
-    result = finalize_prunes(root, [tombstone_id], global_updates={}, lane_updates=[])
-    return result["finalized"][0]
 
 
 def fail_prune(root: Path, tombstone_id: str, error: str) -> dict[str, Any]:
@@ -3156,6 +3361,14 @@ def record_tool_observation(
         raise ValueError("tool observation arguments are invalid") from exc
     if not isinstance(parsed_arguments, dict):
         raise ValueError("tool observation arguments are invalid")
+    tool_name = _bounded_observation_text(
+        tool_name, label="tool_name", maximum=MAX_TOOL_OBSERVATION_NAME_BYTES,
+    )
+    workspace_generation = _bounded_observation_text(
+        workspace_generation,
+        label="workspace_generation",
+        maximum=MAX_TOOL_OBSERVATION_GENERATION_BYTES,
+    )
     if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
         raise ValueError("tool observation status is invalid")
     if result_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", result_digest):
@@ -3232,6 +3445,14 @@ def hook_record_tool_observation(
         parsed_arguments = json.loads(normalized_arguments)
         if not isinstance(parsed_arguments, dict):
             raise ValueError("tool observation arguments are invalid")
+        tool_name = _bounded_observation_text(
+            tool_name, label="tool_name", maximum=MAX_TOOL_OBSERVATION_NAME_BYTES,
+        )
+        workspace_generation = _bounded_observation_text(
+            workspace_generation,
+            label="workspace_generation",
+            maximum=MAX_TOOL_OBSERVATION_GENERATION_BYTES,
+        )
         if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
             raise ValueError("tool observation status is invalid")
         if result_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", result_digest):
