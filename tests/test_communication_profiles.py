@@ -37,7 +37,7 @@ class CommunicationProfileTests(unittest.TestCase):
         self.assertIn("message must include a next step", failures)
         self.assertIn("compact profile is too verbose", failures)
 
-    def test_render_keeps_metadata_out_of_prose_and_reports_quality(self):
+    def test_render_keeps_metadata_out_of_prose_and_preserves_quality(self):
         result = communication.render("The work is complete.", kind="completed", next_step="Review the result.", metadata={"attempt_id": "a1"})
         self.assertEqual(result["message_type"], "Task completed")
         self.assertEqual(result["metadata"]["attempt_id"], "a1")
@@ -97,7 +97,7 @@ class CommunicationProfileTests(unittest.TestCase):
 
     def test_technical_profile_keeps_diagnostics_but_redacts_values_and_paths(self):
         rendered = communication.render(
-            "Inspect the ledger pipeline and report the diagnostic result.",
+            "Inspect the ledger pipeline and record the diagnostic result.",
             config={"communication_profile": "technical"},
             next_step="Review the diagnostic result.",
         )

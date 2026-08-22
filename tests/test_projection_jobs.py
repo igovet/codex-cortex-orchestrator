@@ -22,9 +22,9 @@ class ProjectionMaterializerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             task = Path(directory) / "task"
             task.mkdir(mode=0o700)
-            body = b"canonical report\n"
+            body = b"canonical artifact\n"
             digest = hashlib.sha256(body).hexdigest()
-            result = materialize_projection(task, "reports/record.json", body, digest)
+            result = materialize_projection(task, "artifacts/record.json", body, digest)
             self.assertTrue(result.materialized)
             self.assertEqual(result.path.read_bytes(), body)
             self.assertEqual(stat_mode(result.path), 0o600)
@@ -76,23 +76,23 @@ class ProjectionMaterializerTests(unittest.TestCase):
             body = b"canonical"
             digest = hashlib.sha256(body).hexdigest()
             with self.assertRaises(ProjectionDigestError):
-                materialize_projection(task, "report", body + b"changed", digest)
-            materialize_projection(task, "report", body, digest)
-            (task / "report").write_bytes(b"tampered")
+                materialize_projection(task, "artifact", body + b"changed", digest)
+            materialize_projection(task, "artifact", body, digest)
+            (task / "artifact").write_bytes(b"tampered")
             with self.assertRaises(ProjectionDigestError):
-                materialize_projection(task, "report", body, digest)
+                materialize_projection(task, "artifact", body, digest)
 
     def test_recovers_after_preexisting_temp_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             task = Path(directory) / "task"
             task.mkdir()
-            (task / ".report.tmp-old").write_bytes(b"stale")
+            (task / ".artifact.tmp-old").write_bytes(b"stale")
             body = b"recover"
             digest = hashlib.sha256(body).hexdigest()
-            result = materialize_projection(task, "report", body, digest)
+            result = materialize_projection(task, "artifact", body, digest)
             self.assertEqual(result.path.read_bytes(), body)
-            self.assertEqual((task / ".report.tmp-old").read_bytes(), b"stale")
-            self.assertEqual([item.name for item in task.glob(".report.tmp-*")], [".report.tmp-old"])
+            self.assertEqual((task / ".artifact.tmp-old").read_bytes(), b"stale")
+            self.assertEqual([item.name for item in task.glob(".artifact.tmp-*")], [".artifact.tmp-old"])
 
     def test_remove_optional_is_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -127,7 +127,7 @@ class ProjectionServiceTests(unittest.TestCase):
         task_dir = root / "tasks" / "0001-projection-task"
         task_dir.mkdir(parents=True)
         artifact = ledger_db.put_artifact(
-            root, task_id, kind="report_markdown", title="reports/canonical.md",
+            root, task_id, kind="canonical_markdown", title="artifacts/canonical.md",
             mime_type="text/markdown", content="# Canonical\n",
         )
         return root, task_dir, artifact
@@ -137,21 +137,21 @@ class ProjectionServiceTests(unittest.TestCase):
             root, task_dir, artifact = self._root_with_artifact(directory)
             first = projection_service.enqueue(
                 root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
-                projection_type="report_markdown", export_path="reports/current.md",
+                projection_type="canonical_markdown", export_path="artifacts/current.md",
             )
             second = projection_service.enqueue(
                 root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
-                projection_type="report_markdown", export_path="reports/archive/current.md",
+                projection_type="canonical_markdown", export_path="artifacts/archive/current.md",
             )
             self.assertNotEqual(first["projection_key"], second["projection_key"])
             self.assertEqual(
                 [row["export_path"] for row in ledger_db.list_artifact_exports(root, "projection-task", str(artifact["artifact_ref"]))],
-                ["reports/archive/current.md", "reports/current.md"],
+                ["artifacts/archive/current.md", "artifacts/current.md"],
             )
             completed = projection_service.reconcile(root, worker_id="multi-export")
             self.assertEqual({row["status"] for row in completed}, {"ready"})
-            self.assertEqual((task_dir / "reports/current.md").read_text(encoding="utf-8"), "# Canonical\n")
-            self.assertEqual((task_dir / "reports/archive/current.md").read_text(encoding="utf-8"), "# Canonical\n")
+            self.assertEqual((task_dir / "artifacts/current.md").read_text(encoding="utf-8"), "# Canonical\n")
+            self.assertEqual((task_dir / "artifacts/archive/current.md").read_text(encoding="utf-8"), "# Canonical\n")
 
     def test_on_demand_materialization_claims_only_its_requested_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -160,38 +160,38 @@ class ProjectionServiceTests(unittest.TestCase):
                 root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
                 projection_type="dispatch_briefing", export_path="delegations/dispatch.briefing.md",
             )
-            report = projection_service.enqueue(
+            secondary = projection_service.enqueue(
                 root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
-                projection_type="report_markdown", export_path="reports/current.md",
+                projection_type="canonical_markdown", export_path="artifacts/current.md",
             )
 
             completed_briefing = projection_service.materialize(
                 root, str(briefing["projection_key"]), worker_id="dispatch-owner",
             )
-            untouched_report = ledger_db.get_projection_job(root, str(report["projection_key"]))
+            untouched_secondary = ledger_db.get_projection_job(root, str(secondary["projection_key"]))
 
             self.assertEqual(completed_briefing["status"], "ready")
             self.assertEqual(completed_briefing["attempts"], 1)
-            self.assertIsNotNone(untouched_report)
-            self.assertEqual(untouched_report["status"], "pending")
-            self.assertEqual(untouched_report["attempts"], 0)
-            self.assertIsNone(untouched_report["lease_owner"])
-            self.assertIsNone(untouched_report["lease_expires_at"])
+            self.assertIsNotNone(untouched_secondary)
+            self.assertEqual(untouched_secondary["status"], "pending")
+            self.assertEqual(untouched_secondary["attempts"], 0)
+            self.assertIsNone(untouched_secondary["lease_owner"])
+            self.assertIsNone(untouched_secondary["lease_expires_at"])
 
-            completed_report = projection_service.materialize(
-                root, str(report["projection_key"]), worker_id="report-owner",
+            completed_secondary = projection_service.materialize(
+                root, str(secondary["projection_key"]), worker_id="secondary-owner",
             )
-            self.assertEqual(completed_report["status"], "ready")
-            self.assertEqual(completed_report["lease_owner"], None)
+            self.assertEqual(completed_secondary["status"], "ready")
+            self.assertEqual(completed_secondary["lease_owner"], None)
             self.assertEqual((task_dir / "delegations/dispatch.briefing.md").read_text(encoding="utf-8"), "# Canonical\n")
-            self.assertEqual((task_dir / "reports/current.md").read_text(encoding="utf-8"), "# Canonical\n")
+            self.assertEqual((task_dir / "artifacts/current.md").read_text(encoding="utf-8"), "# Canonical\n")
 
     def test_deleted_optional_export_is_rebuilt_by_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root, task_dir, artifact = self._root_with_artifact(directory)
             job = projection_service.enqueue(
                 root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
-                projection_type="report_markdown", export_path="reports/optional.md",
+                projection_type="canonical_markdown", export_path="artifacts/optional.md",
             )
             projection_service.materialize_job(root, job, worker_id="first-write")
             removed = projection_service.remove_optional(root, job)
@@ -199,7 +199,7 @@ class ProjectionServiceTests(unittest.TestCase):
             self.assertFalse(projection_service.verify_job(root, job).present)
             repaired = projection_service.reconcile(root, worker_id="restore-optional")
             self.assertEqual(repaired[-1]["status"], "ready")
-            self.assertEqual((task_dir / "reports/optional.md").read_text(encoding="utf-8"), "# Canonical\n")
+            self.assertEqual((task_dir / "artifacts/optional.md").read_text(encoding="utf-8"), "# Canonical\n")
             self.assertTrue(projection_service.verify_job(root, job).valid)
 
     def test_tampered_export_is_detected_and_repair_records_a_failed_attempt(self) -> None:
@@ -207,10 +207,10 @@ class ProjectionServiceTests(unittest.TestCase):
             root, task_dir, artifact = self._root_with_artifact(directory)
             job = projection_service.enqueue(
                 root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
-                projection_type="report_markdown", export_path="reports/tampered.md",
+                projection_type="canonical_markdown", export_path="artifacts/tampered.md",
             )
             projection_service.materialize_job(root, job, worker_id="first-write")
-            (task_dir / "reports/tampered.md").write_text("not canonical", encoding="utf-8")
+            (task_dir / "artifacts/tampered.md").write_text("not canonical", encoding="utf-8")
             verification = projection_service.verify_job(root, job)
             self.assertTrue(verification.present)
             self.assertFalse(verification.valid)
@@ -224,7 +224,7 @@ class ProjectionServiceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 projection_service.enqueue(
                     root=root, task_id="projection-task", artifact_id=str(artifact["artifact_ref"]),
-                    projection_type="report_markdown", export_path="../outside.md",
+                    projection_type="canonical_markdown", export_path="../outside.md",
                 )
             self.assertEqual(projection_service.list_pending(root, task_id="projection-task"), [])
 

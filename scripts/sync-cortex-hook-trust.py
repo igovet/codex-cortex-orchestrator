@@ -24,6 +24,7 @@ EXPECTED_KEYS = {
         "session_start",
         "subagent_start",
         "subagent_stop",
+        "stop",
     )
 }
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

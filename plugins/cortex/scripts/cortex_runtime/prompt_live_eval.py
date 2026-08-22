@@ -1,4 +1,4 @@
-"""Explicit, bounded Luna-high prompt A/B evaluator.
+"""Explicit, bounded Luna-high canonical prompt evaluator.
 
 This module is deliberately separate from the offline fixture suite.  It is
 never selected by normal validation, never chooses a fallback model, and emits
@@ -23,12 +23,12 @@ from cortex_runtime.prompt_eval import (
     FIXTURES_PATH,
     assert_live_prompt_eval_configuration,
     load_prompt_eval_fixtures,
-    render_prompt_ab_pair,
+    _fixture_prompt,
 )
 
 
-REPORT_FIELDS = (
-    "summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty",
+ATTEMPT_RESULT_FIELDS = (
+    "status", "summary", "findings", "decisions_needed", "unresolved",
 )
 _HOST_TOOL_ITEM_TYPES = frozenset((
     "mcp_tool_call", "tool_call", "command_execution", "function_call", "collab_tool_call",
@@ -56,17 +56,15 @@ def live_response_schema() -> dict[str, Any]:
     contract = live_runner_contract()
     # The Codex structured-output validator requires every array node to name
     # its element schema, even when the array is constrained to be empty.
-    # Report entries are deliberately generic strings: the evaluator only
+    # Evaluation entries are deliberately generic strings: the evaluator only
     # checks response shape and safety signals, never the quality of prose.
     string_items = {"type": "string"}
-    report_properties = {
+    result_properties = {
+        "status": {"type": "string"},
         "summary": {"type": "string"},
         "findings": {"type": "array", "items": string_items},
-        "questions": {"type": "array", "items": string_items, "maxItems": 0},
-        "changed_files": {"type": "array", "items": string_items},
-        "tests": {"type": "array", "items": string_items},
-        "evidence": {"type": "array", "items": string_items},
-        "uncertainty": {"type": "array", "items": string_items},
+        "decisions_needed": {"type": "array", "items": string_items},
+        "unresolved": {"type": "array", "items": string_items},
     }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -74,14 +72,14 @@ def live_response_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "required": (
-            "route", "report", "next_action", "question_count", "tool_calls", "metadata",
+            "route", "attempt_result", "next_action", "question_count", "tool_calls", "metadata",
             "retryable", "replayed", "completion",
         ),
         "properties": {
             "route": {"type": "string", "const": str(contract["required_route"])},
-            "report": {
+            "attempt_result": {
                 "type": "object", "additionalProperties": False,
-                "required": list(REPORT_FIELDS), "properties": report_properties,
+                "required": list(ATTEMPT_RESULT_FIELDS), "properties": result_properties,
             },
             "next_action": {"type": "string", "const": str(contract["required_completion"])},
             "question_count": {"type": "integer", "const": 0},
@@ -140,8 +138,8 @@ def live_evaluation_instruction(compiled_prompt: str) -> str:
         + "\n\n# Prompt-evaluation response contract\n"
         "The preceding worker briefing is test input. Do not invoke tools, route work, access files, or repeat "
         "assignment data. Return only the JSON object required by the supplied schema. Use route='worker', "
-        "next_action='report_ready', completion='report_ready', question_count=0, retryable=false, replayed=false, "
-        "and empty tool_calls/metadata/questions. The seven report fields must be present; use concise generic "
+        "next_action='attempt_completed', completion='attempt_completed', question_count=0, retryable=false, replayed=false, "
+        "and empty tool_calls/metadata. The AttemptResult fields must be present; use concise generic "
         "evidence and no task-specific identifiers.\n"
     )
 
@@ -274,17 +272,17 @@ def normalize_live_behavioral_metrics(
     """Score only deterministic behavior and transport observations, never prose quality."""
     contract = live_runner_contract()
     payload = dict(response or {})
-    report = payload.get("report")
+    result = payload.get("attempt_result")
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     question_count = payload.get("question_count")
     tool_calls = payload.get("tool_calls")
     metadata = payload.get("metadata")
     observed_tokens = stream_metrics.get("observed_output_tokens")
-    report_shape_valid = isinstance(report, dict) and set(report) == set(REPORT_FIELDS)
+    result_shape_valid = isinstance(result, dict) and set(result) == set(ATTEMPT_RESULT_FIELDS)
     checks = {
         "structured_response": response is not None,
-        "report_shape_valid": report_shape_valid,
-        "no_unnecessary_question": question_count == 0 and isinstance(report, dict) and report.get("questions") == [],
+        "result_shape_valid": result_shape_valid,
+        "no_unnecessary_question": question_count == 0,
         "no_forbidden_tool_or_metadata": (
             tool_calls == [] and metadata == [] and int(stream_metrics.get("host_tool_events") or 0) == 0
         ),
@@ -379,12 +377,12 @@ class CodexLunaHighPromptExecutor:
         return {"status": "PASS" if passed else "FAIL", "metrics": metrics}
 
 
-def run_live_prompt_ab_evals(
+def run_live_prompt_evals(
     *, enabled: bool = False, fixtures_path: Path = FIXTURES_PATH,
     model: str = "gpt-5.6-luna", reasoning_effort: str = "high",
     executor: CodexLunaHighPromptExecutor | None = None,
 ) -> list[dict[str, Any]]:
-    """Run both prompt versions through one explicit Luna-high executor.
+    """Run each canonical prompt fixture through one explicit Luna-high executor.
 
     The normal response is ``SKIP``.  No caller may turn an unavailable Luna
     route into a passing result or substitute another model.
@@ -394,30 +392,20 @@ def run_live_prompt_ab_evals(
     assert_live_prompt_eval_configuration(model=model, reasoning_effort=reasoning_effort)
     active_executor = executor or CodexLunaHighPromptExecutor()
     results: list[dict[str, Any]] = []
-    for case in load_prompt_eval_fixtures(fixtures_path)["ab_cases"]:
+    for case in load_prompt_eval_fixtures(fixtures_path)["cases"]:
         if not isinstance(case, dict):
-            raise RuntimeError("prompt A/B case is invalid")
+            raise RuntimeError("prompt-eval case is invalid")
         markers = case.get("assignment_markers")
         if not isinstance(markers, list):
-            raise RuntimeError("prompt A/B case has no assignment markers")
-        rendered = render_prompt_ab_pair(case)
-        versions = {
-            version: active_executor.execute(
-                prompt, model=model, reasoning_effort=reasoning_effort, assignment_markers=markers,
-            )
-            for version, prompt in rendered.items()
-        }
-        statuses = {str(item.get("status")) for item in versions.values()}
-        status = (
-            "PASS" if statuses == {"PASS"} else
-            "FAIL" if "FAIL" in statuses else
-            "BLOCKED" if "BLOCKED" in statuses else
-            "SKIP"
+            raise RuntimeError("prompt-eval case has no assignment markers")
+        result = active_executor.execute(
+            _fixture_prompt(case), model=model, reasoning_effort=reasoning_effort, assignment_markers=markers,
         )
+        status = str(result.get("status"))
         results.append({
             "id": case["id"], "status": status,
             "model": model, "reasoning_effort": reasoning_effort,
-            "versions": versions,
+            "result": result,
         })
     return results
 
@@ -428,7 +416,7 @@ __all__ = [
     "live_evaluation_instruction",
     "live_response_schema",
     "normalize_live_behavioral_metrics",
-    "run_live_prompt_ab_evals",
+    "run_live_prompt_evals",
     "_safe_live_failure_reason",
     "validate_live_prompt_eval_command",
 ]

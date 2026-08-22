@@ -1,5 +1,53 @@
 # Changelog
 
+## [10.0.0] - 2026-08-22
+
+This breaking release makes the database-centric attempt protocol the only
+worker transport. The public v10 registry contains nine operations; workers
+checkpoint `AttemptEvent` facts with `record_attempt_event` and close a
+semantic `AttemptResult` with `complete_attempt`. Cortex owns identity,
+timestamps, changed paths, verification observations, read receipts, and
+result projections. The prior 9.x draft/report transport is historical and is
+not part of the v10 public contract.
+
+- Added the fresh-only nine-operation public registry and strict coordinator /
+  worker projections.
+- Promoted SQLite schema v15 and the Prompt Contract v3 compiler.
+- Separated `WORK_COMPLETED` from finalization and projection retries so
+  infrastructure failures never respawn a completed worker.
+- Replaced text acknowledgement markers with server-owned briefing and
+  predecessor-result receipts.
+
+## [9.3.0] - 2026-08-22
+
+This additive release introduces the database-centric worker attempt protocol.
+Workers publish semantic attempt events and one compact completion result while
+Cortex owns durable attempt state, server-observed receipts, and generated
+human/compatibility projections. Legacy draft/report operations remain
+available only as compatibility adapters for older workers.
+
+## [9.2.24] - 2026-08-21
+
+This source-tree patch keeps a coordinator turn alive while its durably bound
+native worker is still running, and makes missing worker bootstrap inputs a
+durable question/resume boundary.
+
+- Register the Codex `Stop` hook and block coordinator finalization only when
+  the active ledger contains a durably bound running worker. The prompt is
+  identifier-free, directs the same turn to wait only for the exact persisted
+  child, and honors the host's re-entrant stop-hook escape.
+- Keep `SubagentStop` as terminal-state telemetry rather than a synthetic
+  parent wakeup. An already-idle coordinator is resumed safely through one
+  state inspection and its existing child/report/recovery receipt; no child is
+  replayed or respawned.
+- Require the immutable worker bootstrap to validate briefing, applicable
+  acceptance/verification, predecessor references, and gate evidence before
+  project work. A missing or unreadable required input produces one durable
+  `worker_question`, then the same worker polls its answer and reruns the full
+  bootstrap validation before proceeding.
+- Extend hook-trust/preflight and marketplace validation to the six-hook
+  contract, and add lifecycle, prompt-contract, and trust regressions.
+
 ## [9.2.23] - 2026-08-21
 
 This source-tree patch prevents a host-proven lost native worker from pinning

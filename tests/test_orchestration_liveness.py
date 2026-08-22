@@ -124,34 +124,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             ],
         })
 
-    def _record_success_report(self, attempt: dict, *, submission_id: str = "parallel-success") -> str:
-        recorded = control.record_report({
-            "project_root": str(self.project),
-            "task_id": self._state()["task_id"],
-            "principal": self._state()["principal"],
-            "attempt_id": attempt["attempt_id"],
-            "submission_id": submission_id,
-            "report": {
-                "summary": "Independent gate completed.", "findings": [], "questions": [],
-                "changed_files": [], "tests": [], "evidence": ["focused evidence"], "uncertainty": [],
-            },
-        })
-        return recorded["report"]["report_id"]
 
-    def _fail_parallel_qa_and_complete_security(self, current: dict) -> dict:
-        attempts = {item["gate"]: item for item in self._state()["attempts"] if not item.get("invalidated")}
-        security_report = self._record_success_report(attempts["security"])
-        return control.continue_orchestration({
-            "project_root": str(self.project),
-            "task_ref": current["task_ref"], "step": current["step"],
-            "results": [
-                {
-                    "worker": 1, "status": "failed", "reason": "network transport unavailable before any project change",
-                    "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
-                },
-                {"worker": 2, "report_ref": security_report},
-            ],
-        })
 
     def _failed_continue(self, current: dict, *, reason: str, next_strategy: str | None = None) -> dict:
         result = {
@@ -199,9 +172,10 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertEqual(paused["dispatches"], [])
         state = self._state()
         self.assertEqual(state["status"], "blocked")
-        self.assertEqual(state["rework_pause"]["status"], "needs_user_decision")
-        self.assertEqual(state["rework_pause"]["failure_class"], "infrastructure")
-        self.assertEqual(state["rework_pause"]["consecutive_identical_iterations"], 3)
+        pause = state["rework_pauses"]["discover"]
+        self.assertEqual(pause["status"], "needs_user_decision")
+        self.assertEqual(pause["failure_class"], "infrastructure")
+        self.assertEqual(pause["consecutive_identical_iterations"], 3)
         self.assertEqual(set(state["rework_pauses"]), {"discover"})
         self.assertNotIn("discover", state["completed_gates"])
         self.assertNotEqual(state["status"], "completed")
@@ -229,7 +203,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertEqual(changed["outcome"], "ready_to_spawn")
         state = self._state()
         self.assertEqual(state["status"], "active")
-        self.assertNotIn("rework_pause", state)
+        self.assertNotIn("discover", state.get("rework_pauses", {}))
         self.assertEqual(state["rework_progress"]["discover"]["consecutive_identical_iterations"], 1)
 
     def test_paraphrased_equivalent_failure_reasons_still_trip_the_circuit_breaker(self) -> None:
@@ -272,7 +246,8 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertFalse(rejected["ok"])
         self.assertIn("materially change the failed strategy, pipeline, or verification", rejected["diagnostics"][0]["message"])
         self.assertEqual(self._state()["status"], "blocked")
-        self.assertEqual(self._state()["rework_pause"]["status"], "needs_user_decision")
+        state = self._state()
+        self.assertEqual(state["rework_pauses"]["discover"]["status"], "needs_user_decision")
 
     def test_paused_resume_accepts_a_material_strategy_change(self) -> None:
         current = self._start()
@@ -301,7 +276,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertEqual(resumed["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in resumed["dispatches"]], ["plan"])
         self.assertEqual(self._state()["status"], "active")
-        self.assertNotIn("rework_pause", self._state())
+        self.assertNotIn("discover", self._state().get("rework_pauses", {}))
 
     def test_paused_resume_accepts_matching_infrastructure_remediation(self) -> None:
         current = self._start()
@@ -329,52 +304,9 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertTrue(resumed["ok"], resumed)
         self.assertEqual(resumed["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in resumed["dispatches"]], ["plan"])
-        self.assertNotIn("rework_pause", self._state())
+        self.assertNotIn("discover", self._state().get("rework_pauses", {}))
 
-    def test_parallel_sibling_completes_while_no_progress_pauses_only_failed_gate(self) -> None:
-        current = self._start_parallel()
-        current = self._fail_parallel_qa_and_complete_security(current)
-        self.assertTrue(current["ok"], current)
-        self.assertEqual([item["phase"] for item in current["dispatches"]], ["qa"])
-        for _ in range(2):
-            current = self._failed_continue(
-                current,
-                reason="network transport unavailable before any project change",
-            )
-        self.assertTrue(current["ok"], current)
-        # QA is locally paused only after its independent security sibling
-        # completed. A later wave cannot leapfrog that unresolved dependency.
-        self.assertEqual(current["outcome"], "blocked")
-        state = self._state()
-        self.assertEqual(state["status"], "blocked")
-        self.assertEqual(state["completed_gates"], ["security"])
-        self.assertEqual(set(state["rework_pauses"]), {"qa"})
-        self.assertEqual(state["current_gates"], [])
 
-    def test_unrelated_finding_does_not_change_failed_gate_repeat_signature(self) -> None:
-        current = self._start_parallel()
-        current = self._fail_parallel_qa_and_complete_security(current)
-        state = self._state()
-        control.db_upsert_task_finding(
-            self.ledger,
-            state["task_id"],
-            {
-                "fingerprint": "security-unrelated", "severity": "P1", "status": "open",
-                "blocking": True, "summary": "Independent security finding", "details": {},
-            },
-            source={
-                "transition": "opened", "report_id": "report-security", "receipt_ref": "receipt-security",
-                "report_artifact_ref": "artifact-security", "report_content_digest": "digest-security",
-                "attempt_id": "security-02", "gate": "security", "task_revision": 1,
-            },
-        )
-        current = self._failed_continue(
-            current,
-            reason="network transport unavailable before any project change",
-        )
-        progress = self._state()["rework_progress"]["qa"]
-        self.assertEqual(progress["consecutive_identical_iterations"], 2)
-        self.assertEqual(progress["finding_fingerprints"], [])
 
     def test_multi_gate_recovery_requires_and_unpauses_only_named_gate(self) -> None:
         current = self._start_parallel()

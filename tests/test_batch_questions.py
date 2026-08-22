@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 import cortex as control
+from cortex_runtime import attempt_protocol
 
 
 class BatchQuestionTests(unittest.TestCase):
@@ -65,20 +66,20 @@ class BatchQuestionTests(unittest.TestCase):
                     "question_key": "storage_strategy",
                     "question": "Which storage strategy should the implementation use?",
                     "type": "single_select",
-                    "header": "Storage compatibility strategy",
-                    "context": "A new schema increases migration risk; the existing schema preserves compatibility.",
+                    "header": "Storage migration strategy",
+                    "context": "A new schema increases migration risk; the existing schema preserves required behavior.",
                     "options": [
                         {"option_id": "existing_schema", "label_en": "Keep the existing schema", "description": "Lowest migration risk and preserves deployed readers."},
                         {"option_id": "new_schema", "label_en": "Create a new schema", "description": "Cleaner structure but requires a coordinated migration."},
                     ],
                     "recommended_option_ids": ["existing_schema"],
-                    "recommendation": "Keep the existing schema because compatibility is the stated priority.",
+                    "recommendation": "Keep the existing schema because preserving required behavior is the stated priority.",
                 },
                 {
-                    "question_key": "compatibility_note",
-                    "question": "What compatibility constraint should be treated as non-negotiable?",
+                    "question_key": "migration_note",
+                    "question": "What migration constraint should be treated as non-negotiable?",
                     "type": "text",
-                    "header": "Required compatibility constraint",
+                    "header": "Required migration constraint",
                     "context": "The worker needs an explicit boundary before finalizing its plan.",
                     "recommended_answer": "Preserve all existing public API behavior.",
                     "recommendation": "Use this wording because it is concrete and directly verifiable.",
@@ -119,6 +120,7 @@ class BatchQuestionTests(unittest.TestCase):
             "payload": {"question_ref": batch_ref},
         })
         self.assertEqual(surfaced["outcome"], "awaiting_user")
+        self.assertNotIn("resume_contract", surfaced)
         interaction = surfaced["chat_interaction"]
         self.assertEqual(interaction["schema"], "cortex/chat-interaction/v1")
         self.assertEqual(interaction["kind"], "worker_question")
@@ -136,14 +138,30 @@ class BatchQuestionTests(unittest.TestCase):
                 "question_ref": batch_ref,
                 "answers": {
                     "storage_strategy": "existing_schema",
-                    "compatibility_note": "Preserve all existing public API behavior.",
+                "migration_note": "Preserve all required public API behavior.",
                 },
             },
         })
         self.assertEqual(answered["outcome"], "question_answered")
+        self.assertEqual(answered["resume_contract"], {
+            "batch_ref": batch_ref,
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "poll_action": "poll_batch",
+        })
+        self.assertNotIn("target", answered["resume_contract"])
         polled = control.worker_question({**self._identity(state, attempt), "action": "poll_batch", "batch_ref": batch_ref})
         self.assertEqual(polled["outcome"], "batch_answered")
         self.assertEqual(polled["answers"]["storage_strategy"]["answer_option_ids"], ["existing_schema"])
+        events = attempt_protocol.list_attempt_events(
+            self.ledger,
+            task_id=str(state["task_id"]),
+            attempt_id=str(attempt["attempt_id"]),
+        )
+        event_types = [event["event_type"] for event in events]
+        self.assertEqual(event_types.count("question_created"), 2)
+        self.assertEqual(event_types.count("question_answered"), 2)
+        self.assertEqual(event_types.count("decision_resolved"), 2)
 
     def test_single_question_next_chat_message_is_recorded_on_same_ref(self):
         started, state, attempt = self._start()
@@ -168,6 +186,7 @@ class BatchQuestionTests(unittest.TestCase):
             "payload": {"question_ref": question_ref},
         })
         self.assertEqual(surfaced["outcome"], "awaiting_user")
+        self.assertNotIn("resume_contract", surfaced)
         recommended = surfaced["chat_interaction"]["questions"][0]["llm_recommendation"]
         self.assertEqual(recommended["recommended_options"][0]["option_id"], "gradual")
         answered = control.manage_orchestration({
@@ -180,10 +199,30 @@ class BatchQuestionTests(unittest.TestCase):
             },
         })
         self.assertEqual(answered["outcome"], "question_answered")
+        self.assertEqual(answered["resume_contract"], {
+            "question_ref": question_ref,
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "poll_action": "poll",
+        })
         polled = control.worker_question({**self._identity(state, attempt), "action": "poll", "question_ref": question_ref})
         self.assertEqual(polled["outcome"], "question_answered")
         self.assertEqual(polled["answer_option_ids"], ["gradual"])
         self.assertIn("five minutes", polled["answer_text"])
+        events = attempt_protocol.list_attempt_events(
+            self.ledger,
+            task_id=str(state["task_id"]),
+            attempt_id=str(attempt["attempt_id"]),
+        )
+        event_types = [event["event_type"] for event in events]
+        self.assertEqual(
+            event_types[-3:],
+            ["question_created", "question_answered", "decision_resolved"],
+        )
+        self.assertTrue(all(event["actor"] == "cortex" for event in events[-3:]))
+        resolved = events[-1]["payload"]
+        self.assertEqual(resolved["question_ref"], question_ref)
+        self.assertIn("gradual", resolved["answer"])
 
     def test_runtime_has_no_nested_elicitation_adapter(self):
         self.assertFalse(hasattr(control, "_request_mcp_elicitation"))

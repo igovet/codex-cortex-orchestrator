@@ -13,7 +13,7 @@ evidence-backed change to future semantic waves.
 2. Decide whether to add a specialist, re-sequence work, widen validation, reduce scope, or stop for a user decision.
 3. Record the revised plan and why it changed in the parent thread. The
    coordinator must explicitly classify the replacement as material or as a
-   no-op/transport-only change; Cortex must not infer materiality from report
+   no-op/transport-only change; Cortex must not infer materiality from result
    prose.
 4. Preserve completed evidence; do not repeat a completed check without a reason.
 
@@ -28,7 +28,7 @@ Typical adaptations:
   stale plan revision, predecessor digest, or semantic pipeline digest blocks
   post-plan dispatch with recoverable reapproval guidance.
 
-For required approval, approval is bound to the plan revision, plan report ref,
+For required approval, approval is bound to the plan revision, plan result ref,
 verified predecessor evidence digest, and semantic future-pipeline digest. A
 replacement must be a singleton Planner wave after scope, discovery, and all
 pre-implementation design gates. No-op and transport-only replacements retain

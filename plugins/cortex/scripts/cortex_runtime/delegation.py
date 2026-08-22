@@ -114,7 +114,7 @@ def delegation_lists(
 ) -> dict[str, list[str]]:
     """Select bounded worker contract lists with task-level inheritance only for paths."""
     def text_items(value: object) -> list[str]:
-        # Legacy task definitions may have persisted one path/criterion as a
+        # A malformed task definition may persist one path/criterion as a
         # scalar.  Treat it as one item instead of silently falling back to a
         # broad default or iterating it character-by-character.
         values = [value] if isinstance(value, str) else value

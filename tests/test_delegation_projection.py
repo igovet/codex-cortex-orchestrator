@@ -36,7 +36,7 @@ class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest
         })
         initialized = control.init_task({
             "task_id": "projection-boundary",
-            "objective": "verify required briefing projection",
+            "user_request": "verify required briefing projection",
             "complexity": "C1",
             "classification_id": classification["classification_id"],
             "principal": "projection-test",
@@ -177,27 +177,6 @@ class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest
             ["ready", "ready", "ready"],
         )
 
-    def test_batch_precommit_validation_failure_leaves_no_attempt_or_projection(self) -> None:
-        valid = self._params()
-        invalid = {**self._params(), "context_report_ids": ["not-a-task-report"]}
-        with mock.patch.object(delegation_service, "materialize_job") as materialize:
-            result = control.prepare_delegations({
-                "task_id": "projection-boundary",
-                "principal": "projection-test",
-                "project_root": str(self.project),
-                "delegations": [valid, invalid],
-            })
-
-        self.assertFalse(result["recorded"])
-        self.assertEqual(result["reason"], "partial_failure")
-        self.assertEqual(result["index"], 1)
-        self.assertEqual(result["prepared"], [])
-        materialize.assert_not_called()
-        _, state, _, _ = ledger_db.load_task(self.root, "projection-boundary")
-        self.assertEqual(state["attempts"], [])
-        jobs = ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["projection_type"], "user_intent")
 
 
 if __name__ == "__main__":

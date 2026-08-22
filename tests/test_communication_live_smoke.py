@@ -1,4 +1,4 @@
-"""Small end-to-end smoke for delegation, report persistence, and natural UX."""
+"""Small end-to-end smoke for delegation, result persistence, and natural UX."""
 from __future__ import annotations
 
 import json
@@ -33,7 +33,7 @@ class CommunicationLiveSmokeTests(unittest.TestCase):
             os.environ[control.HOST_CONTROL_STORE_ENV] = self.previous_store
         self.temp.cleanup()
 
-    def test_delegation_report_and_natural_profile_live_path(self) -> None:
+    def test_delegation_result_and_natural_profile_live_path(self) -> None:
         activation = control.activate_orchestration({
             "project_root": str(self.project),
             "user_command": "/cortex",
@@ -76,31 +76,29 @@ class CommunicationLiveSmokeTests(unittest.TestCase):
         state = control.load_task_state_for_artifact(task_dir)
         attempt = state["attempts"][0]
         task = control.load_task_definition(task_dir, state)
-        evidence = [control.dispatch_briefing_review_marker(attempt["briefing_digest"])]
-        evidence.extend(
-            prefix + "observed concrete smoke evidence."
-            for prefix, _ in control._result_contract_markers(attempt, task)
-        )
-        recorded = control.publish_worker_report({
+        briefing_read = control.read_dispatch_briefing({
             "project_root": str(self.project),
             "task_id": state["task_id"],
             "attempt_id": attempt["attempt_id"],
             "profile": attempt["profile"],
-            "report": {
-                "summary": "Smoke check completed and persisted.",
-                "findings": [], "questions": [], "changed_files": [],
-                "tests": [{
-                    "command": "python3 -m unittest tests.test_communication_profiles",
-                    "cwd": ".", "exit_code": 0,
-                    "evidence": "Focused smoke checks passed.",
-                }],
-                "evidence": evidence,
-                "uncertainty": [],
-            },
+            "dispatch_ref": attempt["dispatch_ref"],
+            "briefing_digest": attempt["briefing_digest"],
+        })
+        self.assertTrue(briefing_read.get("ok"), briefing_read)
+        recorded = control.complete_worker_attempt({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "status": "completed",
+            "summary": "Smoke check completed and persisted.",
+            "findings": [],
+            "decisions_needed": [],
+            "unresolved": [],
         })
         self.assertTrue(recorded.get("ok"), recorded)
-        self.assertEqual(recorded.get("outcome"), "report_recorded")
-        self.assertNotEqual(recorded.get("code"), "report_validation_failed")
+        self.assertEqual(recorded.get("outcome"), "attempt_completed")
+        self.assertNotEqual(recorded.get("code"), "attempt_validation_failed")
 
         rendered = render_lifecycle(
             "completed",

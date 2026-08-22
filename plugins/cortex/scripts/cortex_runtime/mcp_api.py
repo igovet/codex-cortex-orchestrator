@@ -2,9 +2,8 @@
 
 The stdio protocol does not carry a trustworthy per-call actor identity.  A
 server process therefore receives one immutable audience at launch time.  The
-ordinary Desktop launch uses the compatibility surface so an explicit
-``$cortex:orchestrator`` can start its lifecycle.  A host that can establish
-separate trusted channels may opt into the strict coordinator and worker
+ordinary Desktop launch uses the fresh public union.  A host that can
+establish separate trusted channels may opt into coordinator and worker
 projections.
 """
 from __future__ import annotations
@@ -12,14 +11,14 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from cortex_runtime.communication import public_risks, render, render_lifecycle, render_plan
 
 
-MCP_AUDIENCES = frozenset({"compat", "coordinator", "worker"})
-DEFAULT_MCP_AUDIENCE = "compat"
+MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
+DEFAULT_MCP_AUDIENCE = "default"
 
 
 def _public_user_view(rendered: object) -> dict[str, Any]:
@@ -37,13 +36,16 @@ def _public_user_view(rendered: object) -> dict[str, Any]:
 def _internal_protocol(response: Mapping[str, Any]) -> dict[str, Any]:
     """Nest a bounded machine receipt under one explicit boundary.
 
-    The legacy top-level response still carries the native dispatch payload for
-    compatibility.  Repeating those large host messages inside ``internal``
+    The top-level response carries the native dispatch payload.  Repeating
+    those large host messages inside ``internal``
     can exceed the host's response budget, so this boundary keeps identity,
     receipt references, and dispatch metadata while leaving the authoritative
-    native payload at its existing compatibility location.
+    native payload at its existing top-level location.
     """
-    keep = {"schema", "ok", "outcome", "task_ref", "step", "replayed", "report_ref", "receipt_ref"}
+    keep = {
+        "schema", "ok", "outcome", "task_ref", "step", "replayed",
+        "attempt_result_ref", "receipt_ref", "continuation",
+    }
     result = {key: response[key] for key in keep if key in response}
     dispatches = response.get("dispatches")
     if isinstance(dispatches, list):
@@ -62,52 +64,39 @@ def _internal_protocol(response: Mapping[str, Any]) -> dict[str, Any]:
         result["diagnostic_count"] = len(response["diagnostics"])
     return result
 
-# ``read_worker_report`` is intentionally shared: the coordinator reads a
-# completed report, while a successor worker may read only refs granted in its
-# dispatch.  Handler-level scope checks remain authoritative for that tool.
+# ``read_worker_result`` is intentionally shared: the coordinator reads a
+# completed canonical result, while a successor worker may read only refs
+# granted in its dispatch.  Handler-level scope checks remain authoritative.
 COORDINATOR_PUBLIC_TOOL_NAMES = (
     "start_orchestration",
     "continue_orchestration",
     "manage_orchestration",
     "manage_governance",
-    "read_worker_report",
+    "read_worker_result",
 )
 WORKER_PUBLIC_TOOL_NAMES = (
     "worker_question",
-    "get_report_template",
-    "record_report",
+    "record_attempt_event",
+    "complete_attempt",
     "read_dispatch_briefing",
-    "read_worker_report",
+    "read_worker_result",
 )
-# Compatibility is deliberately the conventional nine-operation registry.
-# Codex Desktop presently launches one static MCP definition for the root and
-# every native child; defaulting that process to either strict five-tool
-# projection makes the documented `$cortex:orchestrator` route unusable.  The
-# capability/recovery proof and handler scope checks remain authoritative on
-# this surface.  Hosts that can provision role-specific processes use the
-# strict projections above.
-COMPAT_PUBLIC_TOOL_NAMES = (
-    "start_orchestration",
-    "continue_orchestration",
-    "manage_orchestration",
-    "manage_governance",
-    "worker_question",
-    "get_report_template",
-    "record_report",
-    "read_dispatch_briefing",
-    "read_worker_report",
-)
+# Desktop uses the same fresh-only nine-operation union as the explicit
+# audience projections.
+DEFAULT_PUBLIC_TOOL_NAMES = tuple(dict.fromkeys(
+    (*COORDINATOR_PUBLIC_TOOL_NAMES, *WORKER_PUBLIC_TOOL_NAMES)
+))
 
 
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Submit compact report_ref receipts for the active wave and receive the next relative wave with canonical profile-selection metadata. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker report body.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run explicit legacy lifecycle or SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
+    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
-    "get_report_template": "Worker-only draft operation: create one private task-scoped temporary JSON file already filled with the exact report structure, generated evidence markers, and gate-specific placeholders. Return only draft_ref, draft_path, expiry, and required sections. Caller mistakes are corrected on the same attempt; no final report is persisted and no worker attempt is consumed.",
-    "record_report": "Worker-only atomic report operation: pass worker identity and draft_ref after editing the private temporary file, or include a complete replacement or small JSON Merge Patch when the sandbox cannot edit that file. Cortex validates the exact current draft and state, atomically persists it only when valid, and deletes the draft only after success. task_ref, dispatch_ref, and submission_id are coordinator transport fields: omit them rather than trying to translate them into worker identity. Invalid drafts remain editable and consume no worker retry budget; do not paste the report into the parent channel.",
-    "read_dispatch_briefing": "Worker-only fallback: read exactly the immutable briefing identified by the complete task, attempt, profile, dispatch, and SHA-256 capability tuple from the native bootstrap. Oversized chunk requests are safely bounded; caller/schema diagnostics are corrected and retried on the same attempt, while only explicit integrity or storage blockers end the worker. It cannot list or read any other Cortex state.",
-    "read_worker_report": "Read one persisted worker report by report_ref and the exact task_ref from the successful lifecycle response. Oversized chunk requests are safely bounded and caller/schema diagnostics are corrected on the same attempt without consuming its budget. Coordinators omit worker identity; successor workers include their exact attempt_id/profile and may read only refs supplied in their dispatch.",
+    "record_attempt_event": "Worker-only incremental semantic event operation. Persist a bounded finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
+    "complete_attempt": "Worker-only semantic completion operation. Submit only AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
+    "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
+    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. The compact internal receipt retains this continuation across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
     "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If a recovery response was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and original non-durable recovery proof; it redelivers the same pending pair until acknowledge_coordinator_recovery presents the old proof plus both replacement values and retires the old pair. Initial start-response loss remains fail-closed because no proof exists. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
@@ -116,13 +105,12 @@ PUBLIC_TOOL_DESCRIPTIONS = {
 def build_public_schemas(
     *,
     agents: Mapping[str, Any],
-    report_fields: Sequence[str],
     max_work_packages: int,
     max_microtasks_per_package: int,
     max_discovery_domains: int,
     question_option_schema: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Build the nine public contracts independently of internal handlers."""
+    """Build the nine fresh public contracts independently of handlers."""
     EXECUTED_TEST_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -145,111 +133,6 @@ def build_public_schemas(
             },
         },
         "required": ["command", "cwd", "exit_code", "evidence"],
-    }
-    V3_REPORT_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "description": f"Strict cortex/report/v1 object with exactly {len(report_fields)} fields. Review and close closure belongs beside this object, never inside it.",
-        "properties": {
-            "summary": {"type": "string", "minLength": 1},
-            "findings": {"type": "array"},
-            "questions": {
-                "type": "array",
-                "maxItems": 0,
-                "description": "Final reports must use the durable worker_question lifecycle and therefore contain questions=[].",
-            },
-            "changed_files": {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "description": "Safe project-relative paths only; put prose in findings or evidence.",
-            },
-            "tests": {
-                "type": "array",
-                "description": (
-                    "For implementation, QA, specialist checks, review, documentation, and close, each item must contain "
-                    "exactly command, cwd, exit_code, and evidence from an executed check."
-                ),
-                "items": EXECUTED_TEST_SCHEMA,
-            },
-            "evidence": {
-                "type": "array",
-                "minItems": 1,
-                "description": (
-                    "Evidence plus every exact generated Predecessor review:, Knowledge reviewed:, Gate acceptance:, "
-                    "Gate verification:, and close-level Task acceptance:/Task verification: marker from the briefing."
-                ),
-            },
-            "uncertainty": {"type": "array"},
-        },
-        "required": list(report_fields),
-    }
-    CLOSURE_FINDING_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "fingerprint": {"type": "string", "minLength": 1},
-            "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3", "info"]},
-            "status": {"type": "string", "enum": ["open", "resolved", "waived"]},
-            "blocking": {"type": "boolean"},
-            "summary": {"type": "string", "minLength": 1},
-            "details": {},
-            "waiver_reason": {"type": "string"},
-            "waived_by": {"type": "string"},
-            "waived_at": {"type": "string"},
-            "resolved_at": {"type": "string"},
-        },
-        "required": ["severity", "status", "blocking", "summary"],
-    }
-    CLOSURE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "description": "Legacy review/close input alias. New workers use only gate_result; Cortex never persists both.",
-        "properties": {
-            "decision": {"type": "string", "enum": ["pass", "rework", "fail"]},
-            "findings": {"type": "array", "items": CLOSURE_FINDING_SCHEMA},
-            "verification": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "executed": {"type": "array", "items": {"type": "string"}},
-                    "not_executed": {"type": "array", "items": {"type": "string"}},
-                    "required_missing": {"type": "array", "items": {"type": "string"}},
-                    "limitations": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["executed", "not_executed", "required_missing", "limitations"],
-            },
-            "workspace": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "modified": {"type": "array", "items": {"type": "string"}},
-                    "untracked": {"type": "array", "items": {"type": "string"}},
-                    "staged": {"type": "array", "items": {"type": "string"}},
-                    "committed": {"type": ["boolean", "string"], "enum": [True, False, "not_required"]},
-                },
-                "required": ["modified", "untracked", "staged", "committed"],
-            },
-        },
-        "required": ["decision", "findings", "verification", "workspace"],
-    }
-    GATE_RESULT_SCHEMA = {
-        **CLOSURE_SCHEMA,
-        "description": (
-            "Canonical optional result envelope. Review, governance activation, governance close, and final close "
-            "require it; other gates may include it. A pass has no open finding or missing required verification. "
-            "Only a fresh rerun of the gate that opened an inherited fingerprint, consuming its immutable origin and "
-            "a server-bound corrective report, may resolve it. The legacy closure "
-            "sibling remains an alias for review/close during the compatibility window."
-        ),
-        "properties": {
-            **CLOSURE_SCHEMA["properties"],
-            "decision": {"type": "string", "enum": ["pass", "rework", "fail", "blocked"]},
-            "failure_class": {
-                "type": "string",
-                "enum": ["product", "infrastructure", "environment", "policy", "worker"],
-            },
-        },
-        "required": ["decision", "failure_class", "findings", "verification", "workspace"],
     }
     PLANNING_STRING_LIST_SCHEMA = {
         "type": "array",
@@ -441,20 +324,20 @@ def build_public_schemas(
                 "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1},
                 "description": (
-                    "Optional exact prerequisite phases whose verified reports this worker must receive. "
-                    "Omit to receive every completed predecessor report; use an empty list only when the worker "
+                    "Optional exact prerequisite phases whose verified AttemptResults this worker must receive. "
+                    "Omit to receive every completed predecessor result; use an empty list only when the worker "
                     "is intentionally independent."
                 ),
             },
-            "context_report_ids": {
+            "context_result_refs": {
                 "type": "array",
                 "maxItems": 32,
                 "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1},
                 "description": (
-                    "Optional exact immutable report receipts that must be supplied to this worker. "
-                    "Use for corrective handoffs that must retain an origin report; Cortex validates that "
-                    "each receipt belongs to the current task before dispatch."
+                    "Optional exact immutable AttemptResult refs that must be supplied to this worker. "
+                    "Use for corrective handoffs that must retain an origin result; Cortex validates that "
+                    "each result belongs to the current task before dispatch."
                 ),
             },
             "model": {"type": "string", "description": "Optional expert override; luna, terra, and sol aliases are accepted."},
@@ -498,8 +381,8 @@ def build_public_schemas(
                 "additionalProperties": False,
                 "properties": {
                     "user_request": {"type": "string", "minLength": 1, "description": "Exact user-authored task text. Do not paraphrase, normalize, or expand it."},
-                    "objective": {"type": "string", "minLength": 1, "description": "Deprecated exact mirror of user_request. Omit it; when supplied it must match user_request byte-for-byte after trimming."},
                     "requirements": {"type": "array", "items": {"type": "string"}},
+                    "constraints": {"type": "array", "items": {"type": "string"}, "description": "Explicit non-negotiable task constraints compiled as first-class canonical context."},
                     "acceptance_criteria": {
                         "type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1},
                         "description": "Required observable outcomes, except harvest routes where Cortex supplies the exhaustive census contract.",
@@ -538,7 +421,7 @@ def build_public_schemas(
                     "replan_limit": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "Deprecated compatibility field retained in persisted tasks. It is audit metadata, not a lifetime execution cap; evidence-backed public replans are not blocked by it.",
+                        "description": "Historical task metadata. It is not a lifetime execution cap; evidence-backed public replans are not blocked by it.",
                     },
                 },
                 "required": ["user_request"],
@@ -576,7 +459,7 @@ def build_public_schemas(
                     "additionalProperties": False,
                     "properties": {
                         "worker": {"type": "integer", "minimum": 1, "description": "Required only for a parallel wave."},
-                        "report_ref": {"type": "string", "minLength": 1, "description": "Compact ref returned by the worker's record_report call. Successful public continuation uses this field, never an inline report body."},
+                        "attempt_result_ref": {"type": "string", "minLength": 1, "description": "Bare canonical result ref from read_worker_result.continuation.results; never a projection_ref or formatted attempt_result_ref=<id> string. Successful continuation never accepts an inline worker result body."},
                         "dispatch_ref": {"type": "string", "minLength": 1, "description": "Exact dispatch ref returned by Cortex; required only for a non-success result so stale failures cannot target a replacement attempt."},
                         "status": {"type": "string", "description": "Omit for success; human aliases are accepted for non-success."},
                         "reason": {"type": "string", "description": "Required for a non-success result."},
@@ -593,79 +476,60 @@ def build_public_schemas(
             "rework": {
                 "type": "boolean",
                 "default": False,
-                "description": "Optional compatibility hint. Cortex automatically infers rework when future_waves reintroduces a current or completed phase.",
+                "description": "Optional rework hint. Cortex automatically infers rework when future_waves reintroduces a current or completed phase.",
             },
             "reason": {"type": "string"},
         },
         "required": ["project_root", "step", "results"],
     }
-    WORKER_RECORD_REPORT_SCHEMA = {
+    WORKER_RECORD_ATTEMPT_EVENT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": f"Worker report request. Normal finalization sends draft_ref after editing the private file returned by get_report_template. A complete {len(report_fields)}-field replacement belongs in `report`; a small JSON Merge Patch belongs in `patch`. Cortex validates and persists in one atomic operation; invalid drafts remain editable. task_ref, dispatch_ref, and submission_id are coordinator transport fields and are never accepted here.",
-        "properties": {
-            "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project_root from this worker's Cortex briefing."},
-            "task_id": {"type": "string", "minLength": 1, "description": "Exact task_id from this worker's Cortex briefing; never omit or guess it."},
-            "attempt_id": {"type": "string", "minLength": 1, "description": "Exact attempt_id from this worker's Cortex briefing; never substitute a phase or profile."},
-            "profile": {"type": "string", "enum": sorted(agents), "description": "Exact canonical profile from this worker's Cortex briefing."},
-            "draft_ref": {
-                "type": "string",
-                "pattern": "^draft-[0-9a-f]{32}$",
-                "description": "Short reference for the task-scoped temporary report file created by get_report_template.",
-            },
-            "patch": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "report": {},
-                    "scoping": {},
-                    "planning": {},
-                    "gate_result": {},
-                    "closure": {},
-                },
-                "description": "Optional RFC 7396 JSON Merge Patch limited to report, scoping, planning, gate_result, and closure. It is valid only with draft_ref; do not combine it with a complete report replacement.",
-            },
-            "report": V3_REPORT_SCHEMA,
-            "gate_result": GATE_RESULT_SCHEMA,
-            "closure": CLOSURE_SCHEMA,
-            "scoping": V3_SCOPING_SCHEMA,
-            "planning": V3_PLANNING_SCHEMA,
-        },
-        "required": ["project_root", "task_id", "attempt_id", "profile"],
-        "oneOf": [
-            {
-                "required": ["draft_ref"],
-                "not": {
-                    "anyOf": [
-                        {"required": ["report"]},
-                        {"required": ["scoping"]},
-                        {"required": ["planning"]},
-                        {"required": ["gate_result"]},
-                        {"required": ["closure"]},
-                    ],
-                },
-            },
-            {
-                "required": ["report"],
-                "not": {
-                    "anyOf": [
-                        {"required": ["draft_ref"]},
-                        {"required": ["patch"]},
-                    ],
-                },
-            },
-        ],
-    }
-    WORKER_GET_REPORT_TEMPLATE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
+        "description": "Append one bounded semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned.",
         "properties": {
             "project_root": {"type": "string", "minLength": 1},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
             "profile": {"type": "string", "enum": sorted(agents)},
+            "event_type": {
+                "type": "string",
+                "enum": ["finding_added", "decision_evidence", "blocker", "verification_claimed", "progress", "note"],
+            },
+            "payload": {
+                "description": "Bounded worker semantic fact. Use verification_claimed for a worker assertion; only Cortex records verification_observed after a trusted server-side observation.",
+            },
+            "event_key": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "description": "Optional stable idempotency key for this fact; Cortex derives one from content when omitted.",
+            },
         },
-        "required": ["project_root", "task_id", "attempt_id", "profile"],
+        "required": ["project_root", "task_id", "attempt_id", "profile", "event_type", "payload"],
+    }
+    WORKER_COMPLETE_ATTEMPT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Persist the minimal semantic AttemptResult, then let Cortex finalize server-owned receipts, workspace observations, and a regenerated non-authoritative result view on the same attempt.",
+        "properties": {
+            "project_root": {"type": "string", "minLength": 1},
+            "task_id": {"type": "string", "minLength": 1},
+            "attempt_id": {"type": "string", "minLength": 1},
+            "profile": {"type": "string", "enum": sorted(agents)},
+            "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 16000},
+            "findings": {"type": "array", "maxItems": 256},
+            "decisions_needed": {"type": "array", "maxItems": 256},
+            "unresolved": {"type": "array", "maxItems": 256},
+            "claims": {
+                "type": "array",
+                "maxItems": 256,
+                "description": "Optional semantic criterion/evidence claims; Cortex maps them into generated acceptance projections without treating them as identity or telemetry.",
+            },
+        },
+        "required": [
+            "project_root", "task_id", "attempt_id", "profile", "status", "summary",
+            "findings", "decisions_needed", "unresolved",
+        ],
     }
     WORKER_QUESTION_SCHEMA = {
         "type": "object",
@@ -719,19 +583,17 @@ def build_public_schemas(
         },
         "required": ["project_root", "task_id", "attempt_id", "profile", "action"],
     }
-    READ_WORKER_REPORT_SCHEMA = {
+    READ_WORKER_RESULT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1},
-            "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every report read."},
-            "report_ref": {"type": "string", "minLength": 1},
+            "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every result read."},
+            "attempt_result_ref": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
             "profile": {"type": "string", "enum": sorted(agents), "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
-            "cursor": {"type": "string", "description": "Opaque cursor returned for a large scoped report. It is bound to the report digest, task, and reader scope."},
-            "max_bytes": {"type": "integer", "minimum": 1, "description": "Requested UTF-8 report-part size. Values above the safe 32768-byte transport bound are normalized to 32768 and continued with next_cursor."},
         },
-        "required": ["project_root", "report_ref"],
+        "required": ["project_root", "task_ref", "attempt_result_ref"],
     }
     READ_DISPATCH_BRIEFING_SCHEMA = {
         "type": "object",
@@ -755,8 +617,8 @@ def build_public_schemas(
         "additionalProperties": False,
         "properties": {
             "project_root": {"type": "string", "minLength": 1, "description": "Exact absolute project workspace."},
-            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect (read-only), recover_inspect (explicit lifecycle repair named by inspect), resume, deactivate, follow_up, artifacts, lane, resource, question, prune, legacy, or maintenance; common aliases are normalized."},
-            "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune, legacy, and maintenance omit it."},
+            "intent": {"type": "string", "description": "Recovery or maintenance intent such as inspect (read-only), recover_inspect (explicit lifecycle repair named by inspect), resume, deactivate, follow_up, artifacts, lane, resource, question, prune, or maintenance."},
+            "task_ref": {"type": "string", "description": "Exact opaque task reference required for every task-scoped intent. Only prune and maintenance omit it."},
             "reason": {"type": "string"},
             "payload": {
                 "type": "object",
@@ -765,19 +627,18 @@ def build_public_schemas(
                     "cortex/chat-interaction/v1 plan summary with approve, revise, and cancel meanings plus an explicit "
                     "LLM recommendation. Render it as the final ordinary chat message and end the turn. The user's next "
                     "message must be submitted with the exact request_id; preserve revision feedback verbatim. For intent=follow_up, use the completed source task_ref and an exact "
-                    "corrective user_request; optional report_refs select source report context. For intent=question normal usage is exactly "
+                    "corrective user_request; optional source_result_refs select canonical result context. For intent=question normal usage is exactly "
                     "{question_ref: '<worker ref>'} plus optional localized display labels. Cortex returns one detailed "
                     "ordinary-chat interaction containing context, consequences, options, and the mandatory LLM recommendation. For batch localization, "
                     "each ordered item uses localized_question, localized_header, localized_options, and optional "
-                    "localized_custom_label; question/header/options/custom_label remain compatibility aliases. Every question "
+                    "localized_custom_label. Every question "
                     "and option must be self-contained and outcome-specific; generic numbered or recommended/alternative "
                     "placeholders are rejected. If Cortex returns "
                     "awaiting_translation, submit its translation_request unchanged except for the English translation: "
                     "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
                     "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after an exhausted closure-rework cycle, payload.future_waves must begin with a Planner recovery wave; Cortex infers rework and records the replacement before dispatch. When several no-progress gates are paused, payload.rework names the exact gate to release. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
-                    "and accepts older_than_days (default 7). Legacy accepts action=inventory|archive|delete; delete "
-                    "requires the exact archive-specific confirmation returned by archive. Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
+                    "and accepts older_than_days (default 7). Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
                 ),
             },
         },
@@ -846,20 +707,15 @@ def build_public_schemas(
     }
 
     return {
-        "v3_report": V3_REPORT_SCHEMA,
-        "v3_scoping": V3_SCOPING_SCHEMA,
-        "v3_planning": V3_PLANNING_SCHEMA,
-        "v3_worker": V3_WORKER_SCHEMA,
-        "v3_wave": V3_WAVE_SCHEMA,
         "start_orchestration": START_ORCHESTRATION_SCHEMA,
         "continue_orchestration": CONTINUE_ORCHESTRATION_SCHEMA,
         "manage_orchestration": MANAGE_ORCHESTRATION_SCHEMA,
         "manage_governance": MANAGE_GOVERNANCE_SCHEMA,
         "worker_question": WORKER_QUESTION_SCHEMA,
-        "get_report_template": WORKER_GET_REPORT_TEMPLATE_SCHEMA,
-        "record_report": WORKER_RECORD_REPORT_SCHEMA,
+        "record_attempt_event": WORKER_RECORD_ATTEMPT_EVENT_SCHEMA,
+        "complete_attempt": WORKER_COMPLETE_ATTEMPT_SCHEMA,
         "read_dispatch_briefing": READ_DISPATCH_BRIEFING_SCHEMA,
-        "read_worker_report": READ_WORKER_REPORT_SCHEMA,
+        "read_worker_result": READ_WORKER_RESULT_SCHEMA,
     }
 
 
@@ -962,21 +818,21 @@ def v3_response(
         )
         next_action = (
             f"{coordinator_lock}{start_transition} NEXT REQUIRED ACTION: FIRST close every known completed child whose "
-            "durable report was read or whose exact failed result Cortex already accepted; never close a running or "
+            "canonical AttemptResult was read or whose exact failed result Cortex already accepted; never close a running or "
             "question-paused child. If recovery may have missed one, use list_agents defensively. THEN call every "
             "dispatch.call exactly once with its exact dispatch.arguments. Until every returned dispatch has been "
             "invoked, do not call start_orchestration, continue_orchestration, manage_orchestration, inspect, or wait. "
             "A worker exists only after the native call returns a child target. Never claim it was sent or call wait "
             "without the returned child target. Wait only for those targets. Each worker must publish through "
-            "record_report. Read every returned report_ref, then close that exact completed native child with close_agent. "
-            "Only after every report is durably read and every eligible child is closed, call "
-            f"continue_orchestration with task_ref={task_ref}, those report_ref values, and this step."
+            "complete_attempt. Read every returned attempt_result_ref with read_worker_result, then close that exact completed native child with close_agent. "
+            "Only after every result is durably read and every eligible child is closed, copy the returned "
+            "read_worker_result.continuation.step and continuation.results verbatim into continue_orchestration; "
+            "never increment its step or substitute a projection_ref/formatted reference."
         )
     elif outcome == "awaiting_plan_approval":
         next_action = (
-            f"{coordinator_lock} Read plan_review.report_ref with read_worker_report after the Planner completes. "
-            "Publish its link only if publication_required=true and include the completion summary and next step in "
-            "that same main-chat message; never republish on reread. Then call manage_orchestration with "
+            f"{coordinator_lock} Read the Planner's attempt_result_ref with read_worker_result after it completes. "
+            "Use its generated result view only as a non-authoritative display projection. Then call manage_orchestration with "
             "intent=plan_approval and payload.decision=prompt. Render its chat_interaction completely as one final "
             "ordinary user-language message: objective, work packages, paths, dependencies, verification, risks, "
             "remaining phases, all approve/revise/cancel meanings, and the visibly labelled LLM recommendation with "
@@ -985,7 +841,7 @@ def v3_response(
         )
     elif outcome == "completion_pending":
         pending = (
-            old.get("result", {}).get("pending_report_completions", [])
+            old.get("result", {}).get("pending_result_completions", [])
             if isinstance(old.get("result"), dict) else []
         )
         selections = []
@@ -993,28 +849,28 @@ def v3_response(
             if not isinstance(item, dict):
                 continue
             slot = item.get("worker")
-            refs = [str(ref) for ref in item.get("candidate_report_refs", []) if str(ref).strip()]
+            refs = [str(ref) for ref in item.get("candidate_attempt_result_refs", []) if str(ref).strip()]
             if slot and refs:
                 selections.append(f"worker={slot}: " + ", ".join(refs))
         next_action = (
-            f"{coordinator_lock} A native worker already stopped after recording durable reports; it is not a live "
-            "child. Never wait on or respawn it; never resume it. Read the candidate report refs, then explicitly select "
-            "exactly one receipt-validated report_ref for each listed worker slot and call continue_orchestration "
-            f"once for task_ref={task_ref} and this step. Cortex will reject a superseded planner report before any "
+            f"{coordinator_lock} A native worker already stopped after recording a durable AttemptResult; it is not a live "
+            "child. Never wait on, respawn, or resume it. Read the candidate AttemptResult refs, then explicitly select "
+            "exactly one identity-validated attempt_result_ref for each listed worker slot and call continue_orchestration "
+            f"once for task_ref={task_ref} and this step. Cortex rejects a superseded canonical result before any "
             "state mutation. Candidates: "
-            + ("; ".join(selections) if selections else "none validated; inspect the reported receipt mismatch and do not fabricate a result.")
+            + ("; ".join(selections) if selections else "none validated; inspect the canonical result mismatch and do not fabricate a result.")
         )
     elif outcome == "completed":
         next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
     elif outcome == "blocked":
-        reported_recovery = (
-            old.get("result", {}).get("reported_attempt_recovery")
+        stopped_result_recovery = (
+            old.get("result", {}).get("stopped_result_recovery")
             if isinstance(old.get("result"), dict) else None
         )
-        if isinstance(reported_recovery, dict):
+        if isinstance(stopped_result_recovery, dict):
             next_action = (
-                f"{coordinator_lock} The stopped worker's persisted reports cannot be safely consumed. Never wait on or "
-                "respawn it; never resume or manually edit that child/ledger state. Resume the blocked task only through "
+                f"{coordinator_lock} The stopped worker has no usable canonical AttemptResult. Never wait on, "
+                "respawn, resume, or manually edit that child/ledger state. Resume the blocked task only through "
                 "manage_orchestration intent=resume; Cortex will issue a fresh Planner-first dispatch."
             )
         else:
@@ -1034,16 +890,7 @@ def v3_response(
         stopped_workers = [
             item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
         ]
-        stopped_report_refs = [
-            str(report_ref)
-            for item in stopped_workers
-            for report_ref in item.get("report_refs", [])
-            if str(report_ref or "").strip()
-        ]
-        resumable_workers = [
-            item for item in stopped_workers
-            if item.get("resumable") and str(item.get("host_agent_id") or "").strip()
-        ]
+        finalization_pending = [item for item in stopped_workers if item.get("finalization_pending")]
         terminal_failures = [
             item for item in stopped_workers
             if item.get("failure_status") == "failed"
@@ -1052,147 +899,45 @@ def v3_response(
         if outcome == "completion_pending" or (
             outcome == "blocked"
             and isinstance(old.get("result"), dict)
-            and isinstance(old["result"].get("reported_attempt_recovery"), dict)
+            and isinstance(old["result"].get("stopped_result_recovery"), dict)
         ):
-            # The candidate list above is intentionally more restrictive than
-            # generic stopped-worker prose: each eventual continuation must
-            # select one receipt-attested report for its worker slot.
             pass
-        elif outcome == "waiting_workers":
-            if active_worker_ids:
-                terminal_failure_targets = "; ".join(
+        elif outcome == "waiting_workers" and active_worker_ids:
+            failed_result_clause = ""
+            if terminal_failures:
+                targets = "; ".join(
                     f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
                     for item in terminal_failures
                 )
-                stopped_report_clause = (
-                    " Also read and publish these persisted report refs before continuing: "
-                    + ", ".join(stopped_report_refs)
-                    + "."
-                    if stopped_report_refs
-                    else ""
-                )
-                failed_result_clause = (
-                    " Include exactly one failed result for each stopped slot when you continue: "
-                    + terminal_failure_targets
-                    + "."
-                    if terminal_failure_targets
-                    else ""
-                )
-                next_action = (
-                    f"{coordinator_lock} Rehydrate from result.context_handoff. Do not restart, replay, or respawn "
-                    "the running attempts. Wait only on these exact persisted native child ids: "
-                    + ", ".join(active_worker_ids)
-                    + ". After completion, read and validate their report refs before continuing Cortex."
-                    + stopped_report_clause
-                    + failed_result_clause
-                )
-            elif any(item.get("question_refs") for item in stopped_workers):
-                waiting_questions = [
-                    str(question_ref)
-                    for item in stopped_workers
-                    for question_ref in item.get("question_refs", [])
-                    if str(question_ref or "").strip()
-                ]
-                next_action = (
-                    f"{coordinator_lock} The worker is paused on a durable question, not running. Never wait on or "
-                    "respawn it. First publish the worker's complete decision handoff as a detailed user-language "
-                    "commentary preamble, then surface the self-contained question through "
-                    "manage_orchestration(intent=question): "
-                    + ", ".join(waiting_questions) + "."
-                )
-            elif stopped_workers and all(item.get("report_refs") for item in stopped_workers):
-                next_action = (
-                    f"{coordinator_lock} Recovery found stopped workers with persisted reports, not running "
-                    "children. Never wait on or respawn them. Read and publish these report refs, then call "
-                    "continue_orchestration for the current step: " + ", ".join(stopped_report_refs) + "."
-                )
-            elif terminal_failures:
-                failure_targets = "; ".join(
-                    f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
-                    for item in terminal_failures
-                )
-                report_clause = (
-                    " Read and publish these persisted report refs before continuing: "
-                    + ", ".join(stopped_report_refs)
-                    + "."
-                    if stopped_report_refs
-                    else ""
-                )
-                next_action = (
-                    f"{coordinator_lock} Recovery found a terminal stopped worker without a report. Never wait on, "
-                    "follow up, or respawn the stopped child. Submit exactly one failed result for the current "
-                    "step using: " + failure_targets + "; Cortex will continue unbounded corrective rework while "
-                    "raising reasoning effort after repeated failures."
-                    + report_clause
-                )
-            elif resumable_workers:
-                resume_targets = [str(item["host_agent_id"]) for item in resumable_workers]
-                next_action = (
-                    f"{coordinator_lock} Recovery found a stopped but addressable worker. Do not spawn a replacement "
-                    "and do not wait on the stopped child. Resume the exact persisted worker with followup_task "
-                    "targeting: " + ", ".join(resume_targets) + "."
-                )
-            else:
-                next_action = (
-                    f"{coordinator_lock} Recovery found a running attempt without a persisted native child id. "
-                    "Fail closed: do not respawn, do not call an empty wait, and report the host-binding blocker."
-                )
-        elif stopped_workers:
-            waiting_questions = [
-                str(question_ref)
-                for item in stopped_workers
-                for question_ref in item.get("question_refs", [])
-                if str(question_ref or "").strip()
-            ]
-            if waiting_questions:
-                next_action = (
-                    f"{coordinator_lock} Never wait on or respawn the paused worker. First publish the worker's "
-                    "complete decision handoff as a detailed user-language commentary preamble, then surface and "
-                    "answer the durable question through manage_orchestration(intent=question): "
-                    + ", ".join(waiting_questions)
-                    + ". Then resume the same persisted host_agent_id with followup_task."
-                )
-            elif all(item.get("report_refs") for item in stopped_workers):
-                next_action = (
-                    f"{coordinator_lock} Never wait on or respawn the stopped worker. Read and publish these "
-                    "persisted report refs, then continue the current step: " + ", ".join(stopped_report_refs) + "."
-                )
-            elif terminal_failures:
-                failure_targets = "; ".join(
-                    f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
-                    for item in terminal_failures
-                )
-                report_clause = (
-                    " Read and publish these persisted report refs before continuing: "
-                    + ", ".join(stopped_report_refs)
-                    + "."
-                    if stopped_report_refs
-                    else ""
-                )
-                next_action = (
-                    f"{coordinator_lock} Recovery found a terminal stopped worker without a report. Never wait on, "
-                    "follow up, or respawn the stopped child. Submit exactly one failed result for the current "
-                    "step using: " + failure_targets + "; Cortex will continue unbounded corrective rework while "
-                    "raising reasoning effort after repeated failures."
-                    + report_clause
-                )
-            elif resumable_workers:
-                resume_targets = [str(item["host_agent_id"]) for item in resumable_workers]
-                next_action = (
-                    f"{coordinator_lock} The native worker stopped before recording a report but remains addressable. "
-                    "Do not mark the attempt failed and do not spawn a replacement. Resume it with followup_task "
-                    "using the exact persisted target: " + ", ".join(resume_targets) + "."
-                )
-            else:
-                next_action = (
-                    f"{coordinator_lock} Recovery found stopped worker state without a report or an addressable host "
-                    "identity. Fail closed: do not respawn or fabricate a failed receipt; report the host-binding blocker."
-                )
+                failed_result_clause = " Include exactly one failed result for each stopped slot when continuing: " + targets + "."
+            next_action = (
+                f"{coordinator_lock} Rehydrate only from result.context_handoff. Do not restart, replay, or respawn "
+                "running attempts. Wait only on these exact persisted native child ids: "
+                + ", ".join(active_worker_ids)
+                + ". After completion, read each canonical AttemptResult with read_worker_result; the server records the "
+                "machine read receipt before you continue Cortex."
+                + failed_result_clause
+            )
+        elif finalization_pending:
+            next_action = (
+                f"{coordinator_lock} A stopped worker already has a canonical AttemptResult but finalization remains pending. "
+                "Do not wait on, respawn, or replace it. Inspect once, then retry complete_attempt only for that exact persisted attempt."
+            )
+        elif terminal_failures:
+            failure_targets = "; ".join(
+                f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
+                for item in terminal_failures
+            )
+            next_action = (
+                f"{coordinator_lock} Recovery found a terminal stopped worker without an AttemptResult. Never wait on, "
+                "follow up, or respawn the stopped child. Submit exactly one failed result for the current step using: "
+                + failure_targets + "; Cortex will continue unbounded corrective rework while raising reasoning effort after repeated failures."
+            )
         else:
             next_action = (
-                f"{coordinator_lock} Rehydrate from result.context_handoff before continuing. "
-                "It is the durable post-compaction state and protocol snapshot; do not restart the task or replay "
-                "completed dispatches. Then " + next_action
+                f"{coordinator_lock} Rehydrate only from result.context_handoff before continuing. "
+                "It is the durable post-compaction state and target-handoff snapshot; do not restart the task or replay completed dispatches. Then "
+                + next_action
             )
     response = {
         "schema": public_schema,
@@ -1327,9 +1072,8 @@ def configure_internal_schemas(tools: dict[str, tuple[Callable[..., Any], dict[s
     )
     tools["record_delegation"][1]["properties"]["luna_fallback"]["default"] = "terra"
     authorized = {
-        "init_task", "get_task_status", "record_delegation", "prepare_delegation", "prepare_delegations", "confirm_host_spawn", "finalize_attempt", "complete_attempt", "record_evidence", "execute_verification_command",
-        "record_report", "cortex.question", "publish_worker_question", "list_worker_questions", "answer_worker_question", "get_worker_question_updates",
-        "list_task_reports", "get_delegation_reports", "reconcile_report_bus", "close_audit",
+        "init_task", "get_task_status", "record_delegation", "prepare_delegation", "prepare_delegations", "confirm_host_spawn", "finalize_attempt", "record_evidence", "execute_verification_command",
+        "cortex.question", "publish_worker_question", "list_worker_questions", "answer_worker_question", "get_worker_question_updates",
         "record_gate_outcome", "commit_gate", "resume_task", "update_pipeline", "reassess_pipeline", "acquire_lock", "release_lock",
         "create_handoff", "claim_resource", "release_resource",
         "create_lane", "get_lane_status", "claim_lane", "release_lane", "retire_lane", "bind_task_lane",
@@ -1370,28 +1114,28 @@ def public_tools(
     *,
     worker_question: Callable[..., Any],
     worker_question_schema: dict[str, Any],
-    get_report_template: Callable[..., Any],
-    get_report_template_schema: dict[str, Any],
-    record_report: Callable[..., Any],
-    record_report_schema: dict[str, Any],
+    record_attempt_event: Callable[..., Any],
+    record_attempt_event_schema: dict[str, Any],
+    complete_attempt: Callable[..., Any],
+    complete_attempt_schema: dict[str, Any],
     read_dispatch_briefing: Callable[..., Any],
     read_dispatch_briefing_schema: dict[str, Any],
-    read_worker_report: Callable[..., Any],
-    read_worker_report_schema: dict[str, Any],
+    read_worker_result: Callable[..., Any],
+    read_worker_result_schema: dict[str, Any],
     manage_governance: Callable[..., Any],
     manage_governance_schema: dict[str, Any],
 ) -> dict[str, tuple[Callable[..., Any], dict[str, Any]]]:
-    """Return the only nine MCP operations exposed to hosts and workers."""
+    """Return the fresh-only nine-operation public registry."""
     return {
         "start_orchestration": internal_handlers["start_orchestration"],
         "continue_orchestration": internal_handlers["continue_orchestration"],
         "manage_orchestration": internal_handlers["manage_orchestration"],
         "manage_governance": (manage_governance, manage_governance_schema),
         "worker_question": (worker_question, worker_question_schema),
-        "get_report_template": (get_report_template, get_report_template_schema),
-        "record_report": (record_report, record_report_schema),
+        "record_attempt_event": (record_attempt_event, record_attempt_event_schema),
+        "complete_attempt": (complete_attempt, complete_attempt_schema),
         "read_dispatch_briefing": (read_dispatch_briefing, read_dispatch_briefing_schema),
-        "read_worker_report": (read_worker_report, read_worker_report_schema),
+        "read_worker_result": (read_worker_result, read_worker_result_schema),
     }
 
 
@@ -1404,10 +1148,8 @@ def public_tools_for_audience(
     ``audience`` is intentionally not accepted from JSON-RPC initialization or
     individual tool arguments: those values are controlled by the caller and
     cannot establish a privilege boundary.  The host selects it before the
-    process starts.  Unknown/missing audiences use the compatibility
-    projection so ordinary Desktop skill activation remains operable; hosts
-    that need strict role separation must select ``worker`` or
-    ``coordinator`` explicitly.
+    process starts.  Unknown/missing audiences use the default fresh union;
+    hosts that need role separation select ``worker`` or ``coordinator``.
     """
     selected = str(audience or "").strip().lower()
     if selected == "coordinator":
@@ -1415,7 +1157,7 @@ def public_tools_for_audience(
     elif selected == "worker":
         names = WORKER_PUBLIC_TOOL_NAMES
     else:
-        names = COMPAT_PUBLIC_TOOL_NAMES
+        names = DEFAULT_PUBLIC_TOOL_NAMES
     return {
         name: all_public_tools[name]
         for name in names

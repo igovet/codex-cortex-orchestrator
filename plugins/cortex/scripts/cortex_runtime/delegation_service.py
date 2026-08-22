@@ -30,17 +30,13 @@ bind_symbols(
         "QUESTION_SCHEMA",
         "REWORK_EFFORT_BY_PRIOR_FAILURES",
         "REWORK_TERRA_AFTER_FAILURES",
-        "REPORT_SCHEMA",
         "SCHEMA",
         "_contained_path",
-        "_delegation_report_index",
         "_is_knowledge_harvest_task",
         "_project_knowledge_context",
-        "_report_index",
         "_resolved_user_decisions",
         "_v3_task_ref",
         "_write_delegation_package",
-        "_write_delegation_report_index",
         "active_gates",
         "authorize",
         "canonical_profile",
@@ -58,7 +54,6 @@ bind_symbols(
         "profiles_for_gate",
         "redact",
         "render_gate_briefing",
-        "report_bus_paths",
         "resolve_dispatch_route",
         "safe_id",
         "sanitize_structured",
@@ -74,25 +69,137 @@ bind_symbols(
 )
 from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
 from cortex_runtime.ledger_db import fail_projection_job, list_projection_jobs, get_task_document as db_get_task_document
+from cortex_runtime import attempt_protocol
+from cortex_runtime.context_compiler import MAX_PREDECESSORS
 
 
-def _bounded_text_items(value: object, *, limit: int, item_chars: int) -> list[str]:
-    """Project scalar-or-list task text without iterating scalar strings.
-
-    Task definitions created by older callers may contain one textual scope
-    instead of the current array shape.  Treat that value as one atomic item
-    while keeping malformed persisted values bounded and harmless.
-    """
+def _canonical_text_items(
+    value: object,
+    *,
+    field: str,
+    limit: int,
+    item_chars: int,
+) -> list[str]:
+    """Validate and bound a current canonical task text-array field."""
     if value is None:
         return []
-    values = [value] if isinstance(value, str) else value
-    if not isinstance(values, list):
-        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(f"{field} must be a current canonical text array")
     return [
         redact(item, item_chars)
-        for item in values
-        if isinstance(item, str) and item.strip()
+        for item in value
     ][:limit]
+
+
+def _semantic_finding_text(value: object) -> str:
+    """Select the short semantic fact from a canonical result/event value."""
+    if isinstance(value, dict):
+        value = (
+            value.get("summary")
+            or value.get("message")
+            or value.get("finding")
+            or value.get("detail")
+            or ""
+        )
+    return redact(value, 500)
+
+
+def _canonical_verification_checks(root: Path, task_id: str, attempt_id: str) -> list[str]:
+    """Project only command/exit facts from AttemptEvent verification rows."""
+    checks: list[str] = []
+    for event in attempt_protocol.list_attempt_events(
+        root, task_id=task_id, attempt_id=attempt_id, limit=32,
+    ):
+        if event.get("event_type") != "verification_observed" or event.get("actor") != "cortex":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        candidates = payload.get("tests") if isinstance(payload.get("tests"), list) else [payload]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            command = redact(candidate.get("command") or candidate.get("check") or "", 420)
+            if not command:
+                continue
+            exit_code = candidate.get("exit_code")
+            rendered = f"{command} (exit {exit_code})" if isinstance(exit_code, int) and not isinstance(exit_code, bool) else command
+            if rendered not in checks:
+                checks.append(rendered)
+            if len(checks) >= 8:
+                return checks
+    return checks
+
+
+def _bounded_predecessor_results(
+    root: Path,
+    task_id: str,
+    attempts: object,
+    context_result_refs: list[str],
+) -> list[dict[str, Any]]:
+    """Build the dispatch's semantic predecessor basis from canonical facts.
+
+    An AttemptResult plus its bounded AttemptEvent stream is the only source.
+    Result refs are server-issued and mapped back to the exact persisted
+    attempt before a semantic projection is constructed.  Generated views
+    and indexes never contribute predecessor context.
+    """
+    result_attempts: dict[str, dict[str, Any]] = {}
+    if isinstance(attempts, list):
+        for item in attempts:
+            if not isinstance(item, dict):
+                continue
+            raw_result_ref = str(item.get("attempt_result_ref") or "").strip()
+            if not raw_result_ref:
+                continue
+            result_attempts[safe_id(raw_result_ref)] = item
+    results: list[dict[str, Any]] = []
+    for result_ref in context_result_refs[:MAX_PREDECESSORS]:
+        attempt = result_attempts.get(result_ref)
+        if not isinstance(attempt, dict):
+            raise ValueError("context_result_refs must name completed canonical AttemptResults from this task")
+        attempt_id = safe_id(str(attempt.get("attempt_id") or ""))
+        canonical = attempt_protocol.get_attempt_result(
+            root, task_id=task_id, attempt_id=attempt_id,
+        ) if attempt_id else None
+        if (
+            canonical is None
+            or safe_id(str(canonical.get("result_ref") or "")) != result_ref
+            or str(canonical.get("lifecycle_status") or "") != attempt_protocol.LIFECYCLE_COMPLETED
+        ):
+            raise ValueError("context_result_refs must name finalized canonical AttemptResults from this task")
+        result_metadata = canonical.get("metadata") if isinstance(canonical.get("metadata"), dict) else {}
+        identity = result_metadata.get("identity") if isinstance(result_metadata.get("identity"), dict) else {}
+        findings = [
+            _semantic_finding_text(item)
+            for item in [*(canonical.get("unresolved") or []), *(canonical.get("findings") or [])]
+        ]
+        semantic_events = [
+            {
+                "event_type": event["event_type"],
+                "actor": event["actor"],
+                "payload": event["payload"],
+            }
+            for event in attempt_protocol.list_attempt_events(root, task_id=task_id, attempt_id=attempt_id, limit=64)
+            if event.get("actor") == "cortex" and event.get("event_type") in {
+                "question_created", "question_answered", "decision_resolved",
+            }
+        ]
+        results.append({
+            "result_ref": result_ref,
+            "attempt_id": attempt_id,
+            "gate": redact(result_metadata.get("phase") or attempt.get("gate") or "", 80),
+            "profile": redact(identity.get("profile") or attempt.get("profile") or "", 120),
+            "summary": redact(canonical.get("summary") or "", 1200),
+            "changed_files": _canonical_text_items(
+                canonical.get("changed_files"), field="AttemptResult changed_files", limit=24, item_chars=300,
+            ),
+            "checks": _canonical_verification_checks(root, task_id, attempt_id),
+            "unresolved_findings": [item for item in findings if item][:8],
+            "semantic_events": semantic_events[:16],
+            "semantic_source": "attempt_result",
+        })
+    return results
 
 
 def _next_attempt_id(state: dict[str, Any], task_dir: Path, gate: str) -> str:
@@ -158,8 +265,8 @@ def _durable_spawn_request(request: dict[str, Any]) -> dict[str, Any]:
     """Keep host-private artifact paths out of durable attempt state.
 
     The host payload is a one-shot projection.  Persisting its rendered
-    message used to retain absolute host-control paths, so an atomically
-    relocated legacy ledger could replay a stale path after recovery.  The
+    message used to retain absolute host-control paths, so a relocated ledger
+    could replay a stale path after recovery.  The
     immutable dispatch identity below is enough to recreate the transport
     payload against the current ledger root.
     """
@@ -328,7 +435,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             recorded_failures,
             max(active_rework_iterations, default=0),
         )
-        briefing = render_gate_briefing(gate, task_definition.get("objective", ""), agent)
+        briefing = render_gate_briefing(gate, task_definition.get("user_request", ""), agent)
         ownership = str(params.get("ownership", "")).strip() or briefing["ownership"]
         objective = str(params.get("objective", "")).strip() or briefing["objective"]
         requested_task_kind = str(params.get("task_kind") or "").strip()
@@ -382,19 +489,32 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             ),
         }
         required_lists = delegation_lists(params, task_definition, briefing)
-        context_report_ids = [safe_id(str(item)) for item in params.get("context_report_ids", [])]
-        report_paths = report_bus_paths(task_dir)
-        available_reports = {item["report_id"] for item in _report_index(report_paths, state["task_id"]).get("reports", [])}
-        if len(context_report_ids) != len(set(context_report_ids)) or not set(context_report_ids).issubset(available_reports):
-            raise ValueError("context_report_ids must be unique reports from this task")
+        context_result_refs = [safe_id(str(item)) for item in params.get("context_result_refs", [])]
+        available_results: set[str] = set()
+        for item in state.get("attempts", []):
+            if not isinstance(item, dict):
+                continue
+            raw_result_ref = str(item.get("attempt_result_ref") or "").strip()
+            if raw_result_ref:
+                available_results.add(safe_id(raw_result_ref))
+        if (
+            len(context_result_refs) != len(set(context_result_refs))
+            or not set(context_result_refs).issubset(available_results)
+        ):
+            raise ValueError("context_result_refs must be unique finalized AttemptResults from this task")
+        predecessor_results = _bounded_predecessor_results(
+            root,
+            state["task_id"],
+            state.get("attempts"),
+            context_result_refs,
+        )
         all_resolved_user_decisions = _resolved_user_decisions(task_dir, state)
         resolved_user_decisions_digest = digest_text(json.dumps(
             all_resolved_user_decisions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ))
-        # Keep the immutable briefing compact by reference. Every
-        # predecessor report carries the complete task-wide list; this compact
-        # projection covers recent decisions even when a replacement attempt
-        # starts before its predecessor managed to publish a report.
+        # Keep the immutable briefing compact by reference. The bounded
+        # AttemptResult projection covers predecessor facts without sending a
+        # worker-authored predecessor document to the new worker.
         resolved_user_decisions: list[dict[str, Any]] = []
         resolved_user_decision_bytes = 2
         for decision in reversed(all_resolved_user_decisions):
@@ -409,7 +529,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         # unique per task/attempt.  Keeping only ``agent`` here lets the host
         # mistake a fresh dispatch for a continuation of an older child.
         module = worker_module_label(
-            task_definition.get("user_request") or task_definition.get("objective") or objective,
+            task_definition.get("user_request") or objective,
             required_lists["allowed_paths"],
             gate,
         )
@@ -462,12 +582,13 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         revision_history = task_definition.get("active_steers")
         if not isinstance(revision_history, list):
             revision_history = []
-        task_requirements = _bounded_text_items(task_definition.get("requirements"), limit=100, item_chars=1000)
-        task_scope = _bounded_text_items(task_definition.get("scope"), limit=100, item_chars=500)
-        task_acceptance = _bounded_text_items(task_definition.get("acceptance_criteria"), limit=100, item_chars=1000)
-        task_verification = _bounded_text_items(task_definition.get("verification"), limit=100, item_chars=1000)
-        pause_conditions = _bounded_text_items(task_definition.get("pause_conditions"), limit=100, item_chars=1000)
-        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "task_objective": redact(task_definition.get("objective", ""), 4000), "task_requirements": task_requirements, "task_scope": task_scope, "task_acceptance_criteria": task_acceptance, "task_verification": task_verification, "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request") or task_definition.get("objective", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or state.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history[-100:]), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": len(resolved_user_decisions) < len(all_resolved_user_decisions), "report_index": "sqlite:task_documents/report_index", "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "report_contract": REPORT_SCHEMA, "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
+        task_requirements = _canonical_text_items(task_definition.get("requirements"), field="requirements", limit=100, item_chars=1000)
+        task_constraints = _canonical_text_items(task_definition.get("constraints"), field="constraints", limit=100, item_chars=1000)
+        task_scope = _canonical_text_items(task_definition.get("scope"), field="scope", limit=100, item_chars=500)
+        task_acceptance = _canonical_text_items(task_definition.get("acceptance_criteria"), field="acceptance_criteria", limit=100, item_chars=1000)
+        task_verification = _canonical_text_items(task_definition.get("verification"), field="verification", limit=100, item_chars=1000)
+        pause_conditions = _canonical_text_items(task_definition.get("pause_conditions"), field="pause_conditions", limit=100, item_chars=1000)
+        package = {"schema": SCHEMA, "task_id": state["task_id"], "task_ref": _v3_task_ref(state["task_id"]), "gate": gate, "attempt_id": attempt_id, "agent": agent, "profile": agent, "display_name": display_name, "selection_reason": redact(selection_reason, 1000), "spawn_request": spawn_request, **route, "luna_fallback": luna_fallback, "retry": retry, "parallel": bool(params.get("parallel", False)), "mode": "harvest" if _is_knowledge_harvest_task(task_definition) else "ordinary", "strategy": requested_strategy, "task_requirements": task_requirements, "task_constraints": task_constraints, "task_scope": task_scope, "task_acceptance_criteria": task_acceptance, "task_verification": task_verification, "current_user_intent": redact(task_definition.get("current_user_intent") or task_definition.get("user_request", ""), 4000), "current_user_intent_revision": int(task_definition.get("current_user_intent_revision") or task_definition.get("task_revision") or state.get("task_revision") or 1), "user_intent_revisions": sanitize_structured(revision_history[-100:]), "budget": redact(task_definition.get("budget", ""), 500), "pause_conditions": pause_conditions, "plan_feedback": redact(params.get("plan_feedback", ""), 2000) or None, "objective": redact(objective, 4000), "ownership": redact(ownership, 1000), "depends_on_phases": [redact(item, 64) for item in params.get("context_gates", [])], "context_files": [redact(item, 500) for item in context_files], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "predecessor_results": predecessor_results, "predecessor_selection": {"available": len(context_result_refs), "limit": MAX_PREDECESSORS}, "resolved_user_decisions": resolved_user_decisions, "resolved_user_decision_count": len(all_resolved_user_decisions), "resolved_user_decisions_digest": resolved_user_decisions_digest, "resolved_user_decisions_truncated": len(resolved_user_decisions) < len(all_resolved_user_decisions), "plan_tracker_ref": "sqlite:task_documents/plan_tracker_current", "result_baseline_ref": result_baseline_ref, "allowed_paths": [redact(item, 500) for item in required_lists["allowed_paths"]][:50], "acceptance_criteria": [redact(item, 1000) for item in required_lists["acceptance_criteria"]][:50], "verification": [redact(item, 1000) for item in required_lists["verification"]][:50], "project_root": str(project_root), "coordinator_principal": state.get("principal", "local"), "coordinator_thread_id": state.get("thread_id", ""), "internal_language": "en", "visibility": "visible" if visible_thread else "hidden", "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "question_route": question_route, "escalation_route": "main_chat", "handoff_route": "main_chat", "subdelegation": "forbidden_unless_explicitly_authorized", "question_contract": QUESTION_SCHEMA, "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status_receipt": status_receipt, "dispatch_correlation": "host_spawn_required", "spawn_status": "requested", "created_at": now()}
         package["dispatch_ref"] = dispatch_ref
         package["briefing_file"] = briefing_file
         package["pause_conditions"] = pause_conditions
@@ -514,12 +635,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             })
         if isinstance(task_definition.get("follow_up"), dict):
             package["follow_up"] = sanitize_structured(task_definition["follow_up"])
-        package.pop("task_objective", None)
         package["user_intent"] = {
             "projection": redact(
                 task_definition.get("user_request_projection")
                 or task_definition.get("user_request")
-                or task_definition.get("objective", ""),
+                or task_definition.get("user_request", ""),
                 1600,
             ),
             "artifact_ref": task_definition.get("user_intent_artifact_ref"),
@@ -545,7 +665,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         intent_job = intent_jobs[0]
         if isinstance(params.get("plan_unit"), dict):
             # ``plan_unit`` is server-derived by the approved-plan compiler,
-            # not an arbitrary worker report field.  It has already passed
+            # not an arbitrary worker field.  It has already passed
             # the planning schema and is the canonical implementation input.
             # Do not run it through the general diagnostic sanitizer: that
             # helper shortens every scalar/list for log-safe projections,
@@ -583,7 +703,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             package["plan_unit"] = {
                 "schema": "cortex/compiled-plan-unit-ref/v1",
                 "plan_revision": compiled_plan.get("plan_revision"),
-                "source_report_ref": compiled_plan.get("source_report_ref"),
+                "source_result_ref": compiled_plan.get("source_result_ref"),
                 "artifact_ref": compiled_artifact["artifact_ref"],
                 "artifact_path": str(compiled_plan_path),
                 "digest_sha256": compiled_plan_digest,
@@ -626,7 +746,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         )
         # The immutable artifact and outbox row are committed by their own
         # SQLite transactions before materialization begins.  The export is
-        # never written through the legacy direct writer.
+        # never written through a direct filesystem writer.
         briefing_digest = str(briefing_artifact["digest_sha256"])
         # Required dispatch exports are an outbox barrier.  The task attempt,
         # canonical briefing artifact, and its intent must commit before a
@@ -661,7 +781,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
         # host prompt are recreated after a restart/host-store relocation.
         package["spawn_request"] = _durable_spawn_request(spawn_request)
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
-        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_report_ids": context_report_ids, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "report_ids": [], "created_at": now()})
+        state["attempts"].append({"attempt_id": attempt_id, "gate": gate, "agent": agent, "profile": agent, "display_name": display_name, "dispatch_ref": dispatch_ref, "briefing_file": briefing_file, "briefing_digest": briefing_digest, "briefing_artifact_ref": briefing_artifact["artifact_ref"], "plan_unit_file": compiled_relative, "plan_unit_digest": compiled_plan_digest, "spawn_request": _durable_spawn_request(spawn_request), **route, "luna_fallback": luna_fallback, "strategy": package["strategy"], "ownership": package["ownership"], "result_baseline_ref": result_baseline_ref, "result_baseline_digest": result_baseline.get("digest"), "allowed_paths": package["allowed_paths"], "acceptance_criteria": package["acceptance_criteria"], "verification": package["verification"], "context_files": package["context_files"], "knowledge_index_files": knowledge_index_files, "context_result_refs": context_result_refs, "visibility": package["visibility"], "user_facing": visible_thread, "user_owned_thread": visible_thread, "thread_environment": thread_environment, "return_route": "main_chat", "facade_managed": facade_managed, "orchestration_wave_id": orchestration_wave_id, "orchestration_delegation_key": orchestration_delegation_key, "status": AWAITING_HOST_SPAWN, "lifecycle_status": "awaiting_spawn_ack", "spawn_requested_at": spawn_requested_at, "spawn_lease_expires_at": spawn_lease_expires_at, "parallel": bool(params.get("parallel", False)), "evidence_ids": [], "created_at": now()})
         db_put_worker_session(ledger_root(params), {
             "task_id": state["task_id"],
             "attempt_id": attempt_id,
@@ -671,10 +791,6 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "resumable": True,
             "started_at": spawn_requested_at,
         })
-        _, delegation_index = _delegation_report_index(report_paths, state["task_id"], attempt_id)
-        delegation_index["context_report_ids"] = context_report_ids
-        delegation_index["updated_at"] = now()
-        _write_delegation_report_index(report_paths, state["task_id"], attempt_id, delegation_index)
         save_state(task_dir, task_dir / "state.sqlite", state, "delegation", f"{gate} → {agent} ({attempt_id})")
         prepared = {
             "delegation_ref": f"dispatch:{attempt_id}",

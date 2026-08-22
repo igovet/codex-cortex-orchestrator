@@ -40,14 +40,14 @@ coverage, page-content, and validation contracts are mandatory.
    large repository. Each explorer exhaustively inventories its assigned
    domain and traces feature-bearing surfaces through entry points, workflows,
    state, persistence, configuration, integrations, failure paths, and tests.
-   Give each explorer the scoping report through `depends_on: ["scope"]`.
+   Give each explorer the scope AttemptResult projection through `depends_on: ["scope"]`.
 3. **Architecture synthesis:** Dispatch `architect` with the scoping,
    discovery, and all domain handoffs. It deduplicates features, defines stable
    feature boundaries, maps cross-domain flows and shared infrastructure,
    identifies ADR-worthy decisions, and emits the canonical documentation
    taxonomy.
 4. **Plan:** Dispatch the final read-only Planner after discovery and
-   architecture. It consumes all predecessor reports and publishes the
+   architecture. It consumes all predecessor result projections and publishes the
    decision-complete `planning` artifact with ownership, dependencies, and
    complete acceptance and verification criteria.
 5. **Documentation:** Dispatch one or more `technical_writer` workers. Use one
@@ -55,7 +55,7 @@ coverage, page-content, and validation contracts are mandatory.
    across non-overlapping `docs/features/<domain-or-feature>/` paths and assign
    exactly one writer to `docs/project/` plus `docs/features/index.md`. Every
    writer depends on the architecture and final-plan phases and verifies
-   consequential facts in current source or tests instead of copying reports
+   consequential facts in current source or tests instead of copying worker prose
    blindly.
 6. **Completeness review:** Dispatch `code_reviewer` after documentation to
    independently compare the fresh source inventory with the coverage matrix
@@ -68,9 +68,13 @@ coverage, page-content, and validation contracts are mandatory.
    coverage statement without editing files.
 
 The final Planner is deliberately separate from early scope: scope partitions
-evidence, while plan resolves the implementation/documentation decision. The
-strict seven-field `cortex/report/v1` remains unchanged; Scope may add only the
-top-level `scoping` sibling and Plan may add only `planning`.
+evidence, while plan resolves the implementation/documentation decision. Worker
+completion uses the small `cortex/attempt-result/v1` semantic result with
+`status`, `summary`, `findings`, `decisions_needed`, and `unresolved`; typed
+gate payloads are allowed when applicable. Scope may add only the top-level
+`scoping` sibling and Plan may add only `planning`. AttemptResult and
+AttemptEvent are the worker transport; result refs and bounded handoff
+projections are derived server outputs.
 
 The coordinator owns domain partitioning and may change the future pipeline
 when verified evidence exposes additional domains, shared ownership, or an
@@ -122,29 +126,34 @@ facts. Preserve text outside generated blocks and do not overwrite a manual
 ADR, gotcha, or feature explanation without evidence and explicit scope. Never
 expose secrets, source dumps, private operational values, or personal data.
 
-Every Cortex worker edits the private temporary report file created by
-`get_report_template`, fills the private draft, then calls `record_report` on
-the same `draft_ref`. A read-only worker uses a small merge patch or complete
-replacement through `record_report`; invalid records retain the temporary file
-for correction, and successful recording revalidates, commits, and deletes it. The worker acknowledges all
-supplied predecessor handoffs and identifies its inventory counts, mapped
-surfaces, exclusions, unknowns, evidence, and coverage gaps. It must also
-review only the exact immutable briefing
-issued by its compact dispatch bootstrap, verify the supplied SHA-256, and add
-the exact `Dispatch briefing reviewed: <sha256>` evidence marker. That briefing
-and its exact returned report `draft_path` are the only direct filesystem
-access allowed below `.codex/cortex`; workers never
-list or inspect ledger state, baselines, delegation JSON, another briefing, or
-report artifacts. If the host file reader alone cannot open that exact file,
-the worker calls `read_dispatch_briefing` with the complete identity and
-digest tuple from its bootstrap; an incomplete bounded response may continue
-only with its returned cursor. Caller/input/schema diagnostics and
-`retryable=true` results are corrected and retried on the same attempt without
-consuming recovery budget. Only explicit non-retryable integrity/storage
-failures are blockers; none grants permission to browse or substitute another
-artifact. The coordinator reads each report before advancing and
-uses `depends_on` when a later worker needs only selected phase handoffs.
-A successor worker reads each supplied handoff through `read_worker_report`
-with the exact project root, task ref, attempt id, profile, and report ref from
-its generated briefing. It may not read an unlisted report or treat that
-scoped evidence read as permission to call coordinator lifecycle operations.
+Every Cortex worker operates through the strict five-operation worker surface:
+`worker_question`, `record_attempt_event`, `complete_attempt`,
+`read_dispatch_briefing`, and `read_worker_result`. The worker may checkpoint
+semantic facts during execution with `record_attempt_event`; critical findings,
+decision evidence, blockers, or observed checks should not wait for the final
+message. It finishes one attempt with `complete_attempt` and only the semantic
+AttemptResult fields `status`, `summary`, `findings`, `decisions_needed`, and
+`unresolved` (plus an applicable typed gate payload). The worker publishes only
+the semantic result shape; the normal harvest flow uses only
+the semantic AttemptResult/Event protocol.
+
+The worker reviews only the exact immutable briefing issued by its compact
+dispatch bootstrap and verifies its supplied SHA-256. If the host file reader
+cannot open that exact file, it calls `read_dispatch_briefing` with the complete
+identity and digest tuple from the bootstrap; an incomplete bounded response
+may continue only with its returned cursor. A successful full briefing read
+creates a server-side receipt. A successor reads each supplied handoff through
+`read_worker_result` with the exact identity and result reference from its
+generated briefing; a successful scoped predecessor read creates a server-side
+receipt. Workers do not emit digest strings, predecessor markers, changed-file
+lists, timestamps, identity, or evidence markers as authoritative data. Cortex
+derives those facts from the AttemptRecord, workspace observations, hooks, and
+read receipts, then exposes result refs and bounded human projections for
+coordinators. Caller/input/schema diagnostics and `retryable=true` results are
+corrected and retried on the same attempt without consuming recovery budget.
+Only explicit non-retryable integrity/storage failures are blockers; none
+grants permission to browse or substitute another artifact. The coordinator
+reads the generated projection before advancing and uses `depends_on` when a
+later worker needs only selected phase handoffs. A successor may not read an
+unlisted projection or treat a scoped evidence read as permission to call
+coordinator lifecycle operations.

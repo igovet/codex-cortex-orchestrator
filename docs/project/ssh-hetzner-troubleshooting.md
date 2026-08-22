@@ -37,7 +37,7 @@ output emits one record for each check:
   `plugins."cortex@cortex".mcp_servers.cortex.default_tools_approval_mode =
   "approve"`. If the user selects a granular approval policy, it also sets
   Cortex questions use ordinary chat and do not require an MCP-elicitation policy.
-- `cortex_hook_trust` — `hooks/list` reports exactly five enabled, trusted
+- `cortex_hook_trust` — `hooks/list` returns exactly six enabled, trusted
   `cortex@cortex` hooks from the matching cache, with valid hashes matching the
   persisted hook-state table.
 
@@ -55,7 +55,7 @@ it is not a passing registration result.
 | `codex_home` | The same-user cache is version- and content-aligned with the checked plugin. | Codex may load stale or incomplete package content. |
 | `cortex_registration` | The same user has one enabled matching `cortex@cortex` registration. | MCP registration is not proven for this user. |
 | `cortex_mcp_config` | The same-user Cortex MCP table is enabled and approval is `approve`. | Cortex lifecycle tool calls may be blocked before orchestration starts. |
-| `cortex_hook_trust` | All five lifecycle hooks are enabled, trusted, cache-backed, and hash-matched. | Worker binding and stopped-worker recovery are not trusted. |
+| `cortex_hook_trust` | All six lifecycle hooks are enabled, trusted, cache-backed, and hash-matched. | Worker binding, finalization guard, and stopped-worker recovery are not trusted. |
 
 The script returns exit code `0` only for `READY`; an expected negative result
 must be wrapped by a test harness that asserts exit code `1` and itself exits
@@ -79,7 +79,7 @@ command or an unapproved runtime source.
 
 Keep this remote result separate from local source evidence. The checkout can
 pass launcher or source-mode MCP checks while the SSH user's cache is stale or
-the SSH runtime is incompatible. In the local evidence recorded for this task,
+the SSH runtime is unsupported. In the local evidence recorded for this task,
 the source was 6.6.1 while the installed cache was 6.6.0; that mismatch is a
 preflight failure, not proof that the source is broken.
 
@@ -94,7 +94,7 @@ python3 --version
 python3 -c 'import tomllib; print("tomllib: ok")'
 ```
 
-If `python3` is older than 3.11, select an already installed compatible
+If `python3` is older than 3.11, select an already installed supported
 interpreter with an absolute path:
 
 ```bash
@@ -136,11 +136,11 @@ stopped native worker. Recovery is bounded and identity-scoped:
 2. From `context_handoff`, invoke only returned `pending_dispatches`; wait only
    on the exact child IDs in `active_workers`. The handoff itself never
    authorizes a spawn.
-3. If a stopped worker has report refs, read those refs and continue the
+3. If a stopped worker has `attempt_result_ref` values, read those results and continue the
    current step. If it has a durable question, surface the question and resume
    the same persisted worker only after the answer.
-4. If it has no report or question, it is terminal failed with
-   `failure_reason="native_worker_stopped_without_report"`. Never wait on,
+4. If it has no AttemptResult or question, it is terminal failed with
+   `failure_reason="native_worker_stopped_without_attempt_result"`. Never wait on,
    respawn, or call `followup_task` for that stopped child. Submit exactly one
    non-success result to `continue_orchestration` using the current `step`, the
    exact `dispatch_ref`, `status="failed"`, and that reason:
@@ -148,7 +148,7 @@ stopped native worker. Recovery is bounded and identity-scoped:
 ```json
 {
   "status": "failed",
-  "reason": "native_worker_stopped_without_report",
+  "reason": "native_worker_stopped_without_attempt_result",
   "dispatch_ref": "<exact-dispatch-ref-from-inspect>"
 }
 ```
@@ -164,7 +164,7 @@ later failures it is `max`; eligible ordinary work moves to Terra after two
 prior failures. A supplied `next_strategy` is useful audit evidence but is not
 required to continue, and an unchanged strategy never blocks rework. Only an
 explicit non-retryable integrity, storage, permission, identity, or environment
-blocker—or user cancellation—halts the task. Report-backed stops and
+blocker—or user cancellation—halts the task. AttemptResult-backed stops and
 durable-question stops remain separate paths: neither is a reason to follow up
 a dead child.
 
@@ -172,8 +172,8 @@ The runtime contract is implemented by the stop finalizer in
 [`cortex.py`](../../plugins/cortex/scripts/cortex.py), the recovery handoff in
 [`context_handoff.py`](../../plugins/cortex/scripts/cortex_runtime/context_handoff.py),
 and the lifecycle hook in [`cortex_hook.py`](../../plugins/cortex/scripts/cortex_hook.py).
-The focused control and revision regressions cover report consumption,
-durable-question resumption, terminal reportless stops, unbounded corrective
+The focused control and revision regressions cover AttemptResult consumption,
+durable-question resumption, terminal worker stops, bounded corrective
 dispatch, and effort/model escalation.
 
 ## Verification
@@ -192,7 +192,7 @@ git diff --check
 
 The first command validates aligned readiness, each registration/configuration
 failure, hook trust, stale caches, and symlink boundaries. The recovery suites
-cover persisted reports, durable questions, terminal reportless stops,
+cover persisted results, durable questions, terminal worker stops,
 unbounded corrective dispatch, and effort/model escalation. These local checks do not prove that the named remote
 host has been provisioned; that remains blocked until the approved Node >=16
 source and same-user authority are available.

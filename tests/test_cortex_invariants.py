@@ -17,9 +17,8 @@ import cortex as control
 import cortex_hook
 from cortex_runtime import identity as worker_identity
 from cortex_runtime import mcp_api
-from cortex_runtime import briefings as runtime_briefings
 from cortex_runtime import prompt_compiler
-from cortex_runtime import prompt_eval
+from cortex_runtime import briefings
 
 
 class OrchestrationInvariantTests(unittest.TestCase):
@@ -61,7 +60,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def init(self, task_id="task", complexity="C1", requirements=None):
         requirements = requirements or []
         classified = control.classify_task({"complexity": complexity, "requirements": requirements, "principal": "owner"})
-        return control.init_task({"task_id": task_id, "objective": "invariant test", "complexity": complexity, "classification_id": classified["classification_id"], "requirements": requirements, "principal": "owner", "thread_id": "owner"})
+        return control.init_task({"task_id": task_id, "user_request": "invariant test", "complexity": complexity, "classification_id": classified["classification_id"], "requirements": requirements, "principal": "owner", "thread_id": "owner"})
 
     def task_state(self, task_dir: Path) -> dict:
         return control.load_task_state_for_artifact(task_dir)
@@ -74,7 +73,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def delegate(self, state, task_id, gate, agent="general"):
         observed = control.status({"task_id": task_id, "principal": "owner"})
-        delegated = control.record_delegation({"task_id": task_id, "principal": "owner", "expected_revision": state["revision"], "status_receipt": observed["status_receipt"], "gate": gate, "agent": agent, "task_kind": gate, "risk": "moderate", "requested_model": "gpt-5.6-terra", "requested_reasoning_effort": "medium", "objective": "bounded work", "ownership": f"Own {gate}", "allowed_paths": ["."], "acceptance_criteria": [f"Complete {gate}"], "verification": ["Report evidence"]})
+        delegated = control.record_delegation({"task_id": task_id, "principal": "owner", "expected_revision": state["revision"], "status_receipt": observed["status_receipt"], "gate": gate, "agent": agent, "task_kind": gate, "risk": "moderate", "requested_model": "gpt-5.6-terra", "requested_reasoning_effort": "medium", "objective": "bounded work", "ownership": f"Own {gate}", "allowed_paths": ["."], "acceptance_criteria": [f"Complete {gate}"], "verification": ["Record evidence"]})
         confirmed = control.confirm_host_spawn({
             "task_id": task_id, "principal": "owner", "expected_revision": delegated["state"]["revision"],
             "attempt_id": delegated["attempt_id"], "host_agent_id": f"test-host-{delegated['attempt_id']}",
@@ -83,8 +82,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         })
         return {**delegated, "state": confirmed["state"], "host_spawn": confirmed["host_spawn"]}
 
-    def report(self, task_id, attempt_id, submission_id="final"):
-        return control.record_report({"task_id": task_id, "principal": "owner", "attempt_id": attempt_id, "submission_id": submission_id, "report": {"summary": "work complete", "findings": [], "questions": [], "changed_files": [], "tests": [], "evidence": ["focused evidence"], "uncertainty": []}})
 
     def test_runtime_dependency_slices_do_not_import_executable_facade(self):
         """Extracted slices depend on the explicit composition binding only."""
@@ -122,74 +119,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         ):
             self.assertIsNotNone(importlib.import_module(module_name))
 
-    def test_public_mcp_schemas_match_runtime_start_report_and_planning_contracts(self):
-        self.assertIn("ordinary task needs non-empty task.acceptance_criteria", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
-        self.assertIn("verification_mode is not a task field", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["start_orchestration"])
-        control_skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("never add a `verification_mode`", control_skill)
-        self.assertIn("small JSON Merge Patch", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
-        self.assertIn("atomically persists", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["record_report"])
-        self.assertIn("temporary JSON file already filled", mcp_api.PUBLIC_TOOL_DESCRIPTIONS["get_report_template"])
-        task_schema = control.START_ORCHESTRATION_SCHEMA["properties"]["task"]
-        ordinary_contract = task_schema["anyOf"][0]
-        self.assertEqual(
-            ordinary_contract["required"],
-            ["acceptance_criteria", "verification"],
-        )
-        for field in ("acceptance_criteria", "verification"):
-            self.assertEqual(task_schema["properties"][field]["minItems"], 1)
-            self.assertEqual(task_schema["properties"][field]["maxItems"], 100)
-        self.assertFalse(task_schema["additionalProperties"])
-        self.assertNotIn("verification_mode", task_schema["properties"])
-
-        rejected_start = control.start_orchestration({
-            "project_root": str(self.project),
-            "task": {
-                "user_request": "Verify the start task contract.",
-                "acceptance_criteria": ["The public task contract is unambiguous."],
-                "verification": ["Run the focused public-contract regression test."],
-                "verification_mode": "read_only",
-            },
-        })
-        self.assertFalse(rejected_start["ok"])
-        self.assertEqual(rejected_start["code"], "start_validation_failed")
-        self.assertIn("unsupported task fields: verification_mode", rejected_start["diagnostics"][0]["message"])
-        tasks_dir = self.ledger / "tasks"
-        self.assertFalse(tasks_dir.exists() and any(tasks_dir.iterdir()))
-
-        test_schema = control.V3_REPORT_SCHEMA["properties"]["tests"]["items"]
-        self.assertFalse(test_schema["additionalProperties"])
-        self.assertEqual(
-            set(test_schema["required"]),
-            {"command", "cwd", "exit_code", "evidence"},
-        )
-        self.assertEqual(set(test_schema["properties"]), set(test_schema["required"]))
-        self.assertNotIn("observed_evidence", test_schema["properties"])
-        self.assertEqual(test_schema["properties"]["exit_code"]["const"], 0)
-        self.assertEqual(control.V3_REPORT_SCHEMA["properties"]["questions"]["maxItems"], 0)
-        self.assertEqual(control.V3_REPORT_SCHEMA["properties"]["evidence"]["minItems"], 1)
-        # Canonical reports are immutable cursor-paged artifacts.  Their
-        # complete evidence is bounded only by the safe serialized-artifact
-        # size, never by UI-shaped string or item-count schema limits.
-        for field in ("findings", "tests", "evidence", "uncertainty"):
-            self.assertNotIn("maxItems", control.V3_REPORT_SCHEMA["properties"][field])
-        self.assertNotIn("maxLength", control.V3_REPORT_SCHEMA["properties"]["summary"])
-        self.assertNotIn("maxLength", control.V3_REPORT_SCHEMA["properties"]["changed_files"]["items"])
-
-        package_schema = control.V3_PLANNING_SCHEMA["properties"]["work_packages"]["items"]
-        self.assertFalse(package_schema["additionalProperties"])
-        self.assertEqual(
-            set(package_schema["required"]),
-            {"id", "title", "objective", "microtasks"},
-        )
-        self.assertNotIn("profile", package_schema["properties"])
-        microtask_schema = package_schema["properties"]["microtasks"]["items"]
-        self.assertFalse(microtask_schema["additionalProperties"])
-        self.assertIn("profile", microtask_schema["properties"])
-        self.assertEqual(
-            set(microtask_schema["required"]),
-            {"id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"},
-        )
 
     @classmethod
     def replace_generated_facts(cls, content, facts):
@@ -210,9 +139,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_classification_is_required_and_bound_to_inputs(self):
         with self.assertRaisesRegex(ValueError, "prior classify_task"):
-            control.init_task({"task_id": "missing", "objective": "x", "complexity": "C1", "principal": "owner"})
+            control.init_task({"task_id": "missing", "user_request": "x", "complexity": "C1", "principal": "owner"})
         classified = control.classify_task({"complexity": "C2", "requirements": ["docs"], "principal": "owner"})
-        created = control.init_task({"task_id": "mismatch", "objective": "x", "complexity": "C3", "classification_id": classified["classification_id"], "requirements": ["security"], "principal": "owner"})
+        created = control.init_task({"task_id": "mismatch", "user_request": "x", "complexity": "C3", "classification_id": classified["classification_id"], "requirements": ["security"], "principal": "owner"})
         self.assertEqual(created["state"]["complexity"], "C2")
 
     def test_status_authorization_and_stale_dispatch_inputs_are_recoverable(self):
@@ -220,7 +149,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different principal"):
             control.status({"task_id": "task", "principal": "intruder"})
         observed = control.status({"task_id": "task", "principal": "owner"})
-        arguments = {"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer", "task_kind": "discover", "risk": "low", "objective": "inspect", "ownership": "Read-only discovery", "allowed_paths": ["."], "acceptance_criteria": ["Report findings"], "verification": ["Cite inspected paths"]}
+        arguments = {"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "status_receipt": observed["status_receipt"], "gate": "discover", "agent": "explorer", "task_kind": "discover", "risk": "low", "objective": "inspect", "ownership": "Read-only discovery", "allowed_paths": ["."], "acceptance_criteria": ["Record findings"], "verification": ["Cite inspected paths"]}
         delegated = control.record_delegation(arguments)
         recovered = control.record_delegation({**arguments, "expected_revision": delegated["state"]["revision"] + 2})
         self.assertTrue(recovered["receipt_correction"])
@@ -252,7 +181,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "gate": "plan", "agent": "planner", "task_kind": "planning", "risk": "low",
             "objective": "bounded work", "ownership": "Own plan",
             "allowed_paths": ["."], "acceptance_criteria": ["Complete plan"],
-            "verification": ["Report evidence"],
+            "verification": ["Record evidence"],
         })
         confirmed = control.confirm_host_spawn({
             "task_id": "task",
@@ -383,35 +312,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         persisted = self.task_state(task_dir)
         self.assertNotEqual(persisted["status"], "completed")
 
-    def test_partial_baseline_cannot_authorize_read_only_mutation_audit(self):
-        (self.project / "audit-a.txt").write_text("a\n", encoding="utf-8")
-        (self.project / "audit-b.txt").write_text("b\n", encoding="utf-8")
-        state = self.init()["state"]
-        task_dir = self.ledger / "tasks" / "0001-task"
-        policy = dict(control.TRACKER_POLICY)
-        policy["manifest_limits"] = {"max_entries": 1, "max_hashed_bytes": 1024, "max_seconds": 30}
-        partial_baseline = control.capture_project_manifest(self.project, policy=policy)
-        self.assertTrue(partial_baseline["partial_manifest"]["partial"])
-        attempt = {
-            "attempt_id": "read-only-audit",
-            "gate": "discover",
-            "profile": "explorer",
-            "allowed_paths": ["."],
-            "result_baseline_ref": control.store_manifest_snapshot(task_dir, partial_baseline),
-        }
-        with self.assertRaisesRegex(ValueError, "manifest capture incomplete.*baseline"):
-            control._validate_result_artifacts(task_dir, attempt, {"changed_files": []})
-
-        # The same guard applies when only the final/current capture reaches
-        # its cutoff after a complete attempt baseline was stored.
-        (self.project / "audit-b.txt").unlink()
-        complete_baseline = control.capture_project_manifest(self.project, policy=policy)
-        self.assertFalse(complete_baseline["partial_manifest"]["partial"])
-        attempt["result_baseline_ref"] = control.store_manifest_snapshot(task_dir, complete_baseline)
-        (self.project / "audit-unscanned.txt").write_text("new\n", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "manifest capture incomplete.*current"):
-            control._validate_result_artifacts(task_dir, attempt, {"changed_files": []})
-
     def test_manifest_snapshots_are_deduplicated_for_unchanged_attempts(self):
         state = self.init()["state"]
         first = self.delegate(state, "task", "plan", agent="planner")
@@ -482,43 +382,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "retain documentation"):
             control.update_pipeline({"task_id": "task", "principal": "owner", "expected_revision": created["state"]["revision"], "pipeline": [gate for gate in pipeline if gate != "documentation"]})
 
-    def test_completion_requires_terminal_attempts_with_reports_and_evidence(self):
-        state = {
-            "current_pipeline": ["documentation", "close"],
-            "require_handoff": True,
-            "completed_gates": ["documentation", "close"],
-            "documentation_receipt": {"evidence_id": "evidence-doc"},
-            "reassessment_receipts": [{"receipt_id": "reassessment-1"}],
-            "handoff_created": True,
-            "handoff_gate": "close",
-            "attempts": [{"attempt_id": "close-01", "status": "passed"}],
-            "evidence": [{
-                "evidence_id": "evidence-close",
-                "attempt_id": "close-01",
-                "report_id": "report-0001",
-                "report_receipt": "report-receipt-report-0001",
-            }],
-        }
-        control.validate_completion_invariants(state)
-
-        running = {**state, "attempts": [{"attempt_id": "close-01", "status": "running"}]}
-        with self.assertRaisesRegex(ValueError, "every attempt to be terminal: close-01"):
-            control.validate_completion_invariants(running)
-
-        missing_evidence = {**state, "evidence": []}
-        with self.assertRaisesRegex(ValueError, "evidence for every attempt: close-01"):
-            control.validate_completion_invariants(missing_evidence)
-
-        missing_report = {**state, "evidence": [{"evidence_id": "evidence-close", "attempt_id": "close-01"}]}
-        with self.assertRaisesRegex(ValueError, "consumed report receipt for every attempt: close-01"):
-            control.validate_completion_invariants(missing_report)
-
-        terminal_failure_without_report = {
-            **state,
-            "attempts": [{"attempt_id": "close-01", "status": "failed", "finalization_reason": "worker exited"}],
-            "evidence": [],
-        }
-        control.validate_completion_invariants(terminal_failure_without_report)
 
     def test_global_claims_collide_across_tasks_and_lanes(self):
         first = self.init(task_id="first")["state"]
@@ -566,13 +429,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(sanitized["nested"]["access_token"], "<REDACTED>")
         self.assertEqual(sanitized["safe"], "visible")
 
-    def test_report_structured_preserves_json_primitives_and_nested_evidence(self):
-        sanitized = control.sanitize_report_structured({
-            "safe_values": [0, False, None, {"count": 2}],
-            "access_token": "never-store-this",
-        })
-        self.assertEqual(sanitized["safe_values"], [0, False, None, {"count": 2}])
-        self.assertEqual(sanitized["access_token"], "<REDACTED>")
 
     def test_verification_command_ids_reject_caller_execution_control(self):
         state = self.init()["state"]
@@ -602,26 +458,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
                 "user_requested_model": "gpt-5.6-sol",
             })
 
-    def test_record_gate_cannot_remove_mandatory_c2_gates(self):
-        state = self.init(complexity="C2")["state"]
-        delegation = self.delegate(state, "task", "discover", "planner")
-        report = self.report("task", delegation["attempt_id"])
-        evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": delegation["state"]["revision"], "gate": "discover", "attempt_id": delegation["attempt_id"], "report_receipt": report["receipt"]["receipt_id"], "summary": "planned"})
-        with self.assertRaisesRegex(ValueError, "retain documentation"):
-            control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed", "pipeline_operations": [{"op": "remove", "gate": "documentation"}, {"op": "remove", "gate": "close"}]})
 
-    def test_c2_rework_uses_only_current_attempt_evidence(self):
-        state = self.init(complexity="C2")["state"]
-        first = self.delegate(state, "task", "discover", "planner")
-        first_report = self.report("task", first["attempt_id"], "first")
-        evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": first["state"]["revision"], "gate": "discover", "attempt_id": first["attempt_id"], "report_receipt": first_report["receipt"]["receipt_id"], "summary": "first plan"})
-        passed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": evidence["state"]["revision"], "gate": "discover", "outcome": "passed"})
-        reworked = control.reassess_pipeline({"task_id": "task", "principal": "owner", "expected_revision": passed["state"]["revision"], "signals": [], "intent": "rework_gate", "gate": "plan", "decision": "updated", "reason": "plan changed", "apply": True})
-        second = self.delegate(reworked["state"], "task", "plan", "planner")
-        second_report = self.report("task", second["attempt_id"], "second")
-        second_evidence = control.record_evidence({"task_id": "task", "principal": "owner", "expected_revision": second["state"]["revision"], "gate": "plan", "attempt_id": second["attempt_id"], "report_receipt": second_report["receipt"]["receipt_id"], "summary": "replacement plan"})
-        repassed = control.record_gate({"task_id": "task", "principal": "owner", "expected_revision": second_evidence["state"]["revision"], "gate": "plan", "outcome": "passed"})
-        self.assertEqual(repassed["state"]["current_gates"], ["implementation"])
 
     def test_stop_reassessment_requires_current_handoff(self):
         state = self.init(complexity="C2")["state"]
@@ -699,73 +536,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
         verification_properties = control.TOOLS["execute_verification_command"][1]["properties"]
         self.assertFalse({"argv", "cwd", "env", "shell", "executable"} & set(verification_properties))
 
-    def test_public_report_contract_keeps_closure_as_top_level_review_sibling(self):
-        schema = control.WORKER_RECORD_REPORT_SCHEMA
-        contract = json.loads(
-            (Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8")
-        )
-        required_report_fields = contract["shared_worker_contract"]["required_report_fields"]
-        self.assertEqual(list(control.REPORT_FIELDS), required_report_fields)
-        self.assertEqual(schema["properties"]["report"]["required"], required_report_fields)
-        self.assertEqual(
-            set(schema["properties"]["report"]["properties"]),
-            {"summary", "findings", "questions", "changed_files", "tests", "evidence", "uncertainty"},
-        )
-        self.assertEqual(set(schema["properties"]["report"]["required"]), set(schema["properties"]["report"]["properties"]))
-        closure = schema["properties"]["closure"]
-        self.assertEqual(closure["properties"]["decision"]["enum"], ["pass", "rework", "fail"])
-        self.assertEqual(set(closure["properties"]["verification"]["properties"]), {"executed", "not_executed", "required_missing", "limitations"})
-        self.assertEqual(set(closure["properties"]["workspace"]["properties"]), {"modified", "untracked", "staged", "committed"})
-        self.assertEqual(closure["properties"]["workspace"]["properties"]["committed"]["enum"], [True, False, "not_required"])
-        finding = closure["properties"]["findings"]["items"]
-        self.assertEqual(finding["properties"]["severity"]["enum"], ["P0", "P1", "P2", "P3", "info"])
-        self.assertEqual(finding["properties"]["status"]["enum"], ["open", "resolved", "waived"])
-        self.assertNotIn("closure", schema["properties"]["report"]["properties"])
-
-    def test_review_and_close_briefings_require_top_level_closure(self):
-        package = {
-            "task_id": "task", "gate": "review", "attempt_id": "review-01", "dispatch_ref": "dispatch-review-000000000000",
-            "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
-            "task_user_request": "Review the delegated project outcome.", "task_objective": "Review the delegated outcome.",
-            "objective": "Review the mission.", "ownership": "Own review", "allowed_paths": ["tests"],
-            "acceptance_criteria": ["Review complete"], "verification": ["Review evidence"],
-            "task_acceptance_criteria": [], "task_verification": [], "context_files": [], "knowledge_index_files": [],
-            "context_report_ids": [], "result_baseline_ref": "manifest-" + "a" * 64, "task_requirements": [], "task_scope": [],
-            "pause_conditions": [], "budget": "none", "plan_feedback": None, "intent_clarification_required": False,
-            "intent_clarification_reason": None,
-        }
-        review_prompt = control.host_spawn_prompt("code_reviewer", package)
-        self.assertIn("top-level `gate_result`", review_prompt)
-        self.assertIn("top-level `gate_result` outside the 7-key report", review_prompt)
-        self.assertIn("outside the 7-key report", review_prompt)
-        self.assertIn("Do not add closure; it is a legacy input alias only", review_prompt)
-        self.assertIn("Pass permits no open finding", review_prompt)
-        self.assertIn("status=resolved", review_prompt)
-        package["gate"] = "close"
-        close_prompt = control.host_spawn_prompt("build_verification", package)
-        self.assertIn("top-level `gate_result` outside the 7-key report", close_prompt)
-        package["gate"] = "governance_close"
-        package["governance_context"] = {
-            "requested_mode": "auto",
-            "effective_mode": "full",
-            "reasons": ["complexity:C3"],
-            "autonomous_scope_ref": "governance-scope-autonomous",
-            "policy_snapshot_digest": "a" * 64,
-            "current_pipeline": ["governance_activation", "implementation", "governance_close", "close"],
-        }
-        governance_close_prompt = control.host_spawn_prompt("code_reviewer", package)
-        self.assertIn("input to the server-owned immutable governance evidence projection", governance_close_prompt)
-        self.assertIn("MUST NOT be treated as missing prerequisites", governance_close_prompt)
-        self.assertIn("exact fingerprint, status=resolved", governance_close_prompt)
 
     def test_planner_briefing_requires_top_level_planning_sibling(self):
         package = {
             "task_id": "task", "gate": "plan", "attempt_id": "plan-01", "dispatch_ref": "dispatch-plan-000000000000",
             "project_root": "/workspace/project", "facade_managed": True, "user_owned_thread": False,
-            "task_user_request": "Plan the fixture.", "task_objective": "Plan the fixture.", "objective": "Plan.",
+            "task_user_request": "Plan the fixture.", "objective": "Plan.",
             "ownership": "Own planning", "allowed_paths": ["."], "acceptance_criteria": ["Plan complete"],
             "verification": ["Verify plan"], "task_acceptance_criteria": [], "task_verification": [],
-            "context_files": [], "knowledge_index_files": [], "context_report_ids": [],
+            "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
             "result_baseline_ref": "manifest-" + "a" * 64, "task_requirements": [], "task_scope": [],
             "pause_conditions": [], "budget": "none", "plan_feedback": None,
             "intent_clarification_required": False, "intent_clarification_reason": None,
@@ -816,7 +595,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             key: value for key, value in hook_state.items()
             if key.startswith("cortex@cortex:hooks/hooks.json:")
         }
-        self.assertEqual(len(cortex_hook_state), 5)
+        self.assertEqual(len(cortex_hook_state), 6)
         for value in cortex_hook_state.values():
             self.assertRegex(value["trusted_hash"], r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(unrelated_state.read_text(encoding="utf-8"), '{"preserve": true}\n')
@@ -939,7 +718,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), str(selected))
 
-    def test_cortex_launcher_reports_old_python_before_missing_tomllib(self):
+    def test_cortex_launcher_diagnoses_old_python_before_missing_tomllib(self):
         isolated = self.base / "old-python-launcher-home"
         isolated.mkdir()
         selected = isolated / "python launcher 3.10"
@@ -976,7 +755,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("Python 3.10.12 is too old; Python 3.11 or newer is required", completed.stderr)
         self.assertNotIn("tomllib is unavailable", completed.stderr)
 
-    def test_sync_reports_old_python_before_missing_tomllib(self):
+    def test_sync_diagnoses_old_python_before_missing_tomllib(self):
         isolated = self.base / "old-python-sync-home"
         codex_home = isolated / ".codex"
         codex_home.mkdir(parents=True)
@@ -1161,7 +940,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertTrue(artifact.is_file())
             self.assertEqual(artifact.stat().st_mode & 0o777, 0o600)
         self.assertFalse((task_dir / "state.sqlite").exists())
-        self.assertFalse((task_dir / "reports").exists())
+        self.assertFalse((task_dir / "artifacts").exists())
         self.assertFalse((task_dir / "delegations").exists())
 
     def test_agent_hook_rejects_empty_wait_as_unspawned_dispatch(self):
@@ -1245,7 +1024,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("Remain idle while workers run", context)
 
     def test_session_hook_accepts_thread_id_alias(self):
-        self.init(task_id="legacy-session-hook")
+        self.init(task_id="prior-session-hook")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
         completed = subprocess.run(
             [sys.executable, str(hook)],
@@ -1284,45 +1063,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("manage_orchestration(intent='inspect'", context)
         self.assertIn(f"task_ref={public_ref!r}", context)
         self.assertIn("exactly once", context)
-        self.assertIn("publication_required=true", context)
-        self.assertIn("never republish", context)
         self.assertIn("Do not call start_orchestration again", context)
-
-    def test_read_worker_report_hook_reasserts_exact_main_chat_link(self):
-        self.init(task_id="report-publication")
-        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        link = "[qa report](</workspace/.codex/cortex/tasks/task-001/reports/qa.md>)"
-        event = {
-            "hook_event_name": "PostToolUse",
-            "session_id": "owner",
-            "cwd": str(self.project),
-            "tool_name": "mcp__cortex__read_worker_report",
-            "tool_input": {"project_root": str(self.project)},
-            "tool_response": {"structuredContent": {
-                "schema": "cortex/orchestration/v5",
-                "ok": True,
-                "publication_required": True,
-                "report_markdown_link": link,
-                "completion_update": {
-                    "summary": "QA verification completed successfully.",
-                    "next": "Review the result and continue the Cortex pipeline.",
-                },
-            }},
-        }
-        completed = subprocess.run(
-            [sys.executable, str(hook)],
-            input=json.dumps(event),
-            text=True,
-            capture_output=True,
-            env=os.environ.copy(),
-            check=True,
-        )
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("REPORT COMPLETION PUBLICATION REQUIRED", context)
-        self.assertIn("Never publish the link alone", context)
-        self.assertIn(link, context)
 
     def test_start_hook_places_native_spawn_imperative_after_mcp_result(self):
         context = cortex_hook.dispatch_required_context({
@@ -1351,7 +1092,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         matcher = manifest["hooks"]["PostToolUse"][0]["matcher"]
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__start_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__manage_orchestration"))
-        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_report"))
+        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_result"))
         pre_matcher = manifest["hooks"]["PreToolUse"][0]["matcher"]
         self.assertTrue(re.fullmatch(pre_matcher, "Agent"))
         self.assertTrue(re.fullmatch(pre_matcher, "wait"))
@@ -1366,7 +1107,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             for registration in registrations
             for hook in registration["hooks"]
         ]
-        self.assertEqual(len(commands), 5)
+        self.assertEqual(len(commands), 6)
         for command in commands:
             self.assertIn("if test -f", command)
             self.assertIn("else printf '{}\\n'", command)
@@ -1411,11 +1152,16 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("internal worker, never user-facing", context)
         self.assertIn("native parent channel", context)
         self.assertIn("public worker_question when needed", context)
-        self.assertIn("public record_report after all blocking questions are answered", context)
-        self.assertIn("public get_report_template", context)
+        self.assertIn("public record_attempt_event for bounded semantic checkpoints", context)
+        self.assertIn("public complete_attempt for the final semantic result", context)
         self.assertIn("consume no worker attempt", context)
-        self.assertIn("REPORT_RECORDED report_ref=<value>", context)
-        self.assertIn("never paste the report JSON", context)
+        self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", context)
+        self.assertIn("followup_task resumes this exact child", context)
+        self.assertIn("worker_question(action=poll)", context)
+        self.assertIn("record the decision/consequence with record_attempt_event", context)
+        self.assertIn("pending poll returns QUESTION_RECORDED", context)
+        self.assertIn("never emit OTHER_TERMINAL", context)
+        self.assertIn("never paste a generated result view", context)
         self.assertIn("Never call Cortex lifecycle", context)
         self.assertNotIn("mcp__codebase_memory__", context)
 
@@ -1496,22 +1242,23 @@ class OrchestrationInvariantTests(unittest.TestCase):
 
     def test_control_skill_requires_unified_host_dispatch_contract(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("The conventional compatibility projection exposes all nine", skill)
+        self.assertIn("The public registry exposes nine MCP operations", skill)
         self.assertIn("ordinary Desktop launch", skill)
-        self.assertIn("The worker projection is `worker_question`", skill)
+        self.assertIn("The strict worker projection is `worker_question`", skill)
         self.assertIn("The explicit coordinator projection is", skill)
         self.assertIn("The stdio MCP process has one immutable launch-time audience", skill)
-        self.assertIn("strict `worker` or `coordinator` projection", skill)
+        self.assertIn("strict five-tool projections", skill)
         self.assertIn("Coordinators use\n`start_orchestration`", skill)
         self.assertIn("`start_orchestration` and `continue_orchestration` for normal work", skill)
         self.assertIn("Invoke every returned dispatch", skill)
         self.assertIn("Expected routes are metadata, not proof", skill)
         self.assertIn("Workers do not call lifecycle operations", skill)
-        self.assertIn("`record_report`", skill)
-        self.assertIn("`read_worker_report`", skill)
+        self.assertIn("`record_attempt_event`", skill)
+        self.assertIn("`complete_attempt`", skill)
+        self.assertIn("`read_worker_result`", skill)
         self.assertIn("question intent", skill)
         self.assertIn("depends_on", skill)
-        self.assertIn("Predecessor review:", skill)
+        self.assertIn("server-owned briefing receipt", skill)
         self.assertIn("task_ref", skill)
         self.assertIn("docs/features/index.md", skill)
         self.assertIn("Knowledge reviewed:", skill)
@@ -1533,7 +1280,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("`profile` is forbidden at package level", skill)
         self.assertIn("non-empty `task.acceptance_criteria`", skill)
         self.assertIn("an explicit `profile`, narrow non-broad", skill)
-        self.assertRegex(skill, r"Dispatch\s+briefing reviewed: <sha256>")
+        self.assertIn("it does not author a digest or evidence marker", skill)
 
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -1574,7 +1321,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertNotIn(runtime_only, root_policy)
         for bundled_contract in (
             "Assign exactly one writer to an overlapping code or documentation area",
-            "Report every unrun required check, environmental limitation",
+            "State every unrun required check, environmental limitation",
             "## Private tool-error diagnostics",
             "at or below 10 MiB",
             "Expected public validation and recovery responses with `ok: false`",
@@ -1599,9 +1346,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIs(control.PUBLIC_TOOL_DESCRIPTIONS, mcp_api.PUBLIC_TOOL_DESCRIPTIONS)
         hook = (plugin / "scripts/cortex_hook.py").read_text(encoding="utf-8")
         self.assertIn("bind_host_worker_from_hook", hook)
-        self.assertIn("Dispatch briefing reviewed digest", hook)
+        self.assertIn("do not author digest", hook)
         self.assertIn("def stopped_worker_after_wait_context(", hook)
-        self.assertIn("stopped without a report and is terminal failed", hook)
+        self.assertIn("stopped without an AttemptResult and is terminal failed", hook)
         for relative in (
             "skills/cortex-control/SKILL.md",
             "skills/orchestrator/SKILL.md",
@@ -1627,7 +1374,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             payload = tomllib.loads(path.read_text(encoding="utf-8"))
             prompt = payload["developer_instructions"]
             prompts[payload["name"]] = prompt
-            for marker in ("Role and mission:", "Operating workflow:", "Quality bar:", "Report", "Escalate"):
+            for marker in ("Role and mission:", "Operating workflow:", "Quality bar:", "Completion:", "Escalate"):
                 self.assertIn(marker, prompt, f"{marker!r} missing from {path.name}")
             self.assertGreaterEqual(len(prompt.split()), 180, path.name)
             self.assertNotIn("gpt-", prompt.lower())
@@ -1640,113 +1387,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         ):
             self.assertIn(marker, planner)
 
-    def test_every_profile_effective_prompt_has_exact_files_tools_and_completion_contract(self):
-        self.assertEqual(
-            control.PROMPT_COMPACTION_GUIDANCE,
-            {
-                "bootstrap_target_bytes": 1500,
-                "ordinary_briefing_target_bytes": 16 * 1024,
-                "harvest_briefing_target_bytes": 18 * 1024,
-            },
-        )
-        contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
-        profiles = {item["name"]: item for item in contract["profiles"]}
-        execution_contracts = contract["profile_execution_contracts"]
-        self.assertEqual(set(execution_contracts), set(profiles))
-        for name, profile in profiles.items():
-            gate = (profile["gates"] or ["implementation"])[0]
-            package = {
-                "task_id": "task-prompt-audit",
-                "task_ref": "task-ref-prompt-audit",
-                "gate": gate,
-                "attempt_id": f"{gate}-01",
-                "dispatch_ref": f"dispatch-{name.replace('_', '')[:12]}000000000000",
-                "project_root": "/workspace/prompt-audit",
-                "facade_managed": True,
-                "user_owned_thread": False,
-                "task_user_request": "Audit and complete the delegated project outcome.",
-                "task_objective": "Complete the audited task contract.",
-                "objective": f"Complete the {gate} mission.",
-                "ownership": f"Own only the delegated {gate} boundary.",
-                "task_requirements": ["Preserve unrelated project behavior."],
-                "task_scope": ["src", "tests"],
-                "allowed_paths": ["src", "tests"],
-                "context_files": ["docs/project/index.md"],
-                "knowledge_index_files": ["docs/project/index.md"],
-                "context_report_ids": ["report-0001"],
-                "result_baseline_ref": "manifest-" + "a" * 64,
-                "task_acceptance_criteria": ["The requested behavior is complete."],
-                "acceptance_criteria": ["The delegated gate outcome is complete."],
-                "task_verification": ["The final verification succeeds."],
-                "verification": ["The delegated result is independently verified."],
-                "pause_conditions": ["A material user decision is required."],
-                "budget": "No external side effects.",
-                "plan_feedback": None,
-                "intent_clarification_required": False,
-                "intent_clarification_reason": None,
-            }
-            prompt = control.host_spawn_prompt(name, package)
-            with self.subTest(profile=name, gate=gate):
-                self.assertIn("# Cortex Worker Briefing v3", prompt)
-                self.assertNotIn("# Cortex Worker Briefing v2", prompt)
-                self.assertIn("## Assignment data", prompt)
-                assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-                self.assertEqual(assignment["profile"], name)
-                self.assertEqual(assignment["user_intent"]["projection"], package["task_user_request"])
-                self.assertEqual(assignment["requirements"], package["task_requirements"])
-                self.assertEqual(assignment["pause_conditions"], package["pause_conditions"])
-                self.assertIn("## Role contract", prompt)
-                execution = control.PROFILE_EXECUTION_CONTRACTS[name]
-                self.assertIn(f"Inputs: {execution['inputs']}", prompt)
-                self.assertIn(f"Project artifacts: {execution['project_artifacts']}", prompt)
-                self.assertIn(f"Completion: {execution['completion']}", prompt)
-                self.assertIn("The exact user-authored request is the immutable intent artifact", prompt)
-                self.assertIn("Only that exact read-only intent path", prompt)
-                self.assertIn("Dispatch briefing reviewed: <briefing_digest>", prompt)
-                self.assertIn("read_dispatch_briefing", prompt)
-                self.assertNotIn("Attempt baseline ref:", prompt)
-                self.assertIn("read_worker_report", prompt)
-                self.assertIn(f"attempt_id='{gate}-01'", prompt)
-                self.assertIn(f"profile={name!r}", prompt)
-                self.assertIn("worker_question", prompt)
-                self.assertIn("recommended_option_ids", prompt)
-                self.assertIn("record_report", prompt)
-                self.assertIn("gate_acceptance_criteria", prompt)
-                self.assertIn("gate_verification", prompt)
-                self.assertIn("REPORT_RECORDED report_ref=<id>", prompt)
-                if control.result_contract_is_read_only(package):
-                    self.assertIn("report.changed_files must be exactly []", prompt)
-                else:
-                    self.assertIn("inside allowed_paths", prompt)
-                self.assertIn("report.tests entries require an exact command", prompt)
-                self.assertNotIn("observed_evidence", prompt)
-                if gate == "plan":
-                    self.assertIn("REQUIRED top-level planning sibling", prompt)
-                    self.assertIn("explicit profile, non-broad allowed_paths", prompt)
-                self.assertIn("integer exit_code 0", prompt)
-                digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
-                bootstrap = control.host_spawn_bootstrap(
-                    name,
-                    Path("/workspace/prompt-audit/.codex/cortex/tasks/task/delegations/worker.briefing.md"),
-                    digest,
-                    package["dispatch_ref"],
-                    package["task_id"],
-                    package["attempt_id"],
-                    Path(package["project_root"]),
-                )
-                self.assertLessEqual(
-                    len(bootstrap.encode("utf-8")),
-                    control.PROMPT_COMPACTION_GUIDANCE["bootstrap_target_bytes"],
-                    name,
-                )
-                self.assertLessEqual(len(bootstrap.encode("utf-8")), 1500, name)
-                self.assertIn(package["dispatch_ref"], bootstrap)
-                self.assertIn(digest, bootstrap)
-                self.assertIn("only direct-read exception is exactly paths supplied", bootstrap)
-                self.assertIn("read_dispatch_briefing", bootstrap)
-                self.assertIn("caller/schema errors", bootstrap)
-                self.assertIn("retryable=false or blocked", bootstrap)
-                self.assertIn(control.dispatch_briefing_review_marker(digest), bootstrap)
 
     def test_worker_assignment_json_neutralizes_prompt_injection_without_a_size_gate(self):
         hostile = (
@@ -1758,10 +1398,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "gate": "documentation", "attempt_id": "documentation-01",
             "dispatch_ref": "dispatch-" + "a" * 24, "project_root": "/workspace/prompt-injection",
             "facade_managed": True, "user_owned_thread": False, "task_user_request": hostile,
-            "task_objective": "Update the requested documentation.", "objective": hostile,
+            "objective": hostile,
             "ownership": "Own documentation only.", "task_requirements": [hostile],
             "task_scope": ["docs"], "allowed_paths": ["docs"], "context_files": [],
-            "knowledge_index_files": [], "context_report_ids": [],
+            "knowledge_index_files": [], "context_result_refs": [],
             "task_acceptance_criteria": ["Requested documentation is updated."],
             "acceptance_criteria": ["Documentation is evidence-backed."],
             "task_verification": ["Validate the documentation."],
@@ -1785,18 +1425,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("untrusted task data", prompt)
         prompt_without_assignment = prompt.split(fence + "json\n", 1)[0] + prompt.split("\n" + fence, 1)[1]
         self.assertNotIn(hostile, prompt_without_assignment)
-        oversized = {
-            **package,
-            "resolved_user_decisions": [
-                {"decision": "x" * 4096, "index": index}
-                for index in range(8)
-            ],
-        }
-        # Prompt compactness is guidance, not a second lifecycle validator:
-        # a dispatch artifact above the retired 24 KiB cap still renders and
-        # is delivered through the cursor-paged briefing transport.
-        oversized_prompt = control.host_spawn_prompt("technical_writer", oversized)
-        self.assertGreater(len(oversized_prompt.encode("utf-8")), 24 * 1024)
 
     def test_harvest_guidance_is_a_conditional_mode_overlay(self):
         package = {
@@ -1804,10 +1432,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "gate": "documentation", "attempt_id": "documentation-01",
             "dispatch_ref": "dispatch-" + "b" * 24, "project_root": "/workspace/mode-overlay",
             "facade_managed": True, "user_owned_thread": False, "task_user_request": "Update docs.",
-            "task_objective": "Update docs.", "objective": "Update docs.",
+            "objective": "Update docs.",
             "ownership": "Own docs.", "task_requirements": [], "task_scope": ["docs"],
             "allowed_paths": ["docs"], "context_files": [], "knowledge_index_files": [],
-            "context_report_ids": [], "task_acceptance_criteria": ["Docs are updated."],
+            "context_result_refs": [], "task_acceptance_criteria": ["Docs are updated."],
             "acceptance_criteria": ["Docs are accurate."], "task_verification": ["Check docs."],
             "verification": ["Check links."], "pause_conditions": [], "budget": None,
             "plan_feedback": None, "intent_clarification_required": False,
@@ -1820,6 +1448,244 @@ class OrchestrationInvariantTests(unittest.TestCase):
         harvest = control.host_spawn_prompt("technical_writer", package)
         self.assertIn("## Mode delta", harvest)
         self.assertIn("Coverage matrix`, `Inventory totals`", harvest)
+
+    def test_attempt_result_unresolved_semantics_are_compiled_and_fresh_only(self):
+        package = {
+            "task_id": "task-unresolved-semantics", "task_ref": "task-ref-unresolved-semantics",
+            "gate": "governance_close", "attempt_id": "governance_close-01",
+            "dispatch_ref": "dispatch-" + "c" * 24, "project_root": "/workspace/unresolved-semantics",
+            "facade_managed": True, "user_owned_thread": False,
+            "task_user_request": "Verify the governed completion.",
+            "objective": "Verify completion.",
+            "task_requirements": [], "task_scope": ["plugins/cortex"], "allowed_paths": ["plugins/cortex"],
+            "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
+            "task_acceptance_criteria": ["The governed completion is verified."],
+            "acceptance_criteria": ["The completion evidence is concrete."],
+            "task_verification": ["Run the authoritative checks."], "verification": ["Inspect the evidence."],
+            "pause_conditions": [], "budget": None, "plan_feedback": None,
+            "intent_clarification_required": False, "intent_clarification_reason": None,
+            "governance_context": {"effective_mode": "full"},
+        }
+        prompt = control.host_spawn_prompt("code_reviewer", package)
+        self.assertIn("ordinary status=completed attempts", prompt)
+        self.assertIn("closure verifier gates review, governance_activation, governance_close, and close", prompt)
+        self.assertIn("Governance-close status=completed requires unresolved=[]", prompt)
+        self.assertIn("placeholder 'none'", prompt)
+        self.assertNotIn("non-blocking evidence gaps belong in `unresolved`", prompt)
+
+    def test_automatic_governance_close_is_decision_complete_without_open_question(self):
+        package = {
+            "task_id": "task-auto-governance-policy", "task_ref": "task-ref-auto-governance-policy",
+            "gate": "governance_close", "attempt_id": "governance_close-01",
+            "dispatch_ref": "dispatch-" + "d" * 24, "project_root": "/workspace/auto-governance-policy",
+            "facade_managed": True, "user_owned_thread": False,
+            "task_user_request": "Verify the automatic governed completion.",
+            "objective": "Verify completion.",
+            "task_requirements": [], "task_scope": ["plugins/cortex"], "allowed_paths": ["plugins/cortex"],
+            "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
+            "task_acceptance_criteria": ["The governed completion is verified."],
+            "acceptance_criteria": ["The completion evidence is concrete."],
+            "task_verification": ["Run the authoritative checks."], "verification": ["Inspect the evidence."],
+            "pause_conditions": [], "budget": None, "plan_feedback": None,
+            "intent_clarification_required": False, "intent_clarification_reason": None,
+            "governance_context": {
+                "requested_mode": "auto", "effective_mode": "full",
+                "autonomous_scope_ref": "governance-scope-autonomous",
+            },
+        }
+        prompt = control.host_spawn_prompt("code_reviewer", package)
+        self.assertIn("AUTOMATIC FULL-GOVERNANCE DECISION POLICY", prompt)
+        self.assertIn("Do not call worker_question", prompt)
+        self.assertIn("complete with status=blocked", prompt)
+        self.assertIn("do not fabricate an answer", prompt)
+        self.assertTrue(briefings._automatic_governance_close(package))
+
+        for override in (
+            {"governance_context": {"requested_mode": "manual", "effective_mode": "full"}},
+            {"intent_clarification_required": True},
+            {"open_question_refs": ["question-0001"]},
+        ):
+            interactive = dict(package)
+            interactive.update(override)
+            if "governance_context" in override:
+                interactive["governance_context"] = override["governance_context"]
+            self.assertFalse(briefings._automatic_governance_close(interactive))
+            self.assertNotIn("AUTOMATIC FULL-GOVERNANCE DECISION POLICY", control.host_spawn_prompt("code_reviewer", interactive))
+
+    def test_shipped_unresolved_contract_has_no_conflicting_templates(self):
+        repository = Path(__file__).parents[1]
+        targets = [
+            repository / "plugins/cortex/profiles.json",
+            repository / "plugins/cortex/skills/cortex-control/SKILL.md",
+            repository / "plugins/cortex/scripts/cortex_runtime/briefings.py",
+            *sorted((repository / "plugins/cortex/agents").glob("*.toml")),
+        ]
+        forbidden = (
+            "unresolved risks and required escalations",
+            "unresolved questions",
+            "unresolved decisions",
+            "unresolved environment gaps",
+            "unresolved product behavior",
+            "non-blocking evidence gaps belong in `unresolved`",
+            "residual verification gaps.",
+        )
+        for path in targets:
+            content = path.read_text(encoding="utf-8").lower()
+            for marker in forbidden:
+                self.assertNotIn(marker.lower(), content, f"conflicting unresolved template {marker!r} in {path}")
+
+    def test_shipped_worker_completion_wire_token_is_canonical(self):
+        repository = Path(__file__).parents[1]
+        contract_targets = [
+            repository / "plugins/cortex/prompt-contracts.json",
+            repository / "plugins/cortex/skills/cortex-control/SKILL.md",
+            repository / "plugins/cortex/profiles.json",
+            repository / "plugins/cortex/scripts/cortex_hook.py",
+            repository / "plugins/cortex/scripts/cortex_runtime/briefings.py",
+            repository / "plugins/cortex/scripts/cortex_runtime/orchestration_engine.py",
+            repository / "scripts/validate-cortex-marketplace.py",
+            repository / "scripts/cortex-luna-high-eval.py",
+            *sorted((repository / "plugins/cortex/agents").glob("*.toml")),
+        ]
+        runtime_targets = {
+            repository / "plugins/cortex/scripts/cortex_hook.py",
+            repository / "plugins/cortex/scripts/cortex_runtime/briefings.py",
+            repository / "plugins/cortex/scripts/cortex_runtime/orchestration_engine.py",
+            repository / "scripts/cortex-luna-high-eval.py",
+        }
+        for path in contract_targets:
+            content = path.read_text(encoding="utf-8")
+            self.assertNotIn("ATTEMPT_COMPLETED result_ref=", content, str(path))
+            if path.name.endswith(".toml"):
+                self.assertIn("Question resume:", content, str(path))
+            markers = (
+                "server exposes result_ref",
+                "compact_generated_result_ref",
+                "payload.result_refs",
+                "all `result_ref` results",
+                "returned `result_ref`",
+                "omits `result_ref`",
+                "compatibility registry",
+            )
+            for marker in markers:
+                self.assertNotIn(marker, content, f"stale result-ref vocabulary {marker!r} in {path}")
+            if path not in runtime_targets:
+                self.assertIsNone(
+                    re.search(r"(?<!attempt_)\bresult_refs?\b", content),
+                    f"standalone generic result-ref vocabulary in {path}",
+                )
+        briefing = control.host_spawn_prompt(
+            "code_reviewer",
+            {
+                "task_id": "task-wire-token", "task_ref": "task-ref-wire-token",
+                "gate": "governance_activation", "attempt_id": "governance_activation-01",
+                "dispatch_ref": "dispatch-" + "d" * 24, "project_root": "/workspace/wire-token",
+                "facade_managed": True, "user_owned_thread": False,
+                "task_user_request": "Verify the governed activation.",
+                "objective": "Verify activation.",
+                "task_requirements": [], "task_scope": ["plugins/cortex"], "allowed_paths": ["plugins/cortex"],
+                "context_files": [], "knowledge_index_files": [], "context_result_refs": [],
+                "task_acceptance_criteria": ["The activation is verified."],
+                "acceptance_criteria": ["The activation evidence is concrete."],
+                "task_verification": ["Run the authoritative checks."], "verification": ["Inspect the evidence."],
+                "pause_conditions": [], "budget": None, "plan_feedback": None,
+                "intent_clarification_required": False, "intent_clarification_reason": None,
+                "governance_context": {"effective_mode": "full"},
+            },
+        )
+        self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", briefing)
+        self.assertNotIn("ATTEMPT_COMPLETED result_ref=", briefing)
+
+    def test_worst_case_briefing_compaction_preserves_fresh_contract(self):
+        """The general assembler bounds large UTF-8 planner and close inputs."""
+        from cortex_runtime.briefings import TARGET_V3_BRIEFING_BYTES
+
+        unit = "Юникод🚀漢字—" * 500
+        predecessor_refs = [f"result-{index:02d}-" + "r" * 50 for index in range(8)]
+        predecessor_results = [
+            {
+                "result_ref": result_ref,
+                "attempt_id": f"implementation-{index:02d}",
+                "gate": "implementation", "profile": "backend_dev",
+                "summary": unit[:900],
+                "changed_files": [f"path/{item}/файл-{index}.py" for item in range(24)],
+                "checks": [unit[:700] for _ in range(8)],
+                "findings": [{"summary": unit[:500]} for _ in range(8)],
+                "semantic_events": [{
+                    "actor": "cortex", "event_type": "question_answered",
+                    "payload": {"question_ref": f"question-{index}", "question": unit[:500], "answer": unit[:800]},
+                }],
+            }
+            for index, result_ref in enumerate(predecessor_refs)
+        ]
+        decisions = [{"question_en": unit[:500], "answer_en": unit[:800]} for _ in range(8)]
+
+        def package(gate: str) -> dict:
+            return {
+                "task_id": "task-worst-case", "task_ref": "task-ref-worst-case",
+                "gate": gate, "attempt_id": f"{gate}-06", "dispatch_ref": "dispatch-" + "a" * 24,
+                "project_root": "/workspace/worst-case", "facade_managed": True, "user_owned_thread": False,
+                "task_user_request": unit[:1600], "objective": unit[:2400],
+                "selection_reason": unit[:1000], "strategy": unit[:500],
+                "task_requirements": [unit[:600] for _ in range(8)], "task_constraints": [unit[:700] for _ in range(8)],
+                "task_scope": [unit[:500] for _ in range(8)],
+                "allowed_paths": [f"plugins/cortex/{index}/файл" for index in range(50)],
+                "context_files": [unit[:500] for _ in range(16)], "knowledge_index_files": [unit[:500] for _ in range(8)],
+                "context_result_refs": predecessor_refs, "predecessor_results": predecessor_results,
+                "predecessor_selection": {"available": 8, "limit": 8},
+                "read_receipts": {"briefing": {"receipt": "briefing-receipt"}, "predecessors": predecessor_refs},
+                "resolved_user_decisions": decisions,
+                "task_acceptance_criteria": [unit[:700] for _ in range(8)], "acceptance_criteria": [unit[:700] for _ in range(8)],
+                "task_verification": [unit[:700] for _ in range(8)], "verification": [unit[:700] for _ in range(8)],
+                "pause_conditions": [unit[:1000] for _ in range(8)], "plan_feedback": unit * 5, "budget": unit[:500],
+                "intent_clarification_required": False, "intent_clarification_reason": unit[:500],
+                "governance_context": {
+                    "schema": "cortex/governance/v1", "effective_mode": "full",
+                    "close_obligations": [unit[:500] for _ in range(8)],
+                    "policy_snapshot": {"schema": "cortex/governance-policy/v1", "required_floor": "full"},
+                },
+                "user_intent": {
+                    "projection": unit[:1600], "artifact_ref": "artifact-intent", "artifact_path": "/workspace/intent.txt",
+                    "digest_sha256": "a" * 64, "byte_size": 999,
+                },
+                "mode": "ordinary",
+                "plan_unit": {
+                    "plan_revision": "plan-06", "source_result_ref": "result-plan", "artifact_ref": "artifact-plan",
+                    "artifact_path": "/workspace/plan.json", "digest_sha256": "b" * 64, "byte_size": 1234,
+                    "microtask_count": 8, "package_count": 2, "package_ids_digest": "c" * 64, "read_required": True,
+                },
+            }
+
+        for gate, profile in (("plan", "planner"), ("governance_close", "code_reviewer")):
+            with self.subTest(gate=gate):
+                prompt = control.host_spawn_prompt(profile, package(gate))
+                self.assertLessEqual(len(prompt.encode("utf-8")), TARGET_V3_BRIEFING_BYTES)
+                self.assertEqual(prompt.encode("utf-8").decode("utf-8"), prompt)
+                self.assertNotIn("\ufffd", prompt)
+                self.assertTrue(prompt.startswith("# Cortex Worker Briefing v3"))
+                self.assertIn("## Tool protocol", prompt)
+                self.assertIn("read_dispatch_briefing", prompt)
+                self.assertIn("complete_attempt", prompt)
+                self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", prompt)
+                self.assertNotIn("ATTEMPT_COMPLETED result_ref=", prompt)
+                route = [
+                    "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>",
+                    "Answer=>followup_task same child",
+                    "poll same ref/attempt first",
+                    "Answered=>record_attempt_event",
+                    "rerun, complete_attempt",
+                    "ATTEMPT_COMPLETED attempt_result_ref=<generated id>",
+                ]
+                positions = [prompt.index(marker) for marker in route]
+                self.assertEqual(positions, sorted(positions))
+                self.assertIn("## Output contract", prompt)
+                assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
+                self.assertEqual(assignment["worker_identity"]["attempt_id"], f"{gate}-06")
+                self.assertEqual(assignment["user_intent"]["digest_sha256"], "a" * 64)
+                self.assertEqual(assignment["handoff"]["schema"], "cortex/handoff-projection/v1")
+                self.assertEqual(assignment["handoff"]["target"]["gate"], gate)
+                self.assertEqual(assignment["handoff"]["target"]["profile"], profile)
+                self.assertTrue(assignment["compiled_context"]["server_receipts"]["briefing_read"])
 
     def test_installable_orchestration_contract_forbids_root_project_work(self):
         repository = Path(__file__).parents[1]
@@ -1838,58 +1704,15 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("COORDINATOR LOCK", hook)
         self.assertIn("never permission for direct coordinator work", hook)
 
-    def test_legacy_briefing_keeps_scalar_scope_atomic(self):
-        prompt = runtime_briefings._expanded_host_spawn_prompt(
-            "planner",
-            {
-                "task_id": "scope-atomic",
-                "gate": "plan",
-                "attempt_id": "plan-01",
-                "dispatch_ref": "dispatch-scope-atomic",
-                "project_root": "/workspace/scope-atomic",
-                "task_scope": "Текущий репозиторий",
-                "task_objective": "Preserve the task scope",
-                "task_user_request": "Preserve the task scope",
-                "objective": "Preserve the task scope",
-            },
-        )
-        self.assertTrue(prompt.startswith("# Cortex Worker Briefing v2\n"))
-        prompt_compiler.assert_legacy_prompt_parity(prompt)
-        assignment = json.loads(prompt.split("```json\n", 1)[1].split("\n```", 1)[0])
-        self.assertEqual(assignment["scope"], ["Текущий репозиторий"])
-
-    def test_deprecated_v2_adapter_is_limited_to_the_explicit_ab_baseline(self):
-        """Normal orchestration must not regain a legacy v2 dispatch path."""
-        repository = Path(__file__).parents[1]
-        runtime = repository / "plugins/cortex/scripts/cortex_runtime"
-        legacy_adapter = "_expanded_host_spawn_prompt"
-        direct_callers: list[tuple[str, str]] = []
-        for path in runtime.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for function in (
-                node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ):
-                if any(
-                    isinstance(call, ast.Call)
-                    and (
-                        isinstance(call.func, ast.Name) and call.func.id == legacy_adapter
-                        or isinstance(call.func, ast.Attribute) and call.func.attr == legacy_adapter
-                    )
-                    for call in ast.walk(function)
-                ):
-                    direct_callers.append((path.relative_to(runtime).as_posix(), function.name))
-        self.assertEqual(direct_callers, [("prompt_eval.py", "render_prompt_ab_pair")])
-        self.assertEqual(prompt_compiler.lint_prompt_sources(repository), [])
-
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
         contract = json.loads((Path(__file__).parents[1] / "plugins/cortex/profiles.json").read_text(encoding="utf-8"))
         self.assertEqual(set(contract["gate_briefings"]), control.AVAILABLE_GATES)
         for gate, briefing in contract["gate_briefings"].items():
             self.assertEqual(set(briefing), {"objective", "ownership", "acceptance", "verification"})
-            self.assertIn("{task_objective}", briefing["objective"], gate)
+            self.assertIn("{task_user_request}", briefing["objective"], gate)
             self.assertGreaterEqual(len(briefing["acceptance"]), 2, gate)
             self.assertGreaterEqual(len(briefing["verification"]), 2, gate)
-            self.assertNotIn(f"Complete and report the {gate} gate", json.dumps(briefing))
+            self.assertNotIn(f"Complete and return the {gate} result", json.dumps(briefing))
 
     def test_profile_contract_is_the_complete_team_and_routing_source(self):
         repository = Path(__file__).parents[1]
@@ -1915,7 +1738,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         shared = contract["shared_worker_contract"]
         self.assertEqual(
             shared["worker_operations"],
-            ["read_dispatch_briefing", "read_worker_report", "worker_question", "get_report_template", "record_report"],
+            ["worker_question", "record_attempt_event", "complete_attempt", "read_dispatch_briefing", "read_worker_result"],
         )
         self.assertEqual(
             shared["dispatch_briefing_fallback"],
@@ -1980,9 +1803,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_default_cortex_ledger_is_excluded_from_manifest(self):
         ledger = control.ledger_root({"project_root": str(self.project)})
         (ledger / "generated.txt").write_text("runtime\n", encoding="utf-8")
-        legacy_projection = self.project / ".codex" / "cortex"
-        legacy_projection.mkdir(parents=True)
-        (legacy_projection / "generated.txt").write_text("projection\n", encoding="utf-8")
+        workspace_projection = self.project / ".codex" / "cortex"
+        workspace_projection.mkdir(parents=True)
+        (workspace_projection / "generated.txt").write_text("projection\n", encoding="utf-8")
         manifest = control.capture_project_manifest(self.project)
         self.assertEqual(ledger, self.ledger)
         self.assertFalse((self.project / ".codex" / "cortex" / "cortex.db").exists())
@@ -2052,7 +1875,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
             (repository / "plugins/cortex/.codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         base_version = manifest["version"].split("+", 1)[0]
-        self.assertEqual(base_version, "9.2.23")
+        self.assertEqual(base_version, "10.0.0")
         expected_markers = {
             "README.md": f"Cortex-{base_version}",
             "CHANGELOG.md": f"## [{base_version}]",
@@ -2066,7 +1889,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         for relative, marker in expected_markers.items():
             self.assertIn(marker, (repository / relative).read_text(encoding="utf-8"), relative)
 
-    def test_launcher_and_installer_remain_compatible_with_stock_macos_bash(self):
+    def test_launcher_and_installer_remain_usable_with_stock_macos_bash(self):
         repository = Path(__file__).parents[1]
         launcher = (repository / "plugins/cortex/scripts/cortex-launcher").read_text(encoding="utf-8")
         installer = (repository / "scripts/sync-cortex.sh").read_text(encoding="utf-8")
@@ -2083,10 +1906,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_current_contract_sources_reject_stale_report_and_tool_counts(self):
+    def test_current_contract_sources_reject_stale_result_and_tool_counts(self):
         repository = Path(__file__).parents[1]
         stale_contract = re.compile(
-            r"\beight(?:[- ](?:field|key|sections?)| report sections?)\b|\bsix tools\b",
+            r"\beight(?:[- ](?:field|key|sections?)| result sections?)\b|\bsix tools\b",
             re.IGNORECASE,
         )
         roots = [repository / name for name in ("AGENTS.md", "CHANGELOG.md", "docs", "scripts", "plugins")]
@@ -2246,38 +2069,6 @@ class OrchestrationInvariantTests(unittest.TestCase):
             paths = [target] if target.is_file() else [path for path in target.rglob("*") if path.is_file() and "__pycache__" not in path.parts]
             for path in paths:
                 self.assertNotIn(retired, path.read_text(encoding="utf-8", errors="ignore"), str(path))
-
-    def test_prompt_contract_v2_ownership_lint_and_offline_eval_are_deterministic(self):
-        repository = Path(__file__).parents[1]
-        contract = prompt_compiler.load_prompt_contract(
-            repository / "plugins/cortex/prompt-contracts.json"
-        )
-        expected_sections = {
-            "authority", "hard_constraints", "assignment", "role", "mode", "gate", "context",
-            "tool_protocol", "output_contract", "stopping",
-        }
-        self.assertEqual(set(contract["ownership"]), expected_sections)
-        self.assertTrue(contract["ownership"]["assignment"]["task_data"])
-        self.assertTrue(all(
-            not owner["task_data"] for key, owner in contract["ownership"].items() if key != "assignment"
-        ))
-        self.assertEqual(prompt_compiler.lint_prompt_sources(repository), [])
-        self.assertEqual(
-            prompt_eval.run_prompt_evals(),
-            ["canonical-v3-order", "conditional-mode-order", "minimal-required-sections"],
-        )
-        ab_results = prompt_eval.run_prompt_ab_evals()
-        self.assertEqual(ab_results[0]["id"], "legacy-v2-vs-canonical-v3-data-boundary")
-        self.assertTrue(ab_results[0]["delta"]["assignment_boundary_improved"])
-        self.assertLess(ab_results[0]["delta"]["bytes"], 0)
-        with self.assertRaisesRegex(ValueError, "model=gpt-5.6-luna and reasoning_effort=high"):
-            prompt_eval.assert_live_prompt_eval_configuration(
-                model="gpt-5.6-terra", reasoning_effort="xhigh"
-            )
-        with self.assertRaisesRegex(RuntimeError, "explicit Luna-high executor"):
-            prompt_eval.run_prompt_evals(
-                live=True, model="gpt-5.6-luna", reasoning_effort="high"
-            )
 
     def test_prompt_compiler_rejects_duplicate_sections_and_uses_safe_assignment_fence(self):
         required = {

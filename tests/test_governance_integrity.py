@@ -13,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
-from cortex_runtime import governance, ledger_db
+from cortex_runtime import attempt_protocol, governance, ledger_db
 
 
 class GovernanceIntegrityTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
     def add_task(self, task_id: str) -> None:
         ledger_db.create_task(
             self.root,
-            {"schema": "cortex/v3", "task_id": task_id, "objective": "fixture", "created_at": "2026-01-01T00:00:00+00:00"},
+            {"schema": "cortex/v3", "task_id": task_id, "user_request": "fixture", "created_at": "2026-01-01T00:00:00+00:00"},
             {"schema": "cortex/v3", "task_id": task_id, "task_number": int(task_id.rsplit("-", 1)[-1]), "status": "active", "revision": 1, "updated_at": "2026-01-01T00:00:00+00:00"},
             f"tasks/{task_id}",
         )
@@ -42,10 +42,10 @@ class GovernanceIntegrityTests(unittest.TestCase):
             owner="coordinator",
         )
 
-    def test_v12_schema_has_non_null_scope_lifecycle_authority_and_public_uow_boundary(self) -> None:
-        self.assertEqual(ledger_db.DATABASE_SCHEMA_VERSION, 12)
+    def test_v15_schema_has_non_null_scope_lifecycle_authority_and_public_uow_boundary(self) -> None:
+        self.assertEqual(ledger_db.DATABASE_SCHEMA_VERSION, 15)
         history = ledger_db.migration_history(self.root)
-        self.assertEqual(history[-1]["name"], "governance-lifecycle-envelope-authentication")
+        self.assertEqual(history[-1]["name"], "attempt-question-decision-events")
         with ledger_db.connection(self.root) as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(governance_records)")}
             indexes = {row[1] for row in connection.execute("PRAGMA index_list(governance_records)")}
@@ -60,7 +60,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
         with ledger_db.transaction(self.root):
             self.assertTrue(ledger_db.in_transaction(self.root))
 
-    def test_released_v9_database_upgrades_atomically_through_v10_to_v12(self) -> None:
+    def test_released_v9_database_upgrades_atomically_through_v10_to_v15(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             plan = ledger_db._migration_plan()
@@ -68,7 +68,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
                 ledger_db.ensure_database(root)
                 self.assertEqual(ledger_db.migration_history(root)[-1]["version"], 9)
             ledger_db.ensure_database(root)
-            self.assertEqual(ledger_db.migration_history(root)[-1]["version"], 12)
+            self.assertEqual(ledger_db.migration_history(root)[-1]["version"], 15)
             with ledger_db.connection(root) as connection:
                 self.assertIn(
                     "scope_key",
@@ -173,9 +173,12 @@ class GovernanceIntegrityTests(unittest.TestCase):
                     )
             ledger_db.ensure_database(root)
             history = ledger_db.migration_history(root)
-            self.assertEqual(history[-3]["version"], 10)
-            self.assertEqual(history[-2]["version"], 11)
-            self.assertEqual(history[-1]["version"], 12)
+            self.assertEqual(history[-6]["version"], 10)
+            self.assertEqual(history[-5]["version"], 11)
+            self.assertEqual(history[-4]["version"], 12)
+            self.assertEqual(history[-3]["version"], 13)
+            self.assertEqual(history[-2]["version"], 14)
+            self.assertEqual(history[-1]["version"], 15)
             with ledger_db.connection(root) as connection:
                 reconciled = connection.execute(
                     "SELECT record_ref,revision,supersedes FROM governance_records ORDER BY revision"
@@ -534,11 +537,33 @@ class GovernanceIntegrityTests(unittest.TestCase):
             self.root, "task-7", kind="evidence", title="reviewed-material.json", mime_type="application/json",
             content='{"reviewed":true}', immutable=True,
         )
-        state["attempts"] = [{"attempt_id": "close-review", "gate": "governance_close", "agent": "code_reviewer", "status": "passed", "invalidated": False, "report_ids": ["report-7"]}]
+        state["attempts"] = [{"attempt_id": "close-review", "gate": "governance_close", "agent": "code_reviewer", "status": "passed", "invalidated": False, "result_baseline_ref": "baseline-close-review", "result_baseline_digest": "a" * 64}]
+        ledger_db.update_task_state(self.root, state)
+        attempt_protocol.record_verification_observation(
+            self.root, task_id="task-7", attempt_id="close-review",
+            payload={"command": "python -m unittest tests.test_governance_integrity", "exit_code": 0},
+        )
+        completed_result = attempt_protocol.complete_attempt(
+            self.root,
+            task_id="task-7",
+            attempt_id="close-review",
+            status="completed",
+            summary="Independent governance close review completed.",
+            workspace_observation={
+                "baseline_ref": "baseline-close-review",
+                "baseline_digest_sha256": "a" * 64,
+                "current_digest_sha256": "b" * 64,
+                "complete": True,
+                "safe_to_attribute": True,
+                "changed_files": [],
+            },
+        )["result"]
+        attempt_protocol.finalize_attempt(self.root, task_id="task-7", attempt_id="close-review")
+        state["attempts"][0]["attempt_result_ref"] = completed_result["result_ref"]
         ledger_db.update_task_state(self.root, state)
         ledger_db.put_worker_session(self.root, {"task_id": "task-7", "attempt_id": "close-review", "host_agent_id": "reviewer-7", "host_task_name": "review", "host_tool": "spawn_agent", "status": "completed"})
         payload = {
-            "task_id": "task-7", "attempt_id": "close-review", "report_id": "report-7", "reviewer_identity": "reviewer-7",
+            "task_id": "task-7", "attempt_id": "close-review", "attempt_result_ref": completed_result["result_ref"], "reviewer_identity": "reviewer-7",
             "reviewed_initiative_revision": 4,
             "reviewed_task_revisions": {"task-7": 1},
             "reviewed_artifact_digests": {artifact["artifact_ref"]: artifact["digest_sha256"]},

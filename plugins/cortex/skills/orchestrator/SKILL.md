@@ -10,14 +10,14 @@ description: Explicit opt-in Cortex coordinator. Use only when the user directly
 In Codex Desktop use the Skills picker to select `cortex:orchestrator` or
 mention `$cortex:orchestrator`. In CLI use `$cortex:orchestrator` or `/skills`.
 Bare `/cortex` and `/normal` are textual shorthand, not registered native slash
-commands. Do not use the deprecated `/prompts` mechanism.
+commands. Do not use obsolete prompt aliases.
 
 Never present a bare `/cortex` or `/normal` token as a required next step or
 ask the user to send it as a recovery command. Those tokens are not native
 host commands. If activation is needed, use the Skills picker to select
 `cortex:orchestrator` or mention `$cortex:orchestrator`; to leave the route,
 use `$cortex:orchestrator normal`. A Cortex lifecycle response that says a
-task is complete is terminal: report the verified handoff and limitations
+task is complete is terminal: result the verified handoff and limitations
 without asking for another activation.
 
 | Exact argument | Route | Effect |
@@ -32,12 +32,11 @@ without asking for another activation.
 Do not guess unknown arguments. Show help and ask the user to choose.
 
 The help route explains invocation, opt-in behavior, the host-private Cortex
-ledger, and the nine public v5 lifecycle/governance/report tools. An ordinary
-Desktop MCP launch uses the conventional compatibility projection containing
-all nine, so `$cortex:orchestrator` can start and run orchestration. Worker
-briefings and profiles still require worker-only behavior. A host may instead
-opt into an explicit strict `worker` or `coordinator` five-tool projection;
-that is optional hardening, not a prerequisite for normal orchestrator use.
+ledger, and the nine-operation public registry. The registry contains the five
+coordinator operations and the five strict worker operations, with one shared
+operation between the role projections. A host may expose the strict
+five-operation `worker` or `coordinator` projection when it can establish
+role-specific capabilities; exposure does not change server-side scope checks.
 Help performs no activation, dispatch, or write. Source/tests outrank generated
 docs.
 
@@ -92,8 +91,8 @@ completeness gates. Do not substitute a generic documentation task.
 Both routes start with the canonical phases `scope`, `discover`, `architecture`,
 `plan`, `documentation`, `review`, and `close`. Planner Scope first publishes a
 discovery brief, relevant context, and up to eight non-overlapping domains; the
-final Planner consumes all predecessor reports after architecture. After
-reading the scoping report, the
+final Planner consumes all predecessor result projections after architecture.
+After reading the scoping projection, the
 coordinator must decide whether the repository is large enough to split the
 single discovery placeholder into 2–8 parallel `explorer` workers with
 non-overlapping domain ownership. A repository with several applications,
@@ -117,8 +116,9 @@ are required. Any gap triggers unbounded documentation rework until it is
 resolved or an explicit non-retryable blocker is recorded, rather than a
 successful close.
 
-The coordinator must reject reports that lack inventory counts, domain/source
-coverage, mapping/exclusion evidence, and concrete coverage gaps. A
+The coordinator must reject semantic results that lack inventory counts,
+domain/source coverage, mapping/exclusion evidence, and concrete coverage gaps.
+A
 handful of top-level service summaries is not complete documentation when
 those services own distinct workflows, commands, state machines, integrations,
 configuration, failure behavior, or operational contracts.
@@ -133,17 +133,17 @@ While Cortex orchestration is active, the main/root agent is a coordinator,
 not a project worker. It must not inspect, search, read, edit, patch, generate,
 format, build, test, or run project code itself. This prohibition includes
 repository shell commands and direct filesystem or patch tools, even when the
-next implementation step appears obvious from a worker report.
+next implementation step appears obvious from a worker result.
 
 The coordinator may only clarify the user's goal, call the public Cortex
-lifecycle and report-read tools, invoke the exact returned native dispatches,
-wait for workers, relay questions, evaluate reports and gate evidence, adjust
+lifecycle and result-read tools, invoke the exact returned native dispatches,
+wait for workers, relay questions, evaluate results and gate evidence, adjust
 future waves through Cortex, and communicate the integrated result to the user. All project
 operations, including follow-up inspection and implementation after a planning
-report, belong to a dispatched worker. The coordinator must remain idle while
+result, belong to a dispatched worker. The coordinator must remain idle while
 a worker is active. Never work in parallel with an active
 worker or substitute coordinator work for a missing, slow, failed, or blocked
-worker. If dispatch is unavailable, stop and report the blocker; do not fall
+worker. If dispatch is unavailable, stop and result the blocker; do not fall
 back to direct project work.
 
 ## Team intelligence and routing
@@ -151,8 +151,14 @@ back to direct project work.
 The main/root agent is the user-facing mission commander and integration
 authority. It owns goal clarification, routing, wave decisions, evidence
 gates, recovery, and the final answer. It is never a hidden implementer.
-Workers are internal specialists with bounded ownership; they report to the
+Workers are internal specialists with bounded ownership; they result to the
 main coordinator and never become an alternate user-facing authority.
+
+Workers publish semantic AttemptResult facts and, when useful, incremental
+AttemptEvents. Cortex owns attempt identity, receipts, workspace observations,
+checks, timestamps, and evidence markers; it exposes result refs and bounded
+human/handoff projections consumed by the coordinator. A projection is a
+handoff view, not the worker's authoritative transport.
 
 `profiles.json` is the canonical team source. Use only the exact profile names
 below. `automatic` means the profile is the default owner of one or more
@@ -199,19 +205,19 @@ Routing is evidence-driven:
    no specialist match is supported.
 3. The coordinator owns the pipeline decision. Build or consciously accept the
    initial canonical pipeline, then follow the exact `pipeline.waves` snapshot
-   returned by Cortex. Planner and explorer reports are advisory evidence, not
+   returned by Cortex. Planner and explorer results are advisory evidence, not
    commands to rebuild the pipeline. Change `future_waves` only when the
    coordinator concludes that verified evidence materially changes ownership,
    dependencies, risk gates, sequencing, or validation. Include a concise
    reason. Never restate or relabel an unchanged pipeline merely because a
-   report completed. Context narrowing changes dependencies, not phase
+   result completed. Context narrowing changes dependencies, not phase
    membership: Cortex rejects removal of a pending implementation obligation
    and automatically infers rework when a replacement repeats a current or
    completed phase. If an accepted implementation plan reaches documentation
    or close without implementation and its required QA/audit/review evidence,
    Cortex restores a Planner-first full delivery graph before dispatch; never
    substitute another documentation worker. Evidence-backed material replans
-   have no task-lifetime quota: `replan_count` is audit history and the legacy
+   have no task-lifetime quota: `replan_count` is audit history and the prior
    `replan_limit` field cannot terminate a progressing task. Cortex preflights
    the complete replacement before mutating the current gate. If an older
    failed replan left an active gate with no live or pending dispatch, recover
@@ -230,7 +236,7 @@ Routing is evidence-driven:
    native dispatch is a blocker, never permission to continue the wave.
 
 Multiple workers with the same profile are separate bounded instances. Keep
-their ownership, paths, dependencies, report refs, and native task identities
+their ownership, paths, dependencies, result refs, and native task identities
 distinct. `profile` preserves the exact canonical role. `display_name` is the
 human-readable `Profile Module` label (for example, `Explorer Auth`), and
 `spawn_agent.task_name` is its host-safe task/attempt-unique key with an
@@ -239,7 +245,7 @@ uniqueness digest. A new dispatch must use
 `spawn_agent`; `followup_task` is reserved for resuming that exact native
 worker after its durable question or other explicitly resumable pause. Cortex
 rejects reuse of a `host_agent_id` already bound to another attempt. Since
-dynamic host events report `agent_type=default`, lifecycle hooks use the
+dynamic host events result `agent_type=default`, lifecycle hooks use the
 exact returned dispatch identity to bind each opaque child ID back to its
 issued native task key and canonical profile before injecting worker context.
 The hidden `spawn_agent` host contract currently exposes only `task_name` to
@@ -268,7 +274,7 @@ Natural-facing output is a strict presentation boundary. In the default
 `natural` profile, every user-visible update contains only 3–5 short steps:
 what happened, why it matters, what happens next, and—when applicable—the one
 decision required from the user. Internal protocol names, lifecycle states,
-worker identities, dispatch references, cursors, report paths, model names,
+worker identities, dispatch references, cursors, result refs, model names,
 and validation implementation details stay internal. Ask at most one clear
 question in a user-facing message. If all material uncertainty is closed and
 the plan is executable, the coordinator must recommend **Approve** explicitly;
@@ -279,7 +285,7 @@ heartbeat or progress message.
 For an activated route, `../cortex-control/SKILL.md` is the single coordinator
 core and state-machine authority. Load it completely before the first lifecycle
 call and follow its exact tool sequence, silent-wait policy, question flow,
-report processing, unbounded rework escalation, steer/follow-up distinction, model routing,
+result processing, unbounded rework escalation, steer/follow-up distinction, model routing,
 recovery, and completion contract. Do not restate or reinterpret that protocol
 here.
 
@@ -299,7 +305,7 @@ reconstruct lifecycle state from chat. The coordinator must remain idle while a
 worker is active and may never use patch, shell, or project-inspection tools as
 a fallback.
 
-Native worker-slot cleanup, all wait behavior, report-link publication,
+Native worker-slot cleanup, all wait behavior, result-link publication,
 `next_strategy` retry handling, and terminal completion are defined only in
 Cortex Control. A completed lifecycle response is terminal: present the
 evidence-backed result and every unrun release gate without asking the user to

@@ -104,7 +104,7 @@ def materialize_job(root: Path, job: dict[str, Any], *, materializer: Callable[.
     """Materialize only an owned, leased job and durably acknowledge it.
 
     A pending row is claimed before any filesystem operation. A ready row is
-    returned unchanged for backward compatibility; callers that need a
+    returned unchanged because materialization is idempotent; callers that need a
     physical integrity check use :func:`verify_job` or :func:`reconcile`.
     """
     key = str(job.get("projection_key") or "")

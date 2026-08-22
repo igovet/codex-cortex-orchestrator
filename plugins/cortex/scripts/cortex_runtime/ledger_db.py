@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 
 DATABASE_NAME = "cortex.db"
-DATABASE_SCHEMA_VERSION = 12
+DATABASE_SCHEMA_VERSION = 15
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
 _LOCAL = threading.local()
@@ -139,12 +139,12 @@ def governance_lifecycle_binding(
 def _governance_lifecycle_key_path(root: Path) -> Path:
     """Return the host-private sidecar key path for one project ledger.
 
-    The ledger's project directory is movable (legacy project-local state is
+    The ledger's project directory is movable (prior-release project-local state is
     migrated into ``<host>/projects/<opaque-id>``), while the host control
     store is not part of the project checkout.  Keep the HMAC key beside that
     control store rather than in the SQLite ledger it authenticates.  The
     opaque ledger directory name is stable for the normal host-private layout;
-    a digest fallback keeps source-mode/legacy fixtures collision-free.
+    a digest fallback keeps source-mode/prior-release fixtures collision-free.
     """
     resolved = root.resolve()
     host_root = resolved.parent.parent if resolved.parent.name == "projects" else resolved.parent
@@ -218,8 +218,8 @@ def governance_lifecycle_envelope_hmac(
 ) -> str:
     """Authenticate the complete immutable lifecycle event envelope.
 
-    v11's public SHA-256 chain intentionally remains readable for backwards
-    compatibility.  v12 seals every field omitted by that chain with an HMAC
+    v11's public SHA-256 chain remains readable for historical verification.
+    v12 seals every field omitted by that chain with an HMAC
     whose key lives outside the project ledger.
     """
     payload = _canonical_json({
@@ -435,7 +435,7 @@ def hook_snapshot(root: Path, *, timeout_ms: int = 100) -> Iterator[sqlite3.Conn
 
     Hooks are observational and must never bootstrap a ledger, validate or
     apply migrations, acquire the filesystem state lock, or wait behind a
-    report commit.  The database must already exist and advertise the current
+    result commit.  The database must already exist and advertise the current
     schema; any missing, busy, unreadable, or incompatible database is a
     fail-open ``None`` snapshot.  Callers may perform all of their reads while
     this single deferred transaction is open, then the connection is closed.
@@ -591,15 +591,6 @@ def hook_snapshot_pending_subagent(
         if len(candidates) == 1:
             matches.append(str(row["task_id"]))
     return matches
-
-
-def hook_snapshot_pending_subagent_task(
-    connection: sqlite3.Connection,
-    agent_type: str,
-    model: str = "",
-) -> list[str]:
-    """Compatibility spelling for the pending-subagent snapshot reader."""
-    return hook_snapshot_pending_subagent(connection, agent_type, model)
 
 
 def hook_snapshot_find_successful_tool_observation(
@@ -928,7 +919,7 @@ _PRUNE_SCHEMA_STATEMENTS = (
 # intact.  They are migration evidence and preserve every historic artifact id
 # while this migration backfills an explicitly split logical/blob model.  New
 # writes and all reads use the tables below; a later, separately-versioned
-# retention migration may reclaim legacy duplicate chunks only after it has a
+# retention migration may reclaim prior-release duplicate chunks only after it has a
 # safe export/projection retention policy.
 _ARTIFACT_NORMALIZATION_SCHEMA_STATEMENTS = (
     "CREATE TABLE IF NOT EXISTS artifact_blobs(blob_id TEXT PRIMARY KEY, digest_sha256 TEXT NOT NULL, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 1), encoding TEXT NOT NULL CHECK(encoding IN ('utf-8', 'binary')), created_at TEXT NOT NULL, UNIQUE(digest_sha256, mime_type, byte_size))",
@@ -1018,8 +1009,8 @@ _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS = (
     "OR (NEW.initiative_ref IS NOT NULL AND NEW.task_id IS NOT NULL AND NOT EXISTS "
     "(SELECT 1 FROM initiative_task_links WHERE initiative_ref=NEW.initiative_ref AND task_id=NEW.task_id)) "
     "BEGIN SELECT RAISE(ABORT, 'governance scope integrity violation'); END",
-    # Re-evaluate legacy v9 rows through the just-installed trigger.  A
-    # legacy record with a cross-initiative task link must fail closed instead
+    # Re-evaluate prior-release v9 rows through the just-installed trigger.  A
+    # prior-release record with a cross-initiative task link must fail closed instead
     # of silently becoming valid in a wider scope after upgrade.
     "UPDATE governance_records SET scope_key = scope_key",
     "CREATE UNIQUE INDEX governance_records_scope_revision_unique ON governance_records(scope_key, record_type, revision)",
@@ -1116,6 +1107,48 @@ _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS = (
     "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication is append-only'); END",
     "CREATE TRIGGER governance_record_lifecycle_auth_immutable_delete BEFORE DELETE ON governance_record_lifecycle_auth FOR EACH ROW "
     "BEGIN SELECT RAISE(ABORT, 'governance lifecycle authentication is append-only'); END",
+)
+
+# v13 separates the small semantic result supplied by a worker from the
+# server-observed attempt metadata and from rebuildable result projections.
+# ``attempt_results`` is deliberately one row per dispatched attempt: a
+# completed worker must never be replaced merely because a later result
+# materialization or other finalization step is unavailable.  The append-only
+# ``attempt_events`` stream checkpoints useful facts while work is in flight.
+_ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS = (
+    "CREATE TABLE attempt_results(result_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, result_status TEXT NOT NULL CHECK(result_status IN ('completed','blocked','failed')), lifecycle_status TEXT NOT NULL CHECK(lifecycle_status IN ('WORK_COMPLETED','FINALIZING','COMPLETED','BLOCKED','FAILED')), summary TEXT NOT NULL, findings_json TEXT NOT NULL, decisions_needed_json TEXT NOT NULL, unresolved_json TEXT NOT NULL, claims_json TEXT NOT NULL, metadata_json TEXT NOT NULL, workspace_observation_json TEXT NOT NULL, changed_files_json TEXT NOT NULL, changed_files_status TEXT NOT NULL CHECK(changed_files_status IN ('server_observed','unavailable','incomplete','not_attributable')), content_digest TEXT NOT NULL, submission_id TEXT NOT NULL, work_completed_at TEXT, finalizing_at TEXT, completed_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(task_id, attempt_id), UNIQUE(task_id, attempt_id, submission_id))",
+    "CREATE INDEX attempt_results_task_lifecycle_idx ON attempt_results(task_id, lifecycle_status, updated_at)",
+    "CREATE INDEX attempt_results_attempt_idx ON attempt_results(task_id, attempt_id)",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
+    "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
+)
+
+# v14 makes verification authority explicit: workers can claim a check, but
+# only Cortex may emit the observed verification event consumed by gates.
+_ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS = (
+    "DROP INDEX attempt_events_task_type_idx",
+    "DROP INDEX attempt_events_task_attempt_sequence_idx",
+    "ALTER TABLE attempt_events RENAME TO attempt_events_v13",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) SELECT event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at FROM attempt_events_v13",
+    "DROP TABLE attempt_events_v13",
+    "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
+    "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
+)
+
+# v15 makes durable question/decision transitions first-class AttemptEvents.
+# The question documents remain the detailed interaction records; this table
+# is the immutable attempt-local timeline consumed by canonical compilers.
+_ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS = (
+    "DROP INDEX attempt_events_task_type_idx",
+    "DROP INDEX attempt_events_task_attempt_sequence_idx",
+    "ALTER TABLE attempt_events RENAME TO attempt_events_v14",
+    "CREATE TABLE attempt_events(event_ref TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE, attempt_id TEXT NOT NULL, event_key TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 1), event_type TEXT NOT NULL CHECK(event_type IN ('finding_added','decision_evidence','blocker','verification_claimed','verification_observed','progress','note','briefing_acknowledged','predecessor_read','question_created','question_answered','decision_resolved','work_completed','finalizing','finalization_failed','completed')), payload_json TEXT NOT NULL, actor TEXT NOT NULL CHECK(actor IN ('worker','cortex','system')), occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, attempt_id, event_key), UNIQUE(task_id, attempt_id, sequence))",
+    "INSERT INTO attempt_events(event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at) SELECT event_ref,task_id,attempt_id,event_key,sequence,event_type,payload_json,actor,occurred_at,created_at FROM attempt_events_v14",
+    "DROP TABLE attempt_events_v14",
+    "CREATE INDEX attempt_events_task_attempt_sequence_idx ON attempt_events(task_id, attempt_id, sequence)",
+    "CREATE INDEX attempt_events_task_type_idx ON attempt_events(task_id, event_type, occurred_at)",
 )
 
 
@@ -1225,7 +1258,7 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             raise _v9_governance_upgrade_error("v9_supersedes_graph_incomplete")
         # Move every revision out of the old range before assigning its
         # canonical number, avoiding transient uniqueness conflicts for
-        # non-null legacy scopes.
+        # non-null prior-release scopes.
         offset = max([int(item["revision"]) for item in group_rows] + [0]) + len(group_rows) + 1
         for item in group_rows:
             connection.execute("UPDATE governance_records SET revision=revision+? WHERE record_ref=?", (offset, item["record_ref"]))
@@ -1373,6 +1406,9 @@ def _migration_plan() -> tuple[_Migration, ...]:
         _Migration(10, "governance-integrity-hardening", _GOVERNANCE_INTEGRITY_SCHEMA_STATEMENTS),
         _Migration(11, "governance-lifecycle-authority", _GOVERNANCE_LIFECYCLE_INTEGRITY_SCHEMA_STATEMENTS),
         _Migration(12, "governance-lifecycle-envelope-authentication", _GOVERNANCE_LIFECYCLE_ENVELOPE_AUTH_SCHEMA_STATEMENTS),
+        _Migration(13, "attempt-result-event-protocol", _ATTEMPT_RESULT_EVENT_PROTOCOL_SCHEMA_STATEMENTS),
+        _Migration(14, "attempt-verification-authority", _ATTEMPT_VERIFICATION_AUTHORITY_SCHEMA_STATEMENTS),
+        _Migration(15, "attempt-question-decision-events", _ATTEMPT_QUESTION_EVENT_SCHEMA_STATEMENTS),
     )
 
 
@@ -1432,6 +1468,16 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
             "governance_record_lifecycle_auth_insert_integrity",
             "governance_record_lifecycle_auth_immutable_update",
             "governance_record_lifecycle_auth_immutable_delete",
+        },
+        13: {
+            "attempt_results", "attempt_results_task_lifecycle_idx", "attempt_results_attempt_idx",
+            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
+        },
+        14: {
+            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
+        },
+        15: {
+            "attempt_events", "attempt_events_task_attempt_sequence_idx", "attempt_events_task_type_idx",
         },
     }
     present = {
@@ -1503,6 +1549,24 @@ def _assert_migration_schema(connection: sqlite3.Connection, version: int) -> No
         },
         12: {
             "governance_record_lifecycle_auth": {"lifecycle_ref", "envelope_hmac"},
+        },
+        13: {
+            "attempt_results": {
+                "result_ref", "task_id", "attempt_id", "result_status", "lifecycle_status", "summary",
+                "findings_json", "decisions_needed_json", "unresolved_json", "claims_json", "metadata_json",
+                "workspace_observation_json", "changed_files_json", "changed_files_status", "content_digest",
+                "submission_id", "work_completed_at", "finalizing_at", "completed_at", "created_at", "updated_at",
+            },
+            "attempt_events": {
+                "event_ref", "task_id", "attempt_id", "event_key", "sequence", "event_type", "payload_json",
+                "actor", "occurred_at", "created_at",
+            },
+        },
+        15: {
+            "attempt_events": {
+                "event_ref", "task_id", "attempt_id", "event_key", "sequence", "event_type", "payload_json",
+                "actor", "occurred_at", "created_at",
+            },
         },
     }
     for table, expected_columns in column_requirements.get(version, {}).items():
@@ -1691,7 +1755,7 @@ def ensure_database(root: Path) -> None:
                 if known is not None:
                     if known == (migration.name, checksum):
                         continue
-                    # Databases from the pre-atomic release used a legacy
+                    # Databases from the pre-atomic release used a prior-release
                     # name-only checksum. Upgrade it only after confirming
                     # the migration's known schema is actually present.
                     if known == (migration.name, _migration_checksum(migration.name)):
@@ -1857,7 +1921,7 @@ def create_task(root: Path, definition: dict[str, Any], state: dict[str, Any], a
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_revisions'"
         ).fetchone() is not None:
-            original = str(definition.get("user_request") or definition.get("objective") or "")
+            original = str(definition.get("user_request") or "")
             language = str(definition.get("user_language") or "en")
             connection.execute(
                 """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
@@ -1952,7 +2016,7 @@ def append_task_revision(
             if task is None:
                 raise ValueError("task revision refers to an unknown task")
             definition = _decode_json(str(task["definition_json"]), "task definition")
-            initial = str(definition.get("user_request") or definition.get("objective") or "")
+            initial = str(definition.get("user_request") or "")
             initial_language = str(definition.get("user_language") or "en").lower()
             connection.execute(
                 """INSERT INTO task_revisions(task_id, task_revision, base_revision, source, message_original, message_language, message_en, translation_status, created_at)
@@ -2036,6 +2100,29 @@ def put_worker_session(root: Path, session: dict[str, Any]) -> dict[str, Any]:
             ),
         )
     return {**session, "session_id": session_id, "status": status, "last_seen_at": timestamp}
+
+
+def list_worker_sessions(root: Path, task_id: str) -> list[dict[str, Any]]:
+    """Read server-owned native worker identities for one task.
+
+    Compaction recovery must be able to rehydrate a native child even when an
+    older task projection does not carry the nested ``host_spawn`` object.
+    ``worker_sessions`` is the canonical server-observed identity table, so
+    this read is deliberately scoped to one exact task and returns no other
+    host/session metadata.
+    """
+    ensure_database(root)
+    with _connection(root) as connection:
+        rows = connection.execute(
+            """SELECT session_id, task_id, attempt_id, host_agent_id, host_task_name,
+                      host_tool, generation, status, resumable, started_at,
+                      last_seen_at, terminated_at
+               FROM worker_sessions
+               WHERE task_id = ?
+               ORDER BY attempt_id, generation DESC, last_seen_at DESC""",
+            (str(task_id),),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def append_attempt_message(root: Path, message: dict[str, Any]) -> dict[str, Any]:
@@ -3014,12 +3101,6 @@ def finalize_prunes(
         "removed_classifications": int(removed_classifications),
         "removed_manifest_snapshots": int(removed_snapshots),
     }
-
-
-def finalize_prune(root: Path, tombstone_id: str) -> dict[str, Any]:
-    """Compatibility wrapper for a metadata-free one-tombstone finalization."""
-    result = finalize_prunes(root, [tombstone_id], global_updates={}, lane_updates=[])
-    return result["finalized"][0]
 
 
 def fail_prune(root: Path, tombstone_id: str, error: str) -> dict[str, Any]:

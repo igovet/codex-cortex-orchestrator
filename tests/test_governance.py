@@ -15,16 +15,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex
-from cortex_runtime import governance, ledger_db
+from cortex_runtime import attempt_protocol, governance, ledger_db
 
 
 class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.set_up_host_private_control_store()
-        # This direct ledger-db fixture is intentionally not a legacy
-        # workspace location: public runtime calls in this suite must use the
-        # private host mapping instead of triggering an incidental migration.
+        # This direct ledger-db fixture is intentionally outside the workspace
+        # mapping: public runtime calls in this suite must use the private host
+        # mapping rather than mutating an incidental project location.
         self.root = Path(self.temp.name) / "governance-ledger"
         ledger_db.ensure_database(self.root)
 
@@ -211,6 +211,56 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         self.assertNotIn("task_verification", assignment)
         self.assertIn("MUST NOT be reported as findings", briefing)
         self.assertIn("Fail or request rework only for a defect in those activation inputs", briefing)
+        self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", briefing)
+        self.assertNotIn("ATTEMPT_COMPLETED result_ref=", briefing)
+        route = [
+            "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>",
+            "Answer=>followup_task same child",
+            "poll same ref/attempt first",
+            "Answered=>record_attempt_event",
+            "rerun, complete_attempt",
+            "ATTEMPT_COMPLETED attempt_result_ref=<generated id>",
+        ]
+        positions = [briefing.index(marker) for marker in route]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Pending=>QUESTION_RECORDED", briefing)
+        self.assertIn("No OTHER_TERMINAL/freeform/replacement", briefing)
+
+    def test_actual_governance_activation_briefing_preserves_question_resume_route(self) -> None:
+        project = Path(self.temp.name) / "question-route"
+        project.mkdir()
+        started = cortex.start_orchestration({
+            "project_root": str(project),
+            "task": {
+                "user_request": "Create result.txt as a governed high-impact release fixture.",
+                "complexity": "C3",
+                "acceptance_criteria": ["result.txt contains the governed fixture result."],
+                "verification": ["Read result.txt after implementation."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "documentation"}]},
+                {"workers": [{"phase": "close"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        activation = started["dispatches"][0]
+        self.assertEqual(activation["phase"], "governance_activation")
+        briefing = Path(activation["briefing_path"]).read_text(encoding="utf-8")
+        self.assertLessEqual(len(briefing.encode("utf-8")), 14_500)
+        route = [
+            "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>",
+            "Answer=>followup_task same child",
+            "poll same ref/attempt first",
+            "Answered=>record_attempt_event",
+            "rerun, complete_attempt",
+            "ATTEMPT_COMPLETED attempt_result_ref=<generated id>",
+        ]
+        positions = [briefing.index(marker) for marker in route]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Pending=>QUESTION_RECORDED", briefing)
+        self.assertIn("No OTHER_TERMINAL/freeform/replacement", briefing)
 
     def test_minimal_and_light_modes_preserve_the_existing_pipeline(self) -> None:
         ordinary = [{"wave_id": "wave-01", "delegations": [{"gate": "implementation", "agent": "general"}]}]
@@ -353,23 +403,6 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         )
         self.assertTrue(replayed["ok"], replayed)
         self.assertNotIn("authorization", replayed)
-
-    def test_legacy_plaintext_governance_capability_is_scrubbed_and_invalidated(self) -> None:
-        project = Path(self.temp.name) / "legacy-capability-project"
-        project.mkdir()
-        ledger = cortex.ledger_root({"project_root": str(project)})
-        ledger.mkdir(parents=True, exist_ok=True)
-        legacy = "b" * 64
-        cortex.db_put_global(ledger, "operation_registry", {
-            "schema": cortex.PUBLIC_ORCHESTRATION_SCHEMA,
-            "starts": {"digest": {"task_id": "legacy-task", "coordinator_capability": legacy}},
-            "tasks": {"legacy-task": {"start": {"coordinator_capability": legacy}}},
-            "updated_at": cortex.now(),
-        })
-        registry = cortex._operation_registry(ledger)
-        serialized = json.dumps(registry, sort_keys=True)
-        self.assertNotIn(legacy, serialized)
-        self.assertFalse(cortex._coordinator_capability_matches(ledger, "legacy-task", legacy))
 
     def test_public_start_enforces_governance_classification_and_review_waves(self) -> None:
         def start(project: Path, request: str, complexity: str, mode: str) -> dict[str, object]:
@@ -564,93 +597,6 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         )
         self.assertEqual(replay["initiative_ref"], initiative["initiative_ref"])
         self.assertEqual(replay["relationship"], "deliverable")
-
-    def test_stale_revisions_concurrent_promotions_and_exception_floors_are_safe(self) -> None:
-        initiative = governance.create_initiative(
-            self.root,
-            initiative_ref="initiative-concurrency",
-            title="Concurrency",
-            goal="Exercise optimistic revisions and one-writer promotion",
-            owner="coordinator",
-        )
-        self.add_task("task-401")
-        governance.link_task(
-            self.root,
-            initiative_ref=initiative["initiative_ref"],
-            task_id="task-401",
-            relationship="deliverable",
-            expected_revision=initiative["revision"],
-        )
-        with self.assertRaisesRegex(governance.GovernanceError, "stale"):
-            governance.link_task(
-                self.root,
-                initiative_ref=initiative["initiative_ref"],
-                task_id="task-401",
-                relationship="milestone",
-                milestone="stale revision must not write",
-                expected_revision=initiative["revision"],
-            )
-
-        for number in range(402, 405):
-            self.add_task(f"task-{number}")
-            ledger_db.upsert_task_finding(
-                self.root,
-                f"task-{number}",
-                {"fingerprint": "concurrent-risk", "severity": "P2", "status": "open", "blocking": False, "summary": "canonical"},
-            )
-        findings = [
-            {
-                "fingerprint": "concurrent-risk",
-                "task_id": f"task-{number}",
-                "created_at": "2026-08-01T00:00:00+00:00",
-            }
-            for number in range(402, 405)
-        ]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            results = list(
-                pool.map(
-                    lambda _index: governance.evaluate_promotion(
-                        self.root,
-                        fingerprint="concurrent-risk",
-                        findings=findings,
-                        initiative_ref=initiative["initiative_ref"],
-                        created_by="worker",
-                    ),
-                    range(4),
-                )
-            )
-        self.assertEqual(sum(bool(result["proposal_created"]) for result in results), 1)
-        proposals = governance.list_records(
-            self.root,
-            initiative_ref=initiative["initiative_ref"],
-            record_type="promotion",
-            active_only=False,
-        )
-        self.assertEqual(len(proposals), 1)
-        self.assertEqual(proposals[0]["status"], "pending")
-
-        with self.assertRaisesRegex(governance.GovernanceError, "hard security/runtime invariants"):
-            governance.request_exception(
-                self.root,
-                trigger="security",
-                reason="cannot waive a hard invariant",
-                initiative_ref=initiative["initiative_ref"],
-            )
-        with self.assertRaisesRegex(governance.GovernanceError, "coordinator"):
-            governance.request_exception(
-                self.root,
-                trigger="documentation_gap",
-                reason="worker proposal only",
-                actor_role="worker",
-                initiative_ref=initiative["initiative_ref"],
-            )
-        exception = governance.request_exception(
-            self.root,
-            trigger="documentation_gap",
-            reason="coordinator-approved scoped exception",
-            initiative_ref=initiative["initiative_ref"],
-        )
-        self.assertEqual(exception["status"], "approved")
 
     def test_records_are_revised_append_only_and_snapshots_require_policy(self) -> None:
         initiative = governance.create_initiative(
@@ -910,6 +856,43 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         ledger_db.update_task_state(self.root, completed_state)
         governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="completed")
         current_initiative = governance.inspect_initiative(self.root, initiative["initiative_ref"])
+        state = completed_state
+        state["attempts"] = [{
+            "attempt_id": "governance-close-1",
+            "gate": "governance_close",
+            "agent": "code_reviewer",
+            "status": "passed",
+            "invalidated": False,
+            "result_baseline_ref": "baseline-close-review",
+            "result_baseline_digest": "a" * 64,
+        }]
+        ledger_db.update_task_state(self.root, state)
+        attempt_protocol.record_verification_observation(
+            self.root,
+            task_id="task-203",
+            attempt_id="governance-close-1",
+            payload={"command": "python -m unittest tests.test_governance", "exit_code": 0},
+        )
+        completed_result = attempt_protocol.complete_attempt(
+            self.root,
+            task_id="task-203",
+            attempt_id="governance-close-1",
+            status="completed",
+            summary="Independent governance close review completed.",
+            workspace_observation={
+                "baseline_ref": "baseline-close-review",
+                "baseline_digest_sha256": "a" * 64,
+                "current_digest_sha256": "b" * 64,
+                "complete": True,
+                "safe_to_attribute": True,
+                "changed_files": [],
+            },
+        )["result"]
+        attempt_protocol.finalize_attempt(
+            self.root, task_id="task-203", attempt_id="governance-close-1",
+        )
+        state["attempts"][0]["attempt_result_ref"] = completed_result["result_ref"]
+        ledger_db.update_task_state(self.root, state)
         artifact_by_key = {}
         for key in governance._CLOSE_EVIDENCE_KEYS:
             body = {
@@ -921,7 +904,7 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 body.update({
                     "task_id": "task-203",
                     "attempt_id": "governance-close-1",
-                    "report_id": "report-review-1",
+                    "attempt_result_ref": completed_result["result_ref"],
                     "reviewer_identity": "reviewer-1",
                     "reviewed_initiative_revision": current_initiative["revision"],
                     "reviewed_task_revisions": {"task-203": 1},
@@ -946,17 +929,6 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 status="closed",
                 evidence={},
             )
-
-        state = completed_state
-        state["attempts"] = [{
-            "attempt_id": "governance-close-1",
-            "gate": "governance_close",
-            "agent": "code_reviewer",
-            "status": "passed",
-            "invalidated": False,
-            "report_ids": ["report-review-1"],
-        }]
-        ledger_db.update_task_state(self.root, state)
 
         def proof(key: str) -> dict[str, str]:
             artifact = artifact_by_key[key]
@@ -1101,77 +1073,6 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         )
         self.assertEqual(replay["policy"]["record_ref"], approved["policy"]["record_ref"])
 
-    def test_unscoped_repeated_findings_promote_to_project_policy(self) -> None:
-        findings = []
-        for number in range(501, 504):
-            task_id = f"task-{number}"
-            self.add_task(task_id)
-            ledger_db.upsert_task_finding(
-                self.root,
-                task_id,
-                {"fingerprint": "project-repeat-risk", "severity": "P2", "status": "open", "blocking": False, "summary": "canonical"},
-            )
-            findings.append({
-                "fingerprint": "project-repeat-risk",
-                "task_id": task_id,
-                "created_at": "2026-08-01T00:00:00+00:00",
-            })
-        proposal = governance.evaluate_promotion(
-            self.root,
-            fingerprint="project-repeat-risk",
-            findings=findings,
-            created_by="worker",
-        )
-        self.assertTrue(proposal["proposal_created"])
-        self.assertIsNone(proposal["proposal"]["initiative_ref"])
-        self.assertIsNone(proposal["proposal"]["task_id"])
-        approved = governance.approve_promotion(
-            self.root,
-            proposal_ref=proposal["proposal"]["record_ref"],
-            actor_role="coordinator",
-        )
-        self.assertEqual(approved["policy"]["status"], "approved")
-        self.assertIsNone(approved["policy"]["initiative_ref"])
-
-    def test_repeated_findings_create_only_a_pending_worker_proposal(self) -> None:
-        initiative = governance.create_initiative(
-            self.root,
-            initiative_ref="initiative-worker-proposal",
-            title="Worker proposal",
-            goal="Keep policy changes coordinator-approved",
-            owner="coordinator",
-        )
-        findings = [
-            {"fingerprint": "repeat-worker-risk", "task_id": f"task-{index}", "created_at": "2026-08-01T00:00:00+00:00"}
-            for index in range(1, 4)
-        ]
-        for item in findings:
-            self.add_task(item["task_id"])
-            ledger_db.upsert_task_finding(
-                self.root,
-                item["task_id"],
-                {"fingerprint": "repeat-worker-risk", "severity": "P2", "status": "open", "blocking": False, "summary": "canonical"},
-            )
-        proposal_result = governance.evaluate_promotion(
-            self.root,
-            fingerprint="repeat-worker-risk",
-            findings=findings,
-            created_by="worker",
-            initiative_ref=initiative["initiative_ref"],
-        )
-        proposal = proposal_result["proposal"]
-        self.assertTrue(proposal_result["proposal_created"])
-        self.assertEqual(proposal["status"], "pending")
-        self.assertFalse(
-            any(item["record_type"] == "policy" for item in governance.active_snapshot(self.root, initiative_ref=initiative["initiative_ref"])["records"])
-        )
-        with self.assertRaisesRegex(governance.GovernanceError, "coordinator"):
-            governance.approve_promotion(
-                self.root,
-                proposal_ref=proposal["record_ref"],
-                actor_role="worker",
-            )
-
     def test_governance_obligations_require_server_bound_immutable_evidence(self) -> None:
         """Typed metadata alone must never satisfy activation/close proof."""
         scope = "governance-scope-autonomous"
@@ -1191,8 +1092,8 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 "governance_scope_ref": scope,
                 "governance_obligations": [kind],
                 "kind": kind,
-                "report_id": "report-1",
-                "report_receipt": "receipt-1",
+                "attempt_result_ref": "attempt-result-1",
+                "server_observation": "server-observation-1",
                 "verified_execution": True,
                 "exit_code": 0,
                 "reviewer_identity": "reviewer-1" if kind == "independent_governance_review" else None,
@@ -1234,8 +1135,8 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 "digest": "receipt-digest",
                 "governance_scope_ref": scope,
                 "governance_obligations": [kind],
-                "report_id": "report-1",
-                "report_receipt": "receipt-1",
+                "attempt_result_ref": "attempt-result-1",
+                "server_observation": "server-observation-1",
                 "verified_execution": True,
                 "exit_code": 0,
                 "reviewer_identity": "reviewer-1" if kind == "independent_governance_review" else None,

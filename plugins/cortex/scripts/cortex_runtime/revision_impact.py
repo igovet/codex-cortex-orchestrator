@@ -34,7 +34,7 @@ _CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\b(database|schema|migration|storage|persistence|transaction|sqlite|postgres|mysql)\b",
     ),
     "public_contract": (
-        r"\b(public api|public contract|wire format|protocol|endpoint|backward compatib)\b",
+        r"\b(public api|public contract|wire format|protocol|endpoint)\b",
     ),
     "security": (
         r"\b(authentication|authorization|permission|tenant|credential|secret|token|privacy|security)\b",

@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from cortex_runtime import communication
+from cortex_runtime import attempt_protocol, communication
 
 from cortex_runtime.core.runtime_bindings import bind_symbols
 
@@ -70,6 +70,114 @@ _GENERIC_NUMBERED_QUESTION = re.compile(
     r"\bрешени[ея]\s*#?\d+\b|\b(?:перв\w*|втор\w*|трет\w*)\s+решени\w*\b)",
     re.IGNORECASE,
 )
+
+
+def _record_question_created_event(root: Any, state: dict[str, Any], record: dict[str, Any]) -> None:
+    """Mirror a durable question document into the canonical AttemptEvent stream."""
+    question_id = safe_id(str(record["question_id"]))
+    attempt_protocol.record_system_event(
+        root,
+        task_id=str(state["task_id"]),
+        attempt_id=safe_id(str(record["attempt_id"])),
+        event_type="question_created",
+        event_key=f"question_created:{question_id}",
+        payload={
+            "question_ref": question_id,
+            "question": redact(record.get("question") or "", 1000),
+            "gate": redact(record.get("gate") or "", 80),
+            "task_revision": int(record.get("task_revision") or 1),
+            "created_at": record.get("created_at"),
+        },
+    )
+
+
+def _record_question_answer_events(root: Any, state: dict[str, Any], record: dict[str, Any]) -> None:
+    """Record answer and resolved-decision transitions with stable event keys."""
+    question_id = safe_id(str(record["question_id"]))
+    payload = {
+        "question_ref": question_id,
+        "question": redact(record.get("question") or "", 1000),
+        "answer": redact(record.get("answer_en_text") or record.get("answer_text") or "", 1000),
+        "answer_option_ids": list(record.get("answer_option_ids") or []),
+        "answered_at": record.get("answered_at"),
+    }
+    common = {
+        "task_id": str(state["task_id"]),
+        "attempt_id": safe_id(str(record["attempt_id"])),
+        "payload": payload,
+    }
+    attempt_protocol.record_system_event(
+        root,
+        event_type="question_answered",
+        event_key=f"question_answered:{question_id}",
+        **common,
+    )
+    attempt_protocol.record_system_event(
+        root,
+        event_type="decision_resolved",
+        event_key=f"decision_resolved:{question_id}",
+        **common,
+    )
+
+
+def _record_batch_question_events(
+    root: Any,
+    state: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    answered: bool,
+) -> None:
+    """Emit per-question canonical transitions for the batch interaction flow."""
+    batch_id = safe_id(str(record["batch_id"]))
+    attempt_id = safe_id(str(record["attempt_id"]))
+    answers = record.get("answer_en") if isinstance(record.get("answer_en"), dict) else {}
+    options = record.get("answer_option_ids") if isinstance(record.get("answer_option_ids"), dict) else {}
+    for question in record.get("questions") or []:
+        if not isinstance(question, dict):
+            continue
+        question_key = safe_id(str(question.get("question_key") or ""))
+        question_ref = f"{batch_id}:{question_key}"
+        created_payload = {
+            "question_ref": question_ref,
+            "question": redact(question.get("canonical_question") or question.get("question") or "", 1000),
+            "gate": redact(record.get("gate") or "", 80),
+            "task_revision": int(record.get("task_revision") or 1),
+            "created_at": record.get("created_at"),
+        }
+        attempt_protocol.record_system_event(
+            root,
+            task_id=str(state["task_id"]),
+            attempt_id=attempt_id,
+            event_type="question_created",
+            event_key=f"question_created:{batch_id}:{question_key}",
+            payload=created_payload,
+        )
+        if not answered or question_key not in answers:
+            continue
+        answer_payload = {
+            "question_ref": question_ref,
+            "question": created_payload["question"],
+            "answer": redact(answers[question_key], 1000),
+            "answer_option_ids": list(options.get(question_key) or []),
+            "answered_at": record.get("answered_at"),
+        }
+        common = {
+            "task_id": str(state["task_id"]),
+            "attempt_id": attempt_id,
+            "payload": answer_payload,
+        }
+        attempt_protocol.record_system_event(
+            root,
+            event_type="question_answered",
+            event_key=f"question_answered:{batch_id}:{question_key}",
+            **common,
+        )
+        attempt_protocol.record_system_event(
+            root,
+            event_type="decision_resolved",
+            event_key=f"decision_resolved:{batch_id}:{question_key}",
+            **common,
+        )
 
 
 def _normalized_display_text(value: object) -> str:
@@ -166,8 +274,8 @@ def _attempt_generation(attempt: dict[str, Any]) -> int:
 
     Attempts created before the revision-aware retry work do not carry an
     explicit generation.  Their retry escalation already records the number
-    of preceding failed attempts, so use that as a backwards-compatible
-    generation projection instead of treating every legacy attempt as the
+    of preceding failed attempts, so use that as a current
+    generation projection instead of treating every prior attempt as the
     same lifetime quota bucket.
     """
     raw = attempt.get("attempt_generation")
@@ -213,10 +321,10 @@ def _question_revision_context(state: dict[str, Any], attempt: dict[str, Any]) -
     }
 
 
-def _legacy_question_is_stale(record: dict[str, Any], state: dict[str, Any], attempt: dict[str, Any]) -> bool:
+def _question_is_stale(record: dict[str, Any], state: dict[str, Any], attempt: dict[str, Any]) -> bool:
     """Whether a single-question record can no longer resume its worker.
 
-    Batch questions already had revision semantics.  Legacy single questions
+    Batch questions already had revision semantics.  Single questions
     must receive the same protection: a material steer, retry generation, or
     invalidated worker turns an unanswered question into a terminal,
     explicitly non-resumable record.
@@ -239,7 +347,7 @@ def _legacy_question_is_stale(record: dict[str, Any], state: dict[str, Any], att
     return bool(attempt.get("invalidated"))
 
 
-def _supersede_legacy_question(
+def _supersede_question(
     task_dir: Any,
     state: dict[str, Any],
     record: dict[str, Any],
@@ -265,7 +373,7 @@ def _supersede_legacy_question(
     return record
 
 
-def _supersede_stale_legacy_questions(
+def _supersede_stale_questions(
     task_dir: Any,
     state: dict[str, Any],
     records: list[dict[str, Any]],
@@ -278,8 +386,8 @@ def _supersede_stale_legacy_questions(
             # The normal task-document validator catches this condition.  Do
             # not silently reclassify a malformed record as a safe stale one.
             raise
-        if _legacy_question_is_stale(record, state, attempt):
-            _supersede_legacy_question(task_dir, state, record, attempt)
+        if _question_is_stale(record, state, attempt):
+            _supersede_question(task_dir, state, record, attempt)
             changed = True
     return changed
 
@@ -456,7 +564,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         question, context, blocking, config, content_digest = _question_payload(params)
         paths = question_bus_paths(task_dir)
         records = _question_records(paths, state)
-        _supersede_stale_legacy_questions(task_dir, state, records)
+        _supersede_stale_questions(task_dir, state, records)
         existing = next(
             (
                 item for item in records
@@ -469,6 +577,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         if existing is not None:
             if existing.get("content_digest") != content_digest:
                 raise ValueError("idempotent question submission_id was reused with different content")
+            _record_question_created_event(root, state, existing)
             return {"idempotent": True, "question": existing, "cursor": _question_sequence(records)}
         revision_context = _question_revision_context(state, attempt)
         active_revision_records = [
@@ -527,6 +636,7 @@ def publish_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "answered_at": None,
         }
         _write_question_record(task_dir, state, record)
+        _record_question_created_event(root, state, record)
         append_journal_best_effort(task_dir, "worker_question", f"{attempt_id} published {question_id}")
         return {"idempotent": False, "question": record, "cursor": sequence}
 
@@ -644,7 +754,7 @@ def _poll_worker_question_batch(
         "batch_ref": batch_ref,
         "status": "answered",
         "answers": _batch_answer_view(record),
-        "next_action": "Resume this same worker attempt with the canonical English batch answers; record the report only after the mission is complete.",
+        "next_action": "Resume this same worker attempt with the canonical English batch answers; complete the AttemptResult only after the mission is complete.",
     }
 
 
@@ -688,6 +798,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("ask_batch accepts only batch and worker identity fields")
             result = _publish_worker_question_batch(params, task_dir, state, attempt)
             record = result["batch"]
+            _record_batch_question_events(root, state, record, answered=False)
             return {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
                 "ok": True,
@@ -702,7 +813,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                     "Return QUESTION_RECORDED question_ref=<value>, then a complete decision handoff to the parent: "
                     "why input is needed, every full question, every concrete option label and description, material "
                     "trade-offs, and your recommendation. Do not use placeholders such as Option 1 or Recommended "
-                    "option. Remain available and do not record a report until this batch is answered."
+                    "option. Remain available and do not complete the AttemptResult until this batch is answered."
                 ),
             }
         if action == "ask":
@@ -748,7 +859,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                     "Return QUESTION_RECORDED question_ref=<value>, then a complete decision handoff to the parent: "
                     "why input is needed, the full question, every concrete option label and description, material "
                     "trade-offs, and your recommendation. Do not use placeholders such as Option 1 or Recommended "
-                    "option. Remain available and do not record a report until this question is answered."
+                    "option. Remain available and do not complete the AttemptResult until this question is answered."
                 ),
             }
         question_ref = safe_id(str(params.get("question_ref") or ""))
@@ -761,8 +872,8 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
         record = next((item for item in records if item.get("question_id") == question_ref), None)
         if record is None or record.get("attempt_id") != attempt_id or record.get("profile") != profile:
             raise ValueError("question_ref does not belong to this worker attempt")
-        if _legacy_question_is_stale(record, state, attempt):
-            _supersede_legacy_question(task_dir, state, record, attempt)
+        if _question_is_stale(record, state, attempt):
+            _supersede_question(task_dir, state, record, attempt)
         if record.get("status") == "superseded":
             return {
                 "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -792,7 +903,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             "answer_text": record.get("answer_en_text") or record.get("answer_text"),
             "answer_option_ids": record.get("answer_option_ids") or [],
             "resume_context": record.get("resume_context"),
-            "next_action": "Resume this same worker attempt with the user's answer; record the report only after the mission is complete.",
+            "next_action": "Resume this same worker attempt with the user's answer; complete the AttemptResult only after the mission is complete.",
         }
 
 
@@ -878,7 +989,7 @@ def list_worker_questions(params: dict[str, Any]) -> dict[str, Any]:
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize_principal(state, params)
         all_records = _question_records(question_bus_paths(task_dir), state)
-        _supersede_stale_legacy_questions(task_dir, state, all_records)
+        _supersede_stale_questions(task_dir, state, all_records)
         records = list(all_records)
         attempt_id = str(params.get("attempt_id", "")).strip()
         if attempt_id:
@@ -919,8 +1030,8 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
         if record is None:
             raise ValueError("question_id does not belong to this task")
         attempt = _attempt(state, safe_id(str(record.get("attempt_id") or "")))
-        if _legacy_question_is_stale(record, state, attempt):
-            _supersede_legacy_question(task_dir, state, record, attempt)
+        if _question_is_stale(record, state, attempt):
+            _supersede_question(task_dir, state, record, attempt)
         if record.get("status") == "superseded":
             return {
                 "schema": QUESTION_SCHEMA,
@@ -964,6 +1075,7 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("worker question has already been answered")
             if record.get("answer_digest") != answer_digest:
                 raise ValueError("idempotent answer submission_id was reused with different content")
+            _record_question_answer_events(root, state, record)
             return {
                 "schema": QUESTION_SCHEMA,
                 "status": "answered",
@@ -988,6 +1100,7 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "answered_at": now(),
         })
         _write_question_record(task_dir, state, record)
+        _record_question_answer_events(root, state, record)
         append_journal_best_effort(task_dir, "worker_answer", f"{question_id} answered for {record['attempt_id']}")
         return {
             "schema": QUESTION_SCHEMA,
@@ -1000,7 +1113,7 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _question_form_schema(config: dict[str, Any]) -> dict[str, Any]:
-    """Build the legacy structured-answer shape for stored compatibility data."""
+    """Build the current structured-answer shape for the current stored question data."""
     properties: dict[str, Any] = {}
     options = list(config.get("options") or [])
     if options:
@@ -1061,7 +1174,7 @@ def _question_answer_from_content(content: dict[str, Any] | None, config: dict[s
     normalized_custom, custom_text = _normalize_question_answer(custom)
     # Some hosts return a ``selection`` value even when the rendered form has
     # only the free-form field.  It is user prose in that shape, never a
-    # canonical option id; preserve it as custom text for compatibility.
+    # canonical option id; preserve it as custom text without changing the canonical answer.
     if not options and selections:
         selected_text = "\n".join(str(item) for item in selections)
         if custom_text:
@@ -1191,7 +1304,7 @@ def _localized_batch_view(record: dict[str, Any], params: dict[str, Any]) -> dic
 
 
 def _batch_form_schema(question: dict[str, Any]) -> dict[str, Any]:
-    """Build one legacy structured batch-answer shape for compatibility."""
+    """Build one current structured batch-answer shape."""
     key = question["question_key"]
     question_type = question["question_type"]
     title = question.get("localized_question") or question["canonical_question"]
@@ -1414,7 +1527,7 @@ def _persist_batch_answers(
     *,
     elicitation_id: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Persist a complete compatibility answer set or canonical translations."""
+    """Persist a complete canonical answer set or canonical translations."""
     root = ledger_root(params)
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -1430,6 +1543,7 @@ def _persist_batch_answers(
         if record.get("status") == "superseded":
             return record, False
         if record.get("status") == "answered":
+            _record_batch_question_events(root, state, record, answered=True)
             return record, True
         if answers is not None:
             if record.get("status") != "open":
@@ -1449,6 +1563,8 @@ def _persist_batch_answers(
             raise ValueError("open batch requires native question answers")
         _refresh_batch_answer_state(record, params)
         _write_batch_record(task_dir, state, record)
+        if record.get("status") == "answered":
+            _record_batch_question_events(root, state, record, answered=True)
         append_journal_best_effort(task_dir, "worker_question_batch_answer", f"{batch_id} {record['status']}")
         return record, False
 

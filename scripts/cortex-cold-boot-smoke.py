@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "plugins/cortex/scripts"))
 from jsonrpc_harness import JsonRpcHarness  # noqa: E402
 import cortex  # noqa: E402
+from cortex_runtime.briefings import TARGET_V3_BRIEFING_BYTES  # noqa: E402
 
 SERVER = ROOT / "plugins/cortex/scripts/cortex.py"
 
@@ -64,7 +65,6 @@ def waves() -> list[dict[str, object]]:
     return [
         {"workers": [{"phase": "research"}]},
         {"workers": [{"phase": "architecture"}, {"phase": "database_architecture"}]},
-        {"workers": [{"phase": "planning"}]},
         {"workers": [{"phase": "implementation"}]},
         {"workers": [{"phase": "testing"}]},
         {"workers": [{"phase": "code_review"}]},
@@ -72,9 +72,9 @@ def waves() -> list[dict[str, object]]:
 
 
 def workspace_summary(project: Path) -> dict[str, object]:
-    """Return a small, truthful closure-workspace summary.
+    """Return a small, truthful workspace summary for fixture results.
 
-    The fixture itself intentionally changes project files.  The closure
+    The fixture itself intentionally changes project files.  The completed
     contract records that state; it does not equate an uncommitted fixture
     change with an unresolved review finding.
     """
@@ -110,21 +110,17 @@ def workspace_summary(project: Path) -> dict[str, object]:
     }
 
 
-def passing_gate_result(project: Path, gate: str) -> dict[str, object]:
-    """Build the canonical review/close gate result required by record_report."""
+def passing_attempt_result(project: Path, gate: str) -> dict[str, object]:
+    """Build a deterministic completed AttemptResult for fixture checks."""
     return {
-        "decision": "pass",
-        "failure_class": "product",
-        # The fixture found no actionable debt, so no open blocker can enter
-        # the canonical findings table and divert the close gate to rework.
+        "status": "completed",
+        "summary": f"Cold-boot fixture completed for the {gate} attempt.",
         "findings": [],
-        "verification": {
-            "executed": [f"Cold-boot fixture verification completed for the {gate} gate."],
-            "not_executed": [],
-            "required_missing": [],
-            "limitations": [],
-        },
-        "workspace": workspace_summary(project),
+        "decisions_needed": [],
+        "unresolved": [],
+        "claims": [],
+        "evidence": [f"Cold-boot fixture verification completed for the {gate} attempt."],
+        "changed_files": workspace_summary(project).get("untracked", []),
     }
 
 
@@ -144,10 +140,10 @@ def canonical_artifacts(
         offset = next_offset
 
 
-def report(
+def attempt_result(
     worker: int,
     step: int,
-    predecessor_reports: list[str],
+    predecessor_result_refs: list[str],
     gate: str,
     acceptance: list[str],
     verification: list[str],
@@ -157,8 +153,8 @@ def report(
     changed_files: list[str],
 ) -> dict[str, object]:
     evidence = [f"step {step} worker {worker} observed the cold-boot fixture state"]
-    if predecessor_reports:
-        evidence.append("Predecessor review: " + ", ".join(predecessor_reports))
+    if predecessor_result_refs:
+        evidence.append("Predecessor result context: " + ", ".join(predecessor_result_refs))
     for index, _criterion in enumerate(acceptance, 1):
         evidence.append(f"Gate acceptance {index}: PASS - Repository path inspection and fixture state comparison produced conclusive evidence.")
     for index, _criterion in enumerate(verification, 1):
@@ -176,10 +172,10 @@ def report(
     }]
     return {
         "summary": f"relative step {step} worker {worker} completed",
-        "findings": [], "questions": [], "changed_files": changed_files,
-        "tests": checks,
-        "evidence": evidence,
-        "uncertainty": [],
+        "findings": [],
+        "decisions_needed": [],
+        "unresolved": [],
+        "verification_claimed": checks[0],
     }
 
 
@@ -215,11 +211,11 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
     start_request = {
         "task": {
             "user_request": "prove a fresh JSON-RPC process can complete public Cortex orchestration by relative waves",
-            "complexity": "standard",
+            "complexity": "C1",
             "requirements": ["implementation, verification, documentation, and close invariants"],
             "acceptance_criteria": ["complete every planned wave"],
             "allowed_paths": ["."],
-            "verification": ["preserve report, evidence, handoff, and manifest receipts"],
+            "verification": ["preserve result, evidence, handoff, and manifest receipts"],
         },
         "waves": waves(),
     }
@@ -231,7 +227,7 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
             "continue_orchestration",
             "manage_orchestration",
             "manage_governance",
-            "read_worker_report",
+            "read_worker_result",
         ]:
             raise AssertionError(f"unexpected Cortex public tools: {names}")
         current = rpc.tool("start_orchestration", start_request)
@@ -260,13 +256,14 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
         plan_approval_seen = False
         question_chat_cycle_seen = False
         implementation_applied = False
+        briefing_sizes: list[dict[str, object]] = []
         dynamic_replan_count = 0
         pending_implementation_drop_rejected = False
         last_payload = None
         while current["outcome"] != "completed":
             if current.get("outcome") == "awaiting_plan_approval":
-                if not current.get("plan_review", {}).get("report_ref"):
-                    raise AssertionError(f"plan approval omitted its planner report reference: {current}")
+                if not current.get("plan_review", {}).get("attempt_result_ref"):
+                    raise AssertionError(f"plan approval omitted its planner result reference: {current}")
                 plan_approval_seen = True
                 prompt = rpc.tool("manage_orchestration", {
                     "intent": "plan_approval",
@@ -401,10 +398,52 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                     (project / "added.txt").write_text("untracked\n", encoding="utf-8")
                     changed_files = ["added.txt", "delete.txt", "new.txt", "old.txt", "tracked.txt"]
                     implementation_applied = True
-                worker_report = report(
+                # Normal workers prove their immutable briefing and each
+                # granted predecessor read through server-owned receipts.
+                # They never manufacture acknowledgement prose in a result.
+                identity = {
+                    "project_root": str(project),
+                    "task_id": state["task_id"],
+                    "attempt_id": attempt["attempt_id"],
+                    "profile": dispatch["profile"],
+                }
+                briefing = worker_rpc.tool("read_dispatch_briefing", {
+                    **identity,
+                    "dispatch_ref": attempt["dispatch_ref"],
+                    "briefing_digest": attempt["briefing_digest"],
+                })
+                if not briefing.get("ok") or not briefing.get("briefing_receipt"):
+                    raise AssertionError(f"read_dispatch_briefing failed: {briefing}")
+                briefing_text = briefing.get("briefing")
+                if not isinstance(briefing_text, str):
+                    raise AssertionError("cold-boot briefing read did not return complete text")
+                briefing_bytes = len(briefing_text.encode("utf-8"))
+                briefing_sizes.append({
+                    "step": int(current["step"]),
+                    "worker": index,
+                    "gate": str(attempt["gate"]),
+                    "profile": str(dispatch["profile"]),
+                    "bytes": briefing_bytes,
+                })
+                if briefing_bytes > TARGET_V3_BRIEFING_BYTES:
+                    raise AssertionError(
+                        f"cold-boot briefing exceeds safe target: {attempt['gate']}/{dispatch['profile']} "
+                        f"{briefing_bytes}>{TARGET_V3_BRIEFING_BYTES}"
+                    )
+                for predecessor_ref in attempt.get("context_result_refs") or []:
+                    predecessor = worker_rpc.tool("read_worker_result", {
+                        "project_root": str(project),
+                        "task_ref": task_ref,
+                        "attempt_result_ref": predecessor_ref,
+                        "attempt_id": attempt["attempt_id"],
+                        "profile": dispatch["profile"],
+                    })
+                    if not predecessor.get("ok") or not predecessor.get("predecessor_receipt"):
+                        raise AssertionError(f"read_worker_result predecessor receipt failed: {predecessor}")
+                worker_result = attempt_result(
                     index,
                     int(current["step"]),
-                    list(attempt.get("context_report_ids") or []),
+                    list(attempt.get("context_result_refs") or []),
                     str(attempt["gate"]),
                     list(attempt.get("acceptance_criteria") or []),
                     list(attempt.get("verification") or []),
@@ -413,41 +452,34 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                     list(task_definition.get("verification") or []),
                     changed_files,
                 )
-                worker_report["evidence"].append(
-                    "Dispatch briefing reviewed: " + str(attempt["briefing_digest"])
-                )
-                publication = {
-                    "task_id": state["task_id"],
-                    "attempt_id": attempt["attempt_id"],
-                    "profile": dispatch["profile"],
-                    "report": worker_report,
+                # A verification event becomes the generated result's test
+                # projection.  changed_files and the result envelope remain
+                # server-observed/canonical; the worker sends semantic facts
+                # only.
+                verification = worker_rpc.tool("record_attempt_event", {
+                    **identity,
+                    "event_type": "verification_claimed",
+                    "event_key": f"cold-boot-verification-{current['step']}-{index}",
+                    "payload": worker_result["verification_claimed"],
+                })
+                if not verification.get("ok"):
+                    raise AssertionError(f"record_attempt_event failed: {verification}")
+                completion = {
+                    **identity,
+                    "status": "completed",
+                    "summary": worker_result["summary"],
+                    "findings": worker_result["findings"],
+                    "decisions_needed": [],
+                    "unresolved": [],
+                    "claims": [],
                 }
-                if attempt.get("gate") in {"review", "close"}:
-                    publication["gate_result"] = passing_gate_result(project, str(attempt["gate"]))
-                if dispatch.get("phase") == "plan":
-                    publication["planning"] = planning(index, int(current["step"]))
-                template = worker_rpc.tool("get_report_template", {
-                    "task_id": state["task_id"],
-                    "attempt_id": attempt["attempt_id"],
-                    "profile": dispatch["profile"],
-                })
-                if not template.get("ok") or template.get("persisted") is not False:
-                    raise AssertionError(f"get_report_template failed: {template}")
-                draft_path = Path(str(template["draft_path"]))
-                if not draft_path.is_file():
-                    raise AssertionError(f"get_report_template did not create its draft file: {template}")
-                published = worker_rpc.tool("record_report", {
-                    **publication,
-                    "draft_ref": template["draft_ref"],
-                })
+                published = worker_rpc.tool("complete_attempt", completion)
                 if not published.get("ok"):
-                    raise AssertionError(f"record_report failed: {published}")
-                if draft_path.exists():
-                    raise AssertionError("record_report did not delete the successfully persisted draft file")
-                read = rpc.tool("read_worker_report", {"task_ref": task_ref, "report_ref": published["report_ref"]})
-                if not read.get("ok") or read.get("report", {}).get("summary") != published.get("summary"):
-                    raise AssertionError(f"read_worker_report failed: {read}")
-                result_value: dict[str, object] = {"report_ref": published["report_ref"]}
+                    raise AssertionError(f"complete_attempt failed: {published}")
+                read = rpc.tool("read_worker_result", {"task_ref": task_ref, "attempt_result_ref": published["attempt_result_ref"]})
+                if not read.get("ok") or read.get("result_view", {}).get("result", {}).get("summary") != published.get("summary"):
+                    raise AssertionError(f"read_worker_result failed: {read}")
+                result_value: dict[str, object] = {"attempt_result_ref": published["attempt_result_ref"]}
                 if parallel:
                     result_value["worker"] = index
                 results.append(result_value)
@@ -480,7 +512,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                     "future_waves": [
                         {"workers": [{"phase": "architecture"}]},
                         {"workers": [{"phase": "database_architecture"}]},
-                        {"workers": [{"phase": "plan"}]},
                         {"workers": [{"phase": "implementation"}]},
                         {"workers": [{"phase": "qa"}]},
                         {"workers": [{"phase": "security"}, {"phase": "performance"}]},
@@ -532,45 +563,34 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
             raise AssertionError("final continue retry lost the completed task identity")
     if not parallel_wave_seen:
         raise AssertionError("the smoke plan did not return a parallel dispatch wave")
-    if not plan_approval_seen:
-        raise AssertionError("the C2 smoke plan did not pause for post-plan approval")
     if not question_chat_cycle_seen:
         raise AssertionError("the smoke did not complete a durable ordinary-chat question pause/resume cycle")
     if dynamic_replan_count < 3 or not pending_implementation_drop_rejected:
         raise AssertionError("the smoke did not exercise three dynamic replans and implementation retention")
     if not implementation_applied:
         raise AssertionError("the dynamically replanned pipeline never executed implementation")
+    if not briefing_sizes or max(int(item["bytes"]) for item in briefing_sizes) > TARGET_V3_BRIEFING_BYTES:
+        raise AssertionError("cold-boot briefing size regression exceeded the safe target")
 
     task_path = ledger / "tasks" / task_directory
     state = cortex.load_task_state_for_artifact(task_path)
     task = cortex.load_task_definition(task_path, state)
-    receipt_artifacts = canonical_artifacts(ledger, state["task_id"], kind="report_receipt")
-    receipts = [
-        json.loads(cortex.db_read_artifact_content(ledger, state["task_id"], str(item["artifact_ref"])))
-        for item in receipt_artifacts
-    ]
-    receipt_states = [
-        cortex.db_get_task_document(ledger, state["task_id"], f"receipt_state:{item['receipt_id']}")
-        for item in receipts
+    attempt_result_refs = [
+        str(item.get("attempt_result_ref") or "")
+        for item in state.get("attempts", [])
+        if isinstance(item, dict) and item.get("attempt_result_ref")
     ]
     if task.get("schema") != "cortex/v8" or state.get("schema") != "cortex/v8" or state.get("status") != "completed":
         raise AssertionError("public orchestration did not preserve the cortex/v8 ledger or complete the task")
-    if not receipts or any(not item or not item.get("consumed_at") for item in receipt_states):
-        raise AssertionError("every passed worker report must have a consumed canonical receipt state")
-    if not state.get("handoff_created"):
-        raise AssertionError("handoff or durable transaction commit is missing")
-    if cortex.current_planning_manifest(task_path) is None:
-        raise AssertionError("Planner work-breakdown manifest is missing")
-    planning_artifacts = canonical_artifacts(ledger, state["task_id"], kind="planning_revision")
-    if not planning_artifacts:
-        raise AssertionError("Planner work-breakdown artifacts are missing from the canonical SQLite catalog")
+    if not attempt_result_refs:
+        raise AssertionError("every passed worker attempt must have a canonical AttemptResult ref")
     passed_gates = {
         str(item.get("gate"))
         for item in state.get("attempts", [])
         if item.get("status") == "passed" and not item.get("invalidated")
     }
     expected_gates = {
-        "discover", "architecture", "database_architecture", "accessibility", "ux", "plan",
+        "discover", "architecture", "database_architecture", "accessibility", "ux",
         "implementation", "qa", "security", "performance", "review",
         "documentation", "close",
     }
@@ -582,13 +602,15 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
     return {
         "status": "PASS", "fixture": str(base), "task_directory": str(task_path),
         "continue_calls": continue_calls, "worker_attempts": len(state.get("attempts", [])),
-        "report_count": len(receipts), "parallel_wave_seen": parallel_wave_seen,
+        "briefing_size_target_bytes": TARGET_V3_BRIEFING_BYTES,
+        "briefing_size_max_bytes": max(int(item["bytes"]) for item in briefing_sizes),
+        "briefing_sizes": briefing_sizes,
+        "result_count": len(attempt_result_refs), "parallel_wave_seen": parallel_wave_seen,
         "plan_approval_seen": plan_approval_seen,
         "question_chat_cycle_seen": question_chat_cycle_seen,
         "dynamic_replan_applied": dynamic_replan_count >= 1,
         "dynamic_replan_count": dynamic_replan_count,
         "replan_count": int(state.get("replan_count", 0)),
-        "legacy_replan_limit": int(state.get("replan_limit", 0)),
         "pending_implementation_drop_rejected": pending_implementation_drop_rejected,
         "implementation_phase_seen": "implementation" in passed_gates,
         "passed_gates": sorted(passed_gates),

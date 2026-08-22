@@ -7,14 +7,14 @@ to the explicitly selected project's `.codex/cortex` directory.
 ## Data stored locally
 
 The ledger can contain task objectives, gate state, delegation contracts,
-sanitized worker reports, evidence summaries, questions, handoffs, file
+sanitized worker AttemptResults, evidence summaries, questions, handoffs, file
 manifests, bounded metrics, and privacy-limited lifecycle events. Secret-like
 structured fields, bearer values, credential-bearing URIs, and environment
-assignments are redacted before persistence. Reports and telemetry have
+assignments are redacted before persistence. AttemptResults and telemetry have
 documented size and retention bounds.
 
 Do not place credentials, private keys, personal data, customer exports, or
-raw production logs in Cortex prompts, reports, fixtures, documentation, or
+raw production logs in Cortex prompts, AttemptResults, fixtures, documentation, or
 evidence. Repository releases exclude `.codex`, Python bytecode, symlinks, and
 common secret-bearing filenames and credential-store paths. The archive check
 uses only a committed `git archive HEAD`; until an initial commit exists, an
