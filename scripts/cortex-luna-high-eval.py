@@ -1188,36 +1188,40 @@ def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
         if operation is not None and (not operations or operation != operations[-1]):
             operations.append(operation)
 
-    stage = 0
-    for operation in operations:
-        if stage == 0:
-            if operation == "spawn":
-                stage = 1
+    # A question can occur in a late governance or close wave, after several
+    # ordinary spawn/wait/read/continue/close cycles.  Start the proof at the
+    # durable question pause rather than at the first worker in the entire
+    # session.  From that pause onward, however, the route is deliberately
+    # rigid: the answer must be submitted before *any* parent completion, and
+    # no replacement dispatch may intervene before the original child closes.
+    expected = (
+        "wait_question", "question_presented", "question_answered", "followup",
+        "wait_result", "read_result", "continue_audited", "close",
+    )
+    for start, operation in enumerate(operations):
+        if operation != "wait_question":
             continue
-        if operation == "spawn":
-            return False
-        if stage == 1 and operation == "wait_question":
-            stage = 2
-        elif stage == 2 and operation == "question_presented":
-            stage = 3
-        elif stage == 3 and operation == "question_answered":
-            stage = 4
-        elif stage == 4 and operation == "followup":
-            stage = 5
-        elif stage == 5 and operation == "wait_result":
-            stage = 6
-        elif stage == 6 and operation == "read_result":
-            stage = 7
-        elif stage == 7 and operation == "continue_audited":
-            stage = 8
-        elif stage == 8 and operation == "close":
-            return True
-        elif operation in {
-            "question_presented", "followup", "question_answered", "question_management_other", "wait_result",
-            "wait_other_terminal", "read_result", "read_result_other", "continue_audited",
-            "continue_other", "close",
-        }:
-            return False
+        stage = 1
+        for candidate in operations[start + 1:]:
+            if candidate == expected[stage]:
+                stage += 1
+                if stage == len(expected):
+                    return True
+                continue
+            # Before a terminal result is recorded, there is no harmless
+            # alternate path: a second spawn, another question presentation,
+            # an unrelated terminal response, a failed read/continue, or a
+            # close all prove that the authorized same-child resume was not
+            # consumed.  In particular, `awaiting_user` alone reaches this
+            # branch by exhausting the stream and cannot be treated as a
+            # successful evaluator stop.
+            if candidate in {
+                "spawn", "wait_question", "question_presented", "followup",
+                "question_answered", "question_management_other", "wait_result",
+                "wait_other_terminal", "read_result", "read_result_other", "continue_audited",
+                "continue_other", "close",
+            }:
+                break
     return False
 
 
@@ -2188,9 +2192,12 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "authority and it overrides neither the task contract nor an unrecognized worker question. If and only if a "
             "paused worker's presented durable question contains every required scope marker, do this exact two-call route: "
             "(1) call manage_orchestration intent=question with only its exact question_ref and expect outcome=awaiting_user; "
-            "do not stop or render that interaction; (2) call manage_orchestration again with command=answer, the exact same "
+            "do not stop, render that interaction, request input, or end the parent turn. UNATTENDED FIXTURE-RESUME RULE: "
+            "for this one pre-authorized fixture, awaiting_user is an intermediate receipt, not a control transfer to a user. "
+            "The very next action in the same parent turn MUST be (2) call manage_orchestration again with command=answer, the exact same "
             "question_ref, and exactly the preauthorized_answer. That second call is mandatory only under this explicit "
-            "fixture authorization and must return outcome=question_answered plus resume_contract. Then use that exact "
+            "fixture authorization and must return outcome=question_answered plus resume_contract. A final message, ordinary "
+            "wait, native close, replacement spawn, or any other tool call between those two receipts is a failed evaluator run. Then use that exact "
             "resume_contract and the original native child target: followup_task, wait for ATTEMPT_COMPLETED, read_worker_result, "
             "call continue_orchestration once with its server-provided continuation, and only then close_agent. If any marker "
             "is absent, a second question appears, the first route does not await the user, the answer is not accepted, or any "

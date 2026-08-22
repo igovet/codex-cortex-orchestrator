@@ -404,6 +404,11 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("it is not ordinary user authority", prompt)
         self.assertIn("exact two-call route", prompt)
         self.assertIn("expect outcome=awaiting_user", prompt)
+        self.assertIn("UNATTENDED FIXTURE-RESUME RULE", prompt)
+        self.assertIn("awaiting_user is an intermediate receipt", prompt)
+        self.assertIn("The very next action in the same parent turn MUST be", prompt)
+        self.assertIn("request input, or end the parent turn", prompt)
+        self.assertIn("between those two receipts is a failed evaluator run", prompt)
         self.assertIn("command=answer, the exact same", prompt)
         self.assertIn("resume/read/continue receipt is missing", prompt)
         self.assertIn("<evaluator_question_authorization>", prompt)
@@ -511,7 +516,9 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
                 "resume_contract": True,
             },
             {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
-            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
+            # A progress-only wait observation is harmless; another durable
+            # question receipt is not and is covered by the fail-closed path.
+            {"event": "native_tool_call", "tool": "wait", "status": "completed"},
             {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
             {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
             {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
@@ -522,6 +529,45 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             "event": "native_tool_call", "tool": "spawn_agent", "status": "completed",
         }, *events[3:]]
         self.assertFalse(LUNA_EVAL.observed_question_resume_lifecycle(with_second_worker))
+
+    def test_authorized_question_resume_can_follow_prior_completed_waves(self) -> None:
+        """A governance question is allowed late; only its local route is strict."""
+        events = [
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
+            {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
+            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
+            {
+                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
+                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
+                "ok": True, "management_intent": "question", "outcome": "question_answered",
+                "resume_contract": True,
+            },
+            {"event": "native_tool_call", "tool": "followup_task", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "attempt_result_recorded"},
+            {"event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed", "ok": True},
+            {"event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed", "ok": True},
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+        ]
+        self.assertTrue(LUNA_EVAL.observed_question_resume_lifecycle(events))
+
+    def test_authorized_awaiting_user_receipt_cannot_end_question_path(self) -> None:
+        """Fixture authority makes the durable answer mandatory, never implicit."""
+        events = [
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {"event": "native_tool_call", "tool": "wait", "status": "completed", "outcome": "question_recorded"},
+            {
+                "event": "cortex_mcp_call", "tool": "manage_orchestration", "status": "completed",
+                "ok": True, "management_intent": "question", "outcome": "awaiting_user",
+            },
+        ]
+        self.assertFalse(LUNA_EVAL.observed_question_resume_lifecycle(events))
 
 
 if __name__ == "__main__":
