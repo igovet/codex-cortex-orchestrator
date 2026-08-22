@@ -1182,19 +1182,33 @@ def active_worker_stop_block(event: dict, state: dict) -> str | None:
         return None
     if str(state.get("status") or "") != "active":
         return None
+    active_facade_attempts = [
+        attempt for attempt in state.get("attempts", [])
+        if isinstance(attempt, dict)
+        and attempt.get("facade_managed")
+        and not attempt.get("invalidated")
+        and attempt.get("status") in {"awaiting_host_spawn", "running", "waiting_question"}
+        and str(attempt.get("lifecycle_status") or "") != "completed"
+    ]
+    if not active_facade_attempts:
+        return None
     has_live_bound_worker = any(
         isinstance(attempt, dict)
-        and not attempt.get("invalidated")
         and attempt.get("status") == "running"
         and str((attempt.get("host_spawn") or {}).get("agent_id") or "").strip()
-        for attempt in state.get("attempts", [])
+        for attempt in active_facade_attempts
     )
-    if not has_live_bound_worker:
-        return None
+    if has_live_bound_worker:
+        return (
+            "CORTEX ACTIVE WORKER: a durably bound native worker is still running. Do not return a final answer, "
+            "declare the task complete, or emit a progress update. Remain silent and wait only for the exact persisted "
+            "child. After it stops, inspect the Cortex state and consume the matching AttemptResult or recovery receipt."
+        )
     return (
-        "CORTEX ACTIVE WORKER: a durably bound native worker is still running. Do not return a final answer, "
-        "declare the task complete, or emit a progress update. Remain silent and wait only for the exact persisted "
-        "child. After it stops, inspect the Cortex state and consume the matching AttemptResult or recovery receipt."
+        "CORTEX ACTIVE DISPATCH: a canonical worker attempt is pending but does not yet have a finalized "
+        "AttemptResult. Do not return a final answer, declare the task complete, or create a completed handoff. "
+        "Inspect the Cortex state and either invoke its exact pending dispatch or recover the exact attempt; do not "
+        "replace it with a new worker."
     )
 
 

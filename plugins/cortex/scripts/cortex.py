@@ -4890,6 +4890,35 @@ def validate_completion_invariants(
     artifact_root: Path | None = None,
 ) -> None:
     validate_pipeline_invariants(state)
+    # A task cannot become terminal merely because a gate projection says so.
+    # A facade-managed worker is authoritative only after its exact canonical
+    # AttemptResult has finished finalization.  Keep this check ahead of the
+    # governance-only return below: C1/C2 terminal transitions are equally
+    # unsafe if a live host child has not produced a durable result yet.
+    active_facade_attempts = [
+        item for item in state.get("attempts", [])
+        if isinstance(item, dict)
+        and item.get("facade_managed")
+        and not item.get("invalidated")
+        and item.get("status") not in TERMINAL_ATTEMPT_STATUSES
+    ]
+    if active_facade_attempts:
+        if artifact_root is None:
+            raise ValueError(
+                "active_attempt_result_pending: canonical ledger root is required"
+            )
+        task_dir = db_task_artifact_path(artifact_root, str(state.get("task_id") or ""))
+        if task_dir is None:
+            raise ValueError(
+                "active_attempt_result_pending: task artifact directory is unavailable"
+            )
+        pending_attempts = _active_facade_attempts_missing_finalized_results(
+            task_dir, active_facade_attempts
+        )
+        if pending_attempts:
+            raise ValueError(
+                "active_attempt_result_pending: " + ", ".join(pending_attempts)
+            )
     governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
     governance_full = governance.get("effective_mode") == "full"
     if not state.get("require_handoff") and not governance_full:
@@ -6194,6 +6223,47 @@ def _attempts_missing_result_validation(task_dir: Path, attempts: list[dict[str,
     return missing
 
 
+def _active_facade_attempts_missing_finalized_results(
+    task_dir: Path,
+    attempts: list[dict[str, Any]],
+) -> list[str]:
+    """Return live public-worker attempts without a finalized canonical result.
+
+    A native child binding is a recovery checkpoint, not successful work.  It
+    lets the host wait for the exact child after compaction, but it must never
+    authorize a handoff or terminal state in place of the child's finalized
+    ``AttemptResult``.  Keep the lookup against SQLite rather than trusting
+    the mutable state projection or an exported result view.
+    """
+    active_attempts = [
+        attempt for attempt in attempts
+        if isinstance(attempt, dict)
+        and attempt.get("facade_managed")
+        and not attempt.get("invalidated")
+        and attempt.get("status") not in TERMINAL_ATTEMPT_STATUSES
+    ]
+    if not active_attempts:
+        return []
+    task = load_task_definition(task_dir)
+    pending: list[str] = []
+    for attempt in active_attempts:
+        attempt_id = str(attempt.get("attempt_id") or "")
+        result_ref = str(attempt.get("attempt_result_ref") or "")
+        result = attempt_protocol.get_attempt_result(
+            _task_document_root(task_dir, str(task["task_id"])),
+            task_id=str(task["task_id"]),
+            attempt_id=attempt_id,
+        )
+        if (
+            not result_ref
+            or result is None
+            or result.get("result_ref") != result_ref
+            or result.get("lifecycle_status") != attempt_protocol.LIFECYCLE_COMPLETED
+        ):
+            pending.append(attempt_id)
+    return pending
+
+
 def _attempts_with_unresolved_canonical_results(task_dir: Path, attempts: list[dict[str, Any]]) -> list[str]:
     """Return supplied facade attempts with an unresolved finalized result.
 
@@ -6911,6 +6981,40 @@ def handoff(params: dict[str, Any]) -> dict[str, Any]:
         _, task_dir, state = load_state(str(params["task_id"]), params)
         authorize(state, params)
         guard_revision(state, params.get("expected_revision"))
+        pending_attempt_ids = _active_facade_attempts_missing_finalized_results(
+            task_dir,
+            [
+                item for item in state.get("attempts", [])
+                if isinstance(item, dict)
+                and not item.get("invalidated")
+                and item.get("status") not in TERMINAL_ATTEMPT_STATUSES
+            ],
+        )
+        if pending_attempt_ids:
+            # A generic handoff is a completed coordination artifact, not a
+            # replacement for the recovery-only context handoff.  Do not
+            # persist it while a host child is still missing its canonical
+            # result: a later coordinator could otherwise mistake the task
+            # for safely handed off and stop waiting for that exact child.
+            active_host_checkpoints = [
+                item["attempt_id"]
+                for item in state.get("attempts", [])
+                if isinstance(item, dict)
+                and item.get("attempt_id") in pending_attempt_ids
+                and str((item.get("host_spawn") or {}).get("agent_id") or "").strip()
+            ]
+            return {
+                "recorded": False,
+                "reason": "active_attempt_result_pending",
+                "recoverable": True,
+                "next_action": "wait_for_exact_worker_or_recover_attempt",
+                "candidate_attempt_ids": pending_attempt_ids,
+                # This is deliberately an opaque attempt identifier rather
+                # than a native child id. The child identity stays in the
+                # host-private recovery context.
+                "active_host_checkpoint_attempt_ids": active_host_checkpoints,
+                "state": state,
+            }
         completed = [redact(item, 1000) for item in params.get("completed", [])][:100]
         next_action = redact(params.get("next_action", ""), 4000)
         if not completed or not next_action:

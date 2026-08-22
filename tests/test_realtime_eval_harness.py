@@ -569,6 +569,103 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertEqual(copied_dispatch_ref["failure_class"], "success_with_dispatch_ref")
         self.assertNotIn("SECRET_REF", json.dumps(copied_dispatch_ref))
 
+    def test_native_terminal_audit_requires_read_then_server_continuation_before_close(self) -> None:
+        events = [
+            {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+            {
+                "event": "native_tool_call", "tool": "wait", "status": "completed",
+                "outcome": "attempt_result_recorded",
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
+                "ok": True,
+            },
+            {
+                "event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed",
+                "ok": True,
+            },
+            {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+        ]
+        audit = self.harness.safe_native_terminal_audit(events)
+        self.assertEqual(audit, {
+            "spawned_worker_observations": 1,
+            "terminal_wait_observations": 1,
+            "canonical_result_reads": 1,
+            "server_continuation_audits": 1,
+            "terminal_closes": 1,
+            "pending_canonical_reads": 0,
+            "pending_server_continuation_audits": 0,
+            "pending_terminal_closes": 0,
+            "protocol_violations": 0,
+            "ambiguous_native_observations": 0,
+            "all_observed_workers_terminally_audited": True,
+        })
+
+        missing_continuation = self.harness.safe_native_terminal_audit(events[:3] + events[4:])
+        self.assertFalse(missing_continuation["all_observed_workers_terminally_audited"])
+        self.assertEqual(missing_continuation["protocol_violations"], 1)
+
+        reordered = self.harness.safe_native_terminal_audit(events[:3] + [events[4], events[3]])
+        self.assertFalse(reordered["all_observed_workers_terminally_audited"])
+        self.assertGreaterEqual(reordered["protocol_violations"], 1)
+
+        ambiguous = self.harness.safe_native_terminal_audit([events[0], events[0], *events[1:]])
+        self.assertFalse(ambiguous["all_observed_workers_terminally_audited"])
+        self.assertEqual(ambiguous["ambiguous_native_observations"], 1)
+
+    def test_terminal_result_audit_requires_one_finalized_result_per_accepted_attempt(self) -> None:
+        state = {
+            "attempts": [
+                {"attempt_id": "safe-attempt-1", "status": "passed", "attempt_result_ref": "safe-ref-1"},
+                {"attempt_id": "safe-attempt-2", "status": "passed", "attempt_result_ref": "safe-ref-2"},
+                {
+                    "attempt_id": "historical-invalidated", "status": "failed", "invalidated": True,
+                    "attempt_result_ref": "historical-ref",
+                },
+            ],
+        }
+        records = [
+            {
+                "attempt_id": "safe-attempt-1", "attempt_result_ref": "safe-ref-1",
+                "result": {"result_ref": "safe-ref-1", "status": "completed", "lifecycle_status": "COMPLETED"},
+            },
+            {
+                "attempt_id": "safe-attempt-2", "attempt_result_ref": "safe-ref-2",
+                "result": {"result_ref": "safe-ref-2", "status": "completed", "lifecycle_status": "COMPLETED"},
+            },
+            {
+                "attempt_id": "historical-invalidated", "attempt_result_ref": "historical-ref",
+                "result": {"result_ref": "historical-ref", "status": "completed", "lifecycle_status": "COMPLETED"},
+            },
+        ]
+        audit = self.harness.safe_terminal_result_audit(state, records)
+        self.assertEqual(audit, {
+            "accepted_attempts": 2,
+            "terminal_accepted_attempts": 2,
+            "finalized_canonical_results": 2,
+            "missing_canonical_results": 0,
+            "duplicate_canonical_results": 0,
+            "mismatched_canonical_results": 0,
+            "foreign_result_records": 0,
+            "invalidated_historical_results": 1,
+            "malformed_accepted_attempts": 0,
+            "all_accepted_attempts_have_terminal_canonical_results": True,
+        })
+
+        incomplete = self.harness.safe_terminal_result_audit(state, records[:1])
+        self.assertFalse(incomplete["all_accepted_attempts_have_terminal_canonical_results"])
+        self.assertEqual(incomplete["missing_canonical_results"], 1)
+
+        mismatched_records = [*records[:2], {**records[1]}]
+        mismatched_records[-1] = {
+            **mismatched_records[-1],
+            "attempt_result_ref": "different-safe-ref",
+        }
+        mismatched = self.harness.safe_terminal_result_audit(state, mismatched_records)
+        self.assertFalse(mismatched["all_accepted_attempts_have_terminal_canonical_results"])
+        self.assertEqual(mismatched["duplicate_canonical_results"], 1)
+        self.assertEqual(mismatched["mismatched_canonical_results"], 1)
+
     def test_stream_retains_only_machine_safe_continue_failure_shape(self) -> None:
         event = self.harness.sanitize_codex_stream_line(json.dumps({
             "item": {

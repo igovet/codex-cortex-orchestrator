@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Cortex 10.0.0 is a database-centric orchestration control plane for the
+Cortex 10.0.1 is a database-centric orchestration control plane for the
 `cortex/v10` task contract and `cortex/orchestration/v6` lifecycle. Schema v15
 separates worker semantic input from server-observed attempt state.
 
@@ -52,6 +52,13 @@ RUNNING → WORK_COMPLETED → FINALIZING → COMPLETED
 Transport, serialization, view, and projection failures after
 `WORK_COMPLETED` never authorize a replacement worker. A lost native
 server receipt is recovered from the canonical result.
+
+An active non-invalidated dispatch with no finalized canonical result is a
+recoverable pending state, never completion evidence. It blocks gate pass,
+generic handoff, terminal acceptance, and coordinator stop completion. The
+native child binding is useful only to recover the exact attempt; the
+coordinator must read the canonical result and receive its server-derived
+continuation before closing that child or presenting completion.
 
 ## Public operations
 

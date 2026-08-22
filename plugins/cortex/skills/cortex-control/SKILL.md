@@ -352,7 +352,12 @@ continuing. Never replace the worker or advance the wave for a question.
    the exact `dispatch_ref` from that stopped worker's returned dispatch (or
    from `context_handoff.stopped_workers`). It omits `attempt_result_ref`. This binds a
    failure to one attempt, so a duplicate stale failure can never be applied to
-   its replacement. Until all workers finish, remain idle and perform
+   its replacement. A native `spawn_agent`/`wait` sequence, a child message, a
+   local close, or a result ref alone is never completion evidence. The
+   successful `continue_orchestration` response is the required server-derived
+   continuation/terminal audit for that wave. Until that audit returns, do not
+   present completion, treat a result as consumed, or close its child as
+   consumed. Until all workers finish, remain idle and perform
    no project operation. A `SubagentStop` after `complete_attempt` leaves the
    attempt completion-pending while the server materializes its projection,
    not active and not resumable. The coordinator must explicitly choose exactly one
@@ -368,16 +373,17 @@ continuing. Never replace the worker or advance the wave for a question.
 
    Native agent slots have their own lifecycle. Before every new native
    `spawn_agent`, use `close_agent` when available to release each known
-   completed child whose durable result was already read and consumed, or whose
-   exact failed result Cortex already accepted. Never close a running child or
+   completed child only after its canonical result was read and the successful
+   server continuation/terminal audit consumed it, or after its exact failed result Cortex already accepted. Never close a running child or
    one paused on a durable question. If recovery may have missed a terminal
    child, use `list_agents` defensively and apply the same eligibility rule.
-   After a durable result is read and no question or follow-up remains, close
+   After that server audit and when no question or follow-up remains, close
    that exact completed native child; the ledger and result store are then
    authoritative.
 6. Repeat one continue per completed wave. Finish only when `outcome` is
    `completed`; Cortex has then reconciled results, evidence, documentation,
-   close verification, the manifest, and handoff.
+   close verification, the manifest, and handoff. Only then may the
+   coordinator present a final result to the user.
 
 ### Recovery after context reset or compaction
 

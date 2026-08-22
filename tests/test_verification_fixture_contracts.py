@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ RUNTIME = ROOT / "plugins" / "cortex" / "scripts"
 sys.path.insert(0, str(RUNTIME))
 
 import cortex  # noqa: E402
+from cortex_runtime import prompt_compiler  # noqa: E402
 
 
 def load_script(name: str, filename: str):
@@ -101,6 +103,37 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             text = path.read_text(encoding="utf-8").lower()
             found = [term for term in retired if term.lower() in text]
             self.assertEqual(found, [], f"retired vocabulary in {path}: {found}")
+
+    def test_prompt_contract_requires_canonical_server_completion_audit(self) -> None:
+        """A spawn/wait cannot be promoted to completion outside Cortex state."""
+        contract_path = ROOT / "plugins/cortex/prompt-contracts.json"
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        coordinator_completion = contract["attempt_result_contract"]["coordinator_completion"]
+        self.assertIn("native spawn or wait is never completion evidence", coordinator_completion)
+        self.assertIn("read_worker_result", coordinator_completion)
+        self.assertIn("continue_orchestration", coordinator_completion)
+        self.assertIn("successful server lifecycle outcome", coordinator_completion)
+        self.assertEqual(prompt_compiler.load_prompt_contract(contract_path), contract)
+
+        contract["attempt_result_contract"].pop("coordinator_completion")
+        with tempfile.TemporaryDirectory() as temporary:
+            invalid_path = Path(temporary) / "prompt-contracts.json"
+            invalid_path.write_text(json.dumps(contract), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "coordinator completion contract"):
+                prompt_compiler.load_prompt_contract(invalid_path)
+
+    def test_bundled_skills_require_server_audit_before_presentation_or_close(self) -> None:
+        plugin = ROOT / "plugins/cortex"
+        control = (plugin / "skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
+        orchestrator = (plugin / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        for marker in (
+            "never completion evidence",
+            "required server-derived\n   continuation/terminal audit",
+            "do not\n   present completion",
+            "Only then may the\n   coordinator present a final result to the user.",
+        ):
+            self.assertIn(marker, control)
+        self.assertIn("server-derived `continue_orchestration` continuation/terminal audit", orchestrator)
 
     def test_fixture_attempt_results_are_complete_and_have_no_open_findings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -289,6 +322,14 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
         self.assertIn("do not widen scope", prompt)
         self.assertIn("If the question requests any fact or decision outside that policy", prompt)
         self.assertIn("strict state machine for all five sequential server waves", prompt)
+        self.assertIn(
+            "read_worker_result -> continue_orchestration(existing project_root/task_ref plus server continuation step/results verbatim) -> close_agent(completed child)",
+            prompt,
+        )
+        self.assertNotIn(
+            "read_worker_result -> close_agent(completed child) -> continue_orchestration",
+            prompt,
+        )
         self.assertIn("the only legal next tool call is every returned dispatch.call", prompt)
         self.assertIn("A native wait is legal only immediately after a successful native dispatch", prompt)
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## [10.0.1] - 2026-08-22
+
+This patch makes orchestration completion fail closed whenever a dispatched
+facade attempt lacks its finalized canonical `AttemptResult`.
+
+- Block gate passes, generic handoffs, terminal acceptance, and coordinator
+  stop completion while an active non-invalidated attempt has no finalized
+  result; a native child binding remains recovery metadata, not completion
+  evidence.
+- Require the coordinator protocol to read the canonical result, obtain a
+  successful server-derived continuation, and only then close the exact child.
+- Make live source-mode acceptance audit the complete native sequence and one
+  matching terminal result per accepted attempt; ambiguous native identity in
+  parallel source-mode observation fails closed.
+
 ## [10.0.0] - 2026-08-22
 
 This breaking release makes the database-centric attempt protocol the only

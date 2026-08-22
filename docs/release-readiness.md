@@ -1,10 +1,10 @@
 # Release readiness
 
-Status: source-mode release contract for Cortex 10.0.0.
+Status: source-mode release contract for Cortex 10.0.1.
 
 ## Current release identity
 
-- plugin version: 10.0.0
+- plugin version: 10.0.1
 - task contract: cortex/v10
 - orchestration lifecycle: cortex/orchestration/v6
 - SQLite schema: v15

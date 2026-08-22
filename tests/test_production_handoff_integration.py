@@ -167,6 +167,120 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(result["ok"], result)
         return result
 
+    def test_unresolved_dispatch_cannot_complete_or_close_and_recovers_deterministically(self) -> None:
+        """A dispatch without a canonical worker result remains recoverable.
+
+        This is the production-shaped failure from a lost/unfinished native
+        wait: the server has issued a dispatch, but the coordinator has no
+        ``AttemptResult`` to submit.  A completion-shaped continuation must
+        fail before reserving or mutating the active wave.  Inspection and
+        lifecycle recovery must continue to expose the same pending dispatch,
+        with documentation/close still pending and no synthetic handoff.
+        """
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Keep an unfinished worker dispatch recoverable.",
+                "acceptance_criteria": ["A canonical worker result is required before completion."],
+                "verification": ["Repeat the pending-dispatch recovery check."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "discover", "profile": "explorer"}]},
+                {"workers": [{"phase": "documentation", "profile": "technical_writer"}]},
+                {"workers": [{"phase": "close", "profile": "build_verification"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        self.assertEqual(started["outcome"], "ready_to_spawn")
+        self.assertEqual(len(started["dispatches"]), 1)
+
+        task_dir, before, attempt = self._active_attempt()
+        dispatch_ref = str(started["dispatches"][0]["dispatch_ref"])
+        attempt_id = str(attempt["attempt_id"])
+        self.assertEqual(attempt["status"], control.AWAITING_HOST_SPAWN)
+        self.assertEqual(attempt["dispatch_ref"], dispatch_ref)
+        self.assertFalse(attempt.get("attempt_result_ref"))
+
+        # A coordinator cannot turn a missing worker result into success.  The
+        # same request is retried to prove the validation path is deterministic
+        # and does not consume the attempt or advance the pipeline.
+        continuation_request = {
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": started["step"],
+            "results": [{"status": "passed"}],
+        }
+        first_rejection = control.continue_orchestration(continuation_request)
+        second_rejection = control.continue_orchestration(continuation_request)
+        for rejection in (first_rejection, second_rejection):
+            self.assertFalse(rejection["ok"], rejection)
+            self.assertEqual(rejection["code"], "continue_validation_failed")
+            self.assertEqual(rejection["outcome"], "needs_input")
+            self.assertEqual(rejection["dispatches"], [])
+            self.assertIn("attempt_result_ref", rejection["diagnostics"][0]["message"])
+        self.assertEqual(
+            first_rejection["diagnostics"], second_rejection["diagnostics"],
+        )
+        self.assertEqual(first_rejection["next_action"], second_rejection["next_action"])
+
+        _same_task_dir, after, same_attempt = self._active_attempt()
+        self.assertEqual(task_dir, _same_task_dir)
+        self.assertEqual(after["revision"], before["revision"])
+        self.assertEqual(after["completed_gates"], [])
+        self.assertFalse(after.get("handoff_created"))
+        self.assertFalse(after.get("close_verified"))
+        self.assertEqual(same_attempt["attempt_id"], attempt_id)
+        self.assertEqual(same_attempt["status"], control.AWAITING_HOST_SPAWN)
+        self.assertEqual(same_attempt["dispatch_ref"], dispatch_ref)
+        self.assertFalse(same_attempt.get("attempt_result_ref"))
+
+        inspected = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "inspect",
+        })
+        self.assertTrue(inspected["ok"], inspected)
+        inspection = inspected["result"]
+        self.assertEqual(inspection["available_results"], [])
+        self.assertEqual(
+            [item["dispatch_ref"] for item in inspection["pending_dispatches"]],
+            [dispatch_ref],
+        )
+        inspection_state = inspection["context_handoff"]["state"]
+        self.assertEqual(inspection_state["completed_gates"], [])
+        self.assertFalse(inspection_state["handoff_created"])
+        self.assertFalse(inspection_state["close_verified"])
+        self.assertEqual(inspection["plan"][1]["status"], "pending")
+        self.assertEqual(inspection["plan"][2]["status"], "pending")
+
+        recovered = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_inspect",
+        })
+        recovered_again = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_inspect",
+        })
+        for result in (recovered, recovered_again):
+            self.assertTrue(result["ok"], result)
+            recovery = result["result"]["lifecycle_recovery"]
+            self.assertEqual(recovery["mode"], "recover_lifecycle")
+            self.assertFalse(recovery["state_changed"])
+            self.assertEqual(recovery["expired_attempt_ids"], [])
+            self.assertEqual(recovery["unselectable_result_attempt_ids"], [])
+            self.assertFalse(recovery["required"])
+            self.assertEqual(
+                [item["dispatch_ref"] for item in result["result"]["pending_dispatches"]],
+                [dispatch_ref],
+            )
+        self.assertEqual(
+            recovered["result"]["lifecycle_recovery"],
+            recovered_again["result"]["lifecycle_recovery"],
+        )
+
     def test_public_successor_briefing_and_compaction_use_bounded_target_handoffs(self) -> None:
         started = control.start_orchestration({
             "project_root": str(self.project),

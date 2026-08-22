@@ -307,6 +307,9 @@ a fallback.
 
 Native worker-slot cleanup, all wait behavior, result-link publication,
 `next_strategy` retry handling, and terminal completion are defined only in
-Cortex Control. A completed lifecycle response is terminal: present the
+Cortex Control. A native spawn, wait, child message, or local child close is
+never completion evidence: read the exact canonical AttemptResult and wait for
+the server-derived `continue_orchestration` continuation/terminal audit before
+presenting any result. A completed lifecycle response is terminal: present the
 evidence-backed result and every unrun release gate without asking the user to
 activate Cortex again.

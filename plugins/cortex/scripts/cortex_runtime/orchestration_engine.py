@@ -3313,7 +3313,7 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             if outcome in {"blocked"} or (outcome == "passed" and gate == "close" and state.get("require_handoff")):
                 handed = _auto_handoff(params, task_dir, state, "Resume after resolving the blocker." if outcome == "blocked" else "Close the Cortex task.")
                 if handed.get("recorded") is False:
-                    raise ValueError("automatic handoff manifest reconciliation failed")
+                    raise ValueError(str(handed.get("reason") or "automatic handoff was not recorded"))
                 state = handed["state"]
             gate_summary = f"Unified facade recorded {gate} as {outcome}."
             if unresolved_rework and outcome == "failed":

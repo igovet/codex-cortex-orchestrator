@@ -21,6 +21,7 @@ bind_symbols(
     (
         "AWAITING_HOST_SPAWN",
         "TERMINAL_ATTEMPT_STATUSES",
+        "_active_facade_attempts_missing_finalized_results",
         "_attempts_missing_result_validation",
         "_attempts_with_unresolved_canonical_results",
         "_validated_evidence_records",
@@ -228,6 +229,23 @@ def _validate_pass_evidence(
         for item in gate_evidence
     ):
         raise ValueError("cannot pass a gate with failed or self-attested command evidence; use execute_verification_command")
+    pending_attempt_ids = _active_facade_attempts_missing_finalized_results(
+        task_dir, gate_attempts
+    )
+    if pending_attempt_ids:
+        # Evidence can be recorded while a worker is running (for example a
+        # server-observed verification command), but it cannot turn that live
+        # worker into a pass. The exact child must publish and finalize its
+        # AttemptResult first; otherwise `_apply_transition` would coerce the
+        # mutable attempt projection to `passed` without canonical proof.
+        return [], _recoverable(
+            state,
+            revision_correction,
+            reason="active_attempt_result_pending",
+            gate=gate,
+            next_action="wait_for_exact_worker_or_recover_attempt",
+            candidate_attempt_ids=pending_attempt_ids,
+        )
     # ``completed`` is scoped to a worker's assignment: ordinary implementation
     # and documentation results may intentionally carry unresolved work forward
     # to their successor.  A closure verifier is different.  Its own immutable

@@ -33,6 +33,12 @@ _EXPECTED_GATES = frozenset((
     "implementation", "qa", "security", "performance", "accessibility", "ux",
     "review", "documentation", "close", "governance_activation", "governance_close",
 ))
+_COORDINATOR_COMPLETION_CONTRACT = (
+    "A native spawn or wait is never completion evidence. For every terminal worker, the coordinator must read its exact "
+    "canonical AttemptResult with read_worker_result, then call continue_orchestration only from that server-returned "
+    "continuation or failed-result route. Only the resulting successful server lifecycle outcome is the continuation or "
+    "terminal audit; before it, the coordinator must neither present completion nor close the worker as consumed."
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,12 @@ def _validate_contract(payload: object) -> dict[str, Any]:
         or set(v3.get("conditional_sections") or []) != {"mode", "gate", "context"}
     ):
         raise RuntimeError("bundled Cortex v3 prompt contract is invalid")
+    attempt_result_contract = payload.get("attempt_result_contract")
+    if (
+        not isinstance(attempt_result_contract, dict)
+        or attempt_result_contract.get("coordinator_completion") != _COORDINATOR_COMPLETION_CONTRACT
+    ):
+        raise RuntimeError("bundled Cortex coordinator completion contract is invalid")
     budgets = payload.get("budgets")
     if not isinstance(budgets, dict) or not all(isinstance(value, int) and value > 0 for value in budgets.values()):
         raise RuntimeError("bundled Cortex prompt budgets are invalid")

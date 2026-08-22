@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 10.0.0 Codex plugin. The runtime is
+This repository contains the Cortex 10.0.1 Codex plugin. The runtime is
 opt-in, runs locally, and stores orchestration state in a host-private SQLite
 v15 ledger. The supported public contract is the fresh v10 protocol only.
 
@@ -70,6 +70,9 @@ dispatch. They do not infer a task by scanning directories or accept prose as
 proof. A stopped child before WORK_COMPLETED is recovered by its exact
 attempt; a canonical WORK_COMPLETED result continues through FINALIZING and
 COMPLETED.
+An active dispatch without a finalized canonical result cannot authorize a
+gate, handoff, terminal completion, or coordinator stop. A host child binding
+is recovery metadata, not a proof that work completed.
 
 Review hook commands before trust. They must invoke the installed cache's
 bundled scripts/cortex-launcher and scripts/cortex_hook.py, and the content
@@ -82,7 +85,7 @@ Prompt Contract v3 is the sole stable prompt path. Dispatch-controlled values
 are fenced assignment data; static policy remains in the bundled skill and
 profile sources. Prompt lint, deterministic prompt evaluation, marketplace
 validation, and source-mode package checks are required before release. The
-package manifest is version 10.0.0 and the ledger schema is v15.
+package manifest is version 10.0.1 and the ledger schema is v15.
 
 ## Vulnerability reporting
 
@@ -105,7 +108,7 @@ or operational data before committing it.
 
 ## Release safety checklist
 
-Before publishing 10.0.0 or a later release:
+Before publishing 10.0.1 or a later release:
 
 1. Run the focused protocol, lifecycle, context, handoff, governance, and
    packaging tests.

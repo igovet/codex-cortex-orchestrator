@@ -892,6 +892,184 @@ def observed_native_lifecycle(events: list[dict[str, object]], *, workers: int =
     )
 
 
+def safe_native_terminal_audit(events: list[dict[str, object]]) -> dict[str, object]:
+    """Audit the public terminal handling of every observable native worker.
+
+    Source-mode telemetry intentionally has no child identifiers or result
+    references.  It can nevertheless prove, without retaining either, that
+    each observed successful wait was followed by a successful canonical
+    ``read_worker_result`` and a successful server-derived
+    ``continue_orchestration`` audit before the child was closed.  The
+    counters are an aggregate proof only: durable attempt/result identity is checked
+    independently by :func:`safe_terminal_result_audit` below.
+
+    Adjacent identical host observations are ambiguous: source-mode telemetry
+    cannot distinguish a transport echo from a second parallel child.  Count
+    neither as completion evidence and fail closed.  The release sequential
+    gate therefore accepts only an unambiguous one-to-one aggregate mapping;
+    parallel identity proof requires the separate trusted-hook integration
+    environment.
+    """
+    spawned = waited = read = continued = closed = 0
+    pending_reads = pending_continuations = pending_closes = 0
+    violation_count = 0
+    ambiguous_observations = 0
+    last_operation: str | None = None
+    for event in events:
+        operation: str | None = None
+        if event.get("event") == "native_tool_call" and event.get("status") == "completed":
+            tool = str(event.get("tool") or "")
+            outcome = str(event.get("outcome") or "")
+            if tool == "spawn_agent":
+                operation = "spawn"
+            elif tool == "wait":
+                operation = "wait_result" if outcome == "attempt_result_recorded" else (
+                    "wait_terminal_other" if outcome else None
+                )
+            elif tool == "close_agent":
+                operation = "close"
+        elif event.get("event") == "cortex_mcp_call" and event.get("status") == "completed":
+            tool = str(event.get("tool") or "")
+            if tool == "read_worker_result":
+                operation = "read_result" if event.get("ok") is True else "read_result_other"
+            elif tool == "continue_orchestration":
+                operation = "continue_result" if event.get("ok") is True else "continue_result_other"
+        if operation is None:
+            continue
+        if operation == last_operation and operation in {
+            "spawn", "wait_result", "read_result", "continue_result", "close",
+        }:
+            ambiguous_observations += 1
+            continue
+        last_operation = operation
+        if operation == "spawn":
+            spawned += 1
+        elif operation == "wait_result":
+            if waited >= spawned:
+                violation_count += 1
+            else:
+                waited += 1
+                pending_reads += 1
+        elif operation == "read_result":
+            if pending_reads < 1:
+                violation_count += 1
+            else:
+                pending_reads -= 1
+                read += 1
+                pending_continuations += 1
+        elif operation == "continue_result":
+            if pending_continuations < 1:
+                violation_count += 1
+            else:
+                pending_continuations -= 1
+                continued += 1
+                pending_closes += 1
+        elif operation == "close":
+            if pending_closes < 1:
+                violation_count += 1
+            else:
+                pending_closes -= 1
+                closed += 1
+        else:
+            # A stopped worker must not be accepted on terminal text alone,
+            # after an unsuccessful canonical read, or without Cortex's
+            # server-derived continuation audit.
+            violation_count += 1
+    return {
+        "spawned_worker_observations": spawned,
+        "terminal_wait_observations": waited,
+        "canonical_result_reads": read,
+        "server_continuation_audits": continued,
+        "terminal_closes": closed,
+        "pending_canonical_reads": pending_reads,
+        "pending_server_continuation_audits": pending_continuations,
+        "pending_terminal_closes": pending_closes,
+        "protocol_violations": violation_count,
+        "ambiguous_native_observations": ambiguous_observations,
+        "all_observed_workers_terminally_audited": (
+            spawned > 0
+            and spawned == waited == read == continued == closed
+            and pending_reads == pending_continuations == pending_closes == violation_count == 0
+            and ambiguous_observations == 0
+        ),
+    }
+
+
+def safe_terminal_result_audit(
+    state: dict[str, object], result_records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Prove accepted attempts have one matching, finalized canonical result.
+
+    This is a ledger-only postcondition and never returns attempt ids, refs,
+    summaries, or worker payload.  Invalidated attempts are historical
+    recovery records, not accepted work; all remaining attempts must have one
+    state-linked canonical result in ``COMPLETED`` lifecycle state before the
+    evaluator can accept a completed task.
+    """
+    attempts = [
+        item for item in state.get("attempts", [])
+        if isinstance(item, dict) and not item.get("invalidated")
+    ]
+    all_attempt_ids = {
+        str(item.get("attempt_id") or "")
+        for item in state.get("attempts", [])
+        if isinstance(item, dict) and str(item.get("attempt_id") or "")
+    }
+    attempt_ids = [str(item.get("attempt_id") or "") for item in attempts]
+    expected_ids = {attempt_id for attempt_id in attempt_ids if attempt_id}
+    malformed_attempts = len(attempts) - len(expected_ids)
+    records_by_attempt: dict[str, list[dict[str, object]]] = {}
+    foreign_records = 0
+    invalidated_historical_results = 0
+    finalized_records = 0
+    mismatched_records = 0
+    for record in result_records:
+        attempt_id = str(record.get("attempt_id") or "")
+        if attempt_id not in expected_ids:
+            if attempt_id in all_attempt_ids:
+                invalidated_historical_results += 1
+            else:
+                foreign_records += 1
+            continue
+        records_by_attempt.setdefault(attempt_id, []).append(record)
+        result = record.get("result")
+        if (
+            isinstance(result, dict)
+            and result.get("lifecycle_status") == "COMPLETED"
+            and result.get("status") == "completed"
+            and str(result.get("result_ref") or "") == str(record.get("attempt_result_ref") or "")
+        ):
+            finalized_records += 1
+        else:
+            mismatched_records += 1
+    missing_records = sum(1 for attempt_id in expected_ids if len(records_by_attempt.get(attempt_id, [])) == 0)
+    duplicate_records = sum(
+        len(records) - 1 for records in records_by_attempt.values() if len(records) > 1
+    )
+    terminal_attempts = sum(
+        1 for item in attempts
+        if str(item.get("status") or "") in cortex.TERMINAL_ATTEMPT_STATUSES
+    )
+    expected_count = len(expected_ids)
+    return {
+        "accepted_attempts": expected_count,
+        "terminal_accepted_attempts": terminal_attempts,
+        "finalized_canonical_results": finalized_records,
+        "missing_canonical_results": missing_records,
+        "duplicate_canonical_results": duplicate_records,
+        "mismatched_canonical_results": mismatched_records,
+        "foreign_result_records": foreign_records,
+        "invalidated_historical_results": invalidated_historical_results,
+        "malformed_accepted_attempts": malformed_attempts,
+        "all_accepted_attempts_have_terminal_canonical_results": (
+            expected_count > 0
+            and terminal_attempts == expected_count
+            and finalized_records == expected_count
+            and missing_records == duplicate_records == mismatched_records == foreign_records == malformed_attempts == 0
+        ),
+    }
+
+
 def observed_question_resume_lifecycle(events: list[dict[str, object]]) -> bool:
     """Prove answer-before-follow-up ordering from privacy-safe live telemetry.
 
@@ -1797,8 +1975,12 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
         task_dir = canonical_task_directories(project)[0]
         state = cortex.load_task_state_for_artifact(task_dir)
         ledger = cortex.ledger_root({"project_root": str(project)})
-        if not canonical_results_are_strict(canonical_attempt_result_records(ledger, state)):
+        result_records = canonical_attempt_result_records(ledger, state)
+        if not canonical_results_are_strict(result_records):
             raise AssertionError(f"{project.name} has no finalized canonical AttemptResult rows")
+        terminal_result_audit = safe_terminal_result_audit(state, result_records)
+        if terminal_result_audit["all_accepted_attempts_have_terminal_canonical_results"] is not True:
+            raise AssertionError(f"{project.name} has an incomplete terminal canonical-result audit")
         snapshot_cleanup = state.get("manifest_snapshot_cleanup") or {}
         if state.get("status") != "completed":
             raise AssertionError(f"{project.name} did not reach completed state")
@@ -1849,8 +2031,9 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "outcome=question_answered and the server next_action explicitly requires the exact same native worker, followup_task, and "
             "worker_question(action=poll) with the same question. Use only that server resume contract and the original child target to "
             "resume the same child. Wait again; accept the resumed child only when it starts with ATTEMPT_COMPLETED, then read its result, "
-            "close that completed child, and continue the current step with only its attempt_result_ref. Stop after that "
-            "continuation response; do not execute any successor dispatch. Never use a private Cortex API or create another worker."
+            "continue the current step with only the server-provided continuation for its attempt_result_ref, and require a successful "
+            "server continuation/terminal audit before closing that completed child. Stop after that continuation response; do not execute "
+            "any successor dispatch. Never use a private Cortex API or create another worker."
         )
     common = (
         "Use the Cortex MCP public tools to complete this isolated task. "
@@ -1864,10 +2047,11 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
         "result reference, dispatch reference, or remembered step; if the read response provides no legal continuation object, do not call continue_orchestration. If a "
         "public lifecycle call is rejected after gates are recorded, stop the scenario and retain only the safe machine classification; never call recovery, add future_waves, "
         "or set rework in response. Except for the single explicitly prescribed blocked_resume reassessment fixture, do not send future_waves, reason, or rework at all. After a durable result was read and no "
-        "question or follow-up remains for that child, close the completed native child with close_agent when that "
-        "host tool is available, before dispatching a later wave; never close a running or question-paused child. "
-        "Before every new spawn, FIRST close every known leftover completed child only after its durable result was "
-        "read or its exact failed result was accepted by Cortex. If recovery may have missed a terminal child, use "
+        "question or follow-up remains for that child, require the successful server-derived continuation/terminal audit from "
+        "continue_orchestration, then close the completed native child with close_agent when that host tool is available, before "
+        "dispatching a later wave; never close a running or question-paused child. Before every new spawn, FIRST close every known "
+        "leftover completed child only after its durable result was read and consumed by that successful server audit or its exact "
+        "failed result was accepted by Cortex. If recovery may have missed a terminal child, use "
         "list_agents defensively and apply the same rule; THEN spawn. Do not close active or question-paused children. "
         "Treat a native child as successful only "
         "when its final response starts with ATTEMPT_COMPLETED and the referenced result was read successfully. If a "
@@ -1921,8 +2105,8 @@ def live_prompt(scenario: str, project: Path, source_task_ref: str | None = None
             "question requests any fact or decision outside that policy, do not invent an answer or resume the child; "
             "stop the scenario safely. "
             "Use this strict state machine for all five sequential server waves when no worker question is paused: "
-            "dispatch.call -> wait(target returned by that dispatch) -> read_worker_result -> close_agent(completed child) "
-            "-> continue_orchestration(existing project_root/task_ref plus server continuation step/results verbatim) -> next dispatch.call. "
+            "dispatch.call -> wait(target returned by that dispatch) -> read_worker_result "
+            "-> continue_orchestration(existing project_root/task_ref plus server continuation step/results verbatim) -> close_agent(completed child) -> next dispatch.call. "
             "After each successful continue_orchestration response with outcome=ready_to_spawn, the only legal next "
             "tool call is every returned dispatch.call with its exact arguments. Invoke it immediately, even when an "
             "attempt summary says passed or a previous child was just closed; do not reason, inspect, list agents, "
@@ -2161,6 +2345,8 @@ def _live_eval(
         ledger = cortex.ledger_root({"project_root": str(project)})
         result_records = canonical_attempt_result_records(ledger, state) if task_dir else []
         strict_results = canonical_results_are_strict(result_records)
+        terminal_result_audit = safe_terminal_result_audit(state, result_records)
+        native_terminal_audit = safe_native_terminal_audit(events)
         question_resolution_audit = safe_question_resolution_audit(ledger, state, result_records)
         attempt_results_valid = all(
             isinstance(record.get("result"), dict)
@@ -2214,6 +2400,15 @@ def _live_eval(
                 )
             ),
             "strict_worker_results": strict_results,
+            "terminal_canonical_result_audit": (
+                terminal_result_audit["all_accepted_attempts_have_terminal_canonical_results"] is True
+            ),
+            "native_terminal_result_audit": (
+                native_terminal_audit["all_observed_workers_terminally_audited"] is True
+                and native_terminal_audit["spawned_worker_observations"]
+                == terminal_result_audit["accepted_attempts"]
+                and streamed["dropped_stream_events"] == 0
+            ),
             "review_close_attempt_results": attempt_results_valid,
             "no_failed_public_calls": not failed_public_calls,
             "one_start": completed_tool_names.count("start_orchestration") == 1,
@@ -2224,6 +2419,12 @@ def _live_eval(
         }
         if scenario == "compact_parallel":
             checks["parallel_wave_exercised"] = parallel_exercised
+            # The source command deliberately runs without trusted native
+            # hooks and its privacy-safe telemetry has no child identity.
+            # Two adjacent parallel spawns are therefore indistinguishable
+            # from transport echoes.  Do not let an aggregate result count
+            # masquerade as an exact per-child terminal audit.
+            checks["parallel_native_identity_verifiable"] = False
         if scenario == "blocked_resume":
             checks["resume_or_reassessment_exercised"] = adaptive_exercised
         if scenario == "planner_work_breakdown":
@@ -2379,6 +2580,15 @@ def _live_eval(
                     if (project / "result.md").is_file() else False
                 ),
                 "strict_worker_result": strict_results and len(result_records) == 1,
+                "terminal_canonical_result_audit": (
+                    terminal_result_audit["all_accepted_attempts_have_terminal_canonical_results"] is True
+                    and terminal_result_audit["accepted_attempts"] == 1
+                ),
+                "native_terminal_result_audit": (
+                    native_terminal_audit["all_observed_workers_terminally_audited"] is True
+                    and native_terminal_audit["spawned_worker_observations"] == 1
+                    and streamed["dropped_stream_events"] == 0
+                ),
                 "native_question_resume_lifecycle": observed_question_resume_lifecycle(events),
                 "no_failed_public_calls": not failed_public_calls,
             }
@@ -2431,11 +2641,20 @@ def _live_eval(
             "termination": streamed["termination"], "dropped_stream_events": streamed["dropped_stream_events"],
             "ledger_audit_records": ledger_audit_records,
             "attempt_event_key_audit": attempt_event_key_audit,
+            "terminal_result_audit": terminal_result_audit,
+            "native_terminal_audit": native_terminal_audit,
             "question_resolution_audit": question_resolution_audit,
             "tool_names": tool_names,
             "native_tool_names": native_tool_names,
             "checks": checks, "failed_public_calls": failed_public_calls,
             "state_diagnostics": state_diagnostics,
+            "native_identity_assurance": (
+                "identity_unverifiable"
+                if scenario == "compact_parallel"
+                else "unambiguous_aggregate_terminal_audit"
+                if checks.get("native_terminal_result_audit") is True
+                else "identity_unverifiable"
+            ),
             **({
                 "evidence_scope": "source_mode_native_lifecycle_observed",
                 "host_binding": "unavailable_without_trusted_hooks",
