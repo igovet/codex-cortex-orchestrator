@@ -29,15 +29,19 @@ from cortex import (
 from cortex_runtime import attempt_protocol
 
 
+_MISSING = object()
+MIN_BRIEFING_READ_BYTES = 4
+
+
 def _bounded_artifact_max_bytes(value: Any, *, label: str) -> tuple[int, int | None, bool]:
     """Normalize a bounded artifact chunk request."""
-    if value is None:
+    if value is _MISSING:
         return 16 * 1024, None, False
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{label} max_bytes must be an integer")
     if value < 1:
         raise ValueError(f"{label} max_bytes must be at least 1")
-    effective = min(value, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES)
+    effective = max(MIN_BRIEFING_READ_BYTES, min(value, _runtime.ARTIFACT_TRANSPORT_MAX_BYTES))
     return effective, value, effective != value
 
 
@@ -142,17 +146,24 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("dispatch briefing export differs from its immutable artifact")
         audience = f"worker:{attempt_id}:{profile}"
         byte_offset = 0
+        has_cursor = "cursor" in params
         raw_cursor = params.get("cursor")
-        if raw_cursor:
-            decoded = _runtime.db_decode_artifact_cursor(root, str(raw_cursor))
+        if has_cursor:
+            if not isinstance(raw_cursor, str) or not raw_cursor:
+                raise ValueError("briefing cursor must be a non-empty opaque string returned by this server")
+            try:
+                decoded = _runtime.db_decode_artifact_cursor(root, raw_cursor)
+            except ValueError as exc:
+                raise ValueError("briefing cursor is invalid") from exc
             expected = {"type": "briefing_read", "task_id": state["task_id"], "artifact_ref": artifact["artifact_ref"], "digest_sha256": briefing_digest, "audience": audience}
             if any(decoded.get(key) != value for key, value in expected.items()):
                 raise ValueError("briefing cursor is not valid for this dispatch, worker identity, or content version")
             byte_offset = decoded.get("byte_offset")
             if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
                 raise ValueError("briefing cursor byte offset is invalid")
-        effective_max, requested_max, max_bytes_normalized = _bounded_artifact_max_bytes(params.get("max_bytes"), label="briefing")
-        chunked = bool(raw_cursor) or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
+        raw_max_bytes = params["max_bytes"] if "max_bytes" in params else _MISSING
+        effective_max, requested_max, max_bytes_normalized = _bounded_artifact_max_bytes(raw_max_bytes, label="briefing")
+        chunked = has_cursor or requested_max is not None or artifact["byte_size"] > _runtime.ARTIFACT_TRANSPORT_MAX_BYTES
         base = {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": True, "outcome": "briefing_read", "task_id": task_id, "attempt_id": attempt_id, "profile": profile, "dispatch_ref": dispatch_ref, "briefing_digest": briefing_digest, "briefing_artifact": artifact}
         if chunked:
             part = _runtime.db_read_artifact_range(root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset, max_bytes=effective_max)

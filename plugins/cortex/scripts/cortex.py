@@ -689,6 +689,14 @@ BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+|bearer\s+)([^\s,;]+)
 URI_CREDENTIAL_RE = re.compile(r"(?i)(://)([^/@\s]+):([^/@\s]+)(@)")
 ENV_SECRET_RE = re.compile(r"(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*)(?:\"[^\"]*\"|'[^']*'|[^\s]+)")
 MAX_TEXT = 4000
+# ``ContextCompiler`` is deliberately strict about the durable task-domain
+# shape: it accepts at most 100 requirements and each requirement must be no
+# longer than 600 characters.  Requirements enter the ledger through several
+# public/control-plane paths, so keep the ingress invariant beside the common
+# text-array normalizer instead of relying on a later briefing compilation to
+# discover it.
+MAX_CANONICAL_REQUIREMENTS = 100
+MAX_CANONICAL_REQUIREMENT_LENGTH = 600
 # The result itself is an immutable, cursor-paged SQLite artifact; it must not
 # have a second product-sized quota.  Keep the same hard bound as one atomic
 # JSON document so a malformed or hostile local draft cannot exhaust process
@@ -982,8 +990,10 @@ def normalize_routing_id(value: Any, field: str = "routing id") -> str:
     return normalized
 
 
-def redact(value: object, limit: int = MAX_TEXT) -> str:
-    text = str(value or "")[:limit]
+def redact(value: object, limit: int | None = MAX_TEXT) -> str:
+    text = str(value or "")
+    if limit is not None:
+        text = text[:limit]
     text = AUTHORIZATION_RE.sub(lambda match: f"{match.group(1)}<REDACTED>", text)
     text = BEARER_RE.sub(lambda match: f"{match.group(1)}<REDACTED>", text)
     text = URI_CREDENTIAL_RE.sub(r"\1<REDACTED>@", text)
@@ -998,6 +1008,71 @@ def normalize_init_text_list(value: object, field: str, *, item_limit: int = 100
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{field} must be a current canonical text array")
     return [item.strip() for item in value][:item_limit]
+
+
+def _atomize_requirement_text(value: str) -> list[str]:
+    """Split one redacted requirement without discarding any of its text.
+
+    A task requirement is a typed ContextDomain record, not a display field.
+    Its compiler boundary is 600 characters.  Prefer a whitespace boundary so
+    natural-language clauses stay intact where possible.  Keep a selected
+    whitespace boundary in the preceding atom and preserve leading/trailing
+    whitespace too: ``ContextCompiler`` applies its own display-time strip,
+    but durable normalization must be byte-stable when a receipt is consumed
+    again.  No user text is discarded and the resulting atoms are idempotent.
+    A single unbroken token is split at the hard boundary because there is no
+    meaning-preserving word boundary available.
+    """
+    text = value
+    atoms: list[str] = []
+    while len(text) > MAX_CANONICAL_REQUIREMENT_LENGTH:
+        window = text[:MAX_CANONICAL_REQUIREMENT_LENGTH]
+        split_at = max(window.rfind(" "), window.rfind("\t"), window.rfind("\n"), window.rfind("\r"))
+        # Include the selected separator in the prior atom.  That makes
+        # ``''.join(atoms)`` reconstruct the complete redacted input and,
+        # unlike lstrip/rstrip normalization, remains stable when init_task
+        # revalidates a persisted classification receipt.
+        end = split_at + 1 if split_at > 0 else MAX_CANONICAL_REQUIREMENT_LENGTH
+        atom = text[:end]
+        if not atom.strip():
+            # Defensive fallback for pathological whitespace-only windows.
+            end = MAX_CANONICAL_REQUIREMENT_LENGTH
+            atom = text[:end]
+        atoms.append(atom)
+        text = text[end:]
+    if text.strip():
+        atoms.append(text)
+    return atoms
+
+
+def normalize_task_requirements(value: object) -> list[str]:
+    """Return the only persistable representation of ``task.requirements``.
+
+    Oversized requirements are atomized *before* they reach classification,
+    receipts, or task definitions.  No text is truncated: explicit secret
+    redaction remains the existing safety policy, while all non-sensitive
+    normalized text is retained in order.  If the complete content cannot fit
+    in ContextCompiler's fixed 100x600 domain, reject it at ingress rather
+    than persisting a task which will later become uncontinuable.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError("requirements must be a current canonical text array")
+    atoms: list[str] = []
+    for item in value:
+        # Do not use redact's ordinary display limit here.  Atomization is the
+        # bounded storage policy and must see the entire user-supplied value.
+        # In particular, do not strip an existing atom: init_task revalidates
+        # immutable receipts and must preserve the split separator exactly.
+        atoms.extend(_atomize_requirement_text(redact(item, limit=None)))
+        if len(atoms) > MAX_CANONICAL_REQUIREMENTS:
+            raise ValueError(
+                "requirements exceed the bounded canonical task domain "
+                f"({MAX_CANONICAL_REQUIREMENTS} items of {MAX_CANONICAL_REQUIREMENT_LENGTH} characters); "
+                "split the work into separate tasks"
+            )
+    return atoms
 
 
 def require_internal_english(value: object, label: str) -> None:
@@ -2307,9 +2382,7 @@ def classify_task(params: dict[str, Any]) -> dict[str, Any]:
     require_activation(params)
     with state_lock(root):
         classification_params = dict(params)
-        normalized_requirements = normalize_init_text_list(
-            params.get("requirements"), "requirements"
-        )
+        normalized_requirements = normalize_task_requirements(params.get("requirements"))
         classification_params["requirements"] = normalized_requirements
         result = classify(classification_params)
         receipt_id = f"classification-{secrets.token_hex(12)}"
@@ -2323,7 +2396,7 @@ def classify_task(params: dict[str, Any]) -> dict[str, Any]:
             # The receipt is the authoritative classification contract.  Keep
             # the bounded task requirements here so init_task need not ask the
             # coordinator to reproduce a second, byte-identical copy.
-            "requirements": [redact(item, 500) for item in normalized_requirements][:100],
+            "requirements": normalized_requirements,
             "classification": result,
             "created_at": now(),
         }
@@ -3280,10 +3353,19 @@ def _planning_identifier(value: Any, label: str) -> str:
 
 
 def _planning_text(value: Any, label: str, *, maximum: int = MAX_JSON_BYTES) -> str:
-    text = str(value or "").strip()
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string")
+    # Do not use ``redact(..., maximum)`` here: its character-count truncation
+    # could make a hostile Unicode payload appear acceptable only after a
+    # planner/scope worker had already produced it.  Planning and scoping are
+    # durable JSON ingress, so enforce the advertised bound in UTF-8 bytes
+    # without silently dropping semantic content.
+    text = redact(value, None).strip()
     if not text:
         raise ValueError(f"{label} is required")
-    return redact(text, maximum)
+    if len(text.encode("utf-8")) > maximum:
+        raise ValueError(f"{label} exceeds the {maximum}-byte limit")
+    return text
 
 
 def _planning_string_list(value: Any, label: str, *, maximum: int | None = None) -> list[str]:
@@ -3465,7 +3547,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     if recommendation not in {"approve", "revise"}:
         raise ValueError("planning recommendation must be approve or revise")
     recommendation_rationale = str(value.get("recommendation_rationale") or "").strip()
-    if recommendation_rationale and len(recommendation_rationale) > 4000:
+    if recommendation_rationale and len(recommendation_rationale.encode("utf-8")) > 4000:
         raise ValueError("planning recommendation_rationale is too long")
     raw_resolved_questions = value.get("resolved_questions", [])
     if not isinstance(raw_resolved_questions, list) or any(
@@ -3477,7 +3559,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     if not isinstance(raw_risks, list) or any(not isinstance(item, str) or not item.strip() for item in raw_risks):
         raise ValueError("planning risks must be an array of non-empty strings")
     risks = list(dict.fromkeys(str(item).strip() for item in raw_risks))
-    if len(risks) > 64 or any(len(item) > 2000 for item in risks):
+    if len(risks) > 64 or any(len(item.encode("utf-8")) > 2000 for item in risks):
         raise ValueError("planning risks exceed the supported bound")
     raw_coverage = value.get("requirement_coverage", [])
     if not isinstance(raw_coverage, list) or len(raw_coverage) > 100:
@@ -5362,7 +5444,7 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
     complexity = str(params.get("complexity", "C2")).upper()
     if complexity not in BASE_PIPELINES:
         raise ValueError("complexity must be C1, C2, or C3")
-    requirements_values = normalize_init_text_list(params.get("requirements"), "requirements")
+    requirements_values = normalize_task_requirements(params.get("requirements"))
     requirements = " ".join(item.lower() for item in requirements_values)
     tokens = set(re.findall(r"[a-z0-9]+", requirements))
     proposed_pipeline = params.get("pipeline")
@@ -5521,9 +5603,21 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if mismatch:
             raise ValueError("classification receipt does not match this " + ", ".join(mismatch))
         classification = receipt["classification"]
-        receipt_requirements = receipt.get("requirements")
-        if not isinstance(receipt_requirements, list) or any(not isinstance(item, str) for item in receipt_requirements):
+        if "requirements" not in receipt:
             raise ValueError("classification receipt requirements are invalid; classify the task again")
+        try:
+            receipt_requirements = normalize_task_requirements(receipt.get("requirements"))
+        except ValueError as exc:
+            raise ValueError("classification receipt requirements are invalid; classify the task again") from exc
+        # Receipts created before the ingress invariant can be safely
+        # atomized here: classification consumes the same text in the same
+        # order, while task persistence must never reintroduce an oversized
+        # canonical requirement.  Keep the receipt digest aligned with its
+        # authoritative stored representation before consumption.
+        receipt["requirements"] = receipt_requirements
+        receipt["requirements_digest"] = digest_text(
+            json.dumps(receipt_requirements, sort_keys=True)
+        )
         pipeline = normalize_pipeline(classification["pipeline"])
         parallel_groups = normalize_parallel_groups(classification.get("parallel_groups"), pipeline)
         requested_pipeline = params.get("pipeline")
@@ -8982,7 +9076,11 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "requirements", "constraints", "acceptance_criteria", "scope", "allowed_paths",
             "verification", "pause_conditions",
         ):
-            task[field] = normalize_init_text_list(raw_task.get(field), field)
+            task[field] = (
+                normalize_task_requirements(raw_task.get(field))
+                if field == "requirements"
+                else normalize_init_text_list(raw_task.get(field), field)
+            )
         task["intent_clarification_required"] = intent_required
         task["intent_clarification_reason"] = intent_reason
         if "_follow_up" in params:

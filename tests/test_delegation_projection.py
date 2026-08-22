@@ -118,7 +118,15 @@ class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest
                 control.record_delegation(self._params())
 
         jobs = ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)
-        self.assertEqual(len(jobs), 2)
+        # Every dispatch now carries a full immutable task-contract artifact
+        # in addition to user intent and its rendered briefing.  A bounded
+        # prompt can therefore omit a whole oversized task field without
+        # losing its canonical source or stranding continuation.
+        self.assertEqual(len(jobs), 3)
+        self.assertEqual(
+            sorted(item["projection_type"] for item in jobs),
+            ["dispatch_briefing", "task_contract", "user_intent"],
+        )
         failed = next(item for item in jobs if item["status"] == "failed")
         self.assertEqual(failed["projection_type"], "user_intent")
         self.assertIn("disk unavailable", str(failed["last_error"]))
@@ -171,10 +179,13 @@ class RequiredBriefingProjectionTests(HostPrivateControlStoreTestMixin, unittest
 
         self.assertTrue(prepared["recorded"])
         self.assertEqual(len(prepared["spawn_requests"]), 2)
-        self.assertEqual(len(observed_calls), 3)
+        # One shared intent projection plus each worker's task contract and
+        # briefing projection: the complete immutable artifact must be ready
+        # before either native child is visible.
+        self.assertEqual(len(observed_calls), 5)
         self.assertEqual(
             [job["status"] for job in ledger_db.list_projection_jobs(self.root, task_id="projection-boundary", limit=10)],
-            ["ready", "ready", "ready"],
+            ["ready", "ready", "ready", "ready", "ready"],
         )
 
 

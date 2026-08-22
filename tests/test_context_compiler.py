@@ -83,6 +83,79 @@ class ContextCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "decision question"):
             context_domain_from_canonical(noncanonical_decision)
 
+    def test_oversized_persisted_requirement_is_losslessly_segmented_for_context_and_handoff(self) -> None:
+        # This simulates a task written before the per-item requirement bound.
+        # Unicode and mixed whitespace ensure the recovery path is not an
+        # ASCII-only slice or a silent truncation.
+        oversized = "\n\t".join([
+            "Сохранить канонический контекст между этапами проверки."
+            for _ in range(24)
+        ])
+        self.assertGreater(len(oversized), 600)
+        canonical = {
+            **self.canonical,
+            "task": {**self.canonical["task"], "requirements": [oversized]},
+        }
+
+        domain = context_domain_from_canonical(canonical)
+        segments = [item.text for item in domain.requirements]
+        self.assertGreater(len(segments), 1)
+        self.assertTrue(all(len(segment) <= 600 for segment in segments))
+        self.assertEqual("".join(segments), oversized)
+
+        context = ContextCompiler().compile(canonical, target_profile="backend_dev")
+        # Context is a native-transport projection, so its ceiling is UTF-8
+        # bytes rather than Python characters.  The full lossless segment
+        # stream remains in the typed domain / immutable task contract.
+        self.assertTrue(all(len(item.encode("utf-8")) <= 600 for item in context["task"]["requirements"]))
+        self.assertTrue(context["task"]["projection"]["requirements"]["truncated"])
+        handoff = HandoffCompiler().build(
+            canonical, target_profile="backend_dev", target_gate="implementation"
+        )
+        self.assertTrue(all(len(item.encode("utf-8")) <= 600 for item in handoff["requirements"]))
+
+    def test_requirements_still_reject_non_array_shape_after_length_recovery(self) -> None:
+        malformed = {
+            **self.canonical,
+            "task": {**self.canonical["task"], "requirements": "scalar requirement"},
+        }
+        with self.assertRaisesRegex(ValueError, "requirements"):
+            context_domain_from_canonical(malformed)
+
+    def test_all_large_task_fields_compile_as_referenced_utf8_projections(self) -> None:
+        """Valid durable facts never become a late dispatch validation error."""
+        huge = "界" * 2_000
+        contract = {
+            "artifact_ref": "artifact-task-contract",
+            "artifact_path": "/tmp/task-contract.json",
+            "digest_sha256": "a" * 64,
+            "byte_size": len(huge.encode("utf-8")),
+        }
+        canonical = {
+            **self.canonical,
+            "task": {
+                **self.canonical["task"],
+                "task_contract": contract,
+                "user_request": huge,
+                "requirements": [huge] * 24,
+                "constraints": [huge] * 24,
+                "acceptance_criteria": [huge] * 24,
+                "verification": [huge] * 24,
+            },
+            "resolved_user_decisions": [
+                {"question_en": huge, "answer_en": huge} for _ in range(16)
+            ],
+        }
+        context = ContextCompiler().compile(canonical, target_profile="backend_dev")
+        self.assertLessEqual(len(context["task"]["user_request"].encode("utf-8")), 2_400)
+        for field in ("requirements", "constraints", "acceptance_criteria", "verification_requirements"):
+            self.assertLessEqual(len(context["task"][field]), 12)
+            self.assertTrue(context["task"]["projection"][field]["truncated"])
+            self.assertEqual(context["task"]["projection"][field]["artifact_ref"], "artifact-task-contract")
+        self.assertTrue(context["decisions_projection"]["truncated"])
+        self.assertEqual(context["decisions_projection"]["artifact_ref"], "artifact-task-contract")
+
+
     def test_server_question_decision_events_are_compiler_visible(self) -> None:
         canonical = {
             **self.canonical,

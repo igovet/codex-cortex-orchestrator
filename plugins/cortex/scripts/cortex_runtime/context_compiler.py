@@ -14,11 +14,16 @@ from typing import Any
 
 
 CONTEXT_SCHEMA = "cortex/compiled-worker-context/v1"
+# These are projection budgets, never validity limits for a durable task.
+# A task is allowed to contain more text than a native worker prompt.  The
+# full fact remains in its immutable task-contract artifact; this compiler
+# emits only a deterministic, explicitly marked view for the current worker.
 MAX_TEXT = 1_200
 MAX_OBJECTIVE = 2_400
 MAX_ITEMS = 12
 MAX_PATHS = 48
 MAX_PREDECESSORS = 16
+MAX_REQUIREMENT_ITEM = 600
 
 
 @dataclass(frozen=True)
@@ -77,14 +82,18 @@ class ContextDomain:
     findings: tuple[Finding, ...]
 
 
-def _domain_text(value: object, *, label: str, limit: int) -> str:
+def _domain_text(value: object, *, label: str, limit: int | None = None) -> str:
     if not isinstance(value, str):
         raise ValueError(f"canonical {label} must be a string")
     text = value.strip()
     if not text:
         raise ValueError(f"canonical {label} must not be empty")
-    if len(text) > limit:
-        raise ValueError(f"canonical {label} exceeds its bounded length")
+    # ``limit`` used to reject a valid durable fact here.  That meant a task
+    # could run successfully and only then become impossible to continue when
+    # a successor briefing was compiled.  Size is a transport concern, not a
+    # canonical-state validity concern.  Keep the argument for source
+    # compatibility; byte-bounded rendering happens in ``_project_text``.
+    del limit
     return text
 
 
@@ -94,8 +103,9 @@ def _domain_values(value: object, *, label: str, limit: int, item_limit: int) ->
     if not isinstance(value, list):
         raise ValueError(f"canonical {label} must be an array of strings")
     values = value
-    if len(values) > limit:
-        raise ValueError(f"canonical {label} has too many records")
+    # Do not use a prompt cardinality limit as a ledger validity limit.  The
+    # returned domain is projected later with a source reference.
+    del limit
     result: list[str] = []
     for raw in values:
         text = _domain_text(raw, label=label, limit=item_limit)
@@ -104,13 +114,77 @@ def _domain_values(value: object, *, label: str, limit: int, item_limit: int) ->
     return tuple(result)
 
 
+def _validated_requirement(value: object) -> str:
+    """Validate one durable requirement without changing its text.
+
+    Old task rows predate the requirement item bound.  Their text is still
+    canonical task state, so rejecting it at dispatch time can strand a task
+    after a prior attempt has already completed.  In particular, an earlier
+    ingress atomizer can deliberately retain a boundary space in the preceding
+    record, so even whitespace must remain byte-for-byte intact here.
+    """
+    if not isinstance(value, str):
+        raise ValueError("canonical requirements must be an array of strings")
+    if not value.strip():
+        raise ValueError("canonical requirements must not be empty")
+    return value
+
+
+def _requirement_segments(text: str, *, item_limit: int = MAX_REQUIREMENT_ITEM) -> tuple[str, ...]:
+    """Split requirement text deterministically without truncation.
+
+    A preferred split is the latest sentence/clause boundary within the item
+    limit, then the latest word boundary, and finally a hard character split
+    for one unbroken token.  Whitespace at a selected word boundary remains in
+    the preceding segment, so ``"".join(segments) == text``.  This gives
+    recovery code an exact no-loss invariant even for Unicode input and for
+    atomized records that carry a split separator at their boundary.
+    """
+    if len(text) <= item_limit:
+        return (text,)
+
+    segments: list[str] = []
+    remaining = text
+    while len(remaining) > item_limit:
+        word_boundaries = [
+            index + 1
+            for index, character in enumerate(remaining[:item_limit])
+            if character.isspace()
+        ]
+        semantic_boundaries = [
+            boundary
+            for boundary in word_boundaries
+            if remaining[:boundary].rstrip().endswith((".", "!", "?", ";", ":"))
+        ]
+        boundary = max(semantic_boundaries or word_boundaries or [item_limit])
+        segments.append(remaining[:boundary])
+        remaining = remaining[boundary:]
+    segments.append(remaining)
+    return tuple(segments)
+
+
+def _domain_requirements(value: object) -> tuple[str, ...]:
+    """Return fresh typed requirement records, repairing only legacy length."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("canonical requirements must be an array of strings")
+    records: list[str] = []
+    seen: set[str] = set()
+    for raw in value:
+        text = _validated_requirement(raw)
+        if text in seen:
+            continue
+        seen.add(text)
+        records.extend(_requirement_segments(text))
+    return tuple(records)
+
+
 def _domain_decisions(value: object) -> tuple[Decision, ...]:
     if value is None:
         return ()
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise ValueError("canonical decisions must be an array")
-    if len(value) > 8:
-        raise ValueError("canonical decisions has too many records")
     decisions: list[Decision] = []
     for raw in value:
         if not isinstance(raw, Mapping):
@@ -163,9 +237,8 @@ def context_domain_from_canonical(canonical: Mapping[str, Any]) -> ContextDomain
     user_request_value = task.get("user_request_projection") or task.get("user_request")
     intent = TaskIntent(_domain_text(user_request_value, label="task intent", limit=MAX_OBJECTIVE))
     requirements = tuple(
-        Requirement(text) for text in _domain_values(
-            task.get("requirements") or task.get("task_requirements"),
-            label="requirements", limit=MAX_ITEMS, item_limit=600,
+        Requirement(text) for text in _domain_requirements(
+            task.get("requirements") or task.get("task_requirements")
         )
     )
     constraints = tuple(
@@ -226,7 +299,47 @@ def _text(value: object, limit: int = MAX_TEXT) -> str:
     """Return a bounded scalar without interpreting worker-controlled prose."""
     if value is None:
         return ""
-    return str(value).strip()[:limit]
+    return _utf8_prefix(str(value).strip(), limit)
+
+
+def _utf8_prefix(value: str, maximum_bytes: int) -> str:
+    """Return a valid UTF-8 prefix without treating characters as bytes."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= maximum_bytes:
+        return value
+    return encoded[:maximum_bytes].decode("utf-8", errors="ignore")
+
+
+def _project_texts(
+    values: Sequence[str],
+    *,
+    item_bytes: int,
+    item_limit: int,
+    source: Mapping[str, Any] | None,
+) -> tuple[list[str], dict[str, Any] | None]:
+    """Make a deterministic non-authoritative text projection.
+
+    The caller retains canonical text in SQLite.  When any element or the
+    number of elements is reduced, the result carries an auditable reference
+    to the immutable task-contract artifact (when dispatch supplied one), so
+    a bounded prompt never silently becomes the source of truth.
+    """
+    selected = list(values[:item_limit])
+    rendered = [_utf8_prefix(item, item_bytes) for item in selected]
+    shortened = len(values) > len(selected) or any(a != b for a, b in zip(selected, rendered))
+    if not shortened:
+        return rendered, None
+    metadata: dict[str, Any] = {
+        "total_items": len(values),
+        "selected_items": len(rendered),
+        "item_byte_limit": item_bytes,
+        "truncated": True,
+    }
+    if isinstance(source, Mapping):
+        for key in ("artifact_ref", "digest_sha256", "artifact_path", "byte_size"):
+            if source.get(key) not in (None, ""):
+                metadata[key] = source[key]
+    return rendered, metadata
 
 
 def _strings(value: object, *, limit: int = MAX_ITEMS, item_limit: int = MAX_TEXT) -> list[str]:
@@ -321,15 +434,75 @@ class ContextCompiler:
         briefing_receipt = _mapping(receipts.get("briefing"))
         predecessor_receipts = receipts.get("predecessors")
         receipt_refs = _strings(predecessor_receipts, limit=MAX_PREDECESSORS, item_limit=128)
+        contract = _mapping(task.get("task_contract") or canonical.get("task_contract"))
+        requirements, requirements_projection = _project_texts(
+            [item.text for item in domain.requirements],
+            item_bytes=MAX_REQUIREMENT_ITEM, item_limit=MAX_ITEMS, source=contract,
+        )
+        constraints, constraints_projection = _project_texts(
+            [item.text for item in domain.constraints],
+            item_bytes=700, item_limit=MAX_ITEMS, source=contract,
+        )
+        acceptance, acceptance_projection = _project_texts(
+            [item.text for item in domain.acceptance_criteria],
+            item_bytes=700, item_limit=MAX_ITEMS, source=contract,
+        )
+        verification, verification_projection = _project_texts(
+            [item.text for item in domain.verification_requirements],
+            item_bytes=700, item_limit=MAX_ITEMS, source=contract,
+        )
+        intent = _utf8_prefix(domain.intent.text, MAX_OBJECTIVE)
+        intent_projection: dict[str, Any] | None = None
+        if intent != domain.intent.text:
+            intent_projection = {
+                "total_bytes": len(domain.intent.text.encode("utf-8")),
+                "selected_bytes": len(intent.encode("utf-8")),
+                "truncated": True,
+            }
+            for key in ("artifact_ref", "digest_sha256", "artifact_path", "byte_size"):
+                if contract.get(key) not in (None, ""):
+                    intent_projection[key] = contract[key]
+        task_projection = {
+            key: value for key, value in {
+                "user_request": intent_projection,
+                "requirements": requirements_projection,
+                "constraints": constraints_projection,
+                "acceptance_criteria": acceptance_projection,
+                "verification_requirements": verification_projection,
+            }.items() if value
+        }
+        decision_values = list(domain.decisions[:8])
+        rendered_decisions = [
+            {
+                "question": _utf8_prefix(item.question, 500),
+                "answer": _utf8_prefix(item.answer, 800),
+            }
+            for item in decision_values
+        ]
+        decisions_truncated = len(domain.decisions) > len(decision_values) or any(
+            rendered["question"] != source.question or rendered["answer"] != source.answer
+            for source, rendered in zip(decision_values, rendered_decisions)
+        )
+        if decisions_truncated:
+            decision_projection: dict[str, Any] = {
+                "total_items": len(domain.decisions), "selected_items": len(rendered_decisions),
+                "question_byte_limit": 500, "answer_byte_limit": 800, "truncated": True,
+            }
+            for key in ("artifact_ref", "digest_sha256", "artifact_path", "byte_size"):
+                if contract.get(key) not in (None, ""):
+                    decision_projection[key] = contract[key]
+        else:
+            decision_projection = {}
 
         context = {
             "schema": CONTEXT_SCHEMA,
             "task": {
-                "user_request": domain.intent.text,
-                "requirements": [item.text for item in domain.requirements],
-                "constraints": [item.text for item in domain.constraints],
-                "acceptance_criteria": [item.text for item in domain.acceptance_criteria],
-                "verification_requirements": [item.text for item in domain.verification_requirements],
+                "user_request": intent,
+                "requirements": requirements,
+                "constraints": constraints,
+                "acceptance_criteria": acceptance,
+                "verification_requirements": verification,
+                "projection": task_projection or None,
             },
             "assignment": {
                 "attempt_id": _text(attempt.get("attempt_id"), 128) or None,
@@ -338,10 +511,8 @@ class ContextCompiler:
                 "scope": _strings(attempt.get("task_scope") or task.get("scope") or task.get("task_scope"), limit=MAX_ITEMS, item_limit=500),
                 "allowed_paths": _strings(attempt.get("allowed_paths") or task.get("allowed_paths"), limit=MAX_PATHS, item_limit=300),
             },
-            "decisions": [
-                {"question": item.question, "answer": item.answer}
-                for item in domain.decisions
-            ],
+            "decisions": rendered_decisions,
+            "decisions_projection": decision_projection or None,
             "event_transitions": _compiler_visible_events(canonical),
             "findings": [item.summary for item in domain.findings],
             "predecessor_facts": predecessors,
@@ -374,6 +545,10 @@ def dispatch_canonical_state(package: Mapping[str, Any], profile: str) -> dict[s
         "verification": package.get("task_verification") or package.get("verification"),
         "scope": package.get("task_scope"),
         "allowed_paths": package.get("allowed_paths"),
+        # This descriptor is deliberately metadata only.  The complete task
+        # contract is an immutable artifact; compilers must never recover it
+        # by reading a ledger row or treating a compact prompt as canonical.
+        "task_contract": _mapping(package.get("task_contract")),
     }
     attempt = {
         "attempt_id": package.get("attempt_id"),

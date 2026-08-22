@@ -246,6 +246,64 @@ class AttemptProtocolTests(unittest.TestCase):
             )
         )
 
+    def test_oversized_unicode_result_and_event_are_rejected_before_any_durable_write(self) -> None:
+        """UTF-8 byte caps must not leave a partial result or event behind."""
+        with self.assertRaisesRegex(ValueError, "bounded storage limit"):
+            attempt_protocol.complete_attempt(
+                self.root,
+                task_id=self.task_id,
+                attempt_id=self.attempt_id,
+                status="completed",
+                summary="Completed after inspecting the bounded protocol.",
+                findings=["🙂" * 140_000],  # 560 KiB before JSON framing.
+            )
+        self.assertIsNone(
+            attempt_protocol.get_attempt_result(
+                self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+            )
+        )
+        self.assertEqual(
+            attempt_protocol.list_attempt_events(
+                self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+            ),
+            [],
+        )
+
+        with self.assertRaisesRegex(ValueError, "bounded storage limit"):
+            attempt_protocol.record_verification_observation(
+                self.root,
+                task_id=self.task_id,
+                attempt_id=self.attempt_id,
+                event_key="verification_observed:unicode-limit",
+                payload={"evidence": "🙂" * 40_000},  # >128 KiB in UTF-8.
+            )
+        self.assertEqual(
+            attempt_protocol.list_attempt_events(
+                self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+            ),
+            [],
+        )
+
+        # The same attempt remains writable; a rejected oversized retry never
+        # consumes identity or leaves a conflicting idempotency key.
+        first = attempt_protocol.record_verification_observation(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            event_key="verification_observed:unicode-limit",
+            payload={"evidence": "trusted check completed"},
+        )
+        replay = attempt_protocol.record_verification_observation(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            event_key="verification_observed:unicode-limit",
+            payload={"evidence": "trusted check completed"},
+        )
+        self.assertFalse(first["idempotent"])
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(first["event"]["event_ref"], replay["event"]["event_ref"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

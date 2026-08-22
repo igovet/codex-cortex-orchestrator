@@ -159,6 +159,111 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(delegation_lists["allowed_paths"], ["plugins/cortex"])
 
+    def test_oversized_requirements_are_atomized_before_classify_and_init_persistence(self):
+        self.activate()
+        requirement = " ".join(
+            f"requirement-{index}: preserve the complete durable requirement text across classification and task initialization"
+            for index in range(32)
+        )
+        self.assertGreater(len(requirement), control.MAX_CANONICAL_REQUIREMENT_LENGTH)
+
+        classified = control.classify_task({
+            "complexity": "C2",
+            "requirements": [requirement],
+            "principal": "thread-a",
+        })
+        receipt = control.db_get_classification(self.ledger, classified["classification_id"])
+        self.assertIsNotNone(receipt)
+        self.assertGreater(len(receipt["requirements"]), 1)
+        self.assertTrue(all(
+            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
+            for item in receipt["requirements"]
+        ))
+        self.assertEqual("".join(receipt["requirements"]), requirement)
+        self.assertEqual(
+            control.normalize_task_requirements(receipt["requirements"]),
+            receipt["requirements"],
+        )
+
+        created = control.init_task({
+            "task_id": "atomized-requirements",
+            "user_request": "persist atomized requirements without blocking continuation",
+            "classification_id": classified["classification_id"],
+            "principal": "thread-a",
+        })
+        task = self.task_definition(self.ledger / "tasks" / created["task_directory"])
+        self.assertEqual(task["requirements"], receipt["requirements"])
+        self.assertEqual("".join(task["requirements"]), requirement)
+        self.assertTrue(all(
+            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
+            for item in task["requirements"]
+        ))
+
+    def test_v3_start_atomizes_oversized_requirements_before_dispatch(self):
+        requirement = " ".join(
+            f"dispatch requirement {index} must remain complete and bounded in the canonical ledger domain"
+            for index in range(36)
+        )
+        self.assertGreater(len(requirement), control.MAX_CANONICAL_REQUIREMENT_LENGTH)
+
+        started = self.v3_start(
+            "start a task with an oversized requirement",
+            requirements=[requirement],
+            waves=[{"workers": [{"phase": "discover"}]}],
+        )
+        self.assertTrue(started["ok"])
+        self.assertTrue(started["dispatches"])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        task = self.task_definition(task_dir)
+        self.assertGreater(len(task["requirements"]), 1)
+        self.assertEqual("".join(task["requirements"]), requirement)
+        self.assertTrue(all(
+            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
+            for item in task["requirements"]
+        ))
+
+    def test_init_task_repairs_an_oversized_preexisting_receipt_before_persistence(self):
+        self.activate()
+        requirement = " ".join(
+            f"receipt requirement {index} remains a complete bounded task-domain value"
+            for index in range(34)
+        )
+        classified = control.classify_task({
+            "complexity": "C1",
+            "requirements": [requirement],
+            "principal": "thread-a",
+        })
+        receipt = control.db_get_classification(self.ledger, classified["classification_id"])
+        self.assertIsNotNone(receipt)
+        # Model a receipt written before this ingress invariant existed.  Init
+        # must not turn it into a ledger task which only fails on continue.
+        receipt["requirements"] = [requirement]
+        control.db_put_classification(self.ledger, receipt)
+
+        created = control.init_task({
+            "task_id": "repair-oversized-receipt",
+            "user_request": "repair a preexisting classification receipt at task ingress",
+            "classification_id": classified["classification_id"],
+            "principal": "thread-a",
+        })
+        task = self.task_definition(self.ledger / "tasks" / created["task_directory"])
+        self.assertGreater(len(task["requirements"]), 1)
+        self.assertEqual("".join(task["requirements"]), requirement)
+        self.assertTrue(all(
+            len(item) <= control.MAX_CANONICAL_REQUIREMENT_LENGTH
+            for item in task["requirements"]
+        ))
+
+    def test_unrepresentable_requirements_fail_at_classification_before_a_task_is_created(self):
+        self.activate()
+        with self.assertRaisesRegex(ValueError, "exceed the bounded canonical task domain"):
+            control.classify_task({
+                "complexity": "C1",
+                "requirements": ["x" * 601 for _ in range(51)],
+                "principal": "thread-a",
+            })
+        self.assertEqual(list((self.ledger / "tasks").iterdir()), [])
+
     def test_init_task_rejects_non_string_items_in_text_lists(self):
         self.activate()
         classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
@@ -4325,6 +4430,18 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verification"):
             control.sanitize_scoping_payload(incomplete)
 
+    def test_planning_and_scoping_reject_oversized_unicode_before_lossy_normalization(self):
+        """Text limits are encoded-byte limits; emoji must not bypass them."""
+        oversized = "🙂" * (control.MAX_JSON_BYTES // len("🙂".encode("utf-8")) + 1)
+        planning = self.v3_planning()
+        planning["overview"] = oversized
+        with self.assertRaisesRegex(ValueError, "planning overview exceeds"):
+            control.sanitize_planning_payload(planning)
+        scoping = self.v3_scoping()
+        scoping["overview"] = oversized
+        with self.assertRaisesRegex(ValueError, "scoping overview exceeds"):
+            control.sanitize_scoping_payload(scoping)
+
 
 
 
@@ -4360,6 +4477,15 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(first["complete"])
         self.assertLessEqual(first["returned_bytes"], 4096)
         self.assertTrue(first["content_part"].startswith("# Evidence"))
+        tiny = control.manage_orchestration({
+            "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
+            "payload": {"action": "read", "artifact_ref": artifact["artifact_ref"], "cursor": metadata["read_cursor"], "max_bytes": 1},
+        })
+        self.assertTrue(tiny["ok"], tiny)
+        self.assertEqual(tiny["requested_max_bytes"], 1)
+        self.assertEqual(tiny["effective_max_bytes"], 4)
+        self.assertTrue(tiny["max_bytes_normalized"])
+        self.assertLessEqual(tiny["returned_bytes"], tiny["effective_max_bytes"])
         oversized = control.manage_orchestration({
             "project_root": str(self.project), "task_ref": started["task_ref"], "intent": "artifacts",
             "payload": {
@@ -4377,6 +4503,62 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertFalse(denied["ok"])
         self.assertIn("cursor", denied["diagnostics"][0]["message"])
+
+    def test_paged_dispatch_briefing_records_receipt_only_after_complete_read_and_recovers_from_bad_cursor(self):
+        started = self.v3_start("page the immutable dispatch briefing", waves=[{"workers": [{"phase": "discover"}]}])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        identity = {
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "dispatch_ref": attempt["dispatch_ref"],
+            "briefing_digest": attempt["briefing_digest"],
+        }
+
+        first = control.read_dispatch_briefing({**identity, "max_bytes": 1})
+        self.assertTrue(first["ok"], first)
+        self.assertFalse(first["complete"])
+        self.assertEqual(first["requested_max_bytes"], 1)
+        self.assertEqual(first["effective_max_bytes"], 4)
+        self.assertTrue(first["max_bytes_normalized"])
+        self.assertLessEqual(first["returned_bytes"], first["effective_max_bytes"])
+        self.assertNotIn("briefing_receipt", first)
+        events = attempt_protocol.list_attempt_events(
+            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
+        )
+        self.assertNotIn("briefing_acknowledged", [event["event_type"] for event in events])
+
+        malformed = control.read_dispatch_briefing({**identity, "cursor": first["next_cursor"] + "x"})
+        self.assertFalse(malformed["ok"])
+        self.assertEqual(malformed["outcome"], "needs_correction")
+        self.assertTrue(malformed["retryable"])
+        self.assertEqual(malformed["diagnostics"][0]["path"], "cursor")
+        events_after_bad_cursor = attempt_protocol.list_attempt_events(
+            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
+        )
+        self.assertEqual(events_after_bad_cursor, events)
+
+        cursor = first["next_cursor"]
+        final = None
+        while final is None:
+            page = control.read_dispatch_briefing({**identity, "cursor": cursor, "max_bytes": 512})
+            self.assertTrue(page["ok"], page)
+            self.assertLessEqual(page["returned_bytes"], page["effective_max_bytes"])
+            if page["complete"]:
+                final = page
+            else:
+                self.assertNotIn("briefing_receipt", page)
+                cursor = page["next_cursor"]
+        self.assertIn("briefing_receipt", final)
+        completed_events = attempt_protocol.list_attempt_events(
+            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"],
+        )
+        self.assertEqual(
+            [event["event_type"] for event in completed_events].count("briefing_acknowledged"), 1,
+        )
 
 
 

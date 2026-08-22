@@ -635,6 +635,79 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertEqual(first["returned_bytes"], len("😀".encode("utf-8")))
             self.assertEqual(first["next_byte_offset"], len("😀".encode("utf-8")))
 
+    def test_artifact_transport_keeps_utf8_pages_bounded_and_cursor_continuous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            self.create_task(root)
+            # The four-byte scalar starts exactly where a 32 KiB page would
+            # otherwise split it.  The page must stop before it, not exceed
+            # the hard cap and not emit replacement text.
+            content = "a" * (ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES - 1) + "😀tail"
+            artifact = ledger_db.put_artifact(
+                root, "artifact-task", kind="canonical_markdown", title="artifacts/markdown/boundary.md",
+                mime_type="text/markdown", content=content, export_path="artifacts/markdown/boundary.md",
+            )
+            first = ledger_db.read_artifact_range(
+                root, "artifact-task", artifact["artifact_ref"], max_bytes=ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES,
+            )
+            self.assertEqual(first["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES - 1)
+            self.assertLessEqual(first["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES)
+            self.assertFalse(first["complete"])
+            self.assertEqual(first["next_byte_offset"], first["returned_bytes"])
+            self.assertNotIn("\ufffd", first["content_part"])
+
+            offsets = [first["byte_offset"]]
+            parts = [first["content_part"]]
+            offset = first["next_byte_offset"]
+            while offset is not None:
+                part = ledger_db.read_artifact_range(
+                    root, "artifact-task", artifact["artifact_ref"], byte_offset=offset, max_bytes=1,
+                )
+                self.assertLessEqual(part["returned_bytes"], ledger_db.ARTIFACT_TRANSPORT_MIN_BYTES)
+                self.assertGreater(part["returned_bytes"], 0)
+                self.assertEqual(part["byte_offset"], offset)
+                self.assertNotIn("\ufffd", part["content_part"])
+                offsets.append(offset)
+                parts.append(part["content_part"])
+                offset = part["next_byte_offset"]
+            self.assertEqual("".join(parts), content)
+            self.assertEqual(offsets, sorted(offsets))
+            self.assertEqual(len(offsets), len(set(offsets)))
+
+            with self.assertRaisesRegex(ValueError, "UTF-8 boundary"):
+                ledger_db.read_artifact_range(
+                    root, "artifact-task", artifact["artifact_ref"],
+                    byte_offset=ledger_db.ARTIFACT_TRANSPORT_MAX_BYTES,
+                )
+
+    def test_artifact_transport_binary_eof_and_malformed_cursor_do_not_create_or_mutate_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            # Syntactically valid but untrusted cursor input cannot bootstrap
+            # a SQLite ledger merely by being rejected.
+            with self.assertRaisesRegex(ValueError, "cursor"):
+                ledger_db.decode_artifact_cursor(root, "e30.AAAA")
+            self.assertFalse((root / "cortex.db").exists())
+            with self.assertRaisesRegex(ValueError, "cursor"):
+                ledger_db.decode_artifact_cursor(root, "e30." + "A" * 43)
+            self.assertFalse((root / "cortex.db").exists())
+            with self.assertRaisesRegex(ValueError, "safe transport length"):
+                ledger_db.encode_artifact_cursor(root, {"padding": "x" * 5000})
+            self.assertFalse((root / "cortex.db").exists())
+
+            ledger_db.ensure_database(root)
+            self.create_task(root)
+            artifact = ledger_db.put_artifact(
+                root, "artifact-task", kind="canonical_binary", title="artifacts/binary/empty.bin",
+                mime_type="application/octet-stream", content=b"", export_path="artifacts/binary/empty.bin",
+            )
+            eof = ledger_db.read_artifact_range(root, "artifact-task", artifact["artifact_ref"], max_bytes=1)
+            self.assertTrue(eof["complete"])
+            self.assertIsNone(eof["next_byte_offset"])
+            self.assertEqual(eof["encoding"], "base64")
+            self.assertEqual(eof["content_base64"], "")
+
     def test_normalized_artifacts_share_one_blob_but_keep_logical_identity_and_exports(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
@@ -767,6 +840,47 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                     ))
                 with self.assertRaises(sqlite3.OperationalError):
                     snapshot.execute("DELETE FROM tasks WHERE task_id = 'snapshot-task'")
+
+    def test_unicode_oversized_mutable_documents_reject_before_replacing_existing_values(self) -> None:
+        """Document budgets are UTF-8 byte budgets and leave existing rows intact."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            self.create_task(root, "bounded-document-task")
+            ledger_db.put_global(root, "bounded-global", {"value": "before"})
+            ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"value": "before"})
+            oversized = "🙂" * (ledger_db.MAX_DURABLE_DOCUMENT_BYTES // len("🙂".encode("utf-8")) + 1)
+            with self.assertRaisesRegex(ValueError, "SQLite global document 'bounded-global' exceeds"):
+                ledger_db.put_global(root, "bounded-global", {"unicode": oversized})
+            with self.assertRaisesRegex(ValueError, "SQLite task document 'bounded-task' exceeds"):
+                ledger_db.put_task_document(root, "bounded-document-task", "bounded-task", {"unicode": oversized})
+            self.assertEqual(ledger_db.get_global(root, "bounded-global"), {"value": "before"})
+            self.assertEqual(
+                ledger_db.get_task_document(root, "bounded-document-task", "bounded-task"),
+                {"value": "before"},
+            )
+
+    def test_oversized_observation_metadata_rejects_before_a_row_is_written(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".codex" / "cortex"
+            ledger_db.ensure_database(root)
+            self.create_task(root, "bounded-observation-task")
+            with self.assertRaisesRegex(ValueError, "workspace_generation exceeds"):
+                ledger_db.record_tool_observation(
+                    root,
+                    task_id="bounded-observation-task",
+                    attempt_id="attempt-1",
+                    context_epoch=0,
+                    fingerprint="f" * 64,
+                    tool_name="Read",
+                    normalized_arguments="{}",
+                    workspace_generation="🙂" * 100,
+                    result_digest=None,
+                    coverage="full",
+                    status="success",
+                )
+            with ledger_db._connection(root) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM tool_observations").fetchone()[0], 0)
 
 
 if __name__ == "__main__":  # pragma: no cover

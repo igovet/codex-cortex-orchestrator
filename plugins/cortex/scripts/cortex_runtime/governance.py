@@ -87,6 +87,35 @@ def _canonical(value: Any) -> str:
         raise GovernanceError("governance content must be strict JSON", code="content_invalid") from exc
 
 
+def _bounded_content_json(value: Any, *, label: str) -> str:
+    """Return strict canonical JSON after enforcing the durable byte budget.
+
+    ``approval_basis`` is persisted twice (the record projection and its
+    append-only lifecycle entry), so it must obey the same trust-boundary
+    budget as record content.  Validate before opening a writer: a rejected
+    payload must never create a partial governance record, artifact, or
+    lifecycle transition.
+    """
+    _validate_content_shape(value)
+    encoded = _canonical(value).encode("utf-8")
+    if len(encoded) > MAX_GOVERNANCE_CONTENT_BYTES:
+        raise GovernanceError(
+            f"{label} exceeds the bounded size limit",
+            code="content_size_exceeded",
+        )
+    return encoded.decode("utf-8")
+
+
+def _bounded_governance_text(value: Any, *, label: str, required: bool = False) -> str:
+    """Normalize a scalar governance field without admitting a large TEXT row."""
+    text = str(value or "").strip()
+    if required and not text:
+        raise GovernanceError(f"{label} is required", code="initiative_fields_required")
+    if len(text.encode("utf-8")) > MAX_GOVERNANCE_STRING_BYTES:
+        raise GovernanceError(f"{label} exceeds the bounded size limit", code="content_size_exceeded")
+    return text
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
@@ -803,10 +832,9 @@ def create_initiative(
     parent_ref: str | None = None,
     acceptance_oracle_artifact_ref: str | None = None,
 ) -> dict[str, Any]:
-    ledger_db.ensure_database(root)
-    title_value, goal_value, owner_value = str(title or "").strip(), str(goal or "").strip(), str(owner or "").strip()
-    if not title_value or not goal_value or not owner_value:
-        raise GovernanceError("initiative title, goal, and owner are required", code="initiative_fields_required")
+    title_value = _bounded_governance_text(title, label="initiative title", required=True)
+    goal_value = _bounded_governance_text(goal, label="initiative goal", required=True)
+    owner_value = _bounded_governance_text(owner, label="initiative owner", required=True)
     risk_value = str(risk or "moderate").strip().lower()
     if risk_value not in {"low", "moderate", "high", "critical"}:
         raise GovernanceError("initiative risk is invalid", code="initiative_risk_invalid")
@@ -817,6 +845,9 @@ def create_initiative(
     if not ref:
         ref = "initiative-" + hashlib.sha256(f"{title_value}\0{goal_value}\0{owner_value}\0{_now()}".encode()).hexdigest()[:20]
     _safe_ref(ref, "initiative_ref", prefix="initiative-")
+    # Validate all caller-controlled persistent text before creating/opening
+    # the ledger writer.
+    ledger_db.ensure_database(root)
     now = _now()
     with _connection(root, write=True) as connection:
         if connection.execute("SELECT 1 FROM initiatives WHERE initiative_ref = ?", (ref,)).fetchone() is not None:
@@ -1371,12 +1402,11 @@ def create_record(
     # Promotion evaluation may call this helper while holding the one-writer
     # connection. Re-running migration setup on a nested connection would
     # try to acquire a second BEGIN IMMEDIATE and self-deadlock SQLite.
-    if not ledger_db.in_transaction(root):
-        ledger_db.ensure_database(root)
     kind = str(record_type or "").lower()
     if kind not in RECORD_TYPES:
         raise GovernanceError("record_type is invalid", code="invalid_record_type")
-    role = str(actor_role or ("coordinator" if str(created_by or "").strip().lower() in {"", "coordinator", "system"} else "worker")).strip().lower()
+    created_by_value = _bounded_governance_text(created_by or "coordinator", label="governance created_by") or "coordinator"
+    role = str(actor_role or ("coordinator" if created_by_value.lower() in {"coordinator", "system"} else "worker")).strip().lower()
     if role not in ACTOR_ROLES:
         raise GovernanceError("actor_role must be coordinator, worker, or reviewer", code="invalid_actor_role")
     initiative = str(initiative_ref or "").strip() or None
@@ -1398,19 +1428,22 @@ def create_record(
     if role != "coordinator" and kind in {"policy", "promotion", "exception"} and status_value in {"active", "approved"}:
         raise GovernanceError("worker and reviewer proposals cannot approve or activate policy governance records", code="coordinator_approval_required")
     body = content
-    _validate_content_shape(body)
-    body_json = _canonical(body)
-    if len(body_json.encode("utf-8")) > MAX_GOVERNANCE_CONTENT_BYTES:
-        raise GovernanceError("governance content exceeds the bounded size limit", code="content_size_exceeded")
+    body_json = _bounded_content_json(body, label="governance content")
     digest = _digest(body)
     ref = str(record_ref or "").strip() or "record-" + hashlib.sha256(f"{kind}:{initiative}:{task}:{digest}:{_now()}".encode()).hexdigest()[:24]
     _safe_ref(ref, "record_ref", prefix="record-")
     submission = str(submission_id or "").strip() or None
     if submission:
         _safe_ref(submission, "submission_id")
-    if approval_basis is not None:
-        _validate_content_shape(approval_basis)
-    approval_json = _canonical(approval_basis) if approval_basis is not None else None
+    approval_json = (
+        _bounded_content_json(approval_basis, label="governance approval_basis")
+        if approval_basis is not None
+        else None
+    )
+    # All direct caller content has now passed its strict byte/shape boundary.
+    # Only then may this helper initialize or enter the durable ledger.
+    if not ledger_db.in_transaction(root):
+        ledger_db.ensure_database(root)
     scope = _scope_key(initiative, task)
     # Submission idempotency represents caller intent, not server-derived
     # retention timestamps or generated record refs.  In particular, retries
@@ -1426,7 +1459,7 @@ def create_record(
         "content_digest": digest,
         "content_artifact_ref": str(content_artifact_ref or "").strip() or None,
         "approval_basis_json": approval_json,
-        "created_by": str(created_by or "coordinator"),
+        "created_by": created_by_value,
         "expires_at_requested": str(expires_at or "").strip() or None,
     })
     with _connection(root, write=True) as connection:
@@ -1492,7 +1525,7 @@ def create_record(
             "content_digest": digest,
             "content_artifact_ref": str(content_artifact_ref or "").strip() or None,
             "approval_basis_json": approval_json,
-            "created_by": str(created_by or "coordinator"),
+            "created_by": created_by_value,
             "expires_at": record_expires_at,
         }
         command_digest = submission_command_digest
@@ -1591,7 +1624,7 @@ def create_record(
         ).hexdigest()[:32]
         connection.execute(
             "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at,scope_key,lifecycle_sequence,lifecycle_binding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, str(created_by or "coordinator"), created, record_expires_at, scope, 0, lifecycle_binding),
+            (ref, initiative, task, kind, revision, supersedes_ref, status_value, body_json, digest, artifact_ref, approval_json, created_by_value, created, record_expires_at, scope, 0, lifecycle_binding),
         )
         connection.execute(
             "INSERT INTO governance_record_lifecycle(lifecycle_ref,record_ref,lifecycle_sequence,previous_binding,status,approval_basis_json,binding,action,actor_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",

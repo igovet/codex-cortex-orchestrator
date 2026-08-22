@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex
-from cortex_runtime import attempt_protocol, governance, ledger_db
+from cortex_runtime import attempt_protocol, briefings, governance, ledger_db
 
 
 class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
@@ -99,6 +99,26 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         )
         self.assertEqual(custom_policy["policy_snapshot"]["off_assessment"], self.no_risk_assessment())
 
+    def test_unicode_oversized_approval_basis_is_rejected_before_governance_mutation(self) -> None:
+        """A lifecycle basis is durable content, not an unbounded side channel."""
+        self.add_task("task-1")
+        # Each string stays below the per-string guard; only the canonical
+        # UTF-8 JSON aggregate exceeds the record/lifecycle budget.
+        oversized = ["🙂" * 16_000] * 5
+        with self.assertRaises(governance.GovernanceError) as raised:
+            governance.create_record(
+                self.root,
+                record_type="decision",
+                task_id="task-1",
+                content={"decision": "bounded"},
+                approval_basis={"unicode": oversized},
+            )
+        self.assertEqual(raised.exception.code, "content_size_exceeded")
+        with ledger_db._connection(self.root) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM governance_records").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM governance_record_lifecycle").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM artifact_blobs").fetchone()[0], 0)
+
     def test_c3_floor_and_explicit_risk_triggers_cannot_be_lowered(self) -> None:
         self.assertEqual(
             governance.classify_governance(complexity="C3", requested_mode="auto")["effective_mode"],
@@ -171,6 +191,26 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 [{"wave_id": "bad", "delegations": [{"gate": "governance_activation", "agent": "general"}]}],
                 task,
             )
+
+    def test_governance_pipeline_transport_projection_keeps_full_lifecycle_edges(self) -> None:
+        """A defensive projection must not falsely hide the final close edge."""
+        pipeline = [
+            "governance_activation",
+            *[f"historical_gate_{index:02d}" for index in range(20)],
+            "governance_close",
+            "close",
+        ]
+        projected, metadata = briefings._compact_governance_pipeline(pipeline)
+        self.assertEqual(projected[0], "governance_activation")
+        self.assertEqual(projected[-2:], ["governance_close", "close"])
+        self.assertEqual(metadata, {
+            "schema": "cortex/governance-pipeline-projection/v1",
+            "total_gates": len(pipeline),
+            "selected_gates": len(projected),
+            "omitted_middle_gates": len(pipeline) - len(projected),
+            "truncated": True,
+            "full_pipeline_source": "task_contract",
+        })
 
     def test_activation_briefing_reviews_governance_boundary_not_future_delivery(self) -> None:
         project = Path(self.temp.name) / "activation-briefing"

@@ -80,15 +80,20 @@ def _canonical_text_items(
     limit: int,
     item_chars: int,
 ) -> list[str]:
-    """Validate and bound a current canonical task text-array field."""
+    """Validate a current canonical task text-array field without rewriting it.
+
+    ``limit`` and ``item_chars`` are retained at this call boundary for
+    compatibility with its former prompt-projection role.  A delegation
+    package is not the canonical task definition, but silently shortening it
+    before the immutable task-contract artifact is made would lose a valid
+    fact.  Rendering owns byte limits and always marks a reduced projection.
+    """
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{field} must be a current canonical text array")
-    return [
-        redact(item, item_chars)
-        for item in value
-    ][:limit]
+    del field, limit, item_chars
+    return list(value)
 
 
 def _semantic_finding_text(value: object) -> str:
@@ -330,6 +335,9 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
     intent_job: dict[str, Any] | None = None
     intent_path: Path | None = None
     intent_digest: str | None = None
+    task_contract_job: dict[str, Any] | None = None
+    task_contract_path: Path | None = None
+    task_contract_digest: str | None = None
     compiled_relative: str | None = None
     with state_lock(root):
         _, task_dir, state = load_state(str(params["task_id"]), params)
@@ -653,6 +661,52 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             "digest_sha256": task_definition.get("user_request_digest"),
             "byte_size": task_definition.get("user_intent_byte_size"),
         }
+        # A dispatch prompt is deliberately bounded, while a task definition
+        # is not.  Give every worker a digest-bound immutable task-contract
+        # artifact before rendering the prompt, so reducing an oversized
+        # array/scalar is a projection rather than data loss or a reason to
+        # strand a post-result continuation.
+        task_contract_relative = f"task-contract/{attempt_id}.json"
+        task_contract_path = _contained_path(
+            task_dir, task_dir / task_contract_relative, "task contract"
+        )
+        task_contract = {
+            "schema": "cortex/task-contract/v1",
+            "task_id": state["task_id"],
+            "task_ref": _v3_task_ref(state["task_id"]),
+            "task_revision": state.get("task_revision") or state.get("revision"),
+            "user_request": task_definition.get("user_request"),
+            "current_user_intent": task_definition.get("current_user_intent"),
+            "requirements": task_definition.get("requirements"),
+            "constraints": task_definition.get("constraints"),
+            "scope": task_definition.get("scope"),
+            "allowed_paths": task_definition.get("allowed_paths"),
+            "acceptance_criteria": task_definition.get("acceptance_criteria"),
+            "verification": task_definition.get("verification"),
+            "pause_conditions": task_definition.get("pause_conditions"),
+            "resolved_user_decisions": all_resolved_user_decisions,
+        }
+        task_contract_artifact = store_immutable_artifact(
+            task_dir, state["task_id"], kind="task_contract",
+            title=task_contract_relative, mime_type="application/json",
+            content=json.dumps(task_contract, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            export_path=task_contract_relative,
+        )
+        task_contract_digest = str(task_contract_artifact["digest_sha256"])
+        task_contract_job = enqueue_projection(
+            root=root, task_id=state["task_id"],
+            artifact_id=task_contract_artifact["artifact_ref"],
+            projection_type="task_contract", export_path=task_contract_relative,
+            required=True,
+        )
+        package["task_contract"] = {
+            "schema": "cortex/task-contract-ref/v1",
+            "artifact_ref": task_contract_artifact["artifact_ref"],
+            "artifact_path": str(task_contract_path),
+            "digest_sha256": task_contract_digest,
+            "byte_size": task_contract_artifact["byte_size"],
+            "read_required": True,
+        }
         intent_path = Path(str(package["user_intent"]["artifact_path"]))
         intent_digest = str(package["user_intent"].get("digest_sha256") or "")
         intent_jobs = [
@@ -770,6 +824,8 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             intent_digest=package["user_intent"]["digest_sha256"],
             plan_unit_path=(package.get("plan_unit") or {}).get("artifact_path"),
             plan_unit_digest=(package.get("plan_unit") or {}).get("digest_sha256"),
+            task_contract_path=(package.get("task_contract") or {}).get("artifact_path"),
+            task_contract_digest=(package.get("task_contract") or {}).get("digest_sha256"),
         )
         if visible_thread:
             # create_thread calls this field `prompt`; retaining `message`
@@ -843,6 +899,19 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             ):
                 raise ValueError("required compiled plan projection is not ready")
             compiled_plan_path.chmod(0o400)
+        if task_contract_job is not None and task_contract_path is not None and task_contract_digest is not None:
+            active_projection_key = str(task_contract_job["projection_key"])
+            contract_materialized = materialize_job(
+                root, {**task_contract_job}, worker_id=f"task-contract-{dispatch_ref}",
+            )
+            if (
+                contract_materialized.get("status") != "ready"
+                or str(contract_materialized.get("materialized_digest") or "") != task_contract_digest
+                or not task_contract_path.is_file()
+                or hashlib.sha256(task_contract_path.read_bytes()).hexdigest() != task_contract_digest
+            ):
+                raise ValueError("required immutable task-contract projection is not ready")
+            task_contract_path.chmod(0o400)
         active_projection_key = projection_key
         materialized = materialize_job(
             root, {**briefing_job}, worker_id=f"dispatch-{dispatch_ref}",

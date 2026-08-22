@@ -50,10 +50,11 @@ jobs:
           PY
           bash -n plugins/cortex/scripts/cortex-launcher scripts/sync-cortex.sh
           git diff --check
-      - name: Run reportless plan-stop regression in isolation
+      - name: Run dispatch preflight and bounded-context regressions in isolation
         run: |
           python -B -W error::ResourceWarning -m unittest -v \
-            tests.test_revision_aware_epic.RevisionAwareEpicAcceptanceTests.test_reportless_plan_stop_requires_failed_receipt_before_retry
+            tests.test_orchestration_dispatch_preflight.DispatchContextPreflightTests.test_advance_rejects_uncompilable_context_before_any_gate_or_attempt_mutation \
+            tests.test_production_handoff_integration.ProductionHandoffIntegrationTests.test_c3_oversized_requirement_continues_after_completed_attempt_without_loss
       - name: Run the complete offline regression suite
         run: |
           python -B -W error::ResourceWarning -m unittest discover -s tests -v

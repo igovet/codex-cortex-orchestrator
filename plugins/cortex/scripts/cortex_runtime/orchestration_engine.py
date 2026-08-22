@@ -15,6 +15,7 @@ from typing import Any
 
 from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
 from cortex_runtime import attempt_protocol
+from cortex_runtime.context_compiler import context_domain_from_canonical
 
 
 class PlanReapprovalRequired(ValueError):
@@ -52,6 +53,34 @@ _NO_PROGRESS_REPEAT_LIMIT = 3
 _INSPECT_MODE_READ_ONLY = "read_only"
 _INSPECT_MODE_RECOVER_LIFECYCLE = "recover_lifecycle"
 _INSPECT_MODES = {_INSPECT_MODE_READ_ONLY, _INSPECT_MODE_RECOVER_LIFECYCLE}
+
+
+def _preflight_dispatch_context(task: dict[str, Any], state: dict[str, Any]) -> None:
+    """Prove that the durable task can produce a worker context before mutation.
+
+    A dispatch briefing is compiled only after a wave boundary has been
+    recorded, because it needs the successor's server-owned attempt identity.
+    Its task/domain validation, however, is independent of that identity.
+    Validate the same canonical boundary before completing attempts, recording
+    gates, reopening a plan, or invalidating a retry.  This keeps a compiler
+    rejection retryable from the exact unchanged ledger state instead of
+    stranding a task at ``gates_recorded`` with no worker to dispatch.
+
+    This is deliberately a validation call rather than a normalizer: the
+    compiler remains the one source of truth for what a dispatch may contain,
+    and no task field is silently truncated or rewritten here.
+    """
+    context_domain_from_canonical({
+        "task": {
+            "user_request_projection": task.get("user_request_projection"),
+            "user_request": task.get("user_request"),
+            "requirements": task.get("requirements") or task.get("task_requirements"),
+            "constraints": task.get("constraints") or task.get("task_constraints"),
+            "acceptance_criteria": task.get("acceptance_criteria"),
+            "verification": task.get("verification") or task.get("verification_requirements"),
+        },
+        "state": state,
+    })
 
 
 # The executable facade is the composition root.  It supplies this explicitly
@@ -1394,6 +1423,9 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
     if not isinstance(host_capabilities, dict):
         raise ValueError("start requires host_capabilities")
     waves, classification_preview = _normalize_orchestrate_waves(params.get("waves"), task, host_capabilities, str(params["project_root"]))
+    # Reject a task that cannot build the immutable worker context before
+    # activation/classification/task initialization leave durable records.
+    _preflight_dispatch_context(task, {})
     root = ledger_root(params)
     existing_contract_version = PIPELINE_CONTRACT_VERSION
     try:
@@ -3072,6 +3104,11 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
         authorize(state, params)
         plan = _load_orchestrate_plan(task_dir, state)
         task = load_task_definition(task_dir, state)
+        # Do this before completing the current worker or recording a gate.
+        # A successor briefing is rendered later, but its task-domain
+        # validation must never be the first operation that discovers an
+        # invalid durable task after the source wave has been consumed.
+        _preflight_dispatch_context(task, state)
         if params.get("future_waves") is not None:
             _governance_boundary_recheck(
                 params,
@@ -3852,6 +3889,10 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
     authorize(state, params)
     task = load_task_definition(task_dir, state)
     plan = _load_orchestrate_plan(task_dir, state)
+    # Resume can replace a recovery plan and invalidate blocked attempts.
+    # Validate dispatch context before either durable transition, so a
+    # compiler rejection keeps the exact recovery state available for retry.
+    _preflight_dispatch_context(task, state)
     if params.get("future_waves") is not None:
         _governance_boundary_recheck(
             params,

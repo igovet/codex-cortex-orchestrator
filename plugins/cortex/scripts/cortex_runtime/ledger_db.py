@@ -38,7 +38,19 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 DATABASE_NAME = "cortex.db"
 DATABASE_SCHEMA_VERSION = 15
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
+# A UTF-8 scalar can use up to four bytes.  Public transports normalize tiny
+# requested pages to this floor so every successful text page can be both
+# complete UTF-8 and strictly bounded by its advertised effective maximum.
+ARTIFACT_TRANSPORT_MIN_BYTES = 4
 ARTIFACT_TRANSPORT_MAX_BYTES = 32 * 1024
+ARTIFACT_CURSOR_MAX_CHARS = 4096
+# Mutable documents are coordination metadata, never an artifact transport.
+# Bound each durable value before acquiring a write connection so rejection
+# cannot partially update an existing document (or a pruning transaction).
+MAX_DURABLE_DOCUMENT_BYTES = 256 * 1024
+MAX_DURABLE_DOCUMENT_KEY_BYTES = 160
+MAX_TOOL_OBSERVATION_NAME_BYTES = 128
+MAX_TOOL_OBSERVATION_GENERATION_BYTES = 256
 _LOCAL = threading.local()
 _MIGRATION_GUARD = threading.Lock()
 _MIGRATION_LOCKS: dict[str, threading.RLock] = {}
@@ -108,6 +120,45 @@ def _now() -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _bounded_document_json(value: Any, *, label: str) -> str:
+    """Serialize one mutable document without allowing post-write overflow.
+
+    This deliberately does not reuse the general ``_canonical_json`` helper:
+    durable documents are an ingress boundary and must reject non-finite JSON
+    values as well as oversized UTF-8 encodings.  Callers invoke it before
+    opening a write transaction.
+    """
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be strict JSON") from exc
+    if len(encoded) > MAX_DURABLE_DOCUMENT_BYTES:
+        raise ValueError(f"{label} exceeds the {MAX_DURABLE_DOCUMENT_BYTES}-byte limit")
+    return encoded.decode("utf-8")
+
+
+def _bounded_document_key(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"{label} is invalid")
+    if len(value.encode("utf-8")) > MAX_DURABLE_DOCUMENT_KEY_BYTES:
+        raise ValueError(f"{label} exceeds the {MAX_DURABLE_DOCUMENT_KEY_BYTES}-byte limit")
+    return value
+
+
+def _bounded_observation_text(value: Any, *, label: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"tool observation {label} is invalid")
+    if len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"tool observation {label} exceeds the {maximum}-byte limit")
+    return value
 
 
 def governance_lifecycle_binding(
@@ -2167,11 +2218,15 @@ def get_global(root: Path, name: str, default: dict[str, Any] | None = None) -> 
 
 
 def put_global(root: Path, name: str, value: dict[str, Any]) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("SQLite global document must be an object")
+    name_value = _bounded_document_key(name, label="SQLite global document identity")
+    payload_json = _bounded_document_json(value, label=f"SQLite global document {name_value!r}")
     with _connection(root, write=True) as connection:
         connection.execute(
             "INSERT INTO global_documents(name, payload_json, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(name) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
-            (name, _canonical_json(value), _now()),
+            (name_value, payload_json, _now()),
         )
 
 
@@ -2192,13 +2247,17 @@ def get_task_document(root: Path, task_id: str, document_key: str) -> dict[str, 
 
 
 def put_task_document(root: Path, task_id: str, document_key: str, value: dict[str, Any]) -> None:
-    if not task_id or not document_key or len(document_key) > 160:
+    if not isinstance(task_id, str) or not task_id or "\x00" in task_id:
         raise ValueError("SQLite task document identity is invalid")
+    if not isinstance(value, dict):
+        raise ValueError("SQLite task document must be an object")
+    key = _bounded_document_key(document_key, label="SQLite task document identity")
+    payload_json = _bounded_document_json(value, label=f"SQLite task document {key!r}")
     with _connection(root, write=True) as connection:
         connection.execute(
             "INSERT INTO task_documents(task_id, document_key, payload_json, updated_at) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(task_id, document_key) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
-            (task_id, document_key, _canonical_json(value), str(value.get("updated_at") or value.get("answered_at") or _now())),
+            (task_id, key, payload_json, str(value.get("updated_at") or value.get("answered_at") or _now())),
         )
 
 
@@ -2375,9 +2434,16 @@ def list_artifacts(
     offset: int = 0,
     page_size: int = 20,
 ) -> tuple[list[dict[str, Any]], int | None]:
-    ensure_database(root)
-    if offset < 0 or not 1 <= page_size <= 100:
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or offset < 0
+        or not 1 <= page_size <= 100
+    ):
         raise ValueError("SQLite artifact page bounds are invalid")
+    ensure_database(root)
     values: list[Any] = [task_id]
     query = (
         "SELECT artifact_id, task_id, kind, title, mime_type, digest_sha256, byte_size, chunk_count, immutable, export_path, created_at "
@@ -2404,69 +2470,94 @@ def read_artifact_range(
     byte_offset: int = 0,
     max_bytes: int = 16 * 1024,
 ) -> dict[str, Any]:
-    """Return a bounded range of one immutable artifact with an exact next offset."""
+    """Return one exact, UTF-8-safe range within the advertised byte bound.
+
+    The cursor offset is always a byte offset into the canonical immutable
+    blob.  Text pages never split a UTF-8 scalar.  Requests below
+    :data:`ARTIFACT_TRANSPORT_MIN_BYTES` are normalized to that UTF-8-safe
+    floor, so the returned page never exceeds the effective transport bound.
+    """
+    if isinstance(byte_offset, bool) or not isinstance(byte_offset, int) or byte_offset < 0:
+        raise ValueError("SQLite artifact byte offset is invalid")
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or not 1 <= max_bytes <= ARTIFACT_TRANSPORT_MAX_BYTES
+    ):
+        raise ValueError(
+            "SQLite artifact max_bytes must be from "
+            f"1 through {ARTIFACT_TRANSPORT_MAX_BYTES}"
+        )
     metadata = get_artifact_metadata(root, task_id, artifact_ref)
     if metadata is None:
         raise ValueError("SQLite artifact is unavailable for the selected task")
-    if byte_offset < 0 or byte_offset > metadata["byte_size"]:
+    if byte_offset > metadata["byte_size"]:
         raise ValueError("SQLite artifact byte offset is invalid")
-    if not 1 <= max_bytes <= ARTIFACT_TRANSPORT_MAX_BYTES:
-        raise ValueError(f"SQLite artifact max_bytes must be from 1 through {ARTIFACT_TRANSPORT_MAX_BYTES}")
     remaining_offset = byte_offset
-    budget = max_bytes
+    effective_max_bytes = max(ARTIFACT_TRANSPORT_MIN_BYTES, max_bytes)
+    budget = effective_max_bytes
     text_parts: list[str] = []
     blob_parts: list[bytes] = []
-    is_text: bool | None = None
     with _connection(root) as connection:
         rows = connection.execute(
-            """SELECT c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256
-               FROM logical_artifacts a JOIN artifact_blob_chunks c ON c.blob_id = a.blob_id
+            """SELECT b.encoding, c.chunk_no, c.text_content, c.blob_content, c.byte_size, c.digest_sha256
+               FROM logical_artifacts a
+               JOIN artifact_blobs b ON b.blob_id = a.blob_id
+               JOIN artifact_blob_chunks c ON c.blob_id = a.blob_id
                WHERE a.task_id = ? AND a.artifact_id = ? ORDER BY c.chunk_no""",
             (task_id, artifact_ref),
         ).fetchall()
-    for row in rows:
+    if len(rows) != int(metadata["chunk_count"]):
+        raise ValueError("SQLite artifact chunk count is invalid")
+    if not rows:
+        raise ValueError("SQLite artifact has no chunks")
+
+    encoding = str(rows[0]["encoding"])
+    if encoding not in {"utf-8", "binary"}:
+        raise ValueError("SQLite artifact encoding is invalid")
+    is_text = encoding == "utf-8"
+    total_bytes = 0
+    content_digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    for expected_chunk_no, row in enumerate(rows):
+        if int(row["chunk_no"]) != expected_chunk_no or str(row["encoding"]) != encoding:
+            raise ValueError("SQLite artifact chunk sequence is invalid")
         size = int(row["byte_size"])
-        if remaining_offset >= size:
-            remaining_offset -= size
-            continue
         text_value = row["text_content"]
         chunk_is_text = text_value is not None
-        if is_text is None:
-            is_text = chunk_is_text
         if is_text != chunk_is_text:
             raise ValueError("SQLite artifact chunk encoding is inconsistent")
         data = str(text_value).encode("utf-8") if chunk_is_text else bytes(row["blob_content"])
-        if hashlib.sha256(data).hexdigest() != str(row["digest_sha256"]):
+        if len(data) != size or hashlib.sha256(data).hexdigest() != str(row["digest_sha256"]):
             raise ValueError("SQLite artifact chunk digest is invalid")
+        total_bytes += len(data)
+        content_digest.update(data)
+        chunks.append(data)
+    if total_bytes != int(metadata["byte_size"]) or content_digest.hexdigest() != str(metadata["digest_sha256"]):
+        raise ValueError("SQLite artifact digest is invalid")
+
+    for data in chunks:
+        size = len(data)
+        if remaining_offset >= size:
+            remaining_offset -= size
+            continue
+        if is_text and remaining_offset < size and data[remaining_offset] & 0b11000000 == 0b10000000:
+            raise ValueError("SQLite artifact byte offset does not align to a UTF-8 boundary")
         start = remaining_offset
         available = len(data) - start
         take = min(available, budget)
         end = start + take
-        if chunk_is_text and end < len(data):
+        if is_text and end < len(data):
             while end > start and data[end] & 0b11000000 == 0b10000000:
                 end -= 1
             if end == start:
-                # A caller may intentionally request fewer bytes than one
-                # UTF-8 code point (for example ``max_bytes=1``).  Cursor
-                # transport must still make forward progress and must never
-                # emit a broken text fragment.  Return that one complete
-                # code point even though it can exceed the requested budget
-                # by at most three bytes; the server's 32 KiB hard ceiling
-                # remains authoritative for every normal page.
-                leading = data[start]
-                if leading & 0b10000000 == 0:
-                    codepoint_bytes = 1
-                elif leading & 0b11100000 == 0b11000000:
-                    codepoint_bytes = 2
-                elif leading & 0b11110000 == 0b11100000:
-                    codepoint_bytes = 3
-                elif leading & 0b11111000 == 0b11110000:
-                    codepoint_bytes = 4
-                else:  # ``content`` originated as Python text, so fail closed on corruption.
-                    raise ValueError("SQLite artifact text encoding is invalid")
-                end = min(len(data), start + codepoint_bytes)
+                # The remaining budget cannot contain one complete scalar.
+                # Stop this page before the scalar rather than exceeding the
+                # transport ceiling.  The next server-issued cursor starts at
+                # this same scalar and its normalized floor guarantees progress.
+                break
         piece = data[start:end]
-        if chunk_is_text:
+        if is_text:
             text_parts.append(piece.decode("utf-8"))
         else:
             blob_parts.append(piece)
@@ -2474,7 +2565,7 @@ def read_artifact_range(
         remaining_offset = 0
         if budget == 0:
             break
-    delivered = max_bytes - budget
+    delivered = effective_max_bytes - budget
     next_offset = byte_offset + delivered
     if delivered == 0 and byte_offset < metadata["byte_size"]:
         raise ValueError("SQLite artifact transport could not form a safe text range")
@@ -2485,7 +2576,7 @@ def read_artifact_range(
         "complete": next_offset >= metadata["byte_size"],
         "next_byte_offset": None if next_offset >= metadata["byte_size"] else next_offset,
     }
-    if is_text is not False:
+    if is_text:
         result["content_part"] = "".join(text_parts)
         result["encoding"] = "utf-8"
     else:
@@ -2547,23 +2638,44 @@ def _artifact_cursor_secret(connection: sqlite3.Connection) -> bytes:
 
 def encode_artifact_cursor(root: Path, payload: dict[str, Any]) -> str:
     """Sign an opaque cursor bound to task, artifact/version and reader scope."""
-    ensure_database(root)
+    if not isinstance(payload, dict):
+        raise ValueError("artifact cursor payload must be an object")
     encoded = _canonical_json(payload).encode("utf-8")
+    encoded_token = base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+    # SHA-256 signatures have a fixed unpadded URL-safe width of 43 chars.
+    # Reject an unusable oversized cursor before opening/bootstrapping SQLite.
+    if len(encoded_token) + 1 + 43 > ARTIFACT_CURSOR_MAX_CHARS:
+        raise ValueError("artifact cursor exceeds its safe transport length")
+    ensure_database(root)
     with _connection(root) as connection:
         signature = hmac.new(_artifact_cursor_secret(connection), encoded, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=") + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    cursor = encoded_token + "." + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    if len(cursor) > ARTIFACT_CURSOR_MAX_CHARS:
+        raise ValueError("artifact cursor exceeds its safe transport length")
+    return cursor
 
 
 def decode_artifact_cursor(root: Path, cursor: str) -> dict[str, Any]:
-    ensure_database(root)
-    if not isinstance(cursor, str) or cursor.count(".") != 1 or len(cursor) > 4096:
+    if (
+        not isinstance(cursor, str)
+        or cursor.count(".") != 1
+        or len(cursor) > ARTIFACT_CURSOR_MAX_CHARS
+    ):
         raise ValueError("artifact cursor is invalid")
     raw, signature = cursor.split(".", 1)
+    if not raw or not signature or not re.fullmatch(r"[A-Za-z0-9_-]+", raw) or not re.fullmatch(r"[A-Za-z0-9_-]+", signature):
+        raise ValueError("artifact cursor is invalid")
     try:
         encoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
         supplied = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
     except (TypeError, UnicodeError, ValueError) as exc:
         raise ValueError("artifact cursor is invalid") from exc
+    if len(supplied) != hashlib.sha256().digest_size:
+        raise ValueError("artifact cursor is invalid")
+    # A malformed or stale cursor must not bootstrap a new durable ledger.
+    # Normal callers already resolved an existing task before cursor decode.
+    if not database_path(root).is_file():
+        raise ValueError("artifact cursor is unavailable")
     with _connection(root) as connection:
         expected = hmac.new(_artifact_cursor_secret(connection), encoded, hashlib.sha256).digest()
     if not hmac.compare_digest(supplied, expected):
@@ -3014,6 +3126,18 @@ def finalize_prunes(
     ids = sorted({str(value) for value in tombstone_ids if str(value)})
     if not ids:
         return {"finalized": [], "removed_operations": 0, "removed_classifications": 0, "removed_manifest_snapshots": 0}
+    # Preflight every replacement before starting the transaction that removes
+    # task rows.  A global-document overflow must leave the prune untouched.
+    serialized_global_updates: dict[str, str | None] = {}
+    for name, value in global_updates.items():
+        name_value = _bounded_document_key(name, label="SQLite global document identity")
+        if value is not None and not isinstance(value, dict):
+            raise ValueError("SQLite global document must be an object")
+        serialized_global_updates[name_value] = (
+            None
+            if value is None
+            else _bounded_document_json(value, label=f"SQLite global document {name_value!r}")
+        )
     ensure_database(root)
     with _connection(root, write=True) as connection:
         placeholders = ",".join("?" for _ in ids)
@@ -3062,14 +3186,14 @@ def finalize_prunes(
             ).rowcount
         else:
             removed_classifications = 0
-        for name, value in global_updates.items():
-            if value is None:
+        for name, payload_json in serialized_global_updates.items():
+            if payload_json is None:
                 connection.execute("DELETE FROM global_documents WHERE name=?", (name,))
             else:
                 connection.execute(
                     "INSERT INTO global_documents(name, payload_json, updated_at) VALUES (?, ?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
-                    (name, _canonical_json(value), _now()),
+                    (name, payload_json, _now()),
                 )
         for definition, state, event, detail in lane_updates:
             lane_id = str(state.get("lane_id") or definition.get("lane_id") or "")
@@ -3237,6 +3361,14 @@ def record_tool_observation(
         raise ValueError("tool observation arguments are invalid") from exc
     if not isinstance(parsed_arguments, dict):
         raise ValueError("tool observation arguments are invalid")
+    tool_name = _bounded_observation_text(
+        tool_name, label="tool_name", maximum=MAX_TOOL_OBSERVATION_NAME_BYTES,
+    )
+    workspace_generation = _bounded_observation_text(
+        workspace_generation,
+        label="workspace_generation",
+        maximum=MAX_TOOL_OBSERVATION_GENERATION_BYTES,
+    )
     if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
         raise ValueError("tool observation status is invalid")
     if result_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", result_digest):
@@ -3313,6 +3445,14 @@ def hook_record_tool_observation(
         parsed_arguments = json.loads(normalized_arguments)
         if not isinstance(parsed_arguments, dict):
             raise ValueError("tool observation arguments are invalid")
+        tool_name = _bounded_observation_text(
+            tool_name, label="tool_name", maximum=MAX_TOOL_OBSERVATION_NAME_BYTES,
+        )
+        workspace_generation = _bounded_observation_text(
+            workspace_generation,
+            label="workspace_generation",
+            maximum=MAX_TOOL_OBSERVATION_GENERATION_BYTES,
+        )
         if status not in {"success", "failed"} or coverage not in {"full", "noncacheable"}:
             raise ValueError("tool observation status is invalid")
         if result_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", result_digest):

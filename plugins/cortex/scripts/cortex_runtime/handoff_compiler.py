@@ -25,6 +25,13 @@ _COMPACT_FINDINGS = 2
 _COMPACT_FINDING_CHARS = 150
 
 
+def _utf8_prefix(value: str, maximum_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= maximum_bytes:
+        return value
+    return encoded[:maximum_bytes].decode("utf-8", errors="ignore")
+
+
 def _profile_kind(profile: str) -> str:
     if profile in _BACKEND:
         return "implementation"
@@ -49,7 +56,7 @@ def _unique(values: list[str], *, limit: int) -> list[str]:
 def _compact_strings(values: object, *, limit: int, item_limit: int) -> list[str]:
     if not isinstance(values, list):
         return []
-    return _unique([str(value).strip()[:item_limit] for value in values], limit=limit)
+    return _unique([_utf8_prefix(str(value).strip(), item_limit) for value in values], limit=limit)
 
 
 def _compact_selection(value: object) -> dict[str, Any]:
@@ -75,6 +82,12 @@ def _compact_projection(projection: dict[str, Any], *, kind: str) -> dict[str, A
         "schema": projection["schema"],
         "target": projection["target"],
         "predecessor_selection": _compact_selection(projection.get("predecessor_selection")),
+        # The compact fact list is a non-authoritative prompt projection.  A
+        # successor can retrieve complete canonical predecessor results using
+        # these exact refs rather than treating shortened prose as truth.
+        "predecessor_result_refs": _compact_strings(
+            projection.get("predecessor_result_refs"), limit=16, item_limit=128,
+        ),
     }
     if kind == "implementation":
         compact = {
@@ -163,6 +176,10 @@ class HandoffCompiler:
             "user_request": task.get("user_request"),
             "server_receipts": context.get("server_receipts", {}),
             "predecessor_selection": context.get("predecessor_selection", {}),
+            "predecessor_result_refs": [
+                str(item.get("result_ref")) for item in predecessors
+                if isinstance(item, Mapping) and str(item.get("result_ref") or "").strip()
+            ],
         }
         changed = _unique([path for item in predecessors for path in item.get("changed_files", [])], limit=64)
         checks = _unique([check for item in predecessors for check in item.get("checks", [])], limit=24)

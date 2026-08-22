@@ -397,6 +397,118 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(governance_close["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in governance_close["dispatches"]], ["governance_close"])
 
+    def test_c3_oversized_requirement_continues_after_completed_attempt_without_loss(self) -> None:
+        """A legacy-long requirement must not strand the ledger after worker completion.
+
+        This enters through the public C3 lifecycle, so it covers the ingress
+        normalization and the later ContextCompiler boundary that previously
+        raised ``canonical requirements exceeds its bounded length`` only when
+        the first result was continued.  The requirement is deliberately an
+        unbroken token so the hard split path proves that every character is
+        retained without depending on whitespace normalization at boundaries.
+        """
+        # Keep the requirement as one unbroken token after its short prefix.
+        # This makes the assertion byte-exact even when the canonical domain
+        # strips whitespace at preferred segment boundaries, and exercises the
+        # hard split path where no word boundary is available.
+        requirement = "semantic-requirement-" + ("z" * 900)
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Continue a C3 task whose existing requirement exceeds one context item.",
+                "complexity": "C3",
+                "requirements": [requirement],
+                "acceptance_criteria": ["The complete requirement remains available to every successor."],
+                "verification": ["Complete the first worker and continue from its canonical result."],
+                "plan_approval": "auto",
+            },
+            "waves": [{"workers": [{"phase": "implementation"}]}],
+        })
+        self.assertTrue(started["ok"], started)
+
+        task_dir, state, first = self._active_attempt()
+        self.assertEqual(first["gate"], "governance_activation")
+        self._read_briefing(state, first)
+        completion = self._complete_strict(
+            state, first, "The first C3 worker completed before continuation.",
+        )
+        replay = self._complete_strict(
+            state, first, "The first C3 worker completed before continuation.",
+        )
+        self.assertEqual(replay, completion)
+
+        # The coordinator reads the exact canonical result before advancing.
+        read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": completion,
+        })
+        self.assertTrue(read["ok"], read)
+        continuation = read.get("continuation")
+        self.assertIsInstance(continuation, dict, read)
+        assert isinstance(continuation, dict)
+        continued = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": continuation["step"],
+            "results": continuation["results"],
+        })
+        self.assertTrue(continued["ok"], continued)
+        self.assertNotIn("canonical requirements exceeds its bounded length", json.dumps(continued))
+
+        state_after = control.load_task_state_for_artifact(task_dir)
+        attempts = [item for item in state_after["attempts"] if isinstance(item, dict)]
+        self.assertEqual(len(attempts), 2, state_after["attempts"])
+        self.assertEqual(attempts[0]["attempt_id"], first["attempt_id"])
+        self.assertEqual(attempts[0]["attempt_result_ref"], completion)
+        self.assertEqual(attempts[1]["attempt_id"], "implementation-02")
+        self.assertNotEqual(attempts[1]["attempt_id"], first["attempt_id"])
+
+        successor = next(item for item in attempts if item["attempt_id"] == "implementation-02")
+        package = control._delegation_package(
+            task_dir, str(state_after["task_id"]), str(successor["attempt_id"]),
+        )
+        segments = package["task_requirements"]
+        self.assertTrue(segments)
+        self.assertLessEqual(max(map(len, segments)), 600)
+        self.assertEqual("".join(segments), requirement)
+
+        # The first result is immutable and the successor can acknowledge its
+        # briefing and predecessor independently without replacement work.
+        self._read_briefing(state_after, successor)
+        predecessor_read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": completion,
+            "attempt_id": successor["attempt_id"],
+            "profile": successor["profile"],
+        })
+        self.assertTrue(predecessor_read["ok"], predecessor_read)
+        self.assertEqual(predecessor_read["result_view"]["attempt_result_ref"], completion)
+
+        stored = attempt_protocol.get_attempt_result(
+            self.ledger,
+            task_id=str(state_after["task_id"]),
+            attempt_id=str(first["attempt_id"]),
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored["result_ref"], completion)
+        self.assertEqual(stored["lifecycle_status"], attempt_protocol.LIFECYCLE_COMPLETED)
+        events = attempt_protocol.list_attempt_events(
+            self.ledger,
+            task_id=str(state_after["task_id"]),
+            attempt_id=str(first["attempt_id"]),
+        )
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["briefing_acknowledged", "work_completed", "finalizing", "completed"],
+        )
+        self.assertEqual(
+            len({event["event_key"] for event in events}), len(events),
+            "briefing receipt and completion retry must not duplicate event keys",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
