@@ -4470,6 +4470,22 @@ class ControlPlaneTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "depends on unknown item"):
             control.sanitize_planning_payload(planning)
 
+    def test_planning_package_prose_gate_projection_uses_microtask_gates(self):
+        planning = self.v3_planning()
+        planning["work_packages"][0]["gates"] = [
+            "a_missing", "timed_out", "inaccessible", "ambiguous",
+            "production_fact", "release_blocker", "autonomous_averaging",
+            "no_production_mutation", "restart", "deployment", "order",
+        ]
+        sanitized = control.sanitize_planning_payload(planning)
+        self.assertEqual(sanitized["work_packages"][0]["gates"], ["implementation"])
+
+    def test_planning_package_unknown_gate_still_fails_closed(self):
+        planning = self.v3_planning()
+        planning["work_packages"][0]["gates"] = ["not_a_real_gate"]
+        with self.assertRaisesRegex(ValueError, "references unknown gates"):
+            control.sanitize_planning_payload(planning)
+
 
 
 

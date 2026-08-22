@@ -3629,15 +3629,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         if isinstance(package_order, bool) or not isinstance(package_order, int) or package_order < 1:
             raise ValueError(f"planning package {package_id!r} order must be a positive integer")
         raw_package_gates = raw_package.get("gates", ["implementation"])
-        if not isinstance(raw_package_gates, list) or not raw_package_gates or any(not str(item).strip() for item in raw_package_gates):
-            raise ValueError(f"planning package {package_id!r} gates must be a non-empty array")
-        package_gates = list(dict.fromkeys(canonical_pipeline_gate(item) for item in raw_package_gates))
-        unknown_package_gates = sorted(set(package_gates) - AVAILABLE_GATES)
-        if unknown_package_gates:
-            raise ValueError(
-                f"planning package {package_id!r} references unknown gates: "
-                + ", ".join(unknown_package_gates)
-            )
+        package_gates = _planning_package_gates(raw_package_gates, microtasks, package_id)
         packages.append({
             "id": package_id,
             "title": _planning_text(raw_package.get("title"), "planning package title"),
@@ -4651,6 +4643,42 @@ def canonical_pipeline_gate(gate: Any) -> str:
     value = str(gate).strip().lower()
     value = re.sub(r"[\s-]+", "_", value)
     return PIPELINE_GATE_ALIASES.get(value, value)
+
+
+_PLANNING_GATE_PROSE_MARKERS = (
+    "missing", "timed_out", "inaccessible", "ambiguous", "production",
+    "release_blocker", "autonomous", "no_production_mutation", "restart",
+    "deployment", "order",
+)
+
+
+def _planning_package_gates(
+    raw_gates: Any,
+    microtasks: list[dict[str, Any]],
+    package_id: str,
+) -> list[str]:
+    """Validate package gates without treating a planner prose leak as IDs.
+
+    Package gates are a projection of the executable microtask gates.  Some
+    model responses have put a comma-separated release-policy sentence in
+    this optional field, tokenized as underscore IDs.  That sentence must not
+    become executable gates, but genuine unknown gate IDs still fail closed.
+    """
+    if not isinstance(raw_gates, list) or not raw_gates or any(not str(item).strip() for item in raw_gates):
+        raise ValueError(f"planning package {package_id!r} gates must be a non-empty array")
+    package_gates = list(dict.fromkeys(canonical_pipeline_gate(item) for item in raw_gates))
+    unknown = sorted(set(package_gates) - AVAILABLE_GATES)
+    if unknown:
+        joined = "_".join(unknown)
+        marker_hits = sum(marker in joined for marker in _PLANNING_GATE_PROSE_MARKERS)
+        if len(unknown) >= 3 and marker_hits >= 2:
+            derived = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])})
+            return derived or ["implementation"]
+        raise ValueError(
+            f"planning package {package_id!r} references unknown gates: "
+            + ", ".join(unknown)
+        )
+    return package_gates
 
 
 def canonical_profile(profile: Any) -> str:
