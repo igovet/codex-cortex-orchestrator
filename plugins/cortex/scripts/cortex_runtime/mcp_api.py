@@ -94,7 +94,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
-    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may additionally submit the planning work breakdown. If planning validation returns a rejected-draft digest, retry this same attempt with base_payload_digest and either diagnostic-scoped planning or JSON patches; the canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
+    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may submit the initial full planning work breakdown. If planning validation returns diagnostics and a rejected-draft digest, Cortex has retained the complete draft and every field that passed validation: retry this same attempt with ONLY base_payload_digest plus non-empty diagnostic-scoped RFC6902 patches. Never resend or regenerate the full planning object during repair; unrelated fields are preserved server-side. The canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
     "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
     "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. The compact internal receipt retains this continuation across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
     "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If a recovery response was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and original non-durable recovery proof; it redelivers the same pending pair until acknowledge_coordinator_recovery presents the old proof plus both replacement values and retires the old pair. Initial start-response loss remains fail-closed because no proof exists. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
@@ -502,7 +502,13 @@ def build_public_schemas(
     WORKER_COMPLETE_ATTEMPT_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
-        "description": "Persist the minimal semantic AttemptResult, then let Cortex finalize server-owned receipts, workspace observations, and a regenerated non-authoritative result view on the same attempt.",
+        "description": (
+            "Persist the minimal semantic AttemptResult, then let Cortex finalize server-owned receipts, "
+            "workspace observations, and a regenerated non-authoritative result view on the same attempt. "
+            "A rejected planner draft is repaired in a separate PATCH-only shape: send only the identity "
+            "fields, base_payload_digest, and diagnostic-scoped patches; never resend the full planning object "
+            "or semantic fields during repair."
+        ),
         "properties": {
             "project_root": {"type": "string", "minLength": 1},
             "task_id": {"type": "string", "minLength": 1},
@@ -517,6 +523,26 @@ def build_public_schemas(
                 "type": "array",
                 "description": "Optional semantic criterion/evidence claims; Cortex maps them into generated acceptance projections without treating them as identity or telemetry.",
             },
+            "base_payload_digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Digest returned with a rejected planner draft; required for same-attempt PATCH repair.",
+            },
+            "patches": {
+                "type": "array",
+                "minItems": 1,
+                "description": "PATCH-only planner repair. Every path must be a returned diagnostic path or descendant; unrelated fields are preserved server-side.",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "op": {"type": "string", "enum": ["replace", "add", "remove"]},
+                        "path": {"type": "string", "pattern": "^/"},
+                        "value": {},
+                    },
+                    "required": ["op", "path"],
+                },
+            },
             "planning": {
                 "type": "object",
                 "additionalProperties": False,
@@ -525,9 +551,46 @@ def build_public_schemas(
                 "required": V3_PLANNING_SCHEMA["required"],
             },
         },
-        "required": [
-            "project_root", "task_id", "attempt_id", "profile", "status", "summary",
-            "findings", "decisions_needed", "unresolved",
+        # The semantic fields are required for a normal completion, but not
+        # for a planner repair.  Keeping this distinction in the public JSON
+        # Schema is important: the model must be able to emit only the
+        # rejected-field patches after validation, rather than reconstructing
+        # a complete AttemptResult and planning object.
+        "required": ["project_root", "task_id", "attempt_id", "profile"],
+        "oneOf": [
+            {
+                "required": ["status", "summary", "findings", "decisions_needed", "unresolved"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["planning"]},
+                        {"required": ["base_payload_digest"]},
+                        {"required": ["patches"]},
+                    ],
+                },
+            },
+            {
+                "required": ["status", "summary", "findings", "decisions_needed", "unresolved", "planning"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["base_payload_digest"]},
+                        {"required": ["patches"]},
+                    ],
+                },
+            },
+            {
+                "required": ["base_payload_digest", "patches"],
+                "not": {
+                    "anyOf": [
+                        {"required": ["status"]},
+                        {"required": ["summary"]},
+                        {"required": ["findings"]},
+                        {"required": ["decisions_needed"]},
+                        {"required": ["unresolved"]},
+                        {"required": ["claims"]},
+                        {"required": ["planning"]},
+                    ],
+                },
+            },
         ],
     }
     WORKER_QUESTION_SCHEMA = {

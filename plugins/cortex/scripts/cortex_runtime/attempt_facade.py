@@ -162,6 +162,39 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
     }
 
 
+def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) -> dict[str, Any]:
+    """Attach the server-owned repair contract to a rejected planner draft.
+
+    The rejected draft is immutable and already contains every field that
+    passed persistence-level copying.  Returning only its digest and the
+    diagnostic paths prevents the coordinator from regenerating a full plan
+    and accidentally rewriting valid packages, paths, or verification data.
+    """
+    diagnostics = response.get("diagnostics") or []
+    response["base_payload_digest"] = draft.get("base_payload_digest")
+    response["rejected_draft_ref"] = f"planning_rejected_draft:{draft.get('attempt_id', '')}"
+    response["planning_repair"] = {
+        "mode": "same_attempt_patch",
+        "base_payload_digest": draft.get("base_payload_digest"),
+        "diagnostic_paths": [
+            item.get("path") for item in diagnostics
+            if isinstance(item, dict) and item.get("path")
+        ],
+        "preserve_other_fields": True,
+        "replacement_worker_authorized": False,
+        "instruction": (
+            "Use complete_attempt on this same attempt with base_payload_digest and JSON patches only. "
+            "Patch only the diagnostic paths; all other rejected-draft fields are retained server-side."
+        ),
+    }
+    response["next_action"] = (
+        "Retry complete_attempt on this same planner attempt using the returned base_payload_digest and "
+        "diagnostic-scoped JSON patches. Do not regenerate or resend unrelated planning fields; do not spawn "
+        "a replacement worker."
+    )
+    return response
+
+
 def record_attempt_event(params: dict[str, Any]) -> dict[str, Any]:
     """Persist one bounded semantic checkpoint for the active worker."""
     try:
@@ -328,10 +361,15 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     state: dict[str, Any] | None = None
     attempt: dict[str, Any] | None = None
     root: Any = None
+    rejected_draft: dict[str, Any] | None = None
     try:
         allowed = _PUBLIC_IDENTITY_FIELDS | {
             "status", "summary", "findings", "decisions_needed", "unresolved", "claims",
             "planning", "base_payload_digest", "patches",
+            # Private server-to-server handoff used only after a validated
+            # diagnostic-scoped patch has been applied.  It is not part of
+            # the public MCP schema and cannot be supplied by the worker.
+            "_validated_planning_repair",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
@@ -352,6 +390,18 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                 if not isinstance(current, dict):
                     raise ValueError("planner plan attempts require a planning payload")
             else:
+                # Once a rejected draft exists, the planner must not submit a
+                # second full object—even if that object happens to validate.
+                # The server-owned draft is the base for a same-attempt PATCH
+                # and is the only place from which valid fields may be reused.
+                existing_draft = _runtime.get_planning_rejected_draft(
+                    task_dir, state["task_id"], attempt["attempt_id"],
+                )
+                if isinstance(existing_draft, dict) and not params.get("_validated_planning_repair"):
+                    rejected_draft = existing_draft
+                    raise ValueError(
+                        "planner rejected draft requires PATCH-only repair; omit the full planning object"
+                    )
                 normalized_planning = _runtime.sanitize_planning_payload(
                     params["planning"], persisted=True,
                 )
@@ -478,16 +528,28 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
             state is not None and attempt is not None and project is not None
             and profile == "planner" and str(attempt.get("gate") or "") == "plan"
             and "planning" in params
+            and isinstance(exc, _runtime.PlanningValidationError)
             and not (root is not None and attempt_protocol.get_attempt_result(root, task_id=state["task_id"], attempt_id=attempt["attempt_id"]))
         ):
             try:
                 diagnostics = getattr(exc, "diagnostics", None)
                 if not isinstance(diagnostics, list) or not diagnostics:
                     diagnostics = [{"code": "planning_validation_failed", "message": _runtime.redact(str(exc), 1000), "path": "planning"}]
-                _runtime.planning_rejected_draft_document(
-                    task_dir, state, attempt, params["planning"], diagnostics,
-                    {key: params.get(key) for key in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims")},
-                )
+                try:
+                    rejected_draft = _runtime.planning_rejected_draft_document(
+                        task_dir, state, attempt, params["planning"], diagnostics,
+                        {key: params.get(key) for key in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims")},
+                    )
+                except ValueError as draft_error:
+                    # The first rejected draft is immutable.  A model retry
+                    # that accidentally regenerates the full object must get
+                    # the original repair contract back, never a bare digest
+                    # mismatch that starts another regeneration loop.
+                    if "immutable" not in str(draft_error):
+                        raise
+                    rejected_draft = _runtime.get_planning_rejected_draft(
+                        task_dir, state["task_id"], attempt["attempt_id"],
+                    )
             except (ValueError, TypeError, OSError, RuntimeError):
                 pass
         if root is not None and state is not None and attempt is not None:
@@ -510,12 +572,15 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                     )
                 except (ValueError, OSError, RuntimeError):
                     pass
-                return _public_failure("complete_attempt", exc, finalization=True)
-        return _public_failure("complete_attempt", exc)
+                response = _public_failure("complete_attempt", exc, finalization=True)
+                return _planning_repair_failure(response, rejected_draft) if rejected_draft else response
+        response = _public_failure("complete_attempt", exc)
+        return _planning_repair_failure(response, rejected_draft) if rejected_draft else response
 
 
 def repair_planning(params: dict[str, Any]) -> dict[str, Any]:
-    """Repair a rejected planner draft and finalize the same worker attempt."""
+    """Repair a rejected planner draft with diagnostic-scoped JSON patches."""
+    draft: dict[str, Any] | None = None
     try:
         allowed = _PUBLIC_IDENTITY_FIELDS | {"base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
         unknown = sorted(set(params) - allowed)
@@ -529,26 +594,35 @@ def repair_planning(params: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("no rejected planning draft exists for this attempt")
         if str(params.get("base_payload_digest") or "") != str(draft.get("base_payload_digest") or ""):
             raise ValueError("planning_correction_digest_mismatch")
-        if "planning" in params and "patches" in params:
-            raise ValueError("provide either planning or patches, not both")
-        if "patches" in params:
-            patches = params["patches"]
-            if not isinstance(patches, list):
-                raise ValueError("patches must be an array")
-            repaired = _runtime.apply_planning_repair(draft, patches)
-        elif "planning" in params:
-            repaired = params["planning"]
-            changed = _runtime.planning_changed_paths(draft.get("planning"), repaired)
-            if not changed or not _runtime.planning_diagnostic_scope_allows(draft.get("diagnostics") or [], changed):
-                raise ValueError("planning_correction_scope_violation")
-        else:
-            raise ValueError("repair_planning requires planning or patches")
+        if "planning" in params:
+            raise ValueError(
+                "planning repair is PATCH-only; omit the full planning object and send patches for diagnostic paths"
+            )
+        if "patches" not in params:
+            raise ValueError("repair_planning requires patches")
+        patches = params["patches"]
+        if not isinstance(patches, list) or not patches:
+            raise ValueError("patches must be a non-empty array")
+        patch_paths = [str(item.get("path") or "") for item in patches if isinstance(item, dict)]
+        if len(patch_paths) != len(patches) or not _runtime.planning_diagnostic_scope_allows(
+            draft.get("diagnostics") or [], patch_paths,
+        ):
+            raise ValueError(
+                "planning_correction_scope_violation: every patch path must target a returned diagnostic path"
+            )
+        repaired = _runtime.apply_planning_repair(draft, patches)
         normalized = _runtime.sanitize_planning_payload(repaired, persisted=True)
         semantic = {key: params[key] if key in params else draft.get("result_payload", {}).get(key) for key in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims")}
-        completion_params = {**{key: params[key] for key in _PUBLIC_IDENTITY_FIELDS}, **semantic, "planning": normalized}
+        completion_params = {
+            **{key: params[key] for key in _PUBLIC_IDENTITY_FIELDS},
+            **semantic,
+            "planning": normalized,
+            "_validated_planning_repair": True,
+        }
         return complete_attempt(completion_params)
     except (ValueError, TypeError, OSError, RuntimeError, json.JSONDecodeError) as exc:
-        return _public_failure("repair_planning", exc)
+        response = _public_failure("repair_planning", exc)
+        return _planning_repair_failure(response, draft) if draft else response
 
 
 def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:

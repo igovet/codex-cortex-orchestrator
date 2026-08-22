@@ -478,6 +478,16 @@ compiles all microtasks into an immutable `compiled_plan_unit` artifact and
 dispatches that exact executable contract. It never substitutes a generic
 implementation objective or broad `.` path.
 
+If `complete_attempt` rejects a planner payload, Cortex stores the complete
+rejected draft and returns its `base_payload_digest` plus all independent,
+path-addressable diagnostics. The next call on that same attempt is
+PATCH-only: send only `base_payload_digest` and a non-empty RFC6902 `patches`
+array whose paths target the returned diagnostic paths (or descendants).
+Never regenerate or resend the full `planning` object after a validation
+error. Fields that passed validation are retained server-side and must be
+left out of the repair payload; a patch outside the diagnostic scope is
+rejected atomically and does not mutate the draft or create an AttemptResult.
+
 ### Active steer and correcting a completed task
 
 While a task is active or blocked, a material user correction uses

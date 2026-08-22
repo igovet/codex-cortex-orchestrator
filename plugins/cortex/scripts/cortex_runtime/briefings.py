@@ -393,6 +393,14 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
             "REQUIRED top-level planning sibling={overview,work_packages}. Every microtask requires a unique id, narrow "
             "objective, explicit profile, non-broad allowed_paths, dependencies, acceptance criteria, and exact verification."
         )
+        gate_parts.append(
+            "PLANNING CORRECTION IS PATCH-ONLY: if complete_attempt returns planning diagnostics, the server has already "
+            "retained the entire rejected planning draft, including every field that passed validation. Do not regenerate, "
+            "resend, or rewrite the full planning object. On the same attempt, call complete_attempt with only the returned "
+            "base_payload_digest and a non-empty patches array of RFC6902 operations; every patch path must be one of the "
+            "returned diagnostic paths (or a descendant), and all unrelated fields must be omitted and preserved server-side. "
+            "Example shape: {base_payload_digest:\"sha256:...\", patches:[{op:\"replace\",path:\"/work_packages/0/gates\",value:[\"implementation\"]}]}."
+        )
     gate_parts.append(
         "Publish only the semantic AttemptResult fields. Include findings and decisions_needed when applicable; "
         "Cortex derives identity, verification observations, changed paths, receipts, and bounded projections. "
