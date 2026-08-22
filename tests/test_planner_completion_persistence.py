@@ -178,6 +178,130 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertIn("verification", response["diagnostics"][0]["message"])
         complete.assert_not_called()
 
+    def test_planner_reports_independent_shape_errors_in_one_response(self) -> None:
+        attempt = {"attempt_id": "plan-01", "gate": "plan", "profile": "planner", "status": "running"}
+        malformed = {
+            "overview": 42,
+            "recommendation": "later",
+            "resolved_questions": "not-an-array",
+            "work_packages": [
+                {"id": "one", "title": "x", "objective": "y", "microtasks": []},
+                {"id": "two", "title": "x", "objective": "y", "microtasks": "not-an-array"},
+            ],
+        }
+        params = {"project_root": str(self.project), "task_id": self.task_id, "attempt_id": "plan-01", "profile": "planner", "status": "completed", "summary": "ready", "findings": [], "decisions_needed": [], "unresolved": [], "planning": malformed}
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"])
+        self.assertGreaterEqual(len(response["diagnostics"]), 4)
+        self.assertTrue(any("recommendation" in item["message"] for item in response["diagnostics"]))
+        complete.assert_not_called()
+        self.assertEqual(ledger_db.list_artifacts(self.root, self.task_id)[0], [])
+
+    def test_attempt_result_reports_independent_envelope_errors_together(self) -> None:
+        attempt = {"attempt_id": "implementation-01", "gate": "implementation", "profile": "backend_dev", "status": "running"}
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "implementation-01", "profile": "backend_dev",
+            "status": "not-a-status", "summary": "", "findings": "bad",
+            "decisions_needed": 7, "unresolved": {}, "claims": "bad",
+        }
+        with self.assertRaises(attempt_protocol.AttemptValidationError) as raised:
+            attempt_protocol._normalise_result({
+                "status": params["status"], "summary": params["summary"],
+                "findings": params["findings"], "decisions_needed": params["decisions_needed"],
+                "unresolved": params["unresolved"], "claims": params["claims"],
+            }, status=None, summary=None, findings=None, decisions_needed=None, unresolved=None, claims=None)
+        paths = {item.get("path") for item in raised.exception.diagnostics}
+        self.assertTrue({"status", "summary", "findings", "decisions_needed", "unresolved", "claims"}.issubset(paths))
+        self.assertEqual(ledger_db.list_artifacts(self.root, self.task_id)[0], [])
+
+    def test_planner_dependency_cycles_are_reported_as_cross_field_diagnostic(self) -> None:
+        malformed = self.planning()
+        micro = malformed["work_packages"][0]["microtasks"][0]
+        micro["depends_on"] = ["core_change"]
+        with self.assertRaisesRegex(ValueError, "acyclic"):
+            cortex.sanitize_planning_payload(malformed)
+
+    def test_planning_repair_scope_normalizes_indexed_diagnostic_paths(self) -> None:
+        diagnostics = [{
+            "code": "planning_validation_failed",
+            "path": "planning.work_packages[0].microtasks[0].verification",
+            "message": "verification is required",
+        }]
+        self.assertTrue(cortex.planning_diagnostic_scope_allows(
+            diagnostics,
+            ["/work_packages/0/microtasks/0/verification/0"],
+        ))
+        self.assertFalse(cortex.planning_diagnostic_scope_allows(
+            diagnostics,
+            ["/work_packages/1/microtasks/0/verification"],
+        ))
+
+    def test_planner_recovery_rejects_changed_semantic_envelope_without_mutation(self) -> None:
+        """A materialization retry cannot replace the immutable planner result."""
+        attempt = {
+            "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
+            "status": "running", "dispatch_ref": "dispatch-plan-01",
+        }
+        state = {**self.state, "attempts": [attempt]}
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner", "status": "completed",
+            # Deliberately differs from the already committed canonical result.
+            "summary": "A changed retry envelope must not replace the result.",
+            "findings": [{"retry": "changed"}], "decisions_needed": [],
+            "unresolved": [], "claims": [], "planning": self.planning(),
+        }
+        canonical = {
+            "result_ref": "attempt-result-existing",
+            "status": "completed", "result_status": "completed",
+            "summary": "The immutable canonical planner result.",
+            "findings": [], "decisions_needed": [], "unresolved": [], "claims": [],
+            "workspace_observation": {}, "changed_files": [],
+            "lifecycle_status": attempt_protocol.LIFECYCLE_WORK_COMPLETED,
+            "submission_id": "completion-existing",
+        }
+        finalized = {**canonical, "lifecycle_status": attempt_protocol.LIFECYCLE_COMPLETED}
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, state, attempt, "planner")), \
+             mock.patch.object(attempt_facade._runtime, "ledger_root", return_value=self.root), \
+             mock.patch.object(attempt_facade, "_receipt_guard", return_value={}), \
+             mock.patch.object(attempt_facade, "_workspace_observation", return_value={}), \
+             mock.patch.object(attempt_facade, "_mark_attempt"), \
+             mock.patch.object(attempt_facade._runtime, "materialize_planning_payload") as materialize, \
+             mock.patch.object(attempt_protocol, "get_attempt_result", return_value=canonical), \
+             mock.patch.object(attempt_protocol, "complete_attempt", side_effect=attempt_protocol.CanonicalResultConflict(result_ref="attempt-result-existing")) as complete, \
+             mock.patch.object(attempt_protocol, "begin_attempt_finalization"), \
+             mock.patch.object(attempt_protocol, "build_attempt_result_view", return_value={"projection_ref": "view-existing"}), \
+             mock.patch.object(attempt_protocol, "finalize_attempt", return_value={"result": finalized}):
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"], response)
+        self.assertEqual(response["code"], "attempt_canonical_result_conflict")
+        self.assertFalse(response["retryable"])
+        complete.assert_called_once()
+        materialize.assert_not_called()
+
+    def test_planner_recovery_invalid_payload_does_not_touch_existing_result(self) -> None:
+        attempt = {
+            "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
+            "status": "running", "dispatch_ref": "dispatch-plan-01",
+        }
+        malformed = self.planning()
+        malformed["work_packages"][0]["microtasks"][0]["verification"] = []
+        params = {
+            "project_root": str(self.project), "task_id": self.task_id,
+            "attempt_id": "plan-01", "profile": "planner", "status": "completed",
+            "summary": "A conflicting retry.", "findings": [],
+            "decisions_needed": [], "unresolved": [], "planning": malformed,
+        }
+        with mock.patch.object(attempt_facade, "_worker_context", return_value=(self.project, self.task_dir, self.state, attempt, "planner")), \
+             mock.patch.object(attempt_protocol, "complete_attempt") as complete:
+            response = attempt_facade.complete_attempt(params)
+        self.assertFalse(response["ok"], response)
+        self.assertIn("verification", response["diagnostics"][0]["message"])
+        complete.assert_not_called()
+
     def test_planner_facade_persists_plan_after_canonical_completion(self) -> None:
         attempt = {
             "attempt_id": "plan-01",

@@ -152,3 +152,25 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.assertEqual(public["dispatches"], [])
         self.assertTrue(public["recoverable"])
         self.assertIn("COORDINATOR LOCK", public["next_action"])
+
+    def test_public_ingress_aggregates_envelope_errors_without_initializing_ledger(self) -> None:
+        response = control.start_orchestration({
+            "project_root": str(self.project), "unexpected": True,
+            "task": {"unknown": True}, "waves": "not-an-array",
+        })
+        self.assertFalse(response["ok"])
+        paths = {item.get("path") for item in response["diagnostics"]}
+        self.assertTrue({"unexpected", "task.unknown", "task.user_request", "waves"}.issubset(paths))
+        self.assertEqual(control.db_task_index(self.ledger), {})
+
+    def test_continue_and_governance_aggregate_without_mutation(self) -> None:
+        continued = control.continue_orchestration({
+            "project_root": str(self.project), "extra": True,
+            "results": "not-an-array", "future_waves": {},
+        })
+        self.assertFalse(continued["ok"])
+        self.assertTrue({"extra", "task_ref", "results", "future_waves"}.issubset({item.get("path") for item in continued["diagnostics"]}))
+        governed = control.manage_governance({"project_root": str(self.project), "extra": True})
+        self.assertFalse(governed["ok"])
+        self.assertTrue({"extra", "action"}.issubset({item.get("path") for item in governed["diagnostics"]}))
+        self.assertEqual(control.db_task_index(self.ledger), {})
