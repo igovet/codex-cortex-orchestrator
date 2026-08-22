@@ -329,11 +329,15 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     try:
         allowed = _PUBLIC_IDENTITY_FIELDS | {
             "status", "summary", "findings", "decisions_needed", "unresolved", "claims",
+            "planning",
         }
         unknown = sorted(set(params) - allowed)
         if unknown:
             raise ValueError("unsupported complete_attempt fields: " + ", ".join(unknown))
         project, task_dir, state, attempt, profile = _worker_context(params)
+        plan_attempt = profile == "planner" and str(attempt.get("gate") or "") == "plan"
+        if "planning" in params and not plan_attempt:
+            raise ValueError("planning is supported only for planner attempts on the plan gate")
         root = _runtime.ledger_root({"project_root": str(project)})
         _receipt_guard(root, state, attempt)
         semantic_result = {
@@ -384,6 +388,19 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                 "worker_replacement_authorized": False,
                 "next_action": "Return this semantic non-success to the coordinator; Cortex retained the attempt facts.",
             }
+        if plan_attempt:
+            if "planning" in params:
+                _runtime.materialize_planning_payload(
+                    task_dir,
+                    state,
+                    attempt,
+                    str(canonical["result_ref"]),
+                    params["planning"],
+                )
+            else:
+                current = _runtime.current_planning_manifest(task_dir)
+                if not isinstance(current, dict) or current.get("source_result_ref") != canonical.get("result_ref"):
+                    raise ValueError("planner plan attempts require a planning payload")
         _mark_attempt(
             project, state["task_id"], attempt["attempt_id"],
             lifecycle_status="work_completed",

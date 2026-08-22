@@ -3904,6 +3904,103 @@ def _sync_plan_tracker_document(task_dir: Path, state: dict[str, Any], *, event:
     db_put_task_document(root, str(state["task_id"]), "plan_tracker_current", tracker)
 
 
+def materialize_planning_payload(
+    task_dir: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    result_id: str,
+    value: Any,
+) -> dict[str, Any]:
+    """Validate and atomically publish one finalized Planner work breakdown.
+
+    The canonical AttemptResult remains the worker's semantic completion.  A
+    plan is a separate, planner-only artifact family: immutable revision and
+    package records are written in the same SQLite unit of work as the two
+    mutable task documents that point at them.  A retry for the same result is
+    therefore a no-op, while a failed validation or artifact write leaves no
+    visible planning pointer or orphaned artifact.
+    """
+    planning = sanitize_planning_payload(value, persisted=True)
+    result_ref = safe_id(str(result_id or ""))
+    if not result_ref:
+        raise ValueError("planning requires a canonical attempt result reference")
+    task_id = safe_id(str(state.get("task_id") or ""))
+    if not task_id:
+        raise ValueError("planning requires a canonical task identity")
+    root = _task_document_root(task_dir, task_id)
+    existing = db_get_task_document(root, task_id, "planning_current")
+    if isinstance(existing, dict) and existing.get("source_result_ref") == result_ref:
+        return existing
+
+    revision = f"plan-{result_ref}"
+    revision_root = f"planning/revisions/{revision}"
+    overview_path = f"{revision_root}/overview.md"
+    summaries: list[dict[str, Any]] = []
+    package_artifacts: list[tuple[dict[str, Any], str, str]] = []
+    for package in planning["work_packages"]:
+        package_id = str(package["id"])
+        package_path = f"{revision_root}/packages/{package_id}.json"
+        package_record = {
+            "schema": PLANNING_SCHEMA,
+            "revision": revision,
+            "source_result_ref": result_ref,
+            "package": package,
+        }
+        package_artifacts.append((package_record, package_id, package_path))
+        summaries.append({
+            "id": package_id,
+            "title": package["title"],
+            "depends_on": list(package.get("depends_on") or []),
+            "microtask_count": len(package.get("microtasks") or []),
+            "artifact_path": package_path,
+        })
+
+    manifest: dict[str, Any] = {
+        "schema": PLANNING_SCHEMA,
+        "revision": revision,
+        "source_result_ref": result_ref,
+        "source_attempt_id": str(attempt.get("attempt_id") or ""),
+        "overview": planning["overview"],
+        "overview_artifact_path": overview_path,
+        "overview_artifact_ref": None,
+        "work_packages": summaries,
+        "requirement_coverage": list(planning.get("requirement_coverage") or []),
+        "recommendation": planning.get("recommendation", "approve"),
+        "recommendation_rationale": planning.get("recommendation_rationale", ""),
+        "resolved_questions": list(planning.get("resolved_questions") or []),
+        "risks": list(planning.get("risks") or []),
+        "created_at": now(),
+        "updated_at": now(),
+    }
+    overview = _planning_overview_markdown(planning)
+    with db_transaction(root):
+        overview_metadata = store_immutable_artifact(
+            task_dir,
+            task_id,
+            kind="planning_revision",
+            title=f"{revision}:overview",
+            mime_type="text/markdown; charset=utf-8",
+            content=overview,
+            export_path=overview_path,
+        )
+        manifest["overview_artifact_ref"] = overview_metadata["artifact_ref"]
+        for package_record, package_id, package_path in package_artifacts:
+            metadata = store_immutable_artifact(
+                task_dir,
+                task_id,
+                kind="planning_revision",
+                title=f"{revision}:package:{package_id}",
+                mime_type="application/json",
+                content=json.dumps(package_record, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                export_path=package_path,
+            )
+            next(summary for summary in summaries if summary["id"] == package_id)["artifact_ref"] = metadata["artifact_ref"]
+        tracker = _plan_tracker_document(state, attempt, result_ref, planning, manifest)
+        db_put_task_document(root, task_id, "planning_current", manifest)
+        db_put_task_document(root, task_id, "plan_tracker_current", tracker)
+    return manifest
+
+
 
 def current_planning_manifest(task_dir: Path) -> dict[str, Any] | None:
     task = load_task_definition(task_dir)

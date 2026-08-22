@@ -2,7 +2,7 @@
 
 <!-- GENERATED:START -->
 
-This page describes source-mode checks for Cortex 10.0.4, task contract v10,
+This page describes source-mode checks for Cortex 10.0.5, task contract v10,
 orchestration lifecycle v6, and SQLite schema v15. A command is evidence only
 when it was actually run; installation and live-model checks must be recorded
 separately.

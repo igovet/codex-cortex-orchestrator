@@ -100,7 +100,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         attempt: dict[str, object],
         summary: str,
     ) -> str:
-        result = control.complete_worker_attempt({
+        completion = {
             "project_root": str(self.project),
             "task_id": state["task_id"],
             "attempt_id": attempt["attempt_id"],
@@ -114,7 +114,29 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
                 "criterion": "The requested observable outcome is completed end to end.",
                 "evidence": "The focused production handoff test observed this completed phase.",
             }],
-        })
+        }
+        if str(attempt.get("gate") or "") == "plan":
+            completion["planning"] = {
+                "overview": "The production handoff plan is bounded and directly verifiable.",
+                "work_packages": [{
+                    "id": "handoff_core",
+                    "title": "Handoff core",
+                    "objective": "Exercise the next canonical production wave.",
+                    "allowed_paths": ["tests"],
+                    "depends_on": [],
+                    "microtasks": [{
+                        "id": "handoff_core_task",
+                        "title": "Verify the handoff",
+                        "objective": "Verify the exact predecessor contract.",
+                        "profile": "backend_dev",
+                        "allowed_paths": ["tests"],
+                        "depends_on": [],
+                        "acceptance_criteria": ["The next wave receives the canonical result."],
+                        "verification": ["Read the next worker briefing."],
+                    }],
+                }],
+            }
+        result = control.complete_worker_attempt(completion)
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["outcome"], "attempt_completed")
         return str(result["attempt_result_ref"])

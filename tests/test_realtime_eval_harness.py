@@ -758,6 +758,37 @@ class RealtimeEvalHarnessTests(HostPrivateControlStoreTestMixin, unittest.TestCa
         self.assertEqual(close_before_continuation["terminal_closes"], 0)
         self.assertEqual(close_before_continuation["protocol_violations"], 1)
 
+    def test_native_terminal_audit_fails_closed_when_final_child_is_not_closed(self) -> None:
+        """The final continuation does not make an explicit native close optional."""
+        events: list[dict[str, object]] = []
+        for _worker in range(5):
+            events.extend([
+                {"event": "native_tool_call", "tool": "spawn_agent", "status": "completed"},
+                {
+                    "event": "native_tool_call", "tool": "wait", "status": "completed",
+                    "outcome": "attempt_result_recorded",
+                },
+                {
+                    "event": "cortex_mcp_call", "tool": "read_worker_result", "status": "completed",
+                    "ok": True,
+                },
+                {
+                    "event": "cortex_mcp_call", "tool": "continue_orchestration", "status": "completed",
+                    "ok": True,
+                },
+                {"event": "native_tool_call", "tool": "close_agent", "status": "completed"},
+            ])
+
+        audit = self.harness.safe_native_terminal_audit(events[:-1])
+        self.assertEqual(audit["spawned_worker_observations"], 5)
+        self.assertEqual(audit["terminal_wait_observations"], 5)
+        self.assertEqual(audit["canonical_result_reads"], 5)
+        self.assertEqual(audit["server_continuation_audits"], 5)
+        self.assertEqual(audit["terminal_closes"], 4)
+        self.assertEqual(audit["pending_terminal_closes"], 1)
+        self.assertEqual(audit["protocol_violations"], 0)
+        self.assertFalse(audit["all_observed_workers_terminally_audited"])
+
     def test_terminal_result_audit_requires_one_finalized_result_per_accepted_attempt(self) -> None:
         state = {
             "attempts": [

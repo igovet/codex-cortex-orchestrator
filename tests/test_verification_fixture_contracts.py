@@ -479,6 +479,19 @@ class VerificationFixtureContractTests(HostPrivateControlStoreTestMixin, unittes
             prompt,
         )
         self.assertIn(
+            "This rule includes the final close wave: even when the continuation outcome=completed and no successor dispatch is returned, close_agent the completed child before stopping",
+            prompt,
+        )
+        self.assertIn("The terminal close count must equal the native spawn count", prompt)
+        self.assertIn(
+            "close_agent, or any management operation for a child from an earlier wave after a later wave has been dispatched",
+            prompt,
+        )
+        self.assertNotIn(
+            "close_agent, or any management operation after a later child terminal response",
+            prompt,
+        )
+        self.assertIn(
             "Only after that close succeeds, when the continuation outcome=ready_to_spawn, the only legal next tool call is every returned dispatch.call",
             prompt,
         )

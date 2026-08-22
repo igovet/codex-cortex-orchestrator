@@ -473,6 +473,8 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                     "unresolved": [],
                     "claims": [],
                 }
+                if str(attempt["gate"]) == "plan":
+                    completion["planning"] = planning(index, int(current["step"]))
                 published = worker_rpc.tool("complete_attempt", completion)
                 if not published.get("ok"):
                     raise AssertionError(f"complete_attempt failed: {published}")

@@ -1,5 +1,13 @@
 # Changelog
 
+## [10.0.5] - 2026-08-22
+
+### Fixed
+
+- Carry the planner work-breakdown sibling through the canonical
+  `complete_attempt` transport and persist its immutable planning projection
+  atomically, while requiring the final native child close in live audits.
+
 ## [10.0.4] - 2026-08-22
 
 ### Fixed

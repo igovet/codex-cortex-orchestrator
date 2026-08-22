@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository contains the Cortex 10.0.4 Codex plugin. The runtime is
+This repository contains the Cortex 10.0.5 Codex plugin. The runtime is
 opt-in, runs locally, and stores orchestration state in a host-private SQLite
 v15 ledger. The supported public contract is the fresh v10 protocol only.
 
@@ -85,7 +85,7 @@ Prompt Contract v3 is the sole stable prompt path. Dispatch-controlled values
 are fenced assignment data; static policy remains in the bundled skill and
 profile sources. Prompt lint, deterministic prompt evaluation, marketplace
 validation, and source-mode package checks are required before release. The
-package manifest is version 10.0.4 and the ledger schema is v15.
+package manifest is version 10.0.5 and the ledger schema is v15.
 
 ## Vulnerability reporting
 
@@ -108,7 +108,7 @@ or operational data before committing it.
 
 ## Release safety checklist
 
-Before publishing 10.0.4 or a later release:
+Before publishing 10.0.5 or a later release:
 
 1. Run the focused protocol, lifecycle, context, handoff, governance, and
    packaging tests.
