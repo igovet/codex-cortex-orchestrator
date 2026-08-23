@@ -185,18 +185,30 @@ class RuntimeBindingRegressionTests(unittest.TestCase):
         persisted = control.load_task_state_for_artifact(task_dir)
         self.assertEqual(persisted["attempts"][0]["status"], "running")
 
-    def test_stop_hook_blocks_pending_unbound_facade_dispatch(self) -> None:
-        """A coordinator cannot silently end a turn before a spawn is bound."""
+    def test_stop_hook_never_blocks_pending_unbound_facade_dispatch(self) -> None:
+        """The command hook is telemetry-only; server lifecycle owns recovery."""
         _task_dir, state = self._started_task()
 
         block = cortex_hook.active_worker_stop_block(
             {"hook_event_name": "Stop", "stop_hook_active": False}, state
         )
 
-        self.assertIsNotNone(block)
-        assert block is not None
-        self.assertIn("CORTEX ACTIVE DISPATCH", block)
-        self.assertIn("Do not return a final answer", block)
+        self.assertIsNone(block)
+
+    def test_stop_hook_does_not_block_stale_terminal_host_binding(self) -> None:
+        """A stale host binding must not make the command hook block."""
+        _task_dir, state = self._started_task()
+        attempt = state["attempts"][0]
+        attempt.update({
+            "status": "running",
+            "lifecycle_status": "running",
+            "host_spawn": {"agent_id": "native.Stale:01"},
+        })
+        block = cortex_hook.active_worker_stop_block(
+            {"hook_event_name": "Stop", "stop_hook_active": False, "cwd": str(self.project)},
+            state,
+        )
+        self.assertIsNone(block)
 
     def test_stop_hook_allows_parent_turn_for_paused_question(self) -> None:
         """An open durable question takes precedence over a bound child."""

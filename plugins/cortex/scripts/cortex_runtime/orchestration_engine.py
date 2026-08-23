@@ -242,7 +242,11 @@ def _orchestrate_error(
         "transaction_id": None,
         "task_id": task_id,
         "wave_id": None,
-        "state": "blocked" if not recoverable else ("error" if validation_error else "needs_input"),
+        # A malformed request or an unavailable route must never turn the
+        # Cortex pipeline into a terminal system block.  Keep the task (or the
+        # not-yet-created task) resumable and expose the exact correction or
+        # user decision required by the diagnostics.
+        "state": "error" if validation_error else "needs_input",
         "spawn_requests": [],
         "phase": phase,
         "code": code,
@@ -3529,12 +3533,15 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             # unpaused gate remains anywhere in the current pipeline.
             _store_no_progress_pauses(state, no_progress_pauses)
             if not active_gates(state):
-                state["status"] = "blocked"
+                # Exhausted identical retries are not a Cortex stop.  Keep
+                # the task resumable and ask for one concrete decision so the
+                # server can derive a materially new Planner-first route.
+                state["status"] = "needs_input"
                 paused_gates = sorted(no_progress_pauses)
                 state["blocked_reason"] = (
                     "automatic corrective dispatch paused all remaining executable gates: "
                     + ", ".join(paused_gates)
-                    + "; submit a Planner-first recovery for the intended paused gate"
+                    + "; choose whether to revise the recovery strategy or retry the intended paused gate"
                 )
             else:
                 state["status"] = "active"
@@ -3636,6 +3643,17 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 },
                 plan=plan,
             )
+        if state.get("status") == "needs_input" and state.get("blocked_reason"):
+            # No-progress circuit breakers ask for a concrete strategy choice;
+            # they do not terminate the Cortex task or require ledger repair.
+            return _orchestrate_response(
+                "advance", state, wave_id=requested_wave_id,
+                result={
+                    "requires_user_decision": True,
+                    "question": state["blocked_reason"],
+                },
+                plan=plan,
+            )
         review = _hold_for_plan_approval(task_dir, state, plan)
         if review is not None:
             return _orchestrate_response(
@@ -3656,18 +3674,23 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
 def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
     """Resolve the explicit user review that follows a completed plan wave."""
     payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-    unknown = sorted(set(payload) - {"decision", "feedback", "request_id"})
+    unknown = sorted(set(payload) - {"decision", "approval_mode", "feedback", "request_id"})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
     decision_raw = str(payload.get("decision") or "").strip().lower().replace("-", "_").replace(" ", "_")
     decision = {
         "approve": "approve", "approved": "approve", "accept": "approve",
+        "approve_with_recommendations": "approve_with_recommendations",
+        "approve_without_recommendations": "approve_without_recommendations",
         "cancel": "cancel", "canceled": "cancel", "cancelled": "cancel",
         "revise": "revise", "changes": "revise", "request_changes": "revise",
     }.get(decision_raw)
     if not decision:
-        raise ValueError("plan_approval decision must be approve, cancel, or revise")
+        raise ValueError("plan_approval decision must be approve_with_recommendations, approve_without_recommendations, cancel, or revise")
     feedback = str(payload.get("feedback") or "").strip()
+    approval_mode = str(payload.get("approval_mode") or "").strip().lower().replace("-", "_")
+    if approval_mode and approval_mode not in {"approve_with_recommendations", "approve_without_recommendations"}:
+        raise ValueError("plan_approval approval_mode must be approve_with_recommendations or approve_without_recommendations")
     if decision == "revise" and not feedback:
         raise ValueError("plan_approval revise requires non-empty feedback")
     request_id = str(payload.get("request_id") or "").strip()
@@ -3699,7 +3722,7 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
                 plan=plan,
             )
 
-        if decision == "approve":
+        if decision in {"approve", "approve_with_recommendations", "approve_without_recommendations"}:
             result_ref = safe_id(str(approval.get("plan_result_ref") or ""))
             current_basis = _current_plan_basis(task_dir, state, plan, result_ref=result_ref)
             pending_basis = approval.get("pending_basis") if isinstance(approval.get("pending_basis"), dict) else {}
@@ -3719,8 +3742,12 @@ def _orchestrate_plan_approval(params: dict[str, Any]) -> dict[str, Any]:
                 "feedback": None,
                 "approved_basis": current_basis,
                 "request_id": expected_request_id,
+                "approval_mode": (
+                    decision if decision.startswith("approve_") else
+                    approval_mode or "approve_with_recommendations"
+                ),
             })
-            history.append({"event": "approved", "at": now(), "plan_review": review, "approved_basis": current_basis})
+            history.append({"event": "approved", "at": now(), "approval_mode": approval["approval_mode"], "plan_review": review, "approved_basis": current_basis})
             state["plan_approval"] = approval
             save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval", "user approved the completed plan")
             prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)

@@ -19,9 +19,10 @@ host filesystem read cannot open its exact briefing may call
 bootstrap. If a bounded response is incomplete, it may continue only with the
 returned opaque cursor until `complete=true`. Any worker-tool caller/input/schema
 diagnostic or `retryable=true` result is corrected and retried on the same
-attempt without consuming the recovery budget; it never ends the worker. Only
-an explicit `retryable=false`, `outcome=blocked`, or genuinely unavailable exact
-identity is terminal. A successor worker may also use `read_worker_result` with its exact attempt/profile only
+attempt without consuming the recovery budget; it never ends the worker. A
+blocked/failed result is terminal evidence for server-owned corrective
+recovery, not a Cortex stop. Only a genuinely unavailable exact identity after
+recovery is surfaced as a user decision. A successor worker may also use `read_worker_result` with its exact attempt/profile only
 for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
@@ -52,7 +53,7 @@ projection at process launch.
 | inactive | explicit orchestrator activation | call `start_orchestration` once | concise activation summary |
 | waiting_workers | wait timeout | wait again | silent |
 | waiting_workers | worker question | render the durable chat interaction and end the turn | one detailed final chat message with LLM recommendation |
-| active or blocked | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise update |
+| active or recovery-pending | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise update |
 | awaiting_plan_approval | approve | invoke only the returned next wave | approval update |
 | awaiting_plan_approval | cancel | make no lifecycle call | silent |
 | awaiting_plan_approval | non-empty custom response | invoke only the returned replacement Planner wave | revision update |
@@ -70,19 +71,21 @@ While the state is `waiting_workers`, the coordinator is completely silent:
 wait timeouts and unchanged worker state produce no heartbeat, progress note,
 or repeated explanation.
 A coordinator must not return a final answer while a durably bound worker is
-running. The bundled `Stop` hook blocks that early finalization and directs the
-same turn to wait only for the exact persisted child. The hook is a live-turn
-guard, not a synthetic wakeup: if a coordinator is already idle, resume it,
-call `manage_orchestration(intent="inspect")` once, and use only the returned
-active child, result, question, or recovery receipt.
+running, but no hook may block or silence a coordinator turn. The Stop hook is
+telemetry-only. If a coordinator is idle, call
+`manage_orchestration(intent="inspect")` once and consume the returned active
+child, result, question, or server-owned recovery receipt. A worker failure or
+malformed lifecycle payload is always routed to same-attempt correction or an
+automatic corrective dispatch; it must never stop Cortex itself.
 
-For plan approval, the coordinator must state its recommendation. When the
-plan covers the request, all material uncertainty is closed, and its gates
-have concrete verification, recommend **Approve**. Recommend **Revise** only
-when naming a specific material blocker, dependency, omitted requirement, or
-verification gap; recommend **Cancel** only when the user has requested
-cancellation or the task is no longer authorized. Never ask the user to
-choose between unlabeled internal states, and never treat silence as approval.
+For plan approval, the planner supplies one canonical recommendation. Any
+material finding or uncertainty must already have a concrete
+`recommendation_actions[]` entry with `issue`, `action`, `plan_refs`, and
+`verification`; the user must not be asked to invent the correction. Render
+exactly four choices: approve with recommendations, approve without
+recommendations, revise, or cancel. The LLM may explain the planner's one
+recommendation, but must never replace it with a contradictory recommendation.
+Never treat silence as approval.
 
 ## Root coordinator lock
 
@@ -96,8 +99,10 @@ call Cortex, invoke the exact returned worker dispatches, wait, route questions,
 assess results, and communicate with the user. Every project operation must be
 delegated, including investigation after a plan and small or obvious edits. The
 root must remain idle while a worker runs. Worker failure, delay, unavailable
-dispatch, or incomplete evidence is a blocker or rework signal, never
-permission for the root to perform the work directly or inspect sources.
+dispatch, or incomplete evidence is a same-task recovery signal, never a
+Cortex system stop and never permission for the root to perform project work
+directly or inspect sources. If a condition requires a user choice, surface
+one concrete question and keep the task resumable.
 
 ## Schema-first tool calls
 
@@ -184,7 +189,8 @@ paths forbidden above.
    is durably bound. A host-level wait-any representation may omit an explicit
    target list only while Cortex has a bound running child; otherwise it is
    denied as an unspawned dispatch. If a native call is unavailable or fails,
-   stop with that blocker; otherwise wait only for bound children.
+   keep the task resumable and route the condition through recovery or one
+   concrete user question; otherwise wait only for bound children.
    A failed targeted wait is terminal only when the host explicitly proves the
    exact persisted child is unavailable. The lifecycle hook then records the
    same resultless-stop recovery state; inspect once and submit its exact
@@ -211,7 +217,7 @@ paths forbidden above.
    directory or ledger access. Values above the chunk bound are normalized and
    continued with the returned cursor. If it returns a caller/schema diagnostic
    or `retryable=true`, correct the named field and retry the same tool on this
-   attempt. Stop only for explicit `retryable=false` or `outcome=blocked`.
+   attempt. A blocked/failed result is durable evidence for server-owned corrective recovery, never a Cortex stop.
    After reviewing it, the worker relies on the server-owned briefing receipt;
    it does not author a digest or evidence marker.
    `complete_attempt` verifies the canonical receipt and current artifact state.
@@ -447,13 +453,16 @@ packages and microtasks, paths, dependencies, verification, material risks,
 coordinator reads the result, then calls
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
 Cortex returns `cortex/chat-interaction/v1` with `user_view` and `internal`.
-Render only `user_view`: a 3–5 step human summary, one approve/revise/cancel
-question, the material risk (if any), and the explicit LLM recommendation.
+Render only `user_view`: a 3–5 step human summary, one four-way approval
+question (approve with recommendations, approve without recommendations,
+revise, or cancel), the concrete corrective actions, and the single planner
+recommendation.
 Do not expose work-package paths, dependencies, result/request IDs, or tool
 instructions. Do not call a UI, input, approval, or elicitation tool. End the
 turn and wait. Submit the user's next message with the exact `interaction_ref`
-as `request_id`: unambiguous approval uses `approve`, explicit cancellation uses
-`cancel`, and any requested change uses `revise` with the exact feedback text.
+as `request_id`: approval uses `approve_with_recommendations` or
+`approve_without_recommendations`, explicit cancellation uses `cancel`, and any
+requested change uses `revise` with the exact feedback text.
 Planner then reruns before another approval hold. Silence never approves. This gate is
 separate from `worker_question`: material questions are resolved through that
 lifecycle during planning rather than through a duplicate approval question.

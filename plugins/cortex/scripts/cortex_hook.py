@@ -144,13 +144,14 @@ WORKER_CONTEXT = (
     "complete_attempt for the final semantic result. Successful briefing and predecessor reads create server-owned receipts; do not author digest, predecessor, changed-file, timestamp, identity, or evidence markers. "
     "For every allowed worker tool, a caller/input/schema validation error or retryable=true result must be corrected "
     "from its diagnostic and retried on the same attempt. Such rejected calls consume no worker attempt and must "
-    "never end the worker. Stop only for explicit retryable=false/outcome=blocked or genuinely unavailable exact "
-    "identity. During work, checkpoint semantic facts with record_attempt_event and finish with complete_attempt using only "
+    "never end the worker. Retry every correctable failure on the same attempt; a blocked/failed result is durable "
+    "evidence for server-owned corrective recovery, not a Cortex stop. During work, checkpoint semantic facts with "
+    "record_attempt_event and finish with complete_attempt using only "
     "status, summary, findings, decisions_needed, unresolved, and any advertised typed gate payload. Invalid input is corrected "
     "and retried on the same attempt; finalization/projection failures never authorize a replacement worker. After it succeeds, return only ATTEMPT_COMPLETED attempt_result_ref=<generated id> plus at most a two-sentence "
     "summary; never paste a generated result view into the parent channel. If exact attempt identity is absent or a tool "
-    "returns an explicit non-retryable blocker, do not invent task, wave, attempt, project, or tool identifiers: "
-    "return only the exact error and a short blocker. Use only tools actually available in this worker context and record unavailable capabilities as "
+    "returns an explicit identity error, preserve the exact task, wave, attempt, project, and tool identifiers and "
+    "route the condition through server-owned recovery or one concrete user question; never stop Cortex. Use only tools actually available in this worker context and record unavailable capabilities as "
     "limitations."
 )
 
@@ -911,10 +912,10 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
     if not wait_shaped or has_target or has_persisted_child:
         return None
     return (
-        "CORTEX DISPATCH FAILURE: the native Agent wait had no child target. No worker was spawned. Do not claim "
-        "dispatch success, do not advance Cortex, and do not return task success. Invoke the exact pending "
-        "spawn_agent dispatch now; if spawn_agent is unavailable or fails to return a child id, stop and surface that "
-        "host blocker. Never retry an empty wait."
+        "CORTEX DISPATCH ADVISORY: this wait has no child target, so no worker was spawned. "
+        "Invoke the exact pending server-owned spawn dispatch and retry the lifecycle step; "
+        "do not claim dispatch success or invent a replacement worker. If the host cannot spawn, "
+        "keep the task resumable and surface one concrete user question."
     )
 
 
@@ -1177,65 +1178,14 @@ def stopped_worker_after_wait_context(
 
 
 def active_worker_stop_block(event: dict, state: dict) -> str | None:
-    """Return a bounded continuation prompt before a live coordinator can finish.
+    """Compatibility shim: Stop never blocks a coordinator turn.
 
-    ``SubagentStop`` is delivered to the host after a native child ends, but
-    cannot itself inject coordinator context.  A coordinator that emits a
-    final answer instead of waiting can therefore become idle before the child
-    completes. Codex's ``Stop`` hook can block that finalization and ask the
-    same turn to wait for its already-bound child.  Do not disclose task or
-    host identifiers in this prompt, and never block the hook's own retry:
-    the latter is the host's loop escape if the coordinator cannot make
-    progress.
+    Native child identity, AttemptResult finalization, and recovery remain
+    server-owned lifecycle facts.  The command hook is deliberately
+    telemetry-only: it must not inject ``CORTEX ACTIVE WORKER`` text, emit a
+    ``decision=block`` response, or make a stale binding look live.
     """
-    if str(event.get("hook_event_name")) != "Stop" or bool(event.get("stop_hook_active")):
-        return None
-    if str(state.get("status") or "") != "active":
-        return None
-    active_facade_attempts = [
-        attempt for attempt in state.get("attempts", [])
-        if isinstance(attempt, dict)
-        and attempt.get("facade_managed")
-        and not attempt.get("invalidated")
-        and attempt.get("status") in {"awaiting_host_spawn", "running", "waiting_question"}
-        and str(attempt.get("lifecycle_status") or "") != "completed"
-    ]
-    if not active_facade_attempts:
-        return None
-    # A durable open question is a resumable parent-turn boundary, not live
-    # work.  Check it before host identity: the native child may still be
-    # bound in the authenticated snapshot while SubagentStop is being
-    # reconciled, but the coordinator must surface the question and allow the
-    # normal turn to finish instead of emitting ACTIVE WORKER/Remain silent.
-    if any(
-        str(attempt.get("lifecycle_status") or "") == "paused_awaiting_user"
-        or str(attempt.get("host_stop_outcome") or "") == "awaiting_user"
-        or str(attempt.get("status") or "") == "waiting_question"
-        or (
-            bool(attempt.get("question_refs") or attempt.get("host_question_refs"))
-            and str(attempt.get("status") or "") in {"running", "waiting_question"}
-        )
-        for attempt in active_facade_attempts
-    ):
-        return None
-    has_live_bound_worker = any(
-        isinstance(attempt, dict)
-        and attempt.get("status") == "running"
-        and str((attempt.get("host_spawn") or {}).get("agent_id") or "").strip()
-        for attempt in active_facade_attempts
-    )
-    if has_live_bound_worker:
-        return (
-            "CORTEX ACTIVE WORKER: a durably bound native worker is still running. Do not return a final answer, "
-            "declare the task complete, or emit a progress update. Remain silent and wait only for the exact persisted "
-            "child. After it stops, inspect the Cortex state and consume the matching AttemptResult or recovery receipt."
-        )
-    return (
-        "CORTEX ACTIVE DISPATCH: a canonical worker attempt is pending but does not yet have a finalized "
-        "AttemptResult. Do not return a final answer, declare the task complete, or create a completed handoff. "
-        "Inspect the Cortex state and either invoke its exact pending dispatch or recover the exact attempt; do not "
-        "replace it with a new worker."
-    )
+    return None
 
 
 def append_lifecycle_event(task_dir: Path, event: dict) -> None:
@@ -1431,15 +1381,12 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
                         agent_name, display_name = worker_identity(event, state)
                 else:
                     reason = str(binding.get("reason") or "host_binding_failed")
-                    host_binding_blocker = (
-                        " CORTEX HOST BINDING BLOCKER: the native worker could not be bound to this exact attempt "
-                        f"({reason}). Stop before project work and return this blocker; do not guess another identity."
-                    )
+                    # Binding failures are recorded by the host adapter and
+                    # recovered on the control plane. Never inject a blocker
+                    # or stop instruction into the worker transcript.
+                    host_binding_blocker = ""
             except Exception:
-                host_binding_blocker = (
-                    " CORTEX HOST BINDING BLOCKER: the native SubagentStart identity could not be persisted. "
-                    "Stop before project work and return this blocker; do not guess another identity."
-                )
+                host_binding_blocker = ""
         if (
             str(event.get("hook_event_name")) == "SubagentStop"
             and finalize_host_worker_stop_from_hook is not None
@@ -1531,13 +1478,6 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
         if safe["hook"] == "SessionStart" and is_context_recovery(event):
             bump_context_epoch_for_recovery(ledger, task_id, event)
         append_lifecycle_event(task_dir, safe)
-        stop_block = active_worker_stop_block(event, state)
-        if stop_block:
-            # ``Stop`` has its own command-hook schema.  It accepts a block
-            # decision and reason, not the additional-context envelope used
-            # by session and tool hooks.
-            print(json.dumps({"decision": "block", "reason": stop_block}, ensure_ascii=False))
-            return
         dedupe = apply_tool_deduplication(event, project, ledger, task_id, state, snapshot)
         if dedupe and dedupe.get("duplicate") and safe["hook"] == "PreToolUse":
             print(json.dumps(duplicate_read_advisory(dedupe.get("resource_kind")), ensure_ascii=False))
@@ -1559,13 +1499,7 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
                     "route; do not infer a worker, task, or project content from this event."
                 )), ensure_ascii=False))
                 return
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": dispatch_failure_reason,
-                }
-            }, ensure_ascii=False))
+            print(json.dumps(hook_context("PreToolUse", dispatch_failure_reason), ensure_ascii=False))
             return
         coordinator_advisory = coordinator_read_advisory(event, state)
         if coordinator_advisory:

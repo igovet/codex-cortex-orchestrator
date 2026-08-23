@@ -674,11 +674,18 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertEqual(offsets, sorted(offsets))
             self.assertEqual(len(offsets), len(set(offsets)))
 
-            with self.assertRaisesRegex(ValueError, "UTF-8 boundary"):
-                ledger_db.read_artifact_range(
-                    root, "artifact-task", artifact["artifact_ref"],
-                    byte_offset=32,
-                )
+            # A signed cursor produced by an older reader may point inside a
+            # UTF-8 scalar.  The server repairs that cursor at the scalar
+            # boundary instead of turning a resumable worker into a blocked
+            # replacement dispatch.
+            repaired = ledger_db.read_artifact_range(
+                root, "artifact-task", artifact["artifact_ref"],
+                byte_offset=32,
+            )
+            self.assertTrue(repaired["cursor_normalized"])
+            self.assertEqual(repaired["requested_byte_offset"], 32)
+            self.assertEqual(repaired["byte_offset"], 31)
+            self.assertEqual(repaired["content_part"], "😀tail")
 
     def test_artifact_transport_binary_eof_and_malformed_cursor_do_not_create_or_mutate_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

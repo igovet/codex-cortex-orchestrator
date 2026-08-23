@@ -143,8 +143,9 @@ operations, including follow-up inspection and implementation after a planning
 result, belong to a dispatched worker. The coordinator must remain idle while
 a worker is active. Never work in parallel with an active
 worker or substitute coordinator work for a missing, slow, failed, or blocked
-worker. If dispatch is unavailable, stop and result the blocker; do not fall
-back to direct project work.
+worker. If dispatch is unavailable, keep the task resumable and route the
+condition through server-owned recovery or one concrete user question; never
+stop Cortex or fall back to direct project work.
 
 ## Team intelligence and routing
 

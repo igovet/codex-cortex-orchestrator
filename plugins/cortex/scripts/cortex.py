@@ -3448,7 +3448,7 @@ def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     if not isinstance(value, dict):
         return [_planning_diag("planning must be an object", path="planning")]
-    allowed = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "resolved_questions", "risks"}
+    allowed = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks"}
     for key in sorted(set(value) - allowed):
         diagnostics.append(_planning_diag("unsupported planning field", path=f"planning.{key}"))
     for key in ("overview", "work_packages"):
@@ -3463,6 +3463,23 @@ def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
     for key in ("resolved_questions", "risks", "requirement_coverage"):
         if key in value and not isinstance(value[key], list):
             diagnostics.append(_planning_diag(f"planning {key} must be an array", path=f"planning.{key}"))
+    actions = value.get("recommendation_actions")
+    if actions is not None and (not isinstance(actions, list) or any(
+        not isinstance(item, dict) or not str(item.get("issue") or "").strip()
+        or not str(item.get("action") or "").strip()
+        or not isinstance(item.get("plan_refs", []), list)
+        or not str(item.get("verification") or "").strip()
+        for item in actions
+    )):
+        diagnostics.append(_planning_diag(
+            "planning recommendation_actions items require issue, action, plan_refs, and verification",
+            path="planning.recommendation_actions",
+        ))
+    if recommendation == "revise" and not actions:
+        diagnostics.append(_planning_diag(
+            "planning recommendation_actions is required when recommendation is revise",
+            path="planning.recommendation_actions",
+        ))
     packages = value.get("work_packages")
     if not isinstance(packages, list):
         return diagnostics
@@ -3628,7 +3645,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         raise PlanningValidationError(base_diagnostics)
     allowed_top_level = {
         "overview", "work_packages", "requirement_coverage", "recommendation",
-        "recommendation_rationale", "resolved_questions", "risks",
+        "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks",
     }
     if not isinstance(value, dict) or not {"overview", "work_packages"}.issubset(value) or set(value) - allowed_top_level:
         raise ValueError("planning must contain overview and work_packages, with only documented traceability fields")
@@ -3637,6 +3654,19 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     if recommendation not in {"approve", "revise"}:
         raise ValueError("planning recommendation must be approve or revise")
     recommendation_rationale = str(value.get("recommendation_rationale") or "").strip()
+    recommendation_actions: list[dict[str, Any]] = []
+    for index, item in enumerate(value.get("recommendation_actions", []), 1):
+        if not isinstance(item, dict):
+            raise ValueError(f"planning recommendation_actions[{index - 1}] must be an object")
+        issue = _planning_text(item.get("issue"), f"planning.recommendation_actions[{index - 1}].issue")
+        action = _planning_text(item.get("action"), f"planning.recommendation_actions[{index - 1}].action")
+        verification = _planning_text(item.get("verification"), f"planning.recommendation_actions[{index - 1}].verification")
+        refs = item.get("plan_refs", [])
+        if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+            raise ValueError(f"planning recommendation_actions[{index - 1}].plan_refs must be an array of non-empty strings")
+        recommendation_actions.append({"issue": issue, "action": action, "plan_refs": list(dict.fromkeys(ref.strip() for ref in refs)), "verification": verification})
+    if recommendation == "revise" and not recommendation_actions:
+        raise ValueError("planning recommendation_actions is required when recommendation is revise")
     # Recommendation prose is canonical planning data. Prompt compactness is
     # advisory only; do not reject a valid rationale because of its byte size.
     raw_resolved_questions = value.get("resolved_questions", [])
@@ -3867,6 +3897,15 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     )
     valid_plan_refs = package_ids | microtask_ids
     coverage_diagnostics: list[dict[str, Any]] = []
+    for action_index, action in enumerate(recommendation_actions, 1):
+        unknown_refs = sorted(set(action["plan_refs"]) - valid_plan_refs)
+        if unknown_refs:
+            coverage_diagnostics.append(_planning_diag(
+                f"planning recommendation_actions[{action_index - 1}] references unknown plan items: "
+                + ", ".join(unknown_refs),
+                path=f"planning.recommendation_actions[{action_index - 1}].plan_refs",
+                code="planning_recommendation_action_invalid",
+            ))
     for coverage_index, item in enumerate(coverage, 1):
         unknown_refs = sorted(set(item["plan_refs"]) - valid_plan_refs)
         if unknown_refs:
@@ -3885,6 +3924,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         "requirement_coverage": coverage,
         "recommendation": recommendation,
         "recommendation_rationale": recommendation_rationale,
+        "recommendation_actions": recommendation_actions,
         "resolved_questions": resolved_questions,
         "risks": risks,
     }
@@ -3997,6 +4037,7 @@ def _plan_tracker_document(
         "task_revision": int(state.get("task_revision") or 1),
         "recommendation": manifest.get("recommendation", "approve"),
         "recommendation_rationale": manifest.get("recommendation_rationale", ""),
+        "recommendation_actions": list(manifest.get("recommendation_actions") or []),
         "requirement_coverage": list(manifest.get("requirement_coverage") or []),
         "resolved_questions": list(manifest.get("resolved_questions") or []),
         "risks": list(manifest.get("risks") or []),
@@ -4057,7 +4098,7 @@ def _planning_pointer_tokens(path: str) -> list[str]:
 def apply_planning_repair(draft: Mapping[str, Any], patches: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Apply restricted RFC6902-like patches to a rejected planning draft."""
     value = json.loads(json.dumps(draft.get("planning"), ensure_ascii=False))
-    allowed_roots = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "resolved_questions", "risks"}
+    allowed_roots = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks"}
     for patch in patches:
         if not isinstance(patch, Mapping) or patch.get("op") not in {"replace", "add", "remove"}:
             raise ValueError("planning patches support only replace, add, and remove")
@@ -4256,6 +4297,7 @@ def materialize_planning_payload(
         "requirement_coverage": list(planning.get("requirement_coverage") or []),
         "recommendation": planning.get("recommendation", "approve"),
         "recommendation_rationale": planning.get("recommendation_rationale", ""),
+        "recommendation_actions": list(planning.get("recommendation_actions") or []),
         "resolved_questions": list(planning.get("resolved_questions") or []),
         "risks": list(planning.get("risks") or []),
         "created_at": now(),
@@ -8420,7 +8462,7 @@ def _v3_collect_fields(params: Any, allowed: set[str], *, operation: str) -> lis
 
 
 def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
-    """Turn a stale/foreign continuation into a terminal coordinator receipt.
+    """Turn a stale/foreign continuation into a resumable coordinator receipt.
 
     A coordinator that loses the response after a successful continuation may
     retry the old relative step.  Treating that diagnostic as an ordinary
@@ -8430,34 +8472,35 @@ def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
     recovery payload, and no project operation.
     """
     result = dict(error)
-    result["outcome"] = "blocked"
-    result["retryable"] = False
+    result["outcome"] = "needs_input"
+    result["retryable"] = True
     result["stop_reason"] = reason
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} STOP. This continuation is stale or belongs to a different task state. "
-        "Do not call continue_orchestration again with this step/results, do not request artifacts, "
-        "do not add future_waves, and do not spawn a replacement worker. Result the blocker; only a "
-        "fresh server lifecycle response may authorize a later action."
+        "This continuation is stale or belongs to a different task state. "
+        "Do not replay the consumed step/results. Call manage_orchestration with "
+        "intent=inspect for the same task_ref, then follow the returned server-owned "
+        "recovery or exact user question. Do not add future_waves or spawn a replacement worker."
     )
     return result
 
 
 def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
-    """Return a terminal start result when no task was safely created.
+    """Return a resumable start result when no task was safely created.
 
     A registry instable happens before Cortex can reserve a task or
     return an opaque task reference.  Treating it as ordinary caller input led
     coordinators to call unscoped recovery, which could select an unrelated
     active task under the same project root.
     """
-    result = _v3_error("start_state_incompatible", message, outcome="blocked")
-    result["retryable"] = False
+    result = _v3_error("start_state_incompatible", message, outcome="needs_input")
+    result["retryable"] = True
     result["task_created"] = False
     result["recovery"] = "user_authorized_ledger_maintenance_required"
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} Cortex did not create a task and returned no task_ref. Do not call "
-        "manage_orchestration, continue_orchestration, read_worker_result, inspect, select another task, or "
-        "dispatch a worker. Stop and result that the project ledger requires user-authorized maintenance."
+        "Cortex did not create a task and returned no task_ref. Surface the exact "
+        "diagnostic, obtain the required user decision or repair, then retry the "
+        "same start_orchestration request. Do not select another task or dispatch "
+        "a worker without a successful task_ref."
     )
     return result
 
@@ -8469,9 +8512,9 @@ def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
         f"{operation} requires the exact task_ref returned by a successful Cortex lifecycle response.",
     )
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} Do not inspect, list, infer, or select another task from this project root. "
-        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, stop and result "
-        "the blocker."
+        "Do not inspect, list, infer, or select another task from this project root. "
+        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, surface the exact "
+        "diagnostic as a user decision and retry the originating lifecycle request."
     )
     return result
 
@@ -11421,20 +11464,25 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
         "localized_prompt", "localized_title", "localized_approve", "localized_cancel",
         "localized_custom_label",
     }
-    unknown = sorted(set(payload) - {"decision", "feedback", "request_id", *localization_fields})
+    unknown = sorted(set(payload) - {"decision", "approval_mode", "feedback", "request_id", *localization_fields})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
     raw = str(payload.get("decision") or "prompt").strip().lower().replace("-", "_").replace(" ", "_")
     decision = {
         "prompt": "prompt", "ask": "prompt", "review": "prompt",
         "approve": "approve", "approved": "approve", "accept": "approve",
+        "approve_with_recommendations": "approve_with_recommendations",
+        "approve_without_recommendations": "approve_without_recommendations",
         "cancel": "cancel", "canceled": "cancel", "cancelled": "cancel",
         "revise": "revise", "changes": "revise", "request_changes": "revise",
     }.get(raw)
     if not decision:
-        raise ValueError("plan_approval decision must be prompt, approve, cancel, or revise")
+        raise ValueError("plan_approval decision must be prompt, approve_with_recommendations, approve_without_recommendations, cancel, or revise")
     feedback = str(payload.get("feedback") or "").strip()
     request_id = str(payload.get("request_id") or "").strip()
+    approval_mode = str(payload.get("approval_mode") or "").strip().lower().replace("-", "_")
+    if approval_mode and approval_mode not in {"approve_with_recommendations", "approve_without_recommendations"}:
+        raise ValueError("plan_approval approval_mode must be approve_with_recommendations or approve_without_recommendations")
     if decision == "prompt" and (feedback or request_id):
         raise ValueError("plan_approval prompt does not accept feedback")
     if decision == "revise" and not feedback:
@@ -11442,7 +11490,8 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
     if decision != "prompt" and any(str(payload.get(field) or "").strip() for field in localization_fields):
         raise ValueError("plan approval localization fields are accepted only with decision=prompt")
     normalized = {
-        "decision": decision,
+        "decision": "approve" if decision.startswith("approve_") else decision,
+        **({"approval_mode": decision} if decision.startswith("approve_") else ({"approval_mode": approval_mode or "approve_with_recommendations"} if decision == "approve" else {})),
         **({"feedback": feedback} if feedback else {}),
         **({"request_id": redact(request_id, 200)} if request_id else {}),
     }
@@ -11527,18 +11576,24 @@ def _v3_prompt_plan_approval(
     review = dict(approval.get("review") or {})
     prompt, title, approve_label, cancel_label, custom_label = _v3_plan_approval_copy(state, localization)
     request_id = str(approval.get("request_id") or _v3_plan_approval_request_id(state, approval))
-    material_concerns = [*(review.get("findings") or []), *(review.get("uncertainty") or [])]
     planner_recommendation = str(review.get("recommendation") or "approve").strip().lower()
-    recommended_decision = "revise" if material_concerns or planner_recommendation == "revise" else "approve"
+    recommendation_actions = list(review.get("recommendation_actions") or [])
+    # The planner owns the recommendation. Findings/uncertainty are not a
+    # second recommendation: when the planner supplied concrete corrective
+    # actions, the single coherent recommendation is approve-with-actions.
+    if recommendation_actions:
+        recommended_decision = "approve_with_recommendations"
+    elif planner_recommendation == "revise":
+        recommended_decision = "revise"
+    else:
+        recommended_decision = "approve_without_recommendations"
     recommendation_rationale = (
-        "Request revision because the current plan still records material findings or uncertainty that should be "
-        "resolved before implementation."
-        if material_concerns else
         str(
             review.get("recommendation_rationale")
             or (
-                "Request revision because the Planner marked the plan for revision even though no separate finding "
-                "or uncertainty was recorded."
+                "Approve with the planner's concrete corrective actions; each action is bound to plan items and verification."
+                if recommendation_actions else
+                "Request a planner revision because no concrete corrective action was supplied."
                 if planner_recommendation == "revise" else
                 "Approve because the reviewed plan defines executable work packages and verification without "
                 "recording an unresolved material concern."
@@ -11562,21 +11617,43 @@ def _v3_prompt_plan_approval(
             "resolved_questions": review.get("resolved_questions") or [],
             "tracker": review.get("plan_tracker"),
             "remaining_phases": review.get("remaining_phases") or [],
+            "recommendation": review.get("recommendation") or "approve",
+            "recommendation_rationale": review.get("recommendation_rationale") or "",
+            "recommendation_actions": recommendation_actions,
             "result_ref": review.get("result_ref"),
         },
         "choices": [
-            {"id": "approve", "label": approve_label, "meaning": "Approve this exact plan revision and continue with its implementation dispatches."},
+            {"id": "approve_with_recommendations", "label": "Утвердить с рекомендациями" if str(state.get("user_language") or "").lower().startswith("ru") else "Approve with recommendations", "meaning": "Approve the plan and require the concrete corrective actions in recommendation_actions."},
+            {"id": "approve_without_recommendations", "label": "Утвердить без рекомендаций" if str(state.get("user_language") or "").lower().startswith("ru") else "Approve without recommendations", "meaning": "Approve the plan without applying its advisory recommendations."},
             {"id": "revise", "label": custom_label, "meaning": "Describe the required changes; Cortex will preserve the exact text as Planner feedback and request a revised plan."},
             {"id": "cancel", "label": cancel_label, "meaning": "Keep the plan pending and stop until a later user message."},
         ],
         "actions": [
             {
-                "id": "approve",
+                "id": "approve_with_recommendations",
                 "arguments": {
                     "project_root": project_root,
                     "task_ref": task_ref,
                     "intent": "plan_approval",
-                    "payload": {"decision": "approve", "request_id": request_id},
+                    "payload": {"decision": "approve_with_recommendations", "request_id": request_id},
+                },
+            },
+            {
+                "id": "approve_without_recommendations",
+                "arguments": {
+                    "project_root": project_root,
+                    "task_ref": task_ref,
+                    "intent": "plan_approval",
+                    "payload": {"decision": "approve_without_recommendations", "request_id": request_id},
+                },
+            },
+            {
+                "id": "revise",
+                "arguments": {
+                    "project_root": project_root,
+                    "task_ref": task_ref,
+                    "intent": "plan_approval",
+                    "payload": {"decision": "revise", "request_id": request_id, "feedback": "<describe concrete plan changes>"},
                 },
             },
             {
@@ -11596,13 +11673,14 @@ def _v3_prompt_plan_approval(
         },
         "response_instructions": (
             "Reply in your next ordinary chat message with approval, cancellation, or the exact changes you want. "
+            "Use approve_with_recommendations or approve_without_recommendations for the two approval modes. "
             "Any substantive change request is treated as revise, not approval."
         ),
         "coordinator_contract": (
             "Use only interaction.user_view for the final ordinary user-language message. Never copy internal plan "
             "objects, paths, dependencies, result or request identifiers, dispatch instructions, or validation details "
             "into that message. Show its bounded summary, the single question, and the recommendation from "
-            "llm_recommendation; then wait for one unambiguous approve/revise/cancel response. Preserve requested "
+            "llm_recommendation; then wait for one unambiguous approve-with-recommendations, approve-without-recommendations, revise, or cancel response. Preserve requested "
             "changes verbatim as revise feedback and use the exact interaction_ref internally. End the turn immediately "
             "after presenting this user_view; do not continue orchestration in the same turn."
         ),
@@ -11615,19 +11693,25 @@ def _v3_prompt_plan_approval(
         "Запустить предусмотренные проверки." if is_ru else "Run the planned verification.",
         "Проверить результат и закрыть задачу." if is_ru else "Review the result and close the task.",
     ]
+    for action in (review.get("recommendation_actions") or [])[:5]:
+        if isinstance(action, dict):
+            public_steps.append(
+                (("Рекомендация: " + str(action.get("action") or "").strip()) if is_ru else
+                 ("Recommendation: " + str(action.get("action") or "").strip()))
+            )
+    action_count = len(review.get("recommendation_actions") or [])
     public_recommendation = (
-        "Рекомендация: доработать план — остаётся существенная неопределённость."
-        if recommended_decision == "revise" and is_ru else
-        "Рекомендация: утвердить план — существенные неопределённости закрыты и проверки конкретны."
-        if is_ru else
-        "Recommendation: revise — a material uncertainty remains."
-        if recommended_decision == "revise" else
-        "Recommendation: approve — material uncertainties are closed and verification is concrete."
+        ("Рекомендация планировщика: утвердить с рекомендациями — план содержит " + str(action_count) + " конкретных корректирующих действий." if is_ru else "Planner recommendation: approve with recommendations — the plan contains " + str(action_count) + " concrete corrective actions.")
+        if recommended_decision == "approve_with_recommendations" and action_count else
+        "Рекомендация: доработать план — планировщик не передал конкретные действия для исправления." if is_ru and recommended_decision == "revise" else
+        "Рекомендация: утвердить без рекомендаций — план готов к выполнению." if is_ru else
+        "Recommendation: revise — the planner did not provide concrete corrective actions." if recommended_decision == "revise" else
+        "Recommendation: approve without recommendations — the plan is ready for execution."
     )
     interaction["user_view"] = render_plan(
         str(review.get("summary") or review.get("objective") or ("Проверка плана" if is_ru else "Plan review")),
         public_steps,
-        question=("Утвердить план, запросить доработку или отменить?" if is_ru else "Approve the plan, request a revision, or cancel?"),
+        question=("Утвердить с рекомендациями, утвердить без рекомендаций, доработать или отменить?" if is_ru else "Approve with recommendations, approve without recommendations, request a revision, or cancel?"),
         recommendation=public_recommendation,
         config={
             "communication_profile": state.get("communication_profile") or "natural",
@@ -11641,14 +11725,14 @@ def _v3_prompt_plan_approval(
     recommendation_rendered = render(
         public_recommendation,
         kind="question",
-        next_step=("Утвердите план, запросите доработку или отмените." if is_ru else "Approve, revise, or cancel the plan."),
+        next_step=("Выберите утверждение с рекомендациями, без рекомендаций, доработку или отмену." if is_ru else "Choose approve with recommendations, approve without recommendations, revise, or cancel."),
         config=plan_config,
     )
     why_rendered = render(
         "Решение определяет, можно ли перейти к выполнению плана." if is_ru else
         "Your decision determines whether the plan can move to implementation.",
         kind="question",
-        next_step=("Утвердите план, запросите доработку или отмените." if is_ru else "Approve, revise, or cancel the plan."),
+        next_step=("Выберите утверждение с рекомендациями, без рекомендаций, доработку или отмену." if is_ru else "Choose approve with recommendations, approve without recommendations, revise, or cancel."),
         config=plan_config,
     )
     interaction["user_view"]["requires_user_decision"] = True

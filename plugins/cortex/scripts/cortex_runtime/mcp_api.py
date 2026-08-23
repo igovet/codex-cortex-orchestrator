@@ -267,6 +267,20 @@ def build_public_schemas(
             },
             "recommendation": {"type": "string", "enum": ["approve", "revise"]},
             "recommendation_rationale": {"type": "string", "minLength": 1},
+            "recommendation_actions": {
+                "type": "array",
+                "description": "Concrete corrective actions required by the planner recommendation; required when recommendation=revise.",
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "issue": {"type": "string", "minLength": 1},
+                        "action": {"type": "string", "minLength": 1},
+                        "plan_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                        "verification": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["issue", "action", "plan_refs", "verification"],
+                },
+            },
             "resolved_questions": {
                 "type": "array", "uniqueItems": True,
                 "items": {"type": "string", "minLength": 1},
@@ -760,7 +774,8 @@ def build_public_schemas(
                     "canonical_answers": {
                         "type": "object", "additionalProperties": {"type": "string", "minLength": 1},
                     },
-                    "decision": {"type": "string", "enum": ["prompt", "approve", "cancel", "revise"]},
+                    "decision": {"type": "string", "enum": ["prompt", "approve", "approve_with_recommendations", "approve_without_recommendations", "cancel", "revise"]},
+                    "approval_mode": {"type": "string", "enum": ["approve_with_recommendations", "approve_without_recommendations"]},
                     "feedback": {"type": "string"},
                     "request_id": {"type": "string", "minLength": 1},
                     "localized_prompt": {"type": "string"},
@@ -986,10 +1001,12 @@ def v3_response(
         diagnostics = old.get("diagnostics") if isinstance(old.get("diagnostics"), list) else []
         operation = str(old.get("operation") or "")
         retry_tool = "start_orchestration" if operation == "start" else "continue_orchestration"
+        raw_outcome = str(old.get("state", "needs_input"))
+        public_outcome = "needs_input" if raw_outcome == "blocked" else raw_outcome
         response = {
             "schema": public_schema,
             "ok": False,
-            "outcome": old.get("state", "needs_input"),
+            "outcome": public_outcome,
             "code": old.get("code", "orchestration_failed"),
             "step": step,
             "diagnostics": diagnostics,
@@ -1015,6 +1032,9 @@ def v3_response(
             response["initiative_ref"] = old["governance"].get("initiative_ref")
             response["policy_snapshot_digest"] = old["governance"].get("policy_snapshot_digest")
             response["close_obligations"] = old["governance"].get("close_obligations", [])
+        # `blocked` remains an internal audit/recovery marker only.  The
+        # public coordinator contract never stops Cortex on that state: it
+        # asks for the exact recovery action or one concrete user decision.
         response["user_message"] = render_lifecycle(
             response.get("outcome"), ok=False, config=communication_config,
             metadata={"code": response.get("code"), "recoverable": response.get("recoverable")},
@@ -1045,7 +1065,8 @@ def v3_response(
     # can recover only the still-awaiting requests without making every exact
     # duplicate start capable of spawning a duplicate worker wave.
     dispatches = [] if start_replayed is True else prepared_dispatches
-    outcome = old.get("state")
+    raw_outcome = old.get("state")
+    outcome = "needs_input" if raw_outcome == "blocked" else raw_outcome
     if start_replayed is True:
         next_action = (
             f"{coordinator_lock} start_orchestration was already completed for task_ref={task_ref}. "
@@ -1107,19 +1128,22 @@ def v3_response(
         )
     elif outcome == "completed":
         next_action = f"{coordinator_lock} Orchestration is complete; use the verified handoff without additional project operations."
-    elif outcome == "blocked":
+    elif raw_outcome == "blocked":
         stopped_result_recovery = (
             old.get("result", {}).get("stopped_result_recovery")
             if isinstance(old.get("result"), dict) else None
         )
         if isinstance(stopped_result_recovery, dict):
             next_action = (
-                f"{coordinator_lock} The stopped worker has no usable canonical AttemptResult. Never wait on, "
-                "respawn, resume, or manually edit that child/ledger state. Resume the blocked task only through "
-                "manage_orchestration intent=resume; Cortex will issue a fresh Planner-first dispatch."
+                "The stopped worker has no usable canonical AttemptResult. Keep the same task resumable: "
+                "call manage_orchestration with intent=inspect and then use the returned server-owned recovery "
+                "dispatch. Do not wait, respawn, replace the child, or edit ledger state."
             )
         else:
-            next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
+            next_action = (
+                "Cortex retained the condition as recoverable evidence. Call manage_orchestration with "
+                "intent=inspect for the same task, then follow its exact recovery or user question."
+            )
     elif outcome == "needs_input":
         user_question = (
             old.get("result", {}).get("question")
@@ -1178,13 +1202,13 @@ def v3_response(
             and str(item.get("dispatch_ref") or "").strip()
         ]
         if outcome == "completion_pending" or (
-            outcome == "blocked"
+            raw_outcome == "blocked"
             and isinstance(old.get("result"), dict)
             and isinstance(old["result"].get("stopped_result_recovery"), dict)
         ):
             pass
         elif (
-            outcome in {"waiting_workers", "blocked"}
+            raw_outcome in {"waiting_workers", "blocked"}
             and not active_worker_ids
             and not pending_dispatches
             and terminal_results

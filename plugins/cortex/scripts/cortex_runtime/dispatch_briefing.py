@@ -129,14 +129,14 @@ def _dispatch_briefing_failure(exc: BaseException, *, params: dict[str, Any] | N
             },
         }
     return {
-        "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "blocked",
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": False, "outcome": "needs_input",
         "code": "dispatch_briefing_unavailable",
         "diagnostics": [{
             "code": "dispatch_briefing_unavailable", "path": "$", "message": message,
             "fix": "Preserve this integrity or storage diagnostic; it cannot be repaired by changing tool arguments.",
         }],
         "retryable": False, "attempt_budget_consumed": False,
-        "next_action": "Stop before project work and return this exact non-retryable diagnostic to the parent coordinator.",
+        "next_action": "Surface this exact integrity/storage diagnostic to the coordinator, keep the same task resumable, and use the server-owned recovery or user decision it returns. Do not create a replacement worker.",
     }
 
 
@@ -215,7 +215,7 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
         base = {"schema": PUBLIC_ORCHESTRATION_SCHEMA, "ok": True, "outcome": "briefing_read", "task_id": task_id, "attempt_id": attempt_id, "profile": profile, "dispatch_ref": dispatch_ref, "briefing_digest": briefing_digest, "briefing_artifact": artifact}
         if chunked:
             part = _runtime.db_read_artifact_range(root, state["task_id"], artifact["artifact_ref"], byte_offset=byte_offset, max_bytes=effective_max)
-            result = {**base, "content_part": part.get("content_part"), "encoding": part["encoding"], "byte_offset": part["byte_offset"], "returned_bytes": part["returned_bytes"], "complete": part["complete"], "effective_max_bytes": effective_max, "max_bytes_normalized": max_bytes_normalized}
+            result = {**base, "content_part": part.get("content_part"), "encoding": part["encoding"], "byte_offset": part["byte_offset"], "requested_byte_offset": part.get("requested_byte_offset", byte_offset), "cursor_normalized": bool(part.get("cursor_normalized", False)), "returned_bytes": part["returned_bytes"], "complete": part["complete"], "effective_max_bytes": effective_max, "max_bytes_normalized": max_bytes_normalized}
             if requested_max is not None:
                 result["requested_max_bytes"] = requested_max
             if part.get("content_base64") is not None:

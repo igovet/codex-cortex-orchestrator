@@ -2641,6 +2641,7 @@ def read_artifact_range(
         raise ValueError("SQLite artifact is unavailable for the selected task")
     if byte_offset > metadata["byte_size"]:
         raise ValueError("SQLite artifact byte offset is invalid")
+    requested_byte_offset = byte_offset
     remaining_offset = byte_offset
     effective_max_bytes = max_bytes if max_bytes is not None else int(metadata["byte_size"]) - byte_offset
     budget = effective_max_bytes
@@ -2684,13 +2685,33 @@ def read_artifact_range(
     if total_bytes != int(metadata["byte_size"]) or content_digest.hexdigest() != str(metadata["digest_sha256"]):
         raise ValueError("SQLite artifact digest is invalid")
 
+    # Older briefing readers could issue a signed cursor in the middle of a
+    # UTF-8 scalar (for example, after slicing a page at byte 32000).  The
+    # cursor is still trusted for its task/artifact/digest scope, so rejecting
+    # it here would unnecessarily terminate an otherwise resumable worker.
+    # Rewind only to the beginning of that scalar.  This is lossless for a
+    # failed continuation and keeps the returned cursor on a canonical UTF-8
+    # boundary; tampered cursors are still rejected by cursor authentication
+    # before reaching this function.
+    normalized_byte_offset = byte_offset
+    if is_text and byte_offset < total_bytes:
+        combined = b"".join(chunks)
+        while normalized_byte_offset > 0 and normalized_byte_offset < len(combined):
+            if combined[normalized_byte_offset] & 0b11000000 != 0b10000000:
+                break
+            normalized_byte_offset -= 1
+        if normalized_byte_offset != byte_offset:
+            byte_offset = normalized_byte_offset
+            remaining_offset = normalized_byte_offset
+            if max_bytes is None:
+                effective_max_bytes = int(metadata["byte_size"]) - normalized_byte_offset
+            budget = effective_max_bytes
+
     for data in chunks:
         size = len(data)
         if remaining_offset >= size:
             remaining_offset -= size
             continue
-        if is_text and remaining_offset < size and data[remaining_offset] & 0b11000000 == 0b10000000:
-            raise ValueError("SQLite artifact byte offset does not align to a UTF-8 boundary")
         start = remaining_offset
         available = len(data) - start
         take = min(available, budget)
@@ -2721,6 +2742,8 @@ def read_artifact_range(
     result = {
         **metadata,
         "byte_offset": byte_offset,
+        "requested_byte_offset": requested_byte_offset,
+        "cursor_normalized": byte_offset != requested_byte_offset,
         "returned_bytes": delivered,
         "complete": next_offset >= metadata["byte_size"],
         "next_byte_offset": None if next_offset >= metadata["byte_size"] else next_offset,

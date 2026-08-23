@@ -47,7 +47,7 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
             set(planning["properties"]),
             {
                 "overview", "requirement_coverage", "recommendation",
-                "recommendation_rationale", "resolved_questions", "risks",
+                "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks",
                 "work_packages",
             },
         )

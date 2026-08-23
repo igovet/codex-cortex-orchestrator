@@ -926,10 +926,10 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         })
         self.assertFalse(stale["ok"], stale)
         self.assertEqual(stale["code"], "continue_validation_failed")
-        self.assertFalse(stale["retryable"])
+        self.assertTrue(stale["retryable"])
         self.assertEqual(stale["stop_reason"], "stale_relative_step")
-        self.assertIn("Do not call continue_orchestration again", stale["next_action"])
-        self.assertIn("do not request artifacts", stale["next_action"])
+        self.assertIn("manage_orchestration", stale["next_action"])
+        self.assertIn("Do not replay", stale["next_action"])
 
     def test_completed_child_recovery_set_survives_compaction_before_read(self) -> None:
         """A compacted coordinator can recover the exact data needed to continue.

@@ -646,12 +646,7 @@ class ControlPlaneTests(unittest.TestCase):
             check=True,
         )
         payload = json.loads(stop.stdout)
-        self.assertEqual(payload["decision"], "block", stop.stderr)
-        self.assertIn("CORTEX ACTIVE WORKER", payload["reason"])
-        self.assertIn("wait only for the exact persisted child", payload["reason"])
-        self.assertNotIn("hookSpecificOutput", payload)
-        self.assertNotIn(worker_id, payload["reason"])
-        self.assertNotIn(started["task_ref"], payload["reason"])
+        self.assertEqual(payload, {})
 
         loop_escape = subprocess.run(
             [sys.executable, str(hook)],
@@ -3057,13 +3052,13 @@ class ControlPlaneTests(unittest.TestCase):
         )
         blocked = self.v3_start("new task must never attach to the existing task")
         self.assertFalse(blocked["ok"])
-        self.assertEqual(blocked["outcome"], "blocked")
+        self.assertEqual(blocked["outcome"], "needs_input")
         self.assertEqual(blocked["code"], "start_state_incompatible")
-        self.assertFalse(blocked["retryable"])
+        self.assertTrue(blocked["retryable"])
         self.assertFalse(blocked["task_created"])
         self.assertNotIn("task_ref", blocked)
         self.assertIn("Cortex did not create a task", blocked["next_action"])
-        self.assertIn("Do not call manage_orchestration", blocked["next_action"])
+        self.assertIn("retry the same start_orchestration request", blocked["next_action"])
 
         recovery = control.manage_orchestration({
             "project_root": str(self.project), "intent": "inspect",
@@ -4557,6 +4552,21 @@ class ControlPlaneTests(unittest.TestCase):
         planning = self.v3_planning()
         planning["work_packages"][0]["gates"] = ["not_a_real_gate"]
         with self.assertRaisesRegex(ValueError, "references unknown gates"):
+            control.sanitize_planning_payload(planning)
+
+    def test_planner_recommendation_actions_are_concrete_and_reference_plan_items(self):
+        planning = self.v3_planning()
+        planning["recommendation"] = "revise"
+        planning["recommendation_actions"] = [{
+            "issue": "The plan leaves the regression risk unresolved.",
+            "action": "Add a focused regression test before implementation closes.",
+            "plan_refs": ["core_change"],
+            "verification": "Run the focused regression test.",
+        }]
+        sanitized = control.sanitize_planning_payload(planning)
+        self.assertEqual(sanitized["recommendation_actions"][0]["plan_refs"], ["core_change"])
+        planning["recommendation_actions"][0]["plan_refs"] = ["missing_plan_item"]
+        with self.assertRaisesRegex(ValueError, "recommendation_actions\[0\].*unknown plan items"):
             control.sanitize_planning_payload(planning)
 
 

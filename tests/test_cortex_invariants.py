@@ -549,7 +549,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "intent_clarification_required": False, "intent_clarification_reason": None,
         }
         prompt = control.host_spawn_prompt("planner", package)
-        self.assertIn("REQUIRED top-level planning sibling={overview,work_packages}", prompt)
+        self.assertIn(
+            "REQUIRED top-level planning siblings={overview,work_packages,recommendation,recommendation_rationale,recommendation_actions}",
+            prompt,
+        )
 
     def test_installable_orchestrator_releases_completed_native_agent_slots(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -975,11 +978,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         output = json.loads(completed.stdout)["hookSpecificOutput"]
         self.assertEqual(output["hookEventName"], "PreToolUse")
-        self.assertEqual(output["permissionDecision"], "deny")
-        reason = output["permissionDecisionReason"]
-        self.assertIn("CORTEX DISPATCH FAILURE", reason)
-        self.assertIn("No worker was spawned", reason)
-        self.assertIn("Never retry an empty wait", reason)
+        self.assertNotIn("permissionDecision", output)
+        reason = output["additionalContext"]
+        self.assertIn("CORTEX DISPATCH ADVISORY", reason)
+        self.assertIn("no worker was spawned", reason)
+        self.assertIn("retry the lifecycle step", reason)
 
         bare_wait = {
             "hook_event_name": "PreToolUse",

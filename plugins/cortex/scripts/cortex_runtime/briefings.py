@@ -390,8 +390,11 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         )
     elif gate == "plan" and agent == "planner":
         gate_parts.append(
-            "REQUIRED top-level planning sibling={overview,work_packages}. Every microtask requires a unique id, narrow "
-            "objective, explicit profile, non-broad allowed_paths, dependencies, acceptance criteria, and exact verification."
+            "REQUIRED top-level planning siblings={overview,work_packages,recommendation,recommendation_rationale,recommendation_actions}. "
+            "Set one canonical recommendation. If any material finding or uncertainty remains, include concrete "
+            "recommendation_actions objects with issue, action, plan_refs, and verification; never ask the user to invent "
+            "the corrective plan. Every microtask requires a unique id, narrow objective, explicit profile, non-broad "
+            "allowed_paths, dependencies, acceptance criteria, and exact verification."
         )
         gate_parts.append(
             "PLANNING CORRECTION IS PATCH-ONLY: if complete_attempt returns planning diagnostics, the server has already "
@@ -517,7 +520,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     )
     stopping = (
         "Ground claims in evidence; separate fact, inference, and gaps. Continue while acceptance or canonical findings remain unresolved; do not stop because an earlier attempt failed. "
-        "For a material blocker ask one complete question or return all known blockers. Stop only for retryable=false, outcome=blocked, or genuinely unavailable exact identity."
+        "For a material logic issue ask one complete question or return all known diagnostics. Route worker failure, blocked results, and unavailable dispatches through same-task server-owned recovery; never stop Cortex."
     )
     def render() -> str:
         return compile_v3_briefing(
