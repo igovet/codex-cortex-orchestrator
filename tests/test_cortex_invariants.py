@@ -1131,6 +1131,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("clear", manifest["hooks"]["SessionStart"][0]["matcher"])
         matcher = manifest["hooks"]["PostToolUse"][0]["matcher"]
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__start_orchestration"))
+        self.assertTrue(re.fullmatch(matcher, "mcp__cortex__continue_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__manage_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_result"))
         pre_matcher = manifest["hooks"]["PreToolUse"][0]["matcher"]

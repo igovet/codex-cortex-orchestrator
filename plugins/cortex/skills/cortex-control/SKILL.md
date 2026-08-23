@@ -32,13 +32,11 @@ ordinary Desktop launch can activate `$cortex:orchestrator`. Explicit `worker`
 and `coordinator` audiences remain
 strict five-tool projections; JSON-RPC initialization and tool arguments cannot
 select or elevate the audience. Coordinator capability recovery is accepted on
-the explicit `coordinator` projection, and requires the exact
-active task, principal, thread, and non-durable recovery proof returned with
-the original successful authorization response. A lost recovery response is
-retried with that proof; Cortex redelivers one HMAC-derived replacement pair.
-Only opaque delivery metadata and SHA-256 verifiers are durable. A lost initial
-start response remains fail-closed without host attestation, and workers never
-receive coordinator secrets. The worker prompt/profile remains worker-only;
+the explicit `coordinator` projection and is resolved from the active
+host/session binding using the exact task reference. Raw capabilities, recovery
+proofs, and replacement bearers are never returned to the model or transported
+through MCP. Only opaque claims and SHA-256 verifiers are durable; workers
+never receive coordinator secrets. The worker prompt/profile remains worker-only;
 hosts that require transport-enforced separation use a strict `worker` or
 `coordinator` projection at process launch.
 

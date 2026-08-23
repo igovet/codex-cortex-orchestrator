@@ -995,6 +995,82 @@ def _codex_host_session_id() -> str | None:
     return None
 
 
+def _worker_binding_from_host_session() -> dict[str, str] | None:
+    """Resolve a native worker binding when the host cannot inject env JSON.
+
+    The Codex native spawn host starts the child's MCP process independently
+    and does not provide a per-process environment extension.  The lifecycle
+    hook nevertheless records the exact host agent/session identity in the
+    private worker_sessions ledger before the child makes its first MCP call.
+    Resolve only one matching resumable/running row across the private host
+    project stores, then derive the complete identity from that attempt.  The
+    coordinator's ordinary CODEX_SESSION_ID is not a worker row and therefore
+    remains unbound.  No model-authored token or semantic request field is
+    consulted.
+    """
+    candidates = {
+        str(os.environ.get(name) or "").strip()
+        for name in (
+            "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_AGENT_ID",
+            "CODEX_SUBAGENT_ID", "CODEX_TASK_ID",
+        )
+    }
+    candidates = {value for value in candidates if value and SAFE_ID_RE.fullmatch(value)}
+    if not candidates:
+        return None
+    projects = _host_control_projects_for_lookup()
+    if projects is None:
+        return None
+    matches: list[dict[str, str]] = []
+    try:
+        project_dirs = sorted(projects.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return None
+    for project_dir in project_dirs:
+        if not project_dir.name.startswith("p-"):
+            continue
+        try:
+            _assert_private_directory(project_dir, "Cortex host project ledger")
+            for task_id in sorted(db_task_index(project_dir)):
+                sessions = db_list_worker_sessions(project_dir, str(task_id))
+                for session in sessions:
+                    if str(session.get("status") or "") not in {"running", "awaiting_spawn", "idle_resumable"}:
+                        continue
+                    identities = {
+                        str(session.get("session_id") or "").strip(),
+                        str(session.get("host_agent_id") or "").strip(),
+                        str(session.get("host_task_name") or "").strip(),
+                    }
+                    if not candidates.isdisjoint(identities):
+                        loaded = _v3_task_state(project_dir, str(task_id))
+                        if loaded is None:
+                            continue
+                        _task_dir, state, task = loaded
+                        attempt_id = str(session.get("attempt_id") or "").strip()
+                        attempt = _attempt(state, attempt_id)
+                        if not attempt or attempt.get("status") not in {"running", AWAITING_HOST_SPAWN}:
+                            continue
+                        matches.append({
+                            "project_root": str(task.get("project_root") or ""),
+                            "task_id": str(state.get("task_id") or task_id),
+                            "task_ref": str(state.get("task_ref") or _v3_task_ref(str(task_id))),
+                            "attempt_id": attempt_id,
+                            "profile": str(attempt.get("profile") or attempt.get("agent") or ""),
+                            "dispatch_ref": str(attempt.get("dispatch_ref") or ""),
+                            "briefing_digest": str(attempt.get("briefing_digest") or ""),
+                            "session_id": str(session.get("session_id") or ""),
+                        })
+        except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError, TypeError):
+            continue
+    if len(matches) != 1:
+        return None
+    binding = matches[0]
+    required = ("project_root", "task_id", "attempt_id", "profile")
+    if any(not binding.get(field) for field in required):
+        return None
+    return binding
+
+
 def _reject_symlink_ancestry(path: Path, label: str, allow_missing_leaf: bool = False) -> Path:
     """Return an absolute path after rejecting every existing symlink component."""
     candidate = path.expanduser().absolute()
@@ -8904,7 +8980,7 @@ def _operation_registry(root: Path) -> dict[str, Any]:
     # document. Remove and invalidate that retired material on first access;
     # hashing a bearer that may already have been read would preserve a
     # compromised credential. Affected active tasks therefore fail closed and
-    # require a fresh start to receive a new one-response capability.
+    # require a fresh host activation to establish new server-owned claims.
     scrubbed_retired_capability = False
     for reservation in registry["starts"].values():
         if isinstance(reservation, dict):
@@ -9615,14 +9691,12 @@ def _recovery_task_identity(params: dict[str, Any], project: Path) -> tuple[Path
 
 
 def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> dict[str, Any]:
-    """Stage or redeliver a replacement pair without rotating active access.
+    """Acknowledge host-owned recovery without redelivering credentials.
 
     Recovery has a deliberately narrower identity contract than ordinary
-    governance calls: the exact task_ref, principal, thread_id, and a
-    coordinator-only recovery proof are all required and must still identify
-    the active activation.  Public identifiers alone are never recovery
-    authority.  Callers cannot request a project-admin elevation through this
-    route.
+    governance calls: the exact task_ref must identify the active host-bound
+    activation. Public identifiers alone are never recovery authority. Callers
+    cannot request a project-admin elevation through this route.
     """
     task_ref = str(params.get("task_ref") or "").strip()
     root = ledger_root({"project_root": str(project)})
@@ -9630,68 +9704,57 @@ def _recover_coordinator_capability(params: dict[str, Any], project: Path) -> di
     if bound is None:
         raise GovernanceError("no unique active host-bound coordinator session matches this recovery request", code="coordinator_authorization_required")
     task_id, principal, thread_id, _mode = bound
-    recovery_proof = _host_bound_recovery_proof(root, task_id)
     generation_raw = params.get("capability_generation")
     if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
         raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
-    authorization_update, claims, redelivered = _begin_coordinator_capability_recovery(
-        root,
-        task_id=task_id,
-        principal=principal,
-        thread_id=thread_id,
-        recovery_proof=recovery_proof,
-        expected_generation=generation_raw,
-    )
+    # There is no model-delivered credential to recover anymore. The host
+    # binding remains the authority, so recovery is an idempotent metadata
+    # acknowledgement rather than a secret redelivery protocol.
+    claims = _coordinator_capability_claims_for_task(root, task_id)
+    if claims is None:
+        raise GovernanceError(
+            "active host-bound coordinator session has no valid claims",
+            code="coordinator_authorization_required",
+        )
+    if generation_raw is not None and int(claims["generation"]) != generation_raw:
+        raise GovernanceError(
+            "capability generation is stale; continue from the current host-bound coordinator session",
+            code="coordinator_capability_stale",
+        )
     return {
         "schema": "cortex/governance/v1",
         "ok": True,
-        "outcome": "coordinator_capability_recovery_redelivered" if redelivered else "coordinator_capability_recovery_pending",
+        "outcome": "coordinator_capability_recovered",
         "action": "recover_coordinator_capability",
         "task_ref": task_ref,
         "authorization": {
             "actor": "coordinator",
-            "source": "server_activation_capability_recovery_pending",
+            "source": "host_activation",
             "principal": principal,
             "thread_id": thread_id,
             "capability_kind": claims["kind"],
-            "generation": int(claims["generation"]) + 1,
+            "generation": claims["generation"],
         },
-        # This is intentionally the only non-start response path that
-        # contains raw coordinator authorization material.  Neither registry
-        # nor rotation audit receives either value, and worker transport never
-        # exposes this operation.
-        "authorization_update": {
-            **authorization_update,
-        },
-        "next_action": (
-            "Call manage_governance once with action=acknowledge_coordinator_recovery, the exact task_ref/principal/thread_id, "
-            "both authorization_update values, and previous_coordinator_recovery_proof set to the old proof. Until acknowledgement, retain and use the old capability/proof."
-        ),
+        "next_action": "Continue the same host-bound coordinator task; recovery was completed server-side.",
     }
 
 
 def _acknowledge_coordinator_recovery(params: dict[str, Any], project: Path) -> dict[str, Any]:
-    """Commit a pending recovery only after its delivered replacement pair returns."""
+    """Return host-owned recovery metadata without accepting raw credentials."""
     task_ref = str(params.get("task_ref") or "").strip()
     root = ledger_root({"project_root": str(project)})
     bound = _host_bound_governance_activation(project, task_ref)
     if bound is None:
         raise GovernanceError("no unique active host-bound coordinator session matches this recovery request", code="coordinator_authorization_required")
     task_id, principal, thread_id, _mode = bound
-    recovery_proof = _host_bound_recovery_proof(root, task_id)
     generation_raw = params.get("capability_generation")
     if generation_raw is not None and (not isinstance(generation_raw, int) or generation_raw < 1):
         raise GovernanceError("capability_generation must be a positive integer", code="coordinator_capability_invalid")
-    claims = _acknowledge_coordinator_capability_recovery(
-        root,
-        task_id=task_id,
-        principal=principal,
-        thread_id=thread_id,
-        replacement_capability=str(params.get("coordinator_capability") or ""),
-        replacement_recovery_proof=str(params.get("coordinator_recovery_proof") or ""),
-        previous_recovery_proof=str(params.get("previous_coordinator_recovery_proof") or recovery_proof),
-        expected_generation=generation_raw,
-    )
+    claims = _coordinator_capability_claims_for_task(root, task_id)
+    if claims is None:
+        raise GovernanceError("active host-bound coordinator session has no valid claims", code="coordinator_authorization_required")
+    if generation_raw is not None and int(claims["generation"]) != generation_raw:
+        raise GovernanceError("capability generation is stale; continue from the current host-bound coordinator session", code="coordinator_capability_stale")
     return {
         "schema": "cortex/governance/v1",
         "ok": True,
@@ -9700,7 +9763,7 @@ def _acknowledge_coordinator_recovery(params: dict[str, Any], project: Path) -> 
         "task_ref": task_ref,
         "authorization": {
             "actor": "coordinator",
-            "source": "server_activation_capability_recovery_acknowledgement",
+            "source": "host_activation",
             "principal": principal,
             "thread_id": thread_id,
             "capability_kind": claims["kind"],
@@ -11192,19 +11255,14 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         response = _v3_response(old, task_ref, start_replayed=replayed)
         authorization = _take_coordinator_capability(ledger_root(params), task_id)
         staged_authorization_task_id = None
-        if authorization and response.get("ok"):
-            capability, recovery_proof = authorization
-            response["authorization"] = {
-                "coordinator_capability": capability,
-                "coordinator_recovery_proof": recovery_proof,
-            }
-        elif authorization:
-            # The one response that could have safely delivered both raw
-            # secrets did not succeed.  Do not leave an idempotent retry as a
-            # bearer/recovery oracle; invalidate the staged claims instead.
+        # Coordinator authorization is host/session-owned. Never publish the
+        # staged bearer or recovery proof in a model-facing start receipt;
+        # normal governance derives both from the active host binding.
+        if authorization and not response.get("ok"):
             _revoke_coordinator_capability(
                 ledger_root(params), task_id, reason="start_authorization_response_unavailable"
             )
+        del authorization
         return response
     except OperationRegistryError as exc:
         if reserved_task_id and materialization_owner:
@@ -13526,12 +13584,9 @@ def _manage_governance_input_diagnostics(params: Any) -> list[dict[str, Any]]:
         if value is None or (isinstance(value, str) and not value.strip()):
             add_required(field, f"{field} is required for action {normalized_action}")
     if normalized_action in CAPABILITY_RECOVERY_ACTIONS:
-        # Recovery is deliberately allowed through to the canonical proof
-        # handler without a bearer.  The original response can be lost, so a
-        # recover request authenticates with the non-durable recovery proof;
-        # acknowledge validates the delivered replacement pair itself.  If we
-        # reject the absent bearer here, callers receive a generic form error
-        # and never reach the security-specific proof/delivery diagnostics.
+        # Recovery is deliberately allowed through to the host-bound handler
+        # without any caller-authored bearer or proof. The server owns both
+        # identity and recovery state; the model receives metadata only.
         for field in ("task_ref",):
             value = params.get(field)
             if value is None or (isinstance(value, str) and not value.strip()):
@@ -14112,6 +14167,12 @@ def main() -> None:
     # the normal coordinator form unchanged, while a bound process exposes
     # the strict worker identity to the shared read_worker_result handler.
     binding = binding_from_environment()
+    if binding is None:
+        # The native Codex spawn host cannot attach a per-child environment
+        # value.  The trusted SubagentStart hook records the child identity
+        # in the private worker-session ledger, which is the equivalent
+        # server-owned transport boundary for this host.
+        binding = _worker_binding_from_host_session()
     with worker_binding(binding):
         serve_stdio(
             public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),

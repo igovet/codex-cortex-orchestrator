@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sys
+import os
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -68,6 +70,61 @@ class WorkerIdentityTransportTests(unittest.TestCase):
             with worker_request():
                 self.assertEqual(bind_semantic_params({"summary": "x"})["attempt_id"], "attempt-1")
             self.assertEqual(current_binding(), binding)
+
+    def test_native_host_session_resolves_binding_without_env_json(self) -> None:
+        """Default CLI child launches can recover the server binding from its host row."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "project"
+            project.mkdir()
+            host_store = base / "host-store"
+            host_store.mkdir(mode=0o700)
+            previous_store = os.environ.get(cortex.HOST_CONTROL_STORE_ENV)
+            previous_thread = os.environ.get("CODEX_THREAD_ID")
+            os.environ[cortex.HOST_CONTROL_STORE_ENV] = str(host_store)
+            try:
+                started = cortex.start_orchestration({
+                    "project_root": str(project),
+                    "task": {
+                        "user_request": "Exercise host-owned native binding recovery.",
+                        "acceptance_criteria": ["The child binding is recovered."],
+                        "verification": ["Run the focused transport test."],
+                        "complexity": "C1",
+                    },
+                    "waves": [{"workers": [{"phase": "discover"}]}],
+                })
+                self.assertTrue(started["ok"], started)
+                ledger = cortex.ledger_root_path({"project_root": str(project)})
+                task_id = next(iter(cortex.db_task_index(ledger)))
+                loaded = cortex._v3_task_state(ledger, task_id)
+                self.assertIsNotNone(loaded)
+                _task_dir, state, _task = loaded
+                attempt = state["attempts"][0]
+                host_id = "native-child-session-123"
+                cortex.db_put_worker_session(ledger, {
+                    "task_id": task_id,
+                    "attempt_id": attempt["attempt_id"],
+                    "host_agent_id": host_id,
+                    "host_task_name": attempt["spawn_request"]["task_name"],
+                    "host_tool": "spawn_agent",
+                    "status": "awaiting_spawn",
+                })
+                os.environ.pop("CORTEX_WORKER_BINDING_JSON", None)
+                os.environ["CODEX_THREAD_ID"] = host_id
+                binding = cortex._worker_binding_from_host_session()
+                self.assertIsNotNone(binding)
+                self.assertEqual(binding["task_id"], task_id)
+                self.assertEqual(binding["attempt_id"], attempt["attempt_id"])
+                self.assertEqual(binding["profile"], attempt["profile"])
+            finally:
+                if previous_store is None:
+                    os.environ.pop(cortex.HOST_CONTROL_STORE_ENV, None)
+                else:
+                    os.environ[cortex.HOST_CONTROL_STORE_ENV] = previous_store
+                if previous_thread is None:
+                    os.environ.pop("CODEX_THREAD_ID", None)
+                else:
+                    os.environ["CODEX_THREAD_ID"] = previous_thread
 
 
 if __name__ == "__main__":

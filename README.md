@@ -951,12 +951,13 @@ Briefings have non-blocking compactness targets:
 1.5 KiB for the bootstrap, 16 KiB for ordinary work, and 18 KiB for harvest
 work. They are prompt guidance, not lifecycle authority.
 
-Governance authorization is returned once by the original successful start;
-the project ledger stores only its SHA-256 digest and a separate digest for a
-non-durable coordinator recovery proof. An idempotent start retry does not
-recover or reissue either value. Capability recovery requires the exact task,
-principal, thread, and original recovery proof, and an explicit worker audience
-cannot call it. Plaintext credentials are never stored. Governance mode `off`
+Governance authorization is host/session-owned and is never returned as a raw
+capability or recovery proof in an MCP response. The project ledger stores only
+server-side claims and SHA-256 verifiers. Recovery is an idempotent host-bound
+operation addressed by the exact task reference; the model never transports a
+proof or replacement bearer, and an explicit worker audience cannot call it.
+Plaintext credentials are never stored or included in transcripts, briefings,
+exports, or diagnostics. Governance mode `off`
 is accepted only for C1 after an exhaustive boolean assessment of every
 hard and topology trigger; prose detection may raise the floor but can never
 authorize `off`. Sensitive governance records require an approved exact-type

@@ -23,6 +23,32 @@ MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
 DEFAULT_MCP_AUDIENCE = "default"
 CANONICAL_MODELS = ("gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra")
 
+# Raw host credentials must never cross the MCP/public response boundary.
+# Keep this projection at the last point before JSON-RPC serialization so an
+# individual lifecycle handler cannot re-introduce a bearer/proof through a
+# success, recovery, error, transcript, or briefing.
+_PUBLIC_SECRET_KEYS = frozenset({
+    "coordinator_capability",
+    "coordinator_recovery_proof",
+    "previous_coordinator_recovery_proof",
+    "authorization_update",
+})
+
+
+def _scrub_public_response(value: object) -> object:
+    """Remove host-owned authorization material from model-facing values."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _scrub_public_response(item)
+            for key, item in value.items()
+            if str(key) not in _PUBLIC_SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_scrub_public_response(item) for item in value]
+    if isinstance(value, tuple):
+        return [_scrub_public_response(item) for item in value]
+    return value
+
 
 def _public_next_action(value: object) -> str:
     """Return the canonical server-provided next action."""
@@ -1765,7 +1791,7 @@ def serve_stdio(
                 name = request.get("params", {}).get("name")
                 if name not in public_tools:
                     if name in all_public_names:
-                        value = _tool_unavailable_receipt(name, normalized_audience)
+                        value = _scrub_public_response(_tool_unavailable_receipt(name, normalized_audience))
                         result = {
                             "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}],
                             "structuredContent": value,
@@ -1800,6 +1826,7 @@ def serve_stdio(
                 # previous attempt's ContextVar into a corrective dispatch.
                 with worker_request():
                     value = public_tools[name][0](arguments)
+                value = _scrub_public_response(value)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
             elif method == "ping":
                 result = {}

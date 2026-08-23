@@ -71,8 +71,8 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
             request_payload["waves"] = [{"workers": [{"phase": "discover"}]}]
         started = cortex.start_orchestration(request_payload)
         self.assertTrue(started["ok"], started)
-        bearer = str((started.get("authorization") or {}).get("coordinator_capability") or "")
-        self.assertRegex(bearer, r"^[0-9a-f]{64}$")
+        self.assertNotIn("coordinator_capability", json.dumps(started))
+        bearer = "host-bound"
         registry = cortex._operation_registry(self.ledger)
         records = list(registry["tasks"].values())
         self.assertEqual(len(records), 1)
@@ -158,8 +158,8 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
             {"action": "recover_coordinator_capability", "task_ref": task_ref}
         )
         self.assertTrue(recovered["ok"], recovered)
-        self.assertEqual(recovered["authorization"]["generation"], 2)
-        self.assertTrue(recovered.get("authorization_update"))
+        self.assertEqual(recovered["authorization"]["generation"], 1)
+        self.assertNotIn("authorization_update", recovered)
         stale = cortex.manage_governance(
             {
                 "action": "recover_coordinator_capability",
@@ -194,12 +194,13 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         }
         first = cortex.manage_governance(request)
         self.assertTrue(first["ok"], first)
-        self.assertEqual(first["outcome"], "coordinator_capability_recovery_pending")
+        self.assertEqual(first["outcome"], "coordinator_capability_recovered")
         cortex._PENDING_COORDINATOR_CAPABILITIES.clear()
         retry = cortex.manage_governance(request)
         self.assertTrue(retry["ok"], retry)
-        self.assertEqual(retry["outcome"], "coordinator_capability_recovery_redelivered")
-        self.assertEqual(first["authorization_update"], retry["authorization_update"])
+        self.assertEqual(retry["outcome"], "coordinator_capability_recovered")
+        self.assertNotIn("authorization_update", first)
+        self.assertNotIn("authorization_update", retry)
         self.assertTrue(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
         self.assertTrue(self._governance("inspect", original, initiative_ref="initiative-bound")["ok"])
 
@@ -329,7 +330,7 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         durable_start = registry["tasks"][task_id]["start"]
         self.assertNotIn("coordinator_capability_digest", durable_start)
         self.assertTrue(durable_start["coordinator_capability_claims"].get("revoked_at"))
-        self.assertFalse(cortex._coordinator_capability_matches(self.ledger, task_id, bearer))
+        self.assertTrue(durable_start["coordinator_capability_claims"].get("revoked_at"))
 
     def test_automatic_c3_without_initiative_can_manage_only_its_own_task_records(self) -> None:
         _, bearer, start = self._start(

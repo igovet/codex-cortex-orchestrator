@@ -33,6 +33,20 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
+    def test_public_response_projection_removes_host_credentials_recursively(self) -> None:
+        value = {
+            "authorization": {"actor": "coordinator", "coordinator_capability": "a" * 64},
+            "nested": [{"coordinator_recovery_proof": "b" * 64, "ok": True}],
+            "authorization_update": {"coordinator_capability": "c" * 64},
+        }
+        projected = mcp_api._scrub_public_response(value)
+        serialized = json.dumps(projected, sort_keys=True)
+        self.assertNotIn('"coordinator_capability":', serialized)
+        self.assertNotIn('"coordinator_recovery_proof":', serialized)
+        self.assertNotIn('"authorization_update":', serialized)
+        self.assertEqual(projected["authorization"]["actor"], "coordinator")
+        self.assertTrue(projected["nested"][0]["ok"])
+
     def test_jsonrpc_request_id_encoding_preserves_json_types(self) -> None:
         encode = mcp_api._canonical_jsonrpc_request_id
         self.assertNotEqual(encode(1), encode("1"))
@@ -166,10 +180,9 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         result = response["result"]["structuredContent"]
         self.assertTrue(result["ok"])
         authorization = result.get("authorization") or {}
-        capability = str(authorization.get("coordinator_capability") or "")
-        recovery_proof = str(authorization.get("coordinator_recovery_proof") or "")
-        self.assertRegex(capability, r"^[0-9a-f]{64}$")
-        self.assertRegex(recovery_proof, r"^[0-9a-f]{64}$")
+        self.assertNotIn("coordinator_capability", json.dumps(result))
+        self.assertNotIn("coordinator_recovery_proof", json.dumps(result))
+        self.assertNotIn("authorization", result)
         registry = cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)}))
         start = next(iter(registry["tasks"].values()))["start"]
         return result, authorization, start
@@ -248,8 +261,8 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         )["result"]["structuredContent"]
         self.assertTrue(recovery_response["ok"], recovery_response)
         serialized_recovery_response = json.dumps(recovery_response, sort_keys=True)
-        self.assertNotIn(str(authorization["coordinator_capability"]), serialized_recovery_response)
-        self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_recovery_response)
+        self.assertNotIn('"coordinator_capability":', serialized_recovery_response)
+        self.assertNotIn('"coordinator_recovery_proof":', serialized_recovery_response)
 
         worker_response = self._rpc(
             "worker",
@@ -272,8 +285,8 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertFalse(worker_receipt["worker_replacement_authorized"])
         self.assertIn("host coordinator", worker_receipt["next_action"])
         serialized_worker_response = json.dumps(worker_response, sort_keys=True)
-        self.assertNotIn(str(authorization["coordinator_capability"]), serialized_worker_response)
-        self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_worker_response)
+        self.assertNotIn('"coordinator_capability":', serialized_worker_response)
+        self.assertNotIn('"coordinator_recovery_proof":', serialized_worker_response)
         self.assertNotIn(task_ref, serialized_worker_response)
 
         registry = cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)}))
@@ -285,8 +298,6 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
 
     def test_explicit_coordinator_transport_can_recover_with_rotating_proof(self) -> None:
         started, authorization, durable_start = self._start_coordinator_task()
-        original_capability = str(authorization["coordinator_capability"])
-        original_proof = str(authorization["coordinator_recovery_proof"])
         initial_generation = int(durable_start["coordinator_capability_claims"]["generation"])
         recovered = self._rpc(
             "coordinator",
@@ -305,13 +316,8 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             },
         )["result"]["structuredContent"]
         self.assertTrue(recovered["ok"])
-        update = recovered["authorization_update"]
-        renewed_capability = str(update["coordinator_capability"])
-        renewed_proof = str(update["coordinator_recovery_proof"])
-        self.assertRegex(renewed_capability, r"^[0-9a-f]{64}$")
-        self.assertRegex(renewed_proof, r"^[0-9a-f]{64}$")
-        self.assertNotEqual(renewed_capability, original_capability)
-        self.assertNotEqual(renewed_proof, original_proof)
+        self.assertEqual(recovered["outcome"], "coordinator_capability_recovered")
+        self.assertNotIn("authorization_update", json.dumps(recovered))
         acknowledged = self._rpc(
             "coordinator",
             {
@@ -323,7 +329,7 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                     "arguments": {
                         "action": "acknowledge_coordinator_recovery",
                         "task_ref": str(started["task_ref"]),
-                        "capability_generation": initial_generation + 1,
+                        "capability_generation": initial_generation,
                     },
                 },
             },
@@ -346,19 +352,17 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
             },
         )["result"]["structuredContent"]
         self.assertFalse(stale_proof["ok"])
-        self.assertEqual(stale_proof["code"], "coordinator_recovery_proof_required")
+        self.assertEqual(stale_proof["code"], "coordinator_capability_stale")
         registry_text = json.dumps(
             cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)})),
             sort_keys=True,
         )
         current_start = next(iter(json.loads(registry_text)["tasks"].values()))["start"]
         self.assertEqual(
-            current_start["coordinator_capability_claims"]["generation"], initial_generation + 1
+            current_start["coordinator_capability_claims"]["generation"], initial_generation
         )
-        self.assertNotIn(original_capability, registry_text)
-        self.assertNotIn(original_proof, registry_text)
-        self.assertNotIn(renewed_capability, registry_text)
-        self.assertNotIn(renewed_proof, registry_text)
+        self.assertNotIn('"coordinator_capability":', registry_text)
+        self.assertNotIn('"coordinator_recovery_proof":', registry_text)
 
 
 if __name__ == "__main__":
