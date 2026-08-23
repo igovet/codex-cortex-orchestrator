@@ -62,6 +62,23 @@ skill is the authoritative runtime protocol for root isolation, dispatch,
 questions, evidence, recovery, ownership, verification, and private diagnostic
 handling. No project-local `AGENTS.md` is part of the installed contract.
 
+## Explicit task identity and new-task default
+
+A request may continue, resume, inspect, steer, or follow up an existing task
+only when the user's current message explicitly contains that task's opaque
+`task_ref` or explicit task number. Preserve that exact identifier; never infer
+it from the same Codex thread, prior turns, an active ledger entry, a similar
+request, words such as “continue” or “resume”, a thread URL, or available
+workers.
+
+If the current user message does not explicitly contain a `task_ref` or task
+number, the request is always a new task: call `start_orchestration` with a new
+task payload and do not call `continue_orchestration`, `manage_orchestration`,
+recovery/inspect, or select a prior task. “Continue the task” without an
+explicit `task_ref` or task number is a new-task request. A Codex thread ID is
+not a Cortex `task_ref` unless the user explicitly supplies it as the task
+identifier.
+
 ## Turn-local read discipline
 
 Maintain a turn-local evidence index of every fully read skill, file, and

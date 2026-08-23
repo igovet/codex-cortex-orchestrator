@@ -2042,6 +2042,22 @@ class OrchestrationInvariantTests(unittest.TestCase):
         after = control.capture_project_manifest(self.project)
         self.assertEqual(before["digest"], after["digest"])
 
+    def test_bundled_skills_require_explicit_task_identity_for_continuation(self):
+        root = Path(__file__).parents[1] / "plugins/cortex/skills"
+        expected = (
+            "## Explicit task identity and new-task default",
+            "only when the user's current message explicitly contains",
+            "the request is always a new task",
+            "do not call `continue_orchestration`, `manage_orchestration`,",
+            "A Codex thread ID is",
+            "not a Cortex `task_ref`",
+        )
+        for relative in ("orchestrator/SKILL.md", "cortex-control/SKILL.md"):
+            with self.subTest(relative=relative):
+                text = (root / relative).read_text(encoding="utf-8")
+                for marker in expected:
+                    self.assertIn(marker, text)
+
     def test_harvest_skills_require_exhaustive_feature_coverage(self):
         repository = Path(__file__).parents[1]
         orchestrator = (repository / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")

@@ -42,6 +42,23 @@ receive coordinator secrets. The worker prompt/profile remains worker-only;
 hosts that require transport-enforced separation use a strict `worker` or
 `coordinator` projection at process launch.
 
+## Explicit task identity and new-task default
+
+A request may continue, resume, inspect, steer, or follow up an existing task
+only when the user's current message explicitly contains that task's opaque
+`task_ref` or explicit task number. Preserve that exact identifier; never infer
+it from the same Codex thread, prior turns, an active ledger entry, a similar
+request, words such as “continue” or “resume”, a thread URL, or available
+workers.
+
+If the current user message does not explicitly contain a `task_ref` or task
+number, the request is always a new task: call `start_orchestration` with a new
+task payload and do not call `continue_orchestration`, `manage_orchestration`,
+recovery/inspect, or select a prior task. “Continue the task” without an
+explicit `task_ref` or task number is a new-task request. A Codex thread ID is
+not a Cortex `task_ref` unless the user explicitly supplies it as the task
+identifier.
+
 ## Coordinator state machine
 
 | Current state | Event | Only allowed action | User output |
@@ -150,7 +167,18 @@ paths forbidden above.
 
 ## Normal flow
 
-1. Before calling `start_orchestration`, materialize attachments. If the user
+1. Decide task identity before calling any lifecycle operation. Continue,
+   inspect, resume, steer, follow up, or otherwise reuse a task **only** when
+   the user explicitly supplied that exact `task_ref` or task number in the
+   current request. A prior transcript, matching task text, active project
+   task, remembered ref, dispatch, result, or a tool response is never user
+   authority to continue work. When the user did not explicitly identify a
+   task, this is always a new task: call `start_orchestration` and never call
+   task-scoped management or continuation for an older ref. If a start response
+   unexpectedly identifies an older task in that case, do not inspect, spawn,
+   or continue it; preserve the discrepancy as internal evidence and retry the
+   new start path. Then, before calling `start_orchestration`, materialize
+   attachments. If the user
    supplied an attachment or pasted-text reference, read it through the host
    attachment surface and place its exact content in `task.user_request`. Never
    send an attachment path as a placeholder, duplicate the path, or paraphrase
@@ -620,8 +648,11 @@ and receipts remain durable below the host-private Cortex state root.
 
 ## Idempotency and relative references
 
-Start resumes an identical unfinished request automatically. Continue replays
-a byte-identical retry for its internal active wave. The relative `step`
+Only an explicit user-supplied task reference or task number authorizes
+continuation of an unfinished task. An unreferenced request is always a new
+task even when its text matches an active task; the coordinator must not infer
+reuse from content, history, project state, an active dispatch, or a prior
+tool response. Continue replays a byte-identical retry for its internal active wave. The relative `step`
 distinguishes identical result content used on successive waves without
 exposing durable identity. Parallel worker slots are complete, unique, and
 validated atomically before task state changes.
