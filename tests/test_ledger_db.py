@@ -95,6 +95,80 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             self.assertFalse((project / ".codex" / "cortex" / "cortex.db").exists())
             self.assertFalse((root / "task-index.json").exists())
 
+    def test_start_orchestration_quarantines_noncanonical_history_and_starts(self) -> None:
+        """Start preflight recovers a 1..15 history without importing it."""
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "README.md").write_text("# fixture\n", encoding="utf-8")
+            root = cortex.ledger_root_path({"project_root": str(project)}, create=True)
+            root.mkdir(parents=True, mode=0o700)
+            database = root / ledger_db.DATABASE_NAME
+            ledger_db.ensure_database(root)
+            (root / "tasks").mkdir(mode=0o700)
+            (root / "lanes").mkdir(mode=0o700)
+            (root / "tasks" / "legacy-artifact.md").write_text("preserve task artifact", encoding="utf-8")
+            (root / "lanes" / "legacy-lane.json").write_text("{\"legacy\":true}", encoding="utf-8")
+            old_key = ledger_db._governance_lifecycle_key_path(root)
+            old_key.parent.mkdir(mode=0o700, exist_ok=True)
+            old_key.write_bytes(b"o" * 32)
+            old_key.chmod(0o600)
+            with sqlite3.connect(database) as connection:
+                connection.execute("DELETE FROM schema_migrations")
+                connection.executemany(
+                    "INSERT INTO schema_migrations VALUES(?,?,?,?)",
+                    [
+                        (version, f"historical-v{version}", "2026-01-01", "historical")
+                        for version in range(1, ledger_db.DATABASE_SCHEMA_VERSION + 1)
+                    ],
+                )
+                connection.execute("CREATE TABLE old_host_state(value TEXT NOT NULL)")
+                connection.execute("INSERT INTO old_host_state VALUES('preserve')")
+                connection.commit()
+            database.chmod(0o600)
+
+            started = cortex.start_orchestration({
+                "project_root": str(project),
+                "task": {
+                    "user_request": "Create a governed fixture result.",
+                    "complexity": "C1",
+                    "acceptance_criteria": ["The fixture result is produced."],
+                    "verification": ["Inspect the fixture result."],
+                },
+                "waves": [{"workers": [{"phase": "discover"}]}],
+            })
+
+            self.assertTrue(started["ok"], started)
+            self.assertEqual(started["outcome"], "ready_to_spawn")
+            self.assertTrue((root / ledger_db.DATABASE_NAME).is_file())
+            with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    ledger_db.DATABASE_SCHEMA_VERSION,
+                )
+                self.assertIsNone(connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='old_host_state'"
+                ).fetchone())
+            archives = list(root.glob("pre-canonical-ledger-*"))
+            self.assertEqual(len(archives), 1)
+            with sqlite3.connect(archives[0] / ledger_db.DATABASE_NAME) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM old_host_state").fetchone()[0],
+                    "preserve",
+                )
+            self.assertFalse((root / "tasks" / "legacy-artifact.md").exists())
+            self.assertFalse((root / "lanes" / "legacy-lane.json").exists())
+            self.assertEqual(
+                (archives[0] / "tasks" / "legacy-artifact.md").read_text(encoding="utf-8"),
+                "preserve task artifact",
+            )
+            self.assertEqual(
+                (archives[0] / "lanes" / "legacy-lane.json").read_text(encoding="utf-8"),
+                "{\"legacy\":true}",
+            )
+            self.assertEqual((archives[0] / "governance-lifecycle.key").read_bytes(), b"o" * 32)
+            self.assertNotEqual(old_key.read_bytes(), b"o" * 32)
+
     def test_ready_ledger_uses_read_only_readiness_probe_without_migration_write_path(self) -> None:
         """A warm helper call must not serialize on bootstrap/migration work."""
         with tempfile.TemporaryDirectory() as directory:
@@ -329,7 +403,7 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsupported pre-canonical ledger"):
                     ledger_db.ensure_database(root)
 
-    def test_database_with_removed_artifact_catalog_fails_closed(self) -> None:
+    def test_database_with_removed_artifact_catalog_is_quarantined(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             ledger_db.ensure_database(root)
@@ -338,8 +412,16 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 connection.execute("CREATE TABLE artifacts(artifact_id TEXT PRIMARY KEY)")
                 connection.execute("PRAGMA user_version = 0")
                 connection.commit()
-            with self.assertRaisesRegex(ValueError, "unsupported pre-canonical ledger"):
-                ledger_db.ensure_database(root)
+            ledger_db.ensure_database(root)
+            with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA user_version").fetchone()[0],
+                    ledger_db.DATABASE_SCHEMA_VERSION,
+                )
+                self.assertIsNone(connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='artifacts'"
+                ).fetchone())
+            self.assertEqual(len(list(root.glob("pre-canonical-ledger-*"))), 1)
 
     def test_user_version_history_and_schema_disagreements_fail_closed(self) -> None:
         with self.subTest("user_version ahead of immutable history"):
@@ -431,8 +513,8 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 [ledger_db.DATABASE_SCHEMA_VERSION],
             )
 
-    def test_noncurrent_v6_state_is_rejected_without_rewrite(self) -> None:
-        """A physical pre-canonical database is rejected and left untouched."""
+    def test_noncurrent_v6_state_is_quarantined_without_import(self) -> None:
+        """An older ledger is archived and replaced with a fresh current one."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             root.mkdir(parents=True)
@@ -445,13 +527,17 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 connection.commit()
             (root / "cortex.db").chmod(0o600)
 
-            with self.assertRaisesRegex(ValueError, "unsupported pre-canonical ledger"):
-                ledger_db.ensure_database(root)
+            ledger_db.ensure_database(root)
             with sqlite3.connect(root / "cortex.db") as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], ledger_db.DATABASE_SCHEMA_VERSION)
+                self.assertIsNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name='historical_v6_marker'").fetchone())
+            archives = list(root.glob("pre-canonical-ledger-*"))
+            self.assertEqual(len(archives), 1)
+            with sqlite3.connect(archives[0] / ledger_db.DATABASE_NAME) as connection:
                 self.assertEqual(connection.execute("SELECT value FROM historical_v6_marker").fetchone()[0], "preserve")
 
-    def test_noncurrent_v8_state_is_rejected_without_rewrite(self) -> None:
-        """A live noncurrent v8 ledger is never rewritten in place."""
+    def test_noncurrent_v8_state_is_quarantined_without_import(self) -> None:
+        """A live older ledger is not rewritten in place or imported."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             root.mkdir(parents=True)
@@ -464,9 +550,13 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                 connection.commit()
             (root / "cortex.db").chmod(0o600)
 
-            with self.assertRaisesRegex(ValueError, "unsupported pre-canonical ledger"):
-                ledger_db.ensure_database(root)
+            ledger_db.ensure_database(root)
             with sqlite3.connect(root / "cortex.db") as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], ledger_db.DATABASE_SCHEMA_VERSION)
+                self.assertIsNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name='historical_v8_marker'").fetchone())
+            archives = list(root.glob("pre-canonical-ledger-*"))
+            self.assertEqual(len(archives), 1)
+            with sqlite3.connect(archives[0] / ledger_db.DATABASE_NAME) as connection:
                 self.assertEqual(connection.execute("SELECT task_id FROM historical_v8_marker").fetchone()[0], "active-v8-task")
 
     def test_v14_to_v15_rebuild_preserves_attempt_events_and_is_idempotent(self) -> None:

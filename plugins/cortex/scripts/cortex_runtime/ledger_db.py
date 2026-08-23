@@ -104,6 +104,7 @@ class _DatabaseReadiness:
 # per-process state.  Entries are revalidated on every use and therefore are
 # never an authority source.
 _DATABASE_READINESS: OrderedDict[str, _DatabaseReadiness] = OrderedDict()
+_DATABASE_BOOTSTRAP_GUARD = threading.RLock()
 
 
 def _now() -> str:
@@ -328,6 +329,17 @@ def _assert_private_regular(path: Path, label: str, *, allow_missing: bool = Fal
         raise ValueError(f"{label} has unsafe permissions")
 
 
+def _fsync_directory(path: Path) -> None:
+    """Durably publish an atomic ledger rename on POSIX hosts."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _connect(root: Path) -> sqlite3.Connection:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     db_path = database_path(root)
@@ -357,6 +369,122 @@ def _connect(root: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA synchronous = FULL")
     return connection
+
+
+@contextlib.contextmanager
+def _database_bootstrap_lock(root: Path) -> Iterator[None]:
+    """Serialize first-boot and stale-ledger isolation across host processes.
+
+    A schema replacement is intentionally not a SQLite migration.  It is a
+    filesystem operation (the old database is renamed out of the active
+    path), so SQLite's database lock cannot protect the decision by itself.
+    Keep a private lock beside the ledger while deciding whether to quarantine
+    an incompatible file and while creating the replacement.
+    """
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = root / ".cortex-bootstrap.lock"
+    with _DATABASE_BOOTSTRAP_GUARD:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
+def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]) -> bool:
+    """Return whether the private ledger is not the exact current one.
+
+    Untrusted prior namespaces are archived without importing any state.  The
+    filesystem boundary checks remain fail-closed before this helper runs.
+    """
+    path = database_path(root)
+    if not path.exists():
+        return False
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return False
+        connection = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2,
+            isolation_level=None,
+        )
+        try:
+            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            migration = migrations[-1]
+            expected = (migration.version, migration.name, _migration_checksum(migration))
+            has_history = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+            ).fetchone() is not None
+            if has_history:
+                history = [tuple(row) for row in connection.execute(
+                    "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+                )]
+                if history != [expected] or user_version != migration.version:
+                    return True
+                try:
+                    _assert_migration_schema(connection, migration.version)
+                except (KeyError, TypeError, ValueError, sqlite3.Error):
+                    return True
+                return False
+            has_objects = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
+                "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            ).fetchone() is not None
+            return has_objects or user_version != 0
+        finally:
+            connection.close()
+    except OSError:
+        return False
+    except sqlite3.Error:
+        # A regular, private but unreadable DB is untrusted and can be
+        # isolated. Symlinks/non-regular files/unsafe modes were rejected
+        # before this path.
+        return True
+
+
+def _quarantine_database(root: Path) -> Path:
+    """Move the complete old ledger namespace into a private archive.
+
+    SQLite is only one part of the host control plane.  Task/lane artifacts,
+    state locks, and the lifecycle authentication key must not remain visible
+    beside a fresh database, or a new task could accidentally observe stale
+    files even though no old rows were imported.
+    """
+    database = database_path(root)
+    stamp = _now().replace("+00:00", "Z").replace(":", "").replace("-", "")
+    archive_root = root / f"pre-canonical-ledger-{stamp}-{secrets.token_hex(8)}"
+    archive_root.mkdir(mode=0o700)
+    # Keep the bootstrap lock outside the archive so a crash/retry can still
+    # serialize recovery.  Every other child belongs to the old namespace and
+    # is moved as one same-filesystem rename, including SQLite sidecars and
+    # task/lane/capability artifacts.
+    lock_path = root / ".cortex-bootstrap.lock"
+    for child in list(root.iterdir()):
+        if child == lock_path or child == archive_root:
+            continue
+        os.replace(child, archive_root / child.name)
+
+    # Lifecycle authentication is intentionally stored outside the SQLite
+    # directory.  Preserve that old key with the archived state and leave the
+    # active key path absent so the fresh ledger receives a new key.
+    old_key = _governance_lifecycle_key_path(root)
+    if old_key.exists():
+        archived_key = archive_root / "governance-lifecycle.key"
+        os.replace(old_key, archived_key)
+        try:
+            os.chmod(archived_key, 0o600)
+        except OSError:
+            pass
+
+    archive = archive_root / DATABASE_NAME
+    _fsync_directory(archive_root)
+    _fsync_directory(root)
+    return archive
 
 
 def _active_connections() -> dict[str, sqlite3.Connection]:
@@ -1496,35 +1624,45 @@ def _database_readiness_is_current(root: Path, migrations: tuple[_Migration, ...
 
 
 def ensure_database(root: Path) -> None:
-    """Open a fresh canonical ledger; reject every pre-canonical database."""
+    """Open a fresh canonical ledger without importing older database state.
+
+    A non-canonical or untrusted ledger is preserved under a private archive
+    name and replaced with a fresh current ledger. Unsafe filesystem
+    boundaries (symlinks, non-regular files, and unsafe permissions) still
+    fail closed before any quarantine is attempted.
+    """
     if _root_key(root) in _active_connections():
         _assert_current_migration_history(_active_connections()[_root_key(root)])
         return
     migrations = _migration_plan()
     if _database_readiness_is_current(root, migrations):
         return
-    with _connection(root, write=True) as connection:
-        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        has_history = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
-        ).fetchone() is not None
-        applied = _applied_migrations(connection) if has_history else {}
-        user_objects = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
-            "AND name NOT LIKE 'sqlite_%' LIMIT 1"
-        ).fetchone() is not None
-        if user_objects and not has_history:
-            raise ValueError("Cortex database is an unsupported pre-canonical ledger")
-        migration = migrations[0]
-        expected = (migration.name, _migration_checksum(migration))
-        if applied:
-            if applied != {migration.version: expected} or user_version != migration.version:
+    with _database_bootstrap_lock(root):
+        if _database_requires_quarantine(root, migrations):
+            _forget_database_readiness(root)
+            _quarantine_database(root)
+        with _connection(root, write=True) as connection:
+            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            has_history = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone() is not None
+            applied = _applied_migrations(connection) if has_history else {}
+            user_objects = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
+                "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            ).fetchone() is not None
+            if user_objects and not has_history:
                 raise ValueError("Cortex database is an unsupported pre-canonical ledger")
-            _assert_migration_schema(connection, migration.version)
-        else:
-            _execute_migration_statements(connection, migration.statements)
-            _record_migration(connection, migration)
-            connection.execute(f"PRAGMA user_version = {migration.version}")
+            migration = migrations[0]
+            expected = (migration.name, _migration_checksum(migration))
+            if applied:
+                if applied != {migration.version: expected} or user_version != migration.version:
+                    raise ValueError("Cortex database is an unsupported pre-canonical ledger")
+                _assert_migration_schema(connection, migration.version)
+            else:
+                _execute_migration_statements(connection, migration.statements)
+                _record_migration(connection, migration)
+                connection.execute(f"PRAGMA user_version = {migration.version}")
     _cache_database_readiness(root, migrations)
 
 

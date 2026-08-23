@@ -62,6 +62,14 @@ regular, private, digest-checked, and rebuildable. A failed view or serializer
 after WORK_COMPLETED retries finalization on the same attempt; it never
 creates a second worker for the same work.
 
+When a new task opens a host ledger whose migration history or schema is not
+the exact current canonical record, Cortex privately quarantines the complete
+old namespace as one archive (SQLite database and sidecars, task/lane files,
+coordination files, and the lifecycle key) and starts a fresh schema-v15
+ledger. It never migrates or imports that state, and this recovery is not
+returned as a user-visible form error. Symlinked, non-regular, or unsafe
+filesystem targets remain fail-closed and are not quarantined automatically.
+
 Backups and pruning must be SQLite-aware. A tombstone is committed before
 removing a view. Never use a broad recursive deletion command for Cortex state,
 and never copy a database between users or unrelated projects.

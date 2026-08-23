@@ -33,6 +33,12 @@ Filesystem views are private, regular, digest-checked, and disposable. A view
 cannot authorize completion, a gate transition, or a read. A tombstone is
 committed before pruning a view. Use SQLite-aware backup and maintenance.
 
+On fresh task bootstrap, a host namespace with non-canonical migration history
+or schema is treated as an untrusted prior namespace: Cortex archives the
+complete namespace privately and creates a clean schema-v15 ledger without
+migration or state import. This recovery does not become a user-visible form
+error. Unsafe filesystem boundaries remain fail-closed.
+
 ## Lifecycle
 
 ~~~text
