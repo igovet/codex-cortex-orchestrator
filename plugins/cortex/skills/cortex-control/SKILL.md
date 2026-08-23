@@ -239,7 +239,13 @@ paths forbidden above.
    the directory, mutable state, baselines, delegation packages, another
    briefing, or result artifacts. If the
    host filesystem read says this exact path is missing or unreadable, the
-   worker may call `read_dispatch_briefing` without repeating identity fields;
+   worker must call `read_dispatch_briefing` with the exact opaque
+   `worker_capability` from its native bootstrap. That same capability is
+   required on **every** worker tool call, including file-readable briefings.
+   This is a server-issued bearer
+   capability, not an identity field; never invent, transform, or reuse one
+   from another dispatch. The worker may call `read_dispatch_briefing` without
+   repeating identity fields;
    the bound worker session supplies project root, task, attempt, profile,
    dispatch, and digest.
    An incomplete bounded response may continue only with its returned cursor.

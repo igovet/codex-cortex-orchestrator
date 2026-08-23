@@ -30,7 +30,7 @@ class WorkerIdentityTransportTests(unittest.TestCase):
             self.assertTrue(server_owned.isdisjoint(schema.get("properties", {})), operation)
         self.assertEqual(
             set(cortex.WORKER_READ_WORKER_RESULT_SCHEMA["properties"]),
-            {"attempt_result_ref"},
+            {"attempt_result_ref", "worker_capability"},
         )
 
     def test_unbound_semantic_worker_call_fails_closed(self) -> None:
@@ -72,16 +72,17 @@ class WorkerIdentityTransportTests(unittest.TestCase):
             "briefing_digest": "a" * 64,
         }
         calls = []
-        set_binding_provider(lambda: calls.append(True) or binding)
+        set_binding_provider(lambda _capability: calls.append(True) or binding)
         try:
             with worker_binding(None):
-                merged = bind_semantic_params({"summary": "done"})
+                merged = bind_semantic_params({"worker_capability": "opaque-capability", "summary": "done"})
             self.assertEqual(merged["attempt_id"], "attempt-1")
             self.assertEqual(calls, [True])
         finally:
             set_binding_provider(None)
 
-    def test_host_session_resolver_returns_only_exact_active_attempt(self) -> None:
+    def test_capability_resolver_matches_exact_parallel_attempt(self) -> None:
+        """Parallel workers are selected by opaque capability, never thread id."""
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary) / "host"
             project = Path(temporary) / "project"
@@ -90,26 +91,29 @@ class WorkerIdentityTransportTests(unittest.TestCase):
             (base / "projects").mkdir()
             store.mkdir()
             project.mkdir()
-            binding_id = "worker-0123456789abcdef"
+            import hashlib
+            capability = "opaque-capability-for-worker-one-0123456789"
+            capability_digest = hashlib.sha256(capability.encode()).hexdigest()
             state = {
                 "status": "active",
+                "thread_id": "orchestration-task-1",
                 "attempts": [{
                     "attempt_id": "attempt-1",
-                    "status": "running",
+                    "status": "awaiting_host_spawn",
                     "profile": "backend_dev",
                     "dispatch_ref": "dispatch-1",
                     "briefing_digest": "b" * 64,
+                    "worker_capability_digest": capability_digest,
                 }],
             }
             session = {
-                "host_agent_id": binding_id,
+                "host_agent_id": "",
                 "attempt_id": "attempt-1",
-                "status": "running",
+                "host_task_name": "explorer-race",
+                "status": "awaiting_spawn",
             }
             with mock.patch.dict(os.environ, {
                 cortex.HOST_CONTROL_STORE_ENV: str(base),
-                "CODEX_THREAD_ID": binding_id,
-                "CODEX_SESSION_ID": "",
             }, clear=False), mock.patch.object(
                 cortex, "db_task_index", return_value={"task-1": {}}
             ), mock.patch.object(
@@ -117,10 +121,9 @@ class WorkerIdentityTransportTests(unittest.TestCase):
             ), mock.patch.object(
                 cortex, "db_load_task", return_value=({"project_root": str(project)}, state, None, "tasks/task-1")
             ):
-                resolved = cortex._worker_binding_from_host_session()
-            self.assertEqual(resolved["task_id"], "task-1")
+                resolved = cortex._worker_binding_from_capability(capability)
             self.assertEqual(resolved["attempt_id"], "attempt-1")
-            self.assertEqual(resolved["session_id"], binding_id)
+            self.assertEqual(resolved["session_id"], "")
 
 
 if __name__ == "__main__":

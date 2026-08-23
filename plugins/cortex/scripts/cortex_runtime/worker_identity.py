@@ -12,15 +12,17 @@ from contextvars import ContextVar
 import json
 import os
 from typing import Any, Callable, Iterator, Mapping
+import hashlib
 
 
 SERVER_OWNED_FIELDS = frozenset({
     "project_root", "task_id", "task_ref", "attempt_id", "profile",
     "dispatch_ref", "briefing_digest", "session_id",
 })
+WORKER_CAPABILITY_FIELD = "worker_capability"
 
 _CURRENT: ContextVar[dict[str, str] | None] = ContextVar("cortex_worker_binding", default=None)
-_BINDING_PROVIDER: Callable[[], Mapping[str, Any] | None] | None = None
+_BINDING_PROVIDER: Callable[[str], Mapping[str, Any] | None] | None = None
 
 
 class WorkerBindingError(ValueError):
@@ -39,7 +41,7 @@ def normalize_binding(value: Mapping[str, Any]) -> dict[str, str]:
         raise WorkerBindingError("worker binding must be an object")
     required = ("project_root", "task_id", "attempt_id", "profile")
     result = {field: _clean(value.get(field), field) for field in required}
-    for field in ("task_ref", "dispatch_ref", "briefing_digest", "session_id"):
+    for field in ("task_ref", "dispatch_ref", "briefing_digest", "session_id", "worker_capability_digest", "worker_capability"):
         if value.get(field) is not None and str(value.get(field)).strip():
             result[field] = str(value[field]).strip()
     return result
@@ -50,8 +52,12 @@ def current_binding() -> dict[str, str] | None:
     return dict(value) if value is not None else None
 
 
-def require_binding() -> dict[str, str]:
+def require_binding(capability: str | None = None) -> dict[str, str]:
     value = current_binding()
+    if value is not None and capability:
+        expected = str(value.get("worker_capability_digest") or "").strip().lower()
+        if not expected or not hashlib.sha256(capability.encode("utf-8")).hexdigest() == expected:
+            raise WorkerBindingError("worker capability does not match the bound dispatch")
     if value is None and _BINDING_PROVIDER is not None:
         # Native worker MCP processes can start before the host's
         # SubagentStart hook has persisted the binding.  Resolve lazily on
@@ -59,7 +65,9 @@ def require_binding() -> dict[str, str]:
         # into an unbound worker attempt.  The provider is installed only by
         # the executable server; unit-test imports remain fail-closed.
         try:
-            candidate = _BINDING_PROVIDER()
+            if not capability:
+                raise WorkerBindingError("worker capability is required for native worker calls")
+            candidate = _BINDING_PROVIDER(capability)
             if candidate is not None:
                 value = normalize_binding(candidate)
                 _CURRENT.set(value)
@@ -72,7 +80,7 @@ def require_binding() -> dict[str, str]:
     return value
 
 
-def set_binding_provider(provider: Callable[[], Mapping[str, Any] | None] | None) -> None:
+def set_binding_provider(provider: Callable[[str], Mapping[str, Any] | None] | None) -> None:
     """Install the trusted host-session resolver for a server process.
 
     This is deliberately process configuration, never a public tool field.
@@ -107,7 +115,8 @@ def bind_semantic_params(params: Mapping[str, Any], *, require: bool = True) -> 
     when it happens to match, preventing callers from accidentally treating
     transport metadata as authorable result content.
     """
-    binding = require_binding() if require else current_binding()
+    raw_capability = str(params.get(WORKER_CAPABILITY_FIELD) or "").strip()
+    binding = require_binding(raw_capability) if require else current_binding()
     explicit = sorted(set(params) & SERVER_OWNED_FIELDS)
     if explicit:
         raise WorkerBindingError(
@@ -115,8 +124,18 @@ def bind_semantic_params(params: Mapping[str, Any], *, require: bool = True) -> 
         )
     if binding is None:
         return dict(params)
-    merged = dict(binding)
-    merged.update(dict(params))
+    # Capability transport authenticates the call at this boundary; it is not
+    # semantic input for downstream worker operations.  Do not leak either
+    # the bearer value or its digest into their additionalProperties=False
+    # validators (worker_question is the first strict consumer).
+    merged = {
+        key: value for key, value in binding.items()
+        if key not in {WORKER_CAPABILITY_FIELD, "worker_capability_digest"}
+    }
+    merged.update({
+        key: value for key, value in dict(params).items()
+        if key not in {WORKER_CAPABILITY_FIELD, "worker_capability_digest"}
+    })
     return merged
 
 

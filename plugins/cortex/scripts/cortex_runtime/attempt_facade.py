@@ -506,7 +506,8 @@ def record_attempt_event(params: dict[str, Any]) -> dict[str, Any]:
     try:
         original = dict(params)
         params = bind_semantic_params(original)
-        allowed = {"event_type", "payload", "event_key"}
+        params["worker_capability"] = original.get("worker_capability")
+        allowed = {"worker_capability", "event_type", "payload", "event_key"}
         unknown = sorted(set(original) - allowed)
         if unknown:
             raise _facade_validation_failure("record_attempt_event", params, unknown)
@@ -676,7 +677,9 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     try:
         original = dict(params)
         params = bind_semantic_params(original)
+        params["worker_capability"] = original.get("worker_capability")
         allowed = {
+            "worker_capability",
             "status", "summary", "findings", "decisions_needed", "unresolved", "claims",
             "planning", "base_payload_digest", "patches",
             # Private server-to-server handoff used only after a validated
@@ -913,7 +916,8 @@ def repair_planning(params: dict[str, Any], *, _trusted: bool = False) -> dict[s
         original = dict(params)
         if not _trusted:
             params = bind_semantic_params(original)
-        allowed = {"base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
+            params["worker_capability"] = original.get("worker_capability")
+        allowed = {"worker_capability", "base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
         unknown = sorted(set(original) - (allowed | (_PUBLIC_IDENTITY_FIELDS if _trusted else set())))
         if unknown:
             raise _facade_validation_failure("repair_planning", params, unknown)
@@ -985,11 +989,15 @@ def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
     authorization or recovery.
     """
     try:
+        original = dict(params)
+        # A fresh successor's first call carries the server-issued capability;
+        # resolve it before choosing the coordinator form.  A coordinator may
+        # never smuggle a worker capability into its task-scoped read form.
+        if str(original.get("worker_capability") or "").strip():
+            params = bind_semantic_params(original)
         binding = current_binding()
         if binding is not None:
-            original = dict(params)
-            params = bind_semantic_params(original)
-            unknown = sorted(set(original) - {"attempt_result_ref"})
+            unknown = sorted(set(original) - {"worker_capability", "attempt_result_ref"})
             if unknown:
                 raise _facade_validation_failure("read_worker_result", params, unknown)
             project = _runtime.select_project_root({"project_root": binding["project_root"]})

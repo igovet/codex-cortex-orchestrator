@@ -115,12 +115,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
 
     def test_schema_has_a_patch_only_repair_variant(self) -> None:
         schema = cortex.PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
-        # Worker identity is injected by the server-bound transport and is
-        # intentionally absent from the public semantic schema.
+        # Worker identity is injected by the server-bound transport; the
+        # opaque capability is the sole worker-authored transport token.
         self.assertEqual(schema["required"], [])
         repair = next(
             branch for branch in schema["oneOf"]
-            if set(branch["required"]) == {"base_payload_digest", "patches"}
+            if set(branch["required"]) == {"worker_capability", "base_payload_digest", "patches"}
         )
         self.assertIn({"required": ["planning"]}, repair["not"]["anyOf"])
         for field in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims"):

@@ -11,6 +11,9 @@ v15 ledger. The supported public contract is the fresh v10 protocol only.
 Cortex treats the following as authoritative:
 
 - server-issued opaque task, dispatch, and attempt identities;
+- a fresh opaque worker capability for each dispatch; its digest binds every
+  worker MCP call to that one server-owned attempt without exposing caller
+  authorable identity fields;
 - immutable dispatch briefings scoped to the exact task and attempt;
 - SQLite AttemptEvent rows and one canonical AttemptResult per attempt;
 - server-observed timestamps, native identity, changed files, checks,
@@ -43,6 +46,13 @@ The worker contributes semantic facts only. The server derives identity,
 timestamps, task revision, profile, phase, changed paths, executed checks,
 workspace observations, and verification metadata. Missing observations remain
 explicit and cannot be converted into a successful verification claim.
+
+The native worker bootstrap carries the exact opaque capability required by
+every worker MCP operation. It is private transport data: never log, return,
+reuse across dispatches, or include it in an AttemptResult, evidence view, or
+user-visible report. Cortex persists only its digest for durable binding and
+uses the raw value only in the host-private dispatch material needed to resume
+that exact worker.
 
 Read observations are idempotent and scoped to the exact task, attempt,
 dispatch, result identity, and digest. A read from one task cannot satisfy

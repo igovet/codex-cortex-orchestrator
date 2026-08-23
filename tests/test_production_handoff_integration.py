@@ -77,7 +77,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
                     candidate = next((item for item in attempts if str(item.get("status")) in {"running", control.AWAITING_HOST_SPAWN, "blocked", "completed"}), None)
                 if candidate is not None:
                     attempt_id = str(candidate.get("attempt_id") or attempt_id)
-                    binding = {"project_root": project_root, "task_id": task_id, "task_ref": str(request.get("task_ref") or task_id), "attempt_id": attempt_id, "profile": str(candidate.get("profile") or request.get("profile") or "default"), "dispatch_ref": str(candidate.get("dispatch_ref") or ""), "briefing_digest": str(candidate.get("briefing_digest") or "")}
+                    binding = {"project_root": project_root, "task_id": task_id, "task_ref": str(request.get("task_ref") or task_id), "attempt_id": attempt_id, "profile": str(candidate.get("profile") or request.get("profile") or "default"), "dispatch_ref": str(candidate.get("dispatch_ref") or ""), "briefing_digest": str(candidate.get("briefing_digest") or ""), "worker_capability_digest": str(candidate.get("worker_capability_digest") or ""), "worker_capability": str(candidate.get("worker_capability") or "")}
                 else:
                     binding = {"project_root": project_root, "task_id": task_id, "task_ref": str(request.get("task_ref") or task_id), "attempt_id": attempt_id, "profile": str(request.get("profile") or "default")}
             else:
@@ -86,6 +86,8 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
                 request.pop(field, None)
             if not worker_form:
                 return original(request)
+            if binding.get("worker_capability"):
+                request.setdefault("worker_capability", binding["worker_capability"])
             with worker_identity.worker_binding(binding):
                 return original(request)
         return invoke

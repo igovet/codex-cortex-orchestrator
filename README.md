@@ -914,8 +914,10 @@ union is exactly nine operations and the audience is fixed for the stdio
 process.
 
 Every worker assignment is an immutable, digest-checked briefing. The native
-bootstrap carries only the exact task and dispatch identity, briefing path, and
-digest; the worker reads and verifies the briefing before project work. Result
+bootstrap carries a fresh opaque `worker_capability` for that dispatch, plus
+the issued briefing path and digest. The worker sends that exact capability on
+every worker MCP call; Cortex derives task and dispatch identity server-side.
+The worker reads and verifies the briefing before project work. Result
 links are `attempt_result_ref`, `context_result_refs`, and
 `predecessor_result_refs`. Compact inspect and recovery responses keep scoped
 summaries, while the complete canonical result remains in SQLite. No worker

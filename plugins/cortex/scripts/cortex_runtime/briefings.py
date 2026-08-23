@@ -86,6 +86,7 @@ def host_spawn_bootstrap(
     task_id: str,
     attempt_id: str,
     project_root: Path,
+    worker_capability: str,
     intent_path: str | None = None,
     intent_digest: str | None = None,
     plan_unit_path: str | None = None,
@@ -100,10 +101,11 @@ def host_spawn_bootstrap(
     # guidance surface, while the complete briefing is stored separately.
     del intent_path, intent_digest, plan_unit_path, plan_unit_digest, task_contract_path, task_contract_digest
     return (
-        f"Cortex worker `{profile}`; dispatch_ref={dispatch_ref}. The host has already bound this worker to the "
-        "exact task, attempt, profile, dispatch, briefing, and project root. Before work call `read_dispatch_briefing` "
-        "without repeating project_root, task_id, attempt_id, profile, dispatch_ref, or briefing_digest; the server "
-        "derives them from the bound worker session. "
+        f"Cortex worker `{profile}`; dispatch_ref={dispatch_ref}; worker_capability={worker_capability}. The host has already bound this worker to the "
+        "exact task, attempt, profile, dispatch, briefing, and project root. Before work call "
+        "`read_dispatch_briefing({worker_capability: <the exact bootstrap value>})`; this capability is required "
+        "on every worker MCP call. Never repeat project_root, task_id, attempt_id, profile, dispatch_ref, or "
+        "briefing_digest: the server derives them from the capability-bound worker session. "
         "Direct reads are the issued briefing capability; use next_cursor when incomplete; complete reads record the server receipt. "
         "Never add prose to simulate a server receipt. Retry caller/schema errors; stop only nonretryable/blocked. "
         "Read exception: issued briefing "
@@ -511,7 +513,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     tool_protocol = (
         "Before every strict Cortex tool call, use the exact nested schema advertised for that tool by the active MCP tools/list surface; do not infer fields, enum values, or paths from prose or prior errors. "
         "Do not call coordinator lifecycle/gate/delegation operations. This worker is already bound to one server-owned task, attempt, profile, phase, dispatch, and project root; never copy or author those identity fields. "
-        "Call read_dispatch_briefing before project work and continue its cursor until complete=true (briefing receipt). Use read_worker_result only for listed predecessor refs; pass only the supplied result reference and any schema-required cursor, because the server derives worker identity and project scope from this binding. "
+        "Pass the exact opaque worker_capability from the native bootstrap on every worker MCP tool call; it is required by the advertised schema and is neither an identity field nor reusable across dispatches. Call read_dispatch_briefing with that capability before project work and continue its cursor until complete=true (briefing receipt). Use read_worker_result only for listed predecessor refs; pass only the supplied result reference, the same capability, and any schema-required cursor, because the server derives worker identity and project scope from this binding. "
         "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>; pause only for an explicit task decision. Answer=>followup_task same child; poll same ref/attempt first. Answered=>record_attempt_event, rerun, complete_attempt. Pending=>QUESTION_RECORDED. Internal Cortex/governance evidence gaps use findings/AttemptEvents and coordinator corrective advice; do not pause. No OTHER_TERMINAL/freeform/replacement. "
         "Record material findings, decision evidence, verification_claimed assertions, and checkpoints with record_attempt_event. "
         "Finish with complete_attempt using semantic status, summary, findings, decisions_needed, unresolved, claims, and (for a plan gate only) the nested `planning` object. Never put planning fields such as overview or work_packages at the complete_attempt root. "

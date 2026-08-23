@@ -8105,12 +8105,12 @@ def _validation_next_action(
         )
     if operation in {"complete_attempt", "record_attempt_event", "repair_planning", "read_worker_result", "read_dispatch_briefing", "worker_question"}:
         tool_fields = {
-            "complete_attempt": "status, summary, findings, decisions_needed, unresolved, claims, planning, or PATCH fields base_payload_digest and patches",
-            "record_attempt_event": "event_type, payload, and optional event_key",
-            "repair_planning": "base_payload_digest and non-empty diagnostic-scoped patches only",
-            "read_worker_result": "task_ref and attempt_result_ref only; Cortex resolves the bound project root",
-            "read_dispatch_briefing": "the exact task_id, attempt_id, profile, dispatch_ref, briefing_digest, and optional cursor",
-            "worker_question": "action, question/options or the exact returned question_ref",
+            "complete_attempt": "worker_capability plus status, summary, findings, decisions_needed, unresolved, claims, planning, or PATCH fields base_payload_digest and patches",
+            "record_attempt_event": "worker_capability plus event_type, payload, and optional event_key",
+            "repair_planning": "worker_capability plus base_payload_digest and non-empty diagnostic-scoped patches only",
+            "read_worker_result": "worker_capability plus attempt_result_ref for a successor worker, or task_ref and attempt_result_ref for the coordinator",
+            "read_dispatch_briefing": "worker_capability plus optional cursor (the server derives task, attempt, profile, dispatch, and briefing digest)",
+            "worker_question": "worker_capability plus action, question/options or the exact returned question_ref",
         }[operation]
         planning_nesting = ""
         if operation == "complete_attempt" and any(
@@ -13361,29 +13361,24 @@ PUBLIC_TOOLS = build_public_tools(
 )
 
 
-def _worker_binding_from_host_session() -> dict[str, str] | None:
+def _worker_binding_from_capability(worker_capability: str) -> dict[str, str] | None:
     """Resolve the exact native worker from the host process identity.
 
-    A worker's MCP server is a separate process from the host hook that
-    receives ``SubagentStart``.  The hook persists the native child id in the
-    canonical ``worker_sessions`` table, while the child MCP process exposes
-    that same host-owned id through its Codex session environment.  Resolve
-    the pair lazily from the private host store so workers do not need to
-    repeat identity fields in semantic tool calls.
+    A worker's MCP server is a separate process from the host hook and does
+    not receive a reliable child thread id.  Resolve the dispatch using only
+    the server-issued opaque capability carried by the immutable bootstrap.
+    The capability is never an identity field and cannot select another
+    attempt: its digest must match exactly one active attempt in one ledger.
 
     The resolver deliberately returns a binding only for one unambiguous,
     active native session.  Missing, stale, malformed, or ambiguous state
     remains unavailable and is handled by the normal server-owned recovery
     path; it never guesses a worker or crosses project namespaces.
     """
-    candidates = {
-        value.strip()
-        for key in CODEX_SESSION_ENV_KEYS
-        for value in [str(os.environ.get(key) or "").strip()]
-        if value and HOST_AGENT_ID_RE.fullmatch(value)
-    }
-    if not candidates:
+    capability = str(worker_capability or "").strip()
+    if len(capability) < 32 or len(capability) > 256:
         return None
+    capability_digest = hashlib.sha256(capability.encode("utf-8")).hexdigest()
     configured = str(os.environ.get(HOST_CONTROL_STORE_ENV) or "").strip()
     base = Path(configured).expanduser() if configured else Path.home() / ".codex" / "cortex"
     if not base.is_absolute() or base.is_symlink() or not base.is_dir():
@@ -13415,7 +13410,8 @@ def _worker_binding_from_host_session() -> dict[str, str] | None:
             loaded = None
             for session in sessions:
                 host_id = str(session.get("host_agent_id") or "").strip()
-                if host_id not in candidates or str(session.get("status") or "") not in {"running", "idle_resumable"}:
+                session_status = str(session.get("status") or "")
+                if session_status not in {"awaiting_spawn", "running", "idle_resumable"}:
                     continue
                 if loaded is None:
                     loaded = db_load_task(project_dir, task_id)
@@ -13437,6 +13433,8 @@ def _worker_binding_from_host_session() -> dict[str, str] | None:
                 )
                 if not isinstance(attempt, dict):
                     continue
+                if str(attempt.get("worker_capability_digest") or "") != capability_digest:
+                    continue
                 project_value = str(definition.get("project_root") or "").strip()
                 project = Path(project_value)
                 if not project.is_absolute() or not project.is_dir() or project.is_symlink():
@@ -13453,6 +13451,7 @@ def _worker_binding_from_host_session() -> dict[str, str] | None:
                     "profile": profile,
                     "dispatch_ref": dispatch_ref,
                     "briefing_digest": briefing_digest,
+                    "worker_capability_digest": capability_digest,
                     "session_id": host_id,
                 })
     return matches[0] if len(matches) == 1 else None
@@ -13486,7 +13485,7 @@ def main() -> None:
     # launch-time audience alone cannot carry the dispatch identity, so install
     # a host-session resolver for every audience and let worker operations bind
     # lazily after SubagentStart has persisted the exact child identity.
-    set_binding_provider(_worker_binding_from_host_session)
+    set_binding_provider(_worker_binding_from_capability)
     with worker_binding(binding):
         serve_stdio(
             public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),

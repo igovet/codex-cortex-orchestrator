@@ -32,11 +32,16 @@ def mcp_tool(
     workspace: Path,
     name: str,
     arguments: dict[str, object],
+    *,
+    include_project_root: bool = True,
 ) -> dict[str, object]:
     """Call an installed MCP entry from its configured plugin-local cwd."""
+    request_arguments = dict(arguments)
+    if include_project_root:
+        request_arguments["project_root"] = str(workspace)
     payload = {
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": name, "arguments": {**arguments, "project_root": str(workspace)}},
+        "params": {"name": name, "arguments": request_arguments},
     }
     rpc = subprocess.run(
         [str(launcher), str(entrypoint)], input=json.dumps(payload) + "\n",
@@ -215,6 +220,7 @@ def main() -> int:
             workspace,
             "manage_orchestration",
             {"task_ref": created["task_ref"], "intent": "inspect"},
+            include_project_root=False,
         )
         task = cortex.load_task_definition(expected_task)
         state = cortex.load_task_state_for_artifact(expected_task)
