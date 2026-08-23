@@ -322,6 +322,31 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertTrue(response["user_view"]["requires_user_decision"])
         self.assertEqual(response["user_view"]["message_type"], "decision_required")
 
+    def test_public_error_keeps_technical_recovery_out_of_user_blocker(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": False,
+                "state": "needs_input",
+                "code": "attempt_invalidated",
+                "next_action": {
+                    "operation": "manage_orchestration",
+                    "arguments": {"intent": "inspect"},
+                },
+                "result": {"outcome": "technical_recovery", "requires_user_decision": False},
+            },
+            "task-invalidated",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="COORDINATOR LOCK: internal only",
+            include_result=True,
+        )
+        self.assertFalse(response["requires_user_decision"])
+        self.assertFalse(response["user_view"]["requires_user_decision"])
+        self.assertNotEqual(response["user_view"]["message_type"], "decision_required")
+        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
+        self.assertNotIn("blocker", response["next_action"].lower())
+        self.assertIn("manage_orchestration", response["next_action"])
+
     def test_active_steer_preserves_task_ref_and_resumes_same_native_worker(self) -> None:
         started = self.start()
         _, state, attempt = self.confirm_running(started, host_agent_id="native.steer:01")

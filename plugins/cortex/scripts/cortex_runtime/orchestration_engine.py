@@ -3019,18 +3019,86 @@ def _complete_orchestrate_attempt(
         package["attempt_status"] = attempt.get("status")
         package["attempt_result_ref"] = result_ref
         _write_delegation_package(task_dir, state["task_id"], attempt_id, package)
+        # The coordinator may be completing a stale in-memory snapshot while
+        # lifecycle recovery has already retired the mutable attempt in
+        # SQLite.  Merge that server-owned retirement marker before the first
+        # projection write; otherwise this write would resurrect the old
+        # attempt and hide the exact race that recovery is meant to reconcile.
+        durable = db_load_task(
+            _ledger_root_for_artifact(task_dir), str(state["task_id"]),
+        )
+        if durable is not None:
+            durable_attempt = next(
+                (
+                    item for item in (durable[1].get("attempts") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("attempt_id") or "") == attempt_id
+                ),
+                None,
+            )
+            if isinstance(durable_attempt, dict) and durable_attempt.get("invalidated"):
+                attempt["invalidated"] = True
+                for field in ("invalidated_at", "invalidation_reason"):
+                    if durable_attempt.get(field) is not None:
+                        attempt[field] = durable_attempt[field]
         save_state(task_dir, task_dir / "state.sqlite", state, "worker_result", attempt_id)
-        finalized = finalize_attempt({
-            **params,
-            "task_id": state["task_id"],
-            "attempt_id": attempt_id,
-            "expected_revision": state["revision"],
-            "status": "passed",
-        })
-        if finalized.get("recorded") is False:
-            raise ValueError(str(finalized.get("reason") or "worker result attempt finalization failed"))
-        finalized_state = finalized["state"]
-        finalized_attempt = _attempt(finalized_state, attempt_id)
+        try:
+            finalized = finalize_attempt({
+                **params,
+                "task_id": state["task_id"],
+                "attempt_id": attempt_id,
+                "expected_revision": state["revision"],
+                "status": "passed",
+            })
+            if finalized.get("recorded") is False:
+                raise ValueError(str(finalized.get("reason") or "worker result attempt finalization failed"))
+            finalized_state = finalized["state"]
+            finalized_attempt = _attempt(finalized_state, attempt_id)
+            if finalized.get("recovered_invalidated_attempt"):
+                # The protocol result is already immutable and complete.  Do
+                # not resurrect or mutate the retired attempt in the protocol
+                # ledger; only reconcile the current orchestration projection.
+                finalized_state = state
+                finalized_attempt = _attempt(finalized_state, attempt_id)
+                finalized_attempt["status"] = "passed"
+                finalized_attempt["lifecycle_status"] = attempt_protocol.LIFECYCLE_COMPLETED
+                finalized_attempt["completion_transport_status"] = "not_applicable"
+                finalized_attempt["gate_decision"] = "completed"
+                finalized_attempt["finalized_at"] = canonical.get("completed_at") or canonical.get("updated_at") or now()
+                finalized_attempt["reconciled_from_canonical_result"] = True
+                save_state(
+                    task_dir,
+                    task_dir / "state.sqlite",
+                    finalized_state,
+                    "canonical_result_reconciled",
+                    f"reconciled immutable AttemptResult for {attempt_id} without mutating the invalidated protocol attempt",
+                )
+        except ValueError as exc:
+            # A completed canonical result may outlive a retry/rework
+            # transition that invalidated the mutable attempt projection.
+            # The result is immutable and already authoritative; trying to
+            # mutate that old attempt again is precisely the technical
+            # condition that previously leaked as a Cortex blocker.  Reconcile
+            # only the orchestration projection and continue through the
+            # normal gate/recovery path.  No worker replacement or user
+            # decision is involved.
+            if "invalidated attempt" not in str(exc).lower():
+                raise
+            finalized_state = state
+            finalized_attempt = _attempt(finalized_state, attempt_id)
+            finalized_attempt["status"] = "passed"
+            finalized_attempt["lifecycle_status"] = attempt_protocol.LIFECYCLE_COMPLETED
+            finalized_attempt["completion_transport_status"] = "not_applicable"
+            finalized_attempt["gate_decision"] = "completed"
+            finalized_attempt["finalized_at"] = canonical.get("completed_at") or canonical.get("updated_at") or now()
+            finalized_attempt["reconciled_from_canonical_result"] = True
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                finalized_state,
+                "canonical_result_reconciled",
+                f"reconciled immutable AttemptResult for {attempt_id} without mutating the invalidated protocol attempt",
+            )
         _record_server_corrective_receipts(
             _ledger_root_for_artifact(task_dir),
             finalized_state,

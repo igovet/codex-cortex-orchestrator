@@ -206,6 +206,32 @@ class AttemptProtocolTests(unittest.TestCase):
         self.assertEqual(len(replayed), 1)
         self.assertEqual(len(replayed[0]["source_evidence"]), 1)
 
+    def test_finalization_replays_completed_result_after_lifecycle_invalidation(self) -> None:
+        """Recovery retirement must not reject an already completed receipt."""
+        completed = attempt_protocol.complete_attempt(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            status="completed",
+            summary="Completed before lifecycle recovery.",
+            submission_id="completion-before-recovery",
+        )["result"]
+        attempt_protocol.finalize_attempt(
+            self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+        )
+        _definition, state, _task, _task_dir = ledger_db.load_task(self.root, self.task_id)
+        state["attempts"][0]["invalidated"] = True
+        state["attempts"][0]["invalidation_reason"] = "lifecycle_recovery"
+        ledger_db.update_task_state(self.root, state)
+        replay = attempt_protocol.finalize_attempt(
+            self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+        )
+        self.assertTrue(replay["ok"])
+        self.assertTrue(replay["idempotent"])
+        self.assertTrue(replay["recovered_invalidated_attempt"])
+        self.assertEqual(replay["result"]["result_ref"], completed["result_ref"])
+        self.assertEqual(replay["result"]["lifecycle_status"], attempt_protocol.LIFECYCLE_COMPLETED)
+
     def test_worker_progress_and_completion_are_rejected_before_briefing_receipt(self) -> None:
         """Implementation and documentation cannot mutate before briefing read."""
         for number, gate in enumerate(("implementation", "documentation"), 2):

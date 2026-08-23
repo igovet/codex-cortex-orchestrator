@@ -31,6 +31,18 @@ def _public_next_action(value: object) -> str:
     Never expose the coordinator's implementation-only prohibition as a
     visible blocker.
     """
+    # A few older runtime receipts stored the action as a structured private
+    # object.  Never stringify that implementation object into the public
+    # transcript (``{'operation': ...}`` is not an executable instruction).
+    if isinstance(value, Mapping):
+        nested = value.get("next_action") or value.get("action")
+        operation = value.get("operation") or value.get("tool")
+        if nested:
+            value = nested
+        elif operation:
+            value = f"Call {operation} with the server-returned arguments for this same task."
+        else:
+            value = "Inspect the same task and follow the server-returned recovery action."
     text = str(value or "").strip()
     marker = "COORDINATOR LOCK:"
     if marker in text:
@@ -1071,7 +1083,13 @@ def v3_response(
         }
         if old.get("code") == "plan_reapproval_required":
             response["outcome"] = "plan_reapproval_required"
-            response["next_action"] = f"{coordinator_lock} {old.get('next_action')}"
+            # Plan reapproval is a typed user decision, not a coordinator
+            # lock.  Keep the action concrete and let user_view carry the
+            # approval interaction without exposing routing policy text.
+            response["next_action"] = str(old.get("next_action") or (
+                "Call manage_orchestration with intent=plan_approval for the same task_ref "
+                "and submit the user's explicit approve, revise, or cancel decision."
+            ))
         if task_ref:
             response["task_ref"] = task_ref
         if include_result and "result" in old:

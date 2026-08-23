@@ -6823,6 +6823,29 @@ def finalize_attempt(params: dict[str, Any]) -> dict[str, Any]:
         status = str(params.get("status", "")).strip().lower()
         if status not in TERMINAL_ATTEMPT_STATUSES:
             raise ValueError("status must be passed, failed, blocked, cancelled, or superseded")
+        # Lifecycle recovery may have retired the mutable attempt after its
+        # canonical AttemptResult was already completed.  The immutable result
+        # is authoritative in this case: acknowledge the receipt idempotently
+        # without mutating the invalidated attempt projection.  Orchestration
+        # will reconcile its own projection and continue through the normal
+        # corrective/gate route.
+        if status == "passed" and attempt.get("invalidated"):
+            canonical = attempt_protocol.get_attempt_result(
+                root, task_id=state["task_id"], attempt_id=attempt_id,
+            )
+            if (
+                isinstance(canonical, dict)
+                and str(canonical.get("result_ref") or "") == str(attempt.get("attempt_result_ref") or "")
+                and canonical.get("lifecycle_status") == attempt_protocol.LIFECYCLE_COMPLETED
+            ):
+                return {
+                    "attempt_id": attempt_id,
+                    "status": status,
+                    "idempotent": True,
+                    "recovered_invalidated_attempt": True,
+                    "attempt_result_ref": canonical.get("result_ref"),
+                    "state": state,
+                }
         if status == "passed" and attempt.get("facade_managed"):
             missing_result = _attempts_missing_result_validation(task_dir, [attempt])
             if missing_result:

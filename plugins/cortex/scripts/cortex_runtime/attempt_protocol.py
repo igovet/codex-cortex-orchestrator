@@ -206,6 +206,7 @@ def _load_task_and_attempt(
     *,
     task_id: str,
     attempt_id: str,
+    allow_invalidated: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     if not task_id or not attempt_id:
         raise ValueError("task_id and attempt_id are required")
@@ -228,7 +229,7 @@ def _load_task_and_attempt(
     )
     if attempt is None:
         raise ValueError("attempt protocol attempt is unavailable")
-    if bool(attempt.get("invalidated")):
+    if bool(attempt.get("invalidated")) and not allow_invalidated:
         raise ValueError("attempt protocol cannot mutate an invalidated attempt")
     return definition, state, attempt
 
@@ -887,13 +888,29 @@ def finalize_attempt(root: Any, *, task_id: str, attempt_id: str) -> dict[str, A
     ledger_root = _root(root)
     ledger_db.ensure_database(ledger_root)
     with ledger_db.connection(ledger_root, write=True) as connection:
-        _load_task_and_attempt(connection, task_id=task_id, attempt_id=attempt_id)
+        # A lifecycle recovery can retire the mutable task projection after
+        # the canonical result was committed but before a coordinator retries
+        # the finalization receipt.  In that case the immutable result is the
+        # authority: a completed result is already finalized and must be
+        # returned idempotently.  Do not reject a valid receipt merely because
+        # the historical attempt row was invalidated by recovery.
+        _definition, _state, attempt = _load_task_and_attempt(
+            connection, task_id=task_id, attempt_id=attempt_id,
+            allow_invalidated=True,
+        )
         row = connection.execute(
             "SELECT * FROM attempt_results WHERE task_id=? AND attempt_id=?", (task_id, attempt_id)
         ).fetchone()
         if row is None:
             raise ValueError("attempt result is unavailable for completion")
         stored = _result_row(row)
+        if attempt.get("invalidated") and stored["lifecycle_status"] == LIFECYCLE_COMPLETED:
+            return {"ok": True, "result": stored, "idempotent": True, "recovered_invalidated_attempt": True}
+        if attempt.get("invalidated"):
+            raise ValueError(
+                "attempt finalization is superseded by lifecycle recovery; "
+                "use the server-derived corrective dispatch for this task"
+            )
         if stored["lifecycle_status"] == LIFECYCLE_COMPLETED:
             return {"ok": True, "result": stored, "idempotent": True}
         if stored["lifecycle_status"] not in {LIFECYCLE_WORK_COMPLETED, LIFECYCLE_FINALIZING}:
