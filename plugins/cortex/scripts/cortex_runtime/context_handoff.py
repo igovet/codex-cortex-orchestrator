@@ -51,6 +51,7 @@ def _context_handoff(
     pending_dispatches: list[dict[str, Any]] = []
     active_workers: list[dict[str, Any]] = []
     stopped_workers: list[dict[str, Any]] = []
+    open_questions: list[dict[str, Any]] = []
     # The state projection is normally sufficient, but the SQLite worker
     # session table is the server-owned identity source.  Keep it as the
     # recovery fallback for task projections written before host_spawn was
@@ -72,6 +73,25 @@ def _context_handoff(
         profile = redact(attempt.get("profile", ""), 128)
         result_ref = redact(attempt.get("attempt_result_ref", ""), 160) or None
         status = str(attempt.get("status") or "")
+        try:
+            attempt_questions = _open_blocking_questions(task_dir, state, str(attempt.get("attempt_id") or ""))
+        except (OSError, ValueError, TypeError):
+            attempt_questions = []
+        question_refs = [
+            redact(item.get("question_id"), 160)
+            for item in attempt_questions
+            if isinstance(item, dict) and str(item.get("question_id") or "").strip()
+        ]
+        for question in attempt_questions:
+            if isinstance(question, dict):
+                open_questions.append({
+                    "attempt_id": attempt_id,
+                    "phase": phase,
+                    "dispatch_ref": redact(attempt.get("dispatch_ref", ""), 160) or None,
+                    "question_ref": redact(question.get("question_id"), 160),
+                    "question": redact(question.get("question", ""), 2000),
+                    "header": redact(question.get("header", ""), 300) or None,
+                })
         identity = {
             "attempt_id": attempt_id,
             "phase": phase,
@@ -110,18 +130,21 @@ def _context_handoff(
             })
         elif attempt.get("host_stopped_at") or attempt.get("worker_session_reconciled_at"):
             finalization_pending = str(attempt.get("host_stop_outcome") or "") == "work_completed_finalization_pending"
+            awaiting_user = str(attempt.get("host_stop_outcome") or "") == "awaiting_user" or bool(question_refs)
             stopped_workers.append({
                 **identity,
                 "attempt_result_ref": result_ref,
                 "finalization_pending": finalization_pending,
+                "awaiting_user": awaiting_user,
+                "question_refs": question_refs,
                 # A result/session reconciliation is terminal worker state,
                 # not a synthetic failure or a claim that a host stop hook
                 # was observed. It must therefore be recoverable only through
                 # the canonical coordinator continuation, never as a live
                 # native worker.
-                "failure_status": None if finalization_pending or attempt.get("worker_session_reconciled_at") else redact(attempt.get("host_stop_outcome", ""), 160) or None,
-                "failure_reason": None if finalization_pending or attempt.get("worker_session_reconciled_at") else redact(attempt.get("finalization_reason", ""), 1000) or None,
-                "resumable": False,
+                "failure_status": None if finalization_pending or awaiting_user or attempt.get("worker_session_reconciled_at") else redact(attempt.get("host_stop_outcome", ""), 160) or None,
+                "failure_reason": None if finalization_pending or awaiting_user or attempt.get("worker_session_reconciled_at") else redact(attempt.get("finalization_reason", ""), 1000) or None,
+                "resumable": awaiting_user,
             })
     active = active_gates(state)
     finalizing = [item for item in stopped_workers if item["finalization_pending"]]
@@ -151,6 +174,7 @@ def _context_handoff(
         "pending_dispatches": pending_dispatches,
         "active_workers": active_workers,
         "stopped_workers": stopped_workers,
+        "open_questions": open_questions,
         "protocol": {
             "coordinator": "The main/root agent is the sole user-facing coordinator; project operations belong to workers.",
             "dispatch_transport": "Each pending dispatch uses one compact bootstrap plus an immutable scoped briefing path and SHA-256; the coordinator does not read the briefing.",

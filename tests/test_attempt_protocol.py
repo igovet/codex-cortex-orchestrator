@@ -162,6 +162,50 @@ class AttemptProtocolTests(unittest.TestCase):
             ["briefing_acknowledged", "verification_claimed", "work_completed", "finalization_failed", "finalizing", "completed"],
         )
 
+    def test_completion_materializes_findings_atomically_and_replays_evidence_once(self) -> None:
+        findings = [{
+            "fingerprint": "missing-artifact",
+            "severity": "P1",
+            "summary": "Required artifact is missing.",
+            "details": {"path": "tests/generated.py"},
+            "evidence_ref": "attempt-event-42",
+        }]
+        completion = attempt_protocol.complete_attempt(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            status="blocked",
+            summary="The required artifact was not created.",
+            findings=findings,
+            submission_id="blocked-completion-1",
+        )
+        self.assertEqual(completion["result"]["lifecycle_status"], "BLOCKED")
+        stored = ledger_db.list_task_findings(self.root, self.task_id)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["fingerprint"], "missing-artifact")
+        self.assertEqual(stored[0]["severity"], "P1")
+        self.assertTrue(stored[0]["blocking"])
+        self.assertEqual(stored[0]["details"], '{"path":"tests/generated.py"}')
+        self.assertEqual(len(stored[0]["source_evidence"]), 1)
+        evidence = stored[0]["source_evidence"][0]
+        self.assertEqual(evidence["attempt_result_ref"], completion["result"]["result_ref"])
+        self.assertEqual(evidence["origin_result_ref"], completion["result"]["result_ref"])
+        self.assertEqual(evidence["evidence_ref"], "attempt-event-42")
+
+        replay = attempt_protocol.complete_attempt(
+            self.root,
+            task_id=self.task_id,
+            attempt_id=self.attempt_id,
+            status="blocked",
+            summary="The required artifact was not created.",
+            findings=findings,
+            submission_id="blocked-completion-1",
+        )
+        self.assertTrue(replay["idempotent"])
+        replayed = ledger_db.list_task_findings(self.root, self.task_id)
+        self.assertEqual(len(replayed), 1)
+        self.assertEqual(len(replayed[0]["source_evidence"]), 1)
+
     def test_worker_progress_and_completion_are_rejected_before_briefing_receipt(self) -> None:
         """Implementation and documentation cannot mutate before briefing read."""
         for number, gate in enumerate(("implementation", "documentation"), 2):

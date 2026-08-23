@@ -3400,6 +3400,49 @@ def _planning_diag(message: str, *, path: str | None = None, code: str = "planni
     return item
 
 
+_REQUIRED_ARTIFACT_KINDS = {
+    "file", "test_suite", "fixture", "cli", "document", "report", "schema", "config", "other",
+}
+
+
+def _normalize_required_artifacts(value: Any, path: str, *, default_gate: str = "implementation") -> list[dict[str, Any]]:
+    """Validate and canonicalize the machine-readable deliverable manifest."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be an array")
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_path} must be an object")
+        allowed = {"path", "kind", "owner_gate", "verification"}
+        unknown = sorted(set(item) - allowed)
+        missing = sorted(allowed - set(item))
+        if unknown or missing:
+            details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + ([] if not missing else ["missing: " + ", ".join(missing)])
+            raise ValueError(f"{item_path} is invalid (" + "; ".join(details) + ")")
+        artifact_path = _safe_project_relative_path(item.get("path"))
+        kind = str(item.get("kind") or "").strip().lower()
+        if not kind:
+            raise ValueError(f"{item_path}.kind must be a non-empty string")
+        if kind not in _REQUIRED_ARTIFACT_KINDS:
+            raise ValueError(
+                f"{item_path}.kind must be one of: {', '.join(sorted(_REQUIRED_ARTIFACT_KINDS))}"
+            )
+        owner_gate = canonical_pipeline_gate(item.get("owner_gate") or default_gate)
+        if owner_gate not in AVAILABLE_GATES:
+            raise ValueError(f"{item_path}.owner_gate references unknown gate {owner_gate!r}")
+        verification = _planning_text(item.get("verification"), f"{item_path}.verification")
+        key = (artifact_path, owner_gate)
+        if key in seen:
+            raise ValueError(f"{item_path} duplicates required artifact {artifact_path!r} for gate {owner_gate!r}")
+        seen.add(key)
+        result.append({"path": artifact_path, "kind": kind, "owner_gate": owner_gate, "verification": verification})
+    return result
+
+
 def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
     """Collect independent shape errors without attempting cross-field checks."""
     diagnostics: list[dict[str, Any]] = []
@@ -3426,8 +3469,8 @@ def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
     if not packages:
         diagnostics.append(_planning_diag("planning work_packages must be a non-empty array", path="planning.work_packages"))
         return diagnostics
-    package_allowed = {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "microtasks"}
-    micro_allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification"}
+    package_allowed = {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "required_artifacts", "microtasks"}
+    micro_allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification", "required_artifacts"}
     for pi, package in enumerate(packages):
         p = f"planning.work_packages[{pi}]"
         if not isinstance(package, dict):
@@ -3451,9 +3494,11 @@ def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
             for key in ("id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"):
                 if key not in micro:
                     diagnostics.append(_planning_diag(f"planning microtask requires {key}", path=f"{m}.{key}"))
-            for key in ("acceptance_criteria", "verification", "allowed_paths", "depends_on", "gates"):
+            for key in ("acceptance_criteria", "verification", "allowed_paths", "depends_on", "gates", "required_artifacts"):
                 if key in micro and not isinstance(micro[key], list):
                     diagnostics.append(_planning_diag(f"planning microtask {key} must be an array", path=f"{m}.{key}"))
+        if "required_artifacts" in package and not isinstance(package["required_artifacts"], list):
+            diagnostics.append(_planning_diag("planning package required_artifacts must be an array", path=f"{p}.required_artifacts"))
     return diagnostics
 
 
@@ -3652,7 +3697,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     for index, raw_package in enumerate(raw_packages, 1):
         if not isinstance(raw_package, dict):
             raise ValueError(f"planning work_packages[{index - 1}] must be an object")
-        unknown = sorted(set(raw_package) - {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "microtasks"})
+        unknown = sorted(set(raw_package) - {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "required_artifacts", "microtasks"})
         missing = sorted({"id", "title", "objective", "microtasks"} - set(raw_package))
         if unknown or missing:
             details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + ([] if not missing else ["missing: " + ", ".join(missing)])
@@ -3668,7 +3713,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         for micro_index, raw_microtask in enumerate(raw_microtasks, 1):
             if not isinstance(raw_microtask, dict):
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} must be an object")
-            allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification"}
+            allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification", "required_artifacts"}
             unknown_micro = sorted(set(raw_microtask) - allowed)
             missing_micro = sorted({"id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"} - set(raw_microtask))
             if unknown_micro or missing_micro:
@@ -3726,6 +3771,19 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 raise ValueError(
                     f"planning microtask {microtask_id!r} allowed_paths must be explicit and non-broad"
                 )
+            try:
+                microtask_artifacts = _normalize_required_artifacts(
+                    raw_microtask.get("required_artifacts"),
+                    f"planning.work_packages[{index - 1}].microtasks[{micro_index - 1}].required_artifacts",
+                    default_gate=(gates[0] if gates else "implementation"),
+                )
+            except ValueError as exc:
+                planning_diagnostics.append(_planning_diag(
+                    str(exc),
+                    path=f"planning.work_packages[{index - 1}].microtasks[{micro_index - 1}].required_artifacts",
+                    code="planning_artifacts_invalid",
+                ))
+                microtask_artifacts = []
             microtasks.append({
                 "id": microtask_id,
                 "title": _planning_text(raw_microtask.get("title"), "planning microtask title"),
@@ -3738,6 +3796,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 "depends_on": dependencies,
                 "acceptance_criteria": microtask_acceptance,
                 "verification": microtask_verification,
+                "required_artifacts": microtask_artifacts,
             })
         total_microtasks += len(microtasks)
         raw_dependencies = raw_package.get("depends_on", [])
@@ -3769,6 +3828,19 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 code="planning_gates_invalid",
             ))
             package_gates = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])}) or ["implementation"]
+        try:
+            package_artifacts = _normalize_required_artifacts(
+                raw_package.get("required_artifacts"),
+                f"planning.work_packages[{index - 1}].required_artifacts",
+                default_gate=(package_gates[0] if package_gates else "implementation"),
+            )
+        except ValueError as exc:
+            planning_diagnostics.append(_planning_diag(
+                str(exc),
+                path=f"planning.work_packages[{index - 1}].required_artifacts",
+                code="planning_artifacts_invalid",
+            ))
+            package_artifacts = []
         packages.append({
             "id": package_id,
             "title": _planning_text(raw_package.get("title"), "planning package title"),
@@ -3778,6 +3850,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             "gates": package_gates,
             "allowed_paths": _planning_paths_list(raw_package.get("allowed_paths"), "planning package allowed_paths"),
             "depends_on": dependencies,
+            "required_artifacts": package_artifacts,
             "microtasks": microtasks,
         })
     _validate_planning_dependency_graph(
@@ -3843,6 +3916,8 @@ def _planning_overview_markdown(manifest: dict[str, Any]) -> str:
             lines.append(
                 f"- `{microtask['id']}`{profile} [{microtask.get('status', 'pending')}; order {microtask.get('order', 1)}; gates {', '.join(microtask.get('gates') or ['implementation'])}]: {microtask['title']}"
             )
+            for artifact in microtask.get("required_artifacts") or []:
+                lines.append(f"  - deliverable `{artifact['path']}` ({artifact['kind']}, {artifact['owner_gate']}): {artifact['verification']}")
         lines.append("")
     coverage = manifest.get("requirement_coverage") or []
     if coverage:
@@ -3890,6 +3965,7 @@ def _plan_tracker_document(
             "allowed_paths": list(package.get("allowed_paths") or []),
             "acceptance_criteria": [],
             "verification": [],
+            "required_artifacts": list(package.get("required_artifacts") or []),
             "package_id": package_id,
         })
         for microtask in package.get("microtasks", []):
@@ -3907,6 +3983,7 @@ def _plan_tracker_document(
                 "allowed_paths": list(microtask.get("allowed_paths") or package.get("allowed_paths") or []),
                 "acceptance_criteria": list(microtask.get("acceptance_criteria") or []),
                 "verification": list(microtask.get("verification") or []),
+                "required_artifacts": list(microtask.get("required_artifacts") or []),
                 "profile": microtask.get("profile"),
                 "package_id": package_id,
             })
@@ -4223,6 +4300,100 @@ def current_planning_manifest(task_dir: Path) -> dict[str, Any] | None:
     if value.get("schema") != PLANNING_SCHEMA:
         raise ValueError("planning manifest schema is not supported")
     return value
+
+
+def required_artifact_diagnostics(
+    project_root: Path,
+    task_dir: Path,
+    state: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Check declared deliverables before implementation/QA completion.
+
+    Planning artifacts are immutable and therefore the manifest is loaded from
+    the task ledger, while existence is checked only in the assigned project
+    workspace.  An undeclared plan remains valid; once a deliverable is
+    declared, a completed gate cannot silently claim success before it exists.
+    """
+    gate = canonical_pipeline_gate(attempt.get("gate") or "")
+    if gate not in {"implementation", "qa"}:
+        return []
+    try:
+        manifest = current_planning_manifest(task_dir)
+    except (ValueError, OSError):
+        # A direct facade unit harness may supply only the project root.  The
+        # artifact gate is additive and must not turn that bounded test seam
+        # into a synthetic task-corruption failure; real task worktrees always
+        # have an immutable Cortex ledger and continue through the checks below.
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    required: list[dict[str, Any]] = []
+    for summary in manifest.get("work_packages") or []:
+        if not isinstance(summary, dict) or not summary.get("artifact_path"):
+            continue
+        try:
+            record, _ = read_immutable_json_artifact(
+                task_dir, str(state.get("task_id") or ""), str(summary["artifact_path"]), kinds={"planning_revision"},
+            )
+        except (ValueError, OSError):
+            continue
+        package = record.get("package") if isinstance(record, dict) else None
+        if not isinstance(package, dict):
+            continue
+        required.extend(item for item in package.get("required_artifacts") or [] if isinstance(item, dict))
+        for microtask in package.get("microtasks") or []:
+            if isinstance(microtask, dict):
+                required.extend(item for item in microtask.get("required_artifacts") or [] if isinstance(item, dict))
+    diagnostics: list[dict[str, Any]] = []
+    root = Path(project_root).resolve()
+    for index, artifact in enumerate(required):
+        owner_gate = canonical_pipeline_gate(artifact.get("owner_gate") or gate)
+        if owner_gate != gate:
+            continue
+        relative = str(artifact.get("path") or "").replace("\\", "/")
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            diagnostics.append({
+                "code": "required_artifact_invalid_path",
+                "phase": gate,
+                "path": f"$.required_artifacts[{index}].path",
+                "json_pointer": f"/required_artifacts/{index}/path",
+                "message": f"required artifact path escapes project workspace: {relative}",
+                "received": relative,
+                "expected": {"type": "string", "format": "project-relative-path"},
+                "field_schema": {"type": "string", "minLength": 1, "format": "project-relative-path"},
+                "fix": "Change the declared artifact path to a project-relative path and retry the same gate.",
+            })
+            continue
+        if not candidate.exists():
+            diagnostics.append({
+                "code": "required_artifact_missing",
+                "phase": gate,
+                "path": f"$.required_artifacts[{index}]",
+                "json_pointer": f"/required_artifacts/{index}",
+                "message": f"required artifact is missing: {relative}",
+                "received": {"path": relative, "kind": artifact.get("kind"), "owner_gate": owner_gate},
+                "expected": {
+                    "path": relative,
+                    "kind": artifact.get("kind"),
+                    "owner_gate": owner_gate,
+                    "verification": artifact.get("verification"),
+                    "exists": True,
+                },
+                "field_schema": {
+                    "type": "object", "required": ["path", "kind", "owner_gate", "verification"],
+                    "properties": {
+                        "path": {"type": "string", "format": "project-relative-path"},
+                        "kind": {"type": "string"}, "owner_gate": {"type": "string"},
+                        "verification": {"type": "string"},
+                    },
+                },
+                "fix": f"Create or restore {relative}, run {artifact.get('verification')}, then retry the same {gate} attempt.",
+            })
+    return diagnostics
 
 
 def current_plan_tracker(task_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -7735,7 +7906,7 @@ def _validation_contract(
             "type": "object",
             "required": ["intent", "project_root"],
             "properties": {
-                "intent": {"type": "string", "enum": ["inspect", "recover_inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts"]},
+                "intent": {"type": "string", "enum": ["inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts"]},
                 "project_root": {"type": "string", "format": "absolute-path"},
                 "task_ref": {"type": "string", "description": "the exact current Cortex task_ref"},
                 "reason": {"type": "string"},
@@ -7763,7 +7934,7 @@ def _validation_contract(
         }
         contract["request_schema"]["conditional_requirements"] = {
             "task_scoped_intents": {
-                "if": {"properties": {"intent": {"enum": ["inspect", "recover_inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "artifacts"]}}},
+                "if": {"properties": {"intent": {"enum": ["inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "artifacts"]}}},
                 "then": {"required": ["task_ref"]},
                 "description": "prune and maintenance are project-scoped and omit task_ref",
             }
@@ -7906,7 +8077,7 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
     allowed_top_level = {
         "operation", "submission_id", "project_root", "principal", "thread_id",
         "task", "task_id", "wave_id", "waves", "host_capabilities", "completions", "payload",
-        "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate",
+        "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate", "terminal_recovery",
     }
     for key in sorted(set(params) - allowed_top_level):
         diagnostics.append(_request_diagnostic(key, "unsupported orchestrate parameter", "a documented orchestrate parameter"))
@@ -9505,7 +9676,7 @@ def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = Fal
         if loaded is None:
             continue
         _, state, task = loaded
-        if not include_completed and state.get("status") not in {"active", "blocked"}:
+        if not include_completed and state.get("status") not in {"active", "blocked", "needs_input"}:
             continue
         candidates.append({
             "task_id": task_id,
@@ -10233,7 +10404,7 @@ def _v3_start_reservation(
             # task. Two MCP processes can observe the digest after reservation
             # but before orchestrate() creates the task ledger; allocating a
             # second task here would split one idempotent start across sessions.
-            if loaded is None or loaded[1].get("status") in {"active", "blocked"}:
+            if loaded is None or loaded[1].get("status") in {"active", "blocked", "needs_input"}:
                 return (
                     task_id,
                     str(prior["task_ref"]),
@@ -11030,7 +11201,16 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         response = _v3_response(
             old,
             task_ref,
-            include_result=old.get("state") == "awaiting_plan_approval",
+            include_result=(
+                old.get("state") == "awaiting_plan_approval"
+                or (
+                    isinstance(old.get("result"), dict)
+                    and (
+                        isinstance(old["result"].get("recovery"), dict)
+                        or bool(old["result"].get("requires_user_decision"))
+                    )
+                )
+            ),
         )
         if old.get("ok"):
             _v3_store_continue(params, state["task_id"], request_digest, response)
@@ -11890,6 +12070,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "status": "inspect", "inspect": "inspect", "show": "inspect",
             "recover_inspect": "recover_inspect", "recover_lifecycle": "recover_inspect",
             "resume": "resume", "retry": "resume", "continue_blocked": "resume",
+            "recover_blocked": "recover_blocked", "recover_terminal": "recover_blocked",
             "deactivate": "deactivate", "normal": "deactivate", "stop_session": "deactivate",
             "lane": "lane", "resource": "resource", "question": "question",
             "plan_approval": "plan_approval", "approve_plan": "plan_approval", "plan_review": "plan_approval",
@@ -12027,9 +12208,19 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     "translation_required_for": sorted(batch.get("translation_required_for") or []),
                 }
         submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload"), **operation_context}, sort_keys=True, default=str))[:16])
-        if intent in {"resume", "deactivate"}:
+        if intent in {"resume", "recover_blocked", "deactivate"}:
             recovery: dict[str, Any] = {}
-            if intent == "resume" and params.get("payload") is not None:
+            if intent == "recover_blocked":
+                if params.get("payload") not in (None, {}):
+                    raise ValueError("recover_blocked is server-owned and accepts no payload; inspect the task and retry the exact intent")
+                old = orchestrate({
+                    **common,
+                    "operation": "resume",
+                    "submission_id": submission_id,
+                    "reason": params.get("reason") or "Server-derived corrective recovery for terminal worker result.",
+                    "terminal_recovery": True,
+                })
+            elif intent == "resume" and params.get("payload") is not None:
                 raw_recovery = params.get("payload")
                 if not isinstance(raw_recovery, dict):
                     raise ValueError("resume payload must be an object")
@@ -12057,13 +12248,20 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     if requested_rework not in AVAILABLE_GATES:
                         raise ValueError("resume recovery rework must name a supported gate")
                     recovery["rework_gate"] = requested_rework
-            old = orchestrate({
-                **common,
-                "operation": intent,
-                "submission_id": submission_id,
-                "reason": params.get("reason"),
-                **recovery,
-            })
+                old = orchestrate({
+                    **common,
+                    "operation": intent,
+                    "submission_id": submission_id,
+                    "reason": params.get("reason"),
+                    **recovery,
+                })
+            else:
+                old = orchestrate({
+                    **common,
+                    "operation": intent,
+                    "submission_id": submission_id,
+                    "reason": params.get("reason"),
+                })
         else:
             payload = normalized_payload if normalized_payload is not None else params.get("payload")
             if not isinstance(payload, dict):

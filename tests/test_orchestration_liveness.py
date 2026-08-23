@@ -307,10 +307,10 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
 
         paused = self._failed_continue(current, reason=reason)
         self.assertTrue(paused["ok"], paused)
-        self.assertEqual(paused["outcome"], "blocked")
+        self.assertEqual(paused["outcome"], "needs_input")
         self.assertEqual(paused["dispatches"], [])
         state = self._state()
-        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["status"], "needs_input")
         pause = state["rework_pauses"]["discover"]
         self.assertEqual(pause["status"], "needs_user_decision")
         self.assertEqual(pause["failure_class"], "infrastructure")
@@ -391,7 +391,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             if expected < 3:
                 self.assertEqual(current["outcome"], "ready_to_spawn")
             else:
-                self.assertEqual(current["outcome"], "blocked")
+                self.assertEqual(current["outcome"], "needs_input")
 
         progress = self._state()["rework_progress"]["discover"]
         self.assertEqual(progress["consecutive_identical_iterations"], 3)
@@ -404,7 +404,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                 current,
                 reason="network transport unavailable before any project change",
             )
-        self.assertEqual(current["outcome"], "blocked")
+        self.assertEqual(current["outcome"], "needs_input")
 
         rejected = control.manage_orchestration(
             {
@@ -417,7 +417,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         )
         self.assertFalse(rejected["ok"])
         self.assertIn("materially change the failed strategy, pipeline, or verification", rejected["diagnostics"][0]["message"])
-        self.assertEqual(self._state()["status"], "blocked")
+        self.assertEqual(self._state()["status"], "needs_input")
         state = self._state()
         self.assertEqual(state["rework_pauses"]["discover"]["status"], "needs_user_decision")
 
@@ -497,7 +497,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                     },
                 ],
             })
-        self.assertEqual(current["outcome"], "blocked")
+        self.assertEqual(current["outcome"], "needs_input")
         recovery_waves = [
             {"workers": [{"phase": "plan", "objective": "Repair network transport configuration before retry."}]},
             {"workers": [{"phase": "qa"}, {"phase": "security"}]},

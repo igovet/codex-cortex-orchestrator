@@ -767,6 +767,18 @@ def complete_attempt(
                 changed_files_status, content_digest, submission, stamp, None, None, stamp, stamp,
             ),
         )
+        # Findings are part of the same canonical transaction as the result.
+        # Gate transitions therefore see them immediately, including blocked
+        # and failed results, and a retry cannot leave a half-materialized
+        # projection behind.
+        ledger_db.materialize_attempt_findings(
+            connection,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            result_ref=result_ref,
+            gate=str(attempt.get("gate") or "") or None,
+            findings=normalized.findings,
+        )
         event, _ = _append_event(
             connection,
             task_id=task_id,

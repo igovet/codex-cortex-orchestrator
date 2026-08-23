@@ -2249,7 +2249,7 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
             "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
         }],
     })
-    if blocked_result.get("outcome") != "blocked":
+    if blocked_result.get("outcome") != "needs_input":
         raise AssertionError(blocked_result)
     resumed = cortex.manage_orchestration({
         "project_root": str(blocked), "task_ref": current["task_ref"],

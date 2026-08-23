@@ -1015,6 +1015,7 @@ def _compiled_implementation_spec(
                 "depends_on": item.get("depends_on") or [],
                 "acceptance_criteria": item.get("acceptance_criteria") or [],
                 "verification": item.get("verification") or [],
+                "required_artifacts": item.get("required_artifacts") or [],
             }
             for index, item in enumerate(ordered, 1)
         ],
@@ -3569,7 +3570,72 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             audited = close_audit({**params, "task_id": task_id})
             return _orchestrate_response("advance", audited["state"], wave_id=requested_wave_id, result={"result_count": audited["result_count"]}, plan=plan)
         if state.get("status") == "blocked":
-            return _orchestrate_response("advance", state, wave_id=requested_wave_id, plan=plan)
+            # A terminal worker result is recoverable orchestration evidence,
+            # not a terminal state for Cortex itself.  Derive the corrective
+            # route on the server immediately; the coordinator must never
+            # manufacture ``future_waves`` or issue a second, replacement
+            # dispatch just to get the task moving again.
+            recovery = _terminal_blocked_recovery(
+                params, task_dir, state, plan,
+            )
+            if recovery is not None:
+                state, plan, recovery_receipt = recovery
+                if state.get("status") == "blocked":
+                    resumed = resume_task({
+                        **params,
+                        "task_id": task_id,
+                        "expected_revision": state["revision"],
+                        "reason": "Server-derived corrective recovery for terminal worker result.",
+                    })
+                    state = resumed["state"]
+                    _, task_dir, state = load_state(task_id, params)
+                prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+                state = prepared["state"]
+                state.setdefault("terminal_recovery", {}).update({
+                    "status": "dispatched",
+                    "dispatch_ref": (
+                        prepared["spawn_requests"][0].get("dispatch_ref")
+                        if prepared.get("spawn_requests") else None
+                    ),
+                })
+                save_state(
+                    task_dir,
+                    task_dir / "state.sqlite",
+                    state,
+                    "terminal_recovery_dispatch",
+                    "automatically dispatched server-owned corrective recovery",
+                )
+                return _orchestrate_response(
+                    "advance",
+                    state,
+                    wave_id=prepared["wave_id"],
+                    spawn_requests=prepared["spawn_requests"],
+                    result={"recovery": recovery_receipt},
+                    plan=plan,
+                )
+            # A logic-level condition without a legal server-owned route is a
+            # user decision, never an orchestrator deadlock.  Keep the task
+            # resumable and surface a concrete question-shaped diagnostic.
+            state["status"] = "needs_input"
+            state["blocked_reason"] = (
+                "Cortex could not derive a safe corrective owner for the terminal result; "
+                "user decision is required."
+            )
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "orchestration_question",
+                "terminal result requires an explicit user routing decision",
+            )
+            return _orchestrate_response(
+                "advance", state, wave_id=requested_wave_id,
+                result={
+                    "requires_user_decision": True,
+                    "question": state["blocked_reason"],
+                },
+                plan=plan,
+            )
         review = _hold_for_plan_approval(task_dir, state, plan)
         if review is not None:
             return _orchestrate_response(
@@ -4035,12 +4101,190 @@ def _orchestrate_inspect(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _terminal_blocked_recovery(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    """Derive a deterministic Planner-first recovery for a terminal worker result.
+
+    A terminal BLOCKED/FAILED AttemptResult is already durable evidence.  It is
+    not a reason for the coordinator to manufacture ``future_waves``.  This
+    helper is intentionally server-owned: it identifies the exact current
+    attempt(s), derives one recovery digest, reopens the plan gate, and records
+    the recovery receipt.  Replaying the same receipt returns the existing
+    Planner dispatch instead of creating another wave.
+    """
+    current = set(active_gates(state))
+    if not current:
+        return None
+    root = _ledger_root_for_artifact(task_dir)
+    existing = state.get("terminal_recovery") if isinstance(state.get("terminal_recovery"), dict) else None
+    # Once the server has reopened the plan gate, the origin attempt is
+    # intentionally invalidated.  Replays therefore cannot rediscover it from
+    # the current wave; the durable recovery receipt is the idempotency source.
+    if existing and str(existing.get("target_gate") or "") == "plan" and "plan" in current and str(existing.get("status") or "") in {"prepared", "dispatched"}:
+        return state, plan, {**existing, "idempotent": True}
+    terminal: list[dict[str, Any]] = []
+    for attempt in state.get("attempts", []):
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("invalidated")
+            or attempt.get("gate") not in current
+            or attempt.get("status") not in {"blocked", "failed", "cancelled", "superseded"}
+        ):
+            continue
+        attempt_id = safe_id(str(attempt.get("attempt_id") or ""))
+        raw_result_ref = str(attempt.get("attempt_result_ref") or "").strip()
+        if not attempt_id or not raw_result_ref:
+            continue
+        result_ref = safe_id(raw_result_ref)
+        canonical = attempt_protocol.get_attempt_result(root, task_id=state["task_id"], attempt_id=attempt_id)
+        if not isinstance(canonical, dict) or str(canonical.get("result_ref") or "") != result_ref:
+            continue
+        if str(canonical.get("lifecycle_status") or "") not in {
+            attempt_protocol.LIFECYCLE_BLOCKED,
+            attempt_protocol.LIFECYCLE_FAILED,
+        }:
+            continue
+        terminal.append({
+            "attempt_id": attempt_id,
+            "origin_gate": str(attempt.get("gate") or ""),
+            "dispatch_ref": str(attempt.get("dispatch_ref") or ""),
+            "attempt_result_ref": result_ref,
+            "status": str(canonical.get("status") or canonical.get("result_status") or "blocked"),
+            "summary": redact(str(canonical.get("summary") or ""), 1200),
+            "findings": canonical.get("findings") if isinstance(canonical.get("findings"), list) else [],
+            "decisions_needed": canonical.get("decisions_needed") if isinstance(canonical.get("decisions_needed"), list) else [],
+            "unresolved": canonical.get("unresolved") if isinstance(canonical.get("unresolved"), list) else [],
+        })
+    if not terminal:
+        return None
+
+    recovery_key = digest_text(canonical_json.dumps({
+        "task_id": state["task_id"],
+        "current_gates": sorted(current),
+        "terminal": terminal,
+    }))
+    if existing and str(existing.get("recovery_key") or "") == recovery_key:
+        return state, plan, {**existing, "idempotent": True}
+
+    task = load_task_definition(task_dir, state)
+    origin_gate = sorted({item["origin_gate"] for item in terminal})[0]
+    if "plan" in state.get("current_pipeline", []):
+        changed = update_pipeline({
+            **params,
+            "task_id": state["task_id"],
+            "expected_revision": state["revision"],
+            "operations": [{"op": "rework", "gate": "plan"}],
+            "allow_rework": True,
+            "reason": f"Server-owned corrective recovery for terminal {origin_gate} result.",
+        })
+    else:
+        changed = update_pipeline({
+            **params,
+            "task_id": state["task_id"],
+            "expected_revision": state["revision"],
+            "operations": [{"op": "add", "gate": "plan", "before": origin_gate}],
+            "allow_rework": True,
+            "reason": f"Server-owned corrective recovery for terminal {origin_gate} result.",
+        })
+    state = changed["state"]
+    _, task_dir, state = load_state(state["task_id"], params)
+    plan = _load_orchestrate_plan(task_dir, state)
+    plan_waves = [wave for wave in plan.get("waves", []) if "plan" in (wave.get("gates") or [])]
+    if not plan_waves:
+        generated, _ = _normalize_orchestrate_waves(
+            [{"wave_id": "server-recovery-plan", "delegations": [{"gate": "plan", "agent": "planner"}]}],
+            task,
+            plan.get("host_capabilities") or {},
+            str(params["project_root"]),
+        )
+        plan["waves"] = [*generated, *plan.get("waves", [])]
+        _write_orchestrate_plan(task_dir, plan)
+        plan_waves = generated
+    planner_wave = plan_waves[0]
+    planner_specs = [spec for spec in planner_wave.get("delegations", []) if spec.get("gate") == "plan"]
+    if not planner_specs:
+        raise ValueError("server recovery plan wave has no planner delegation")
+    # The corrective facts are attached to the Planner objective, rather than
+    # supplied as free-form future_waves by the coordinator.  Keep the source
+    # gate and exact immutable result refs so the Planner can explain and fix
+    # the original worker's error without a self-dependent origin->origin route.
+    instruction = "\n\nServer-owned corrective recovery. Origin gate(s): " + ", ".join(sorted({item["origin_gate"] for item in terminal})) + ". Read these canonical terminal results and produce a corrected plan before any worker is dispatched: " + ", ".join(item["attempt_result_ref"] for item in terminal) + ". Findings: " + redact(canonical_json.dumps([item.get("findings", []) for item in terminal]), 2400) + ". Unresolved: " + redact(canonical_json.dumps([item.get("unresolved", []) for item in terminal]), 1800)
+    for spec in planner_specs:
+        base = str(spec.get("objective") or "").strip()
+        if "Server-owned corrective recovery." not in base:
+            spec["objective"] = (base + instruction).strip()
+    plan["recovery_receipt"] = {
+        "schema": "cortex/recovery-contract/v1",
+        "recovery_key": recovery_key,
+        "mode": "planner_first",
+        "origin_gates": sorted({item["origin_gate"] for item in terminal}),
+        "origin_attempt_result_refs": [item["attempt_result_ref"] for item in terminal],
+        "target_gate": "plan",
+        "target_wave_id": planner_wave.get("wave_id"),
+        "replacement_worker_authorized": False,
+    }
+    _write_orchestrate_plan(task_dir, plan)
+    state["terminal_recovery"] = {
+        **plan["recovery_receipt"],
+        "created_at": now(),
+        "status": "prepared",
+    }
+    save_state(task_dir, task_dir / "state.sqlite", state, "terminal_recovery", "derived server-owned corrective Planner recovery")
+    return state, plan, {**state["terminal_recovery"], "idempotent": False}
+
+
 def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
     task_id = safe_id(str(params.get("task_id", "")))
     _, task_dir, state = load_state(task_id, params)
     authorize(state, params)
     task = load_task_definition(task_dir, state)
     plan = _load_orchestrate_plan(task_dir, state)
+    terminal_recovery_requested = bool(params.get("terminal_recovery"))
+    terminal_recovery: dict[str, Any] | None = None
+    if terminal_recovery_requested and params.get("future_waves") is not None:
+        raise ValueError("server-owned terminal recovery does not accept future_waves")
+    if terminal_recovery_requested:
+        derived = _terminal_blocked_recovery(params, task_dir, state, plan)
+        if derived is None:
+            raise ValueError(
+                "terminal recovery requires a current blocked or failed AttemptResult; "
+                "inspect the exact task state and terminal result first"
+            )
+        state, plan, terminal_recovery = derived
+        # The first recovery reopens the blocked task after the plan gate has
+        # been reset. A replay is already active and must only rehydrate the
+        # same Planner dispatch; it must never call resume_task again.
+        if state.get("status") == "blocked":
+            resumed = resume_task({
+                **params,
+                "task_id": task_id,
+                "expected_revision": state["revision"],
+                "reason": "Server-derived corrective Planner recovery for terminal worker result.",
+            })
+            state = resumed["state"]
+            _, task_dir, state = load_state(task_id, params)
+        else:
+            state.setdefault("terminal_recovery", {})["status"] = "dispatched"
+            save_state(task_dir, task_dir / "state.sqlite", state, "terminal_recovery_ready", "rehydrating idempotent corrective Planner recovery")
+        prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+        state = prepared["state"]
+        state.setdefault("terminal_recovery", {})["status"] = "dispatched"
+        save_state(task_dir, task_dir / "state.sqlite", state, "terminal_recovery_dispatch", "prepared one server-owned corrective Planner dispatch")
+        return {
+            **_orchestrate_response(
+                "resume", state, wave_id=prepared["wave_id"],
+                spawn_requests=prepared["spawn_requests"], plan=plan,
+                result={"recovery": terminal_recovery},
+            ),
+            "next_action": (
+                "invoke the returned corrective Planner dispatch exactly once; it is server-derived and idempotent. "
+                "Do not provide future_waves, spawn a replacement worker, or dispatch the origin gate directly."
+            ),
+        }
     # Resume can replace a recovery plan and invalidate blocked attempts.
     # Validate dispatch context before either durable transition, so a
     # compiler rejection keeps the exact recovery state available for retry.
@@ -4054,7 +4298,7 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
         )
     original_status = str(state.get("status") or "")
     active_recovery = (
-        original_status == "active"
+        original_status in {"active", "needs_input"}
         and params.get("future_waves") is not None
         and bool(active_gates(state))
         and not any(
@@ -4147,7 +4391,7 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             "resume_replan",
             "recorded an atomic recovery plan before resuming the blocked task",
         )
-    if active_recovery:
+    if active_recovery or original_status == "needs_input":
         state.setdefault("resume_events", []).append({
             "reason": redact(
                 params.get("reason") or "Recovered an active pipeline with no dispatch.", 2000
@@ -4155,12 +4399,18 @@ def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
             "mode": "active_stranded_recovery",
             "at": now(),
         })
+        state["status"] = "active"
+        state.pop("blocked_reason", None)
         save_state(
             task_dir,
             task_dir / "state.sqlite",
             state,
-            "active_stranded_recovery",
-            "recovered an active pipeline that had no live or pending dispatch",
+            "resume_user_decision" if original_status == "needs_input" else "active_stranded_recovery",
+            (
+                "user supplied the decision required to resume a non-blocking orchestration question"
+                if original_status == "needs_input"
+                else "recovered an active pipeline that had no live or pending dispatch"
+            ),
         )
         resumed_state = state
     else:

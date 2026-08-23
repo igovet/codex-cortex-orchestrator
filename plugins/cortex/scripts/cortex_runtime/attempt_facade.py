@@ -672,6 +672,15 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
                 )
         root = _runtime.ledger_root({"project_root": str(project)})
         _receipt_guard(root, state, attempt)
+        if str(params.get("status") or "").strip().lower() == "completed":
+            missing_artifacts = _runtime.required_artifact_diagnostics(
+                project, task_dir, state, attempt,
+            )
+            if missing_artifacts:
+                # Keep the attempt and all prior valid evidence untouched. The
+                # worker must materialize the exact declared paths and retry
+                # this same attempt; no replacement worker is authorized.
+                raise ValidationFailure(missing_artifacts)
         semantic_result = {
             "status": params.get("status"),
             "summary": params.get("summary"),

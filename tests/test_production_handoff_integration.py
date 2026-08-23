@@ -407,10 +407,12 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             "results": terminal_continuation["results"],
         })
         self.assertTrue(terminal_receipt["ok"], terminal_receipt)
-        self.assertEqual(terminal_receipt["outcome"], "blocked")
+        self.assertEqual(terminal_receipt["outcome"], "ready_to_spawn")
+        self.assertEqual(len(terminal_receipt["dispatches"]), 1)
+        self.assertEqual(terminal_receipt["dispatches"][0]["phase"], "plan")
         final_state = control.load_task_state_for_artifact(task_dir)
-        self.assertEqual(final_state["status"], "blocked")
-        self.assertEqual(final_state["gates"]["discover"]["outcome"], "blocked")
+        self.assertNotEqual(final_state["status"], "blocked")
+        self.assertEqual(final_state["status"], "active")
 
     def test_unresolved_dispatch_cannot_complete_or_close_and_recovers_deterministically(self) -> None:
         """A dispatch without a canonical worker result remains recoverable.
@@ -1210,6 +1212,76 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             len({event["event_key"] for event in events}), len(events),
             "briefing receipt and completion retry must not duplicate event keys",
         )
+
+    def test_terminal_blocked_result_gets_one_server_owned_planner_recovery(self) -> None:
+        started = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "Recover a blocked worker without coordinator-authored waves.",
+                "complexity": "C1",
+                "acceptance_criteria": ["A terminal worker result gets a corrective Planner dispatch."],
+                "verification": ["Repeat recovery and verify idempotency."],
+                "plan_approval": "auto",
+            },
+            "waves": [
+                {"workers": [{"phase": "discover", "profile": "explorer"}]},
+                {"workers": [{"phase": "review", "profile": "code_reviewer"}]},
+            ],
+        })
+        self.assertTrue(started["ok"], started)
+        task_dir, state, attempt = self._active_attempt()
+        self._read_briefing(state, attempt)
+        blocked = control.complete_worker_attempt({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "profile": attempt["profile"],
+            "status": "blocked",
+            "summary": "Discovery needs a corrected route.",
+            "findings": [{"path": "route", "message": "route is unavailable"}],
+            "decisions_needed": [],
+            "unresolved": ["route"],
+            "claims": [],
+        })
+        self.assertTrue(blocked["ok"], blocked)
+        read = control.read_worker_result({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "attempt_result_ref": blocked["attempt_result_ref"],
+        })
+        self.assertTrue(read["ok"], read)
+        continuation = read["terminal_continuation"]
+        stopped = control.continue_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "step": continuation["step"],
+            "results": continuation["results"],
+        })
+        self.assertTrue(stopped["ok"], stopped)
+        self.assertEqual(stopped["outcome"], "ready_to_spawn")
+        self.assertEqual(len(stopped["dispatches"]), 1)
+        self.assertEqual(stopped["dispatches"][0]["phase"], "plan")
+        self.assertFalse(stopped["result"]["recovery"]["replacement_worker_authorized"])
+        recovered = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_blocked",
+        })
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["outcome"], "ready_to_spawn")
+        self.assertEqual(len(recovered["dispatches"]), 1)
+        self.assertEqual(recovered["dispatches"][0]["phase"], "plan")
+        self.assertEqual(recovered["dispatches"][0]["dispatch_ref"], stopped["dispatches"][0]["dispatch_ref"])
+        self.assertTrue(recovered["result"]["recovery"]["idempotent"])
+        replay = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_blocked",
+        })
+        self.assertTrue(replay["ok"], replay)
+        self.assertEqual(len(replay["dispatches"]), 1)
+        self.assertEqual(replay["dispatches"][0]["dispatch_ref"], recovered["dispatches"][0]["dispatch_ref"])
+        self.assertTrue(replay["result"]["recovery"]["idempotent"])
 
 
 if __name__ == "__main__":

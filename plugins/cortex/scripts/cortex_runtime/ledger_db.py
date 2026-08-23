@@ -24,7 +24,7 @@ import sqlite3
 import stat
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1837,39 +1837,139 @@ def migration_history(root: Path) -> list[dict[str, Any]]:
         )]
 
 
-def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, source: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Merge one closure finding, keyed by task and stable fingerprint."""
-    ensure_database(root)
+def _upsert_task_finding_connection(
+    connection: Any,
+    task_id: str,
+    finding: dict[str, Any],
+    *,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge one canonical finding using an existing transaction."""
     fingerprint = str(finding["fingerprint"])
     source = source or {}
     severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
-    with _connection(root, write=True) as connection:
-        row = connection.execute("SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?", (task_id, fingerprint)).fetchone()
-        now = _now()
-        evidence = []
-        if row:
-            try: evidence = json.loads(str(row["source_evidence_json"]))
-            except json.JSONDecodeError: evidence = []
-        if source and source not in evidence: evidence.append(source)
-        if row:
-            status = str(finding["status"])
-            if str(row["status"]) == "open" and status == "open":
-                # While a finding remains open, repeated reports may only
-                # retain or increase its severity/blocking state. Explicit
-                # resolved/waived reports are lifecycle transitions and keep
-                # their existing metadata contract below.
-                severity = max(
-                    (str(row["severity"]), str(finding["severity"])),
-                    key=lambda value: severity_rank[value],
-                )
-                blocking = bool(row["blocking"]) or bool(finding["blocking"])
-            else:
-                severity = finding["severity"]
-                blocking = bool(finding["blocking"])
-            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (severity, status, int(blocking), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
+    row = connection.execute(
+        "SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?",
+        (task_id, fingerprint),
+    ).fetchone()
+    now = _now()
+    evidence = []
+    if row:
+        try:
+            evidence = json.loads(str(row["source_evidence_json"]))
+        except json.JSONDecodeError:
+            evidence = []
+    if source and source not in evidence:
+        evidence.append(source)
+    if row:
+        status = str(finding["status"])
+        if str(row["status"]) == "open" and status == "open":
+            severity = max(
+                (str(row["severity"]), str(finding["severity"])),
+                key=lambda value: severity_rank[value],
+            )
+            blocking = bool(row["blocking"]) or bool(finding["blocking"])
         else:
-            connection.execute("INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, now))
+            severity = finding["severity"]
+            blocking = bool(finding["blocking"])
+        connection.execute(
+            "UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, "
+            "next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, "
+            "resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?",
+            (
+                severity, status, int(blocking), finding["summary"],
+                _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"),
+                _canonical_json(finding.get("next_action")) if isinstance(finding.get("next_action"), (dict, list)) else finding.get("next_action"),
+                _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"),
+                finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint,
+            ),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,"
+            "next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,"
+            "first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]),
+                finding["summary"],
+                _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"),
+                _canonical_json(finding.get("next_action")) if isinstance(finding.get("next_action"), (dict, list)) else finding.get("next_action"),
+                _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"),
+                finding.get("waived_at"), finding.get("resolved_at"), now, now,
+            ),
+        )
     return finding | {"task_id": task_id, "source_evidence": evidence}
+
+
+def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge one closure finding, keyed by task and stable fingerprint."""
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        return _upsert_task_finding_connection(connection, task_id, finding, source=source)
+
+
+def materialize_attempt_findings(
+    connection: Any,
+    *,
+    task_id: str,
+    attempt_id: str,
+    result_ref: str,
+    gate: str | None,
+    findings: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Materialize AttemptResult findings in the completion transaction."""
+    materialized: list[dict[str, Any]] = []
+    severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
+    for index, raw in enumerate(findings):
+        value = dict(raw) if isinstance(raw, Mapping) else {"details": raw}
+        fingerprint = str(value.get("fingerprint") or "").strip()
+        if not fingerprint:
+            identity = {
+                key: item for key, item in value.items()
+                if key not in {"source_evidence", "evidence", "evidence_refs"}
+            }
+            fingerprint = "finding-" + hashlib.sha256(
+                _canonical_json(identity).encode("utf-8")
+            ).hexdigest()[:32]
+        severity = str(value.get("severity") or "info").strip()
+        if severity not in severity_rank:
+            severity = "info"
+        status = str(value.get("status") or "open").strip().lower()
+        if status not in {"open", "resolved", "waived"}:
+            status = "open"
+        blocking_value = value.get("blocking")
+        blocking = bool(blocking_value) if blocking_value is not None else severity in {"P0", "P1"}
+        summary = str(value.get("summary") or value.get("message") or "AttemptResult finding").strip()
+        if not summary:
+            summary = "AttemptResult finding"
+        details = value.get("details")
+        if details is None:
+            details = {
+                key: item for key, item in value.items()
+                if key not in {
+                    "fingerprint", "severity", "status", "blocking", "summary", "message",
+                    "next_action", "waiver_reason", "waived_by", "waived_at", "resolved_at",
+                }
+            }
+        finding = {
+            "fingerprint": fingerprint, "severity": severity, "status": status,
+            "blocking": blocking, "summary": summary, "details": details,
+        }
+        for key in ("next_action", "waiver_reason", "waived_by", "waived_at", "resolved_at"):
+            if key in value:
+                finding[key] = value[key]
+        source = {
+            "source_type": "attempt_result", "attempt_id": attempt_id,
+            "attempt_result_ref": result_ref, "origin_result_ref": result_ref,
+            "finding_index": index,
+        }
+        if gate:
+            source["gate"] = gate
+        for key in ("evidence_ref", "evidence_refs", "source_ref", "source_evidence"):
+            if key in value:
+                source[key] = value[key]
+        materialized.append(_upsert_task_finding_connection(connection, task_id, finding, source=source))
+    return materialized
 
 
 def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = True) -> list[dict[str, Any]]:

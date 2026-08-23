@@ -188,6 +188,38 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         self.assertEqual(stored["unresolved"], params["unresolved"])
         self.assertEqual(stored["lifecycle_status"], attempt_protocol.LIFECYCLE_COMPLETED)
 
+    def test_required_artifact_preflight_returns_exact_paths_without_writing_result(self) -> None:
+        manifest = {
+            "work_packages": [{"artifact_path": "artifacts/planning.json"}],
+        }
+        package_record = {
+            "package": {
+                "required_artifacts": [{
+                    "path": "tests/generated_invariants.py",
+                    "kind": "test_suite",
+                    "owner_gate": "implementation",
+                    "verification": "pytest -q tests/generated_invariants.py",
+                }],
+                "microtasks": [],
+            },
+        }
+        with mock.patch.object(cortex, "current_planning_manifest", return_value=manifest), \
+             mock.patch.object(cortex, "read_immutable_json_artifact", return_value=(package_record, {})):
+            diagnostics = cortex.required_artifact_diagnostics(
+                self.project,
+                self.project,
+                {"task_id": self.task_id},
+                self.attempt,
+            )
+
+        self.assertEqual(len(diagnostics), 1)
+        diagnostic = diagnostics[0]
+        self.assertEqual(diagnostic["code"], "required_artifact_missing")
+        self.assertEqual(diagnostic["json_pointer"], "/required_artifacts/0")
+        self.assertEqual(diagnostic["received"]["path"], "tests/generated_invariants.py")
+        self.assertIn("pytest -q tests/generated_invariants.py", diagnostic["fix"])
+        self.assertIn("same implementation attempt", diagnostic["fix"])
+
     def test_finalizing_or_completed_work_stop_does_not_become_worker_failure(self) -> None:
         """The native-stop hook preserves both intermediate success lifecycles."""
         for lifecycle in (

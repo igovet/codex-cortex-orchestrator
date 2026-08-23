@@ -90,8 +90,8 @@ DEFAULT_PUBLIC_TOOL_NAMES = tuple(dict.fromkeys(
 
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if it returns waiting_workers, wait only for the exact persisted workers; if it returns completed, blocked, or a non-dispatch terminal outcome, stop after the required close/result. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is terminal: stop and result the blocker.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
+    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is returned as a concrete user-facing correction, not an orchestrator deadlock.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is an idempotent server-owned retry for a lost recovery response and accepts no coordinator-authored future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
     "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may submit the initial full planning work breakdown. If planning validation returns diagnostics and a rejected-draft digest, Cortex has retained the complete draft and every field that passed validation: retry this same attempt with ONLY base_payload_digest plus non-empty diagnostic-scoped RFC6902 patches. Never resend or regenerate the full planning object during repair; unrelated fields are preserved server-side. The canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
@@ -191,6 +191,17 @@ def build_public_schemas(
         },
         "required": ["requirement", "plan_refs", "verification", "status"],
     }
+    REQUIRED_ARTIFACT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "path": {"type": "string", "minLength": 1, "description": "Project-relative path that must exist when the owning gate completes."},
+            "kind": {"type": "string", "enum": ["file", "test_suite", "fixture", "cli", "document", "report", "schema", "config", "other"], "description": "Artifact kind."},
+            "owner_gate": {"type": "string", "enum": sorted(canonical_gates | set(gate_aliases))},
+            "verification": {"type": "string", "minLength": 1, "description": "Exact trusted verification id or command contract for this artifact."},
+        },
+        "required": ["path", "kind", "owner_gate", "verification"],
+    }
     PLANNING_MICROTASK_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -210,6 +221,10 @@ def build_public_schemas(
             "gates": PLANNING_STRING_LIST_SCHEMA,
             "acceptance_criteria": PLANNING_STRING_LIST_SCHEMA,
             "verification": PLANNING_STRING_LIST_SCHEMA,
+            "required_artifacts": {
+                "type": "array", "uniqueItems": True, "items": REQUIRED_ARTIFACT_SCHEMA,
+                "description": "Machine-readable deliverables checked against the project workspace at implementation/QA completion.",
+            },
         },
         "required": ["id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"],
     }
@@ -225,6 +240,10 @@ def build_public_schemas(
             "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
             "order": {"type": "integer", "minimum": 1},
             "gates": PLANNING_STRING_LIST_SCHEMA,
+            "required_artifacts": {
+                "type": "array", "uniqueItems": True, "items": REQUIRED_ARTIFACT_SCHEMA,
+                "description": "Package-level deliverables checked against the project workspace at their owner gate.",
+            },
             "microtasks": {
                 "type": "array",
                 "minItems": 1,
@@ -1101,6 +1120,23 @@ def v3_response(
             )
         else:
             next_action = f"{coordinator_lock} Resolve the blocker without direct project work, then use manage_orchestration with intent resume."
+    elif outcome == "needs_input":
+        user_question = (
+            old.get("result", {}).get("question")
+            if isinstance(old.get("result"), dict) else None
+        )
+        if user_question:
+            next_action = (
+                f"{coordinator_lock} Ask the user this exact orchestration question: {user_question} "
+                "Record the user's decision through manage_orchestration for the same task_ref, then let Cortex "
+                "resume the server-owned route. Do not mark the task blocked, wait, respawn, or invent future_waves."
+            )
+        else:
+            next_action = (
+                f"{coordinator_lock} A user decision is required for this orchestration condition. "
+                "Surface the exact diagnostics/question from result, then resume the same task after the user's answer; "
+                "do not wait or create a replacement worker."
+            )
     else:
         next_action = (
             f"{coordinator_lock} Wait idly for the active worker results, then call continue_orchestration "
@@ -1116,6 +1152,9 @@ def v3_response(
         stopped_workers = [
             item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
         ]
+        open_questions = [
+            item for item in handoff.get("open_questions", []) if isinstance(item, dict)
+        ]
         pending_dispatches = [
             item for item in handoff.get("pending_dispatches", []) if isinstance(item, dict)
         ]
@@ -1129,7 +1168,13 @@ def v3_response(
         finalization_pending = [item for item in stopped_workers if item.get("finalization_pending")]
         terminal_failures = [
             item for item in stopped_workers
-            if item.get("failure_status") == "failed"
+            if str(item.get("failure_status") or "").strip()
+            and not item.get("awaiting_user")
+            and str(item.get("dispatch_ref") or "").strip()
+        ]
+        question_pauses = [
+            item for item in stopped_workers
+            if item.get("awaiting_user")
             and str(item.get("dispatch_ref") or "").strip()
         ]
         if outcome == "completion_pending" or (
@@ -1176,6 +1221,21 @@ def v3_response(
                 f"{coordinator_lock} A stopped worker already has a canonical AttemptResult but finalization remains pending. "
                 "Do not wait on, respawn, or replace it. Inspect once, then retry complete_attempt only for that exact persisted attempt."
             )
+        elif question_pauses or open_questions:
+            question_targets = question_pauses or open_questions
+            targets = "; ".join(
+                f"question_ref={item.get('question_ref') or (item.get('question_refs') or [''])[0]!r}, "
+                f"dispatch_ref={item.get('dispatch_ref')!r}"
+                for item in question_targets
+            )
+            next_action = (
+                f"{coordinator_lock} A worker is paused for a durable user question, not blocked and not running. "
+                f"Surface the exact question and call manage_orchestration(intent='question', task_ref={task_ref!r}, "
+                f"payload={{'question_ref': ...}}) for {targets}; render the returned chat interaction and end this turn. "
+                "After the user's answer, call manage_orchestration with the same question_ref, resume the exact same child, "
+                "then call continue_orchestration only after that attempt result is recorded. Never wait, respawn, replace, "
+                "or invent future_waves."
+            )
         elif terminal_failures:
             failure_targets = "; ".join(
                 f"dispatch_ref={item['dispatch_ref']!r}, status='failed', reason={item['failure_reason']!r}"
@@ -1183,8 +1243,10 @@ def v3_response(
             )
             next_action = (
                 f"{coordinator_lock} Recovery found a terminal stopped worker without an AttemptResult. Never wait on, "
-                "follow up, or respawn the stopped child. Submit exactly one failed result for the current step using: "
-                + failure_targets + "; Cortex will continue unbounded corrective rework while raising reasoning effort after repeated failures."
+                "follow up, or respawn the stopped child. Call continue_orchestration exactly once with the current "
+                f"task_ref={task_ref!r}, current step, and results=[{{'status':'failed','reason':..., 'dispatch_ref':...}}] "
+                "using: " + failure_targets + "; Cortex will route bounded corrective rework automatically and never "
+                "create a replacement worker for this receipt."
             )
         elif outcome == "waiting_workers" and not active_worker_ids and not pending_dispatches:
             next_action = (
