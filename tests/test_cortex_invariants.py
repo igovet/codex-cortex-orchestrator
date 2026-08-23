@@ -1303,6 +1303,13 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("an explicit `profile`, narrow non-broad", skill)
         self.assertIn("it does not author a digest or evidence marker", skill)
 
+    def test_orchestrator_skill_requires_schema_first_lifecycle_calls(self):
+        skill = (Path(__file__).parents[1] / "plugins/cortex/skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Before every Cortex lifecycle or recovery tool call", skill)
+        self.assertIn("exact nested JSON", skill)
+        self.assertIn("active MCP `tools/list` surface", skill)
+        self.assertIn("preserve fields that already passed validation", skill)
+
     def test_control_skill_requires_ordered_one_call_per_wave_protocol(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
         markers = [

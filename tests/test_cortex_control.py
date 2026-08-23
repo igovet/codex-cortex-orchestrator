@@ -2871,6 +2871,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("one durable root worker_question(all missing/why)", bootstrap)
         self.assertIn("exact followup→poll→revalidate", bootstrap)
         self.assertIn("Call read_dispatch_briefing before project work", prompt)
+        self.assertIn("Before every strict Cortex tool call, use the exact nested schema", prompt)
         self.assertIn("briefing receipt", prompt)
         self.assertIn("Finish with complete_attempt", prompt)
 
@@ -3013,6 +3014,27 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "start_validation_failed")
         self.assertIn("task.acceptance_criteria", rejected["diagnostics"][0]["message"])
         self.assertIn("task.verification", rejected["diagnostics"][0]["message"])
+        tasks = self.ledger / "tasks"
+        self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
+
+    def test_v3_start_reports_nested_scope_schema_error_before_normalization(self):
+        rejected = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "preserve the scope boundary",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+                "scope": "Текущий репозиторий",
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "start_validation_failed")
+        diagnostic = next(item for item in rejected["diagnostics"] if item.get("path") == "task.scope")
+        self.assertEqual(diagnostic["message"], "must be an array of non-empty strings")
+        self.assertEqual(diagnostic["received"], {"type": "str"})
+        self.assertEqual(diagnostic["field_schema"], {"type": "array", "items": {"type": "string", "minLength": 1}})
+        self.assertIn("task.scope", rejected["next_action"])
+        self.assertIn("task.scope", rejected["validation"]["invalid_paths"])
         tasks = self.ledger / "tasks"
         self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
@@ -5622,7 +5644,9 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(structured["ok"], False)
             self.assertEqual(structured["code"], "start_validation_failed")
             self.assertIn("unknown worker phase", structured["diagnostics"][0]["message"])
-            self.assertIn("COORDINATOR LOCK", structured["next_action"])
+            self.assertNotIn("COORDINATOR LOCK", structured["next_action"])
+            self.assertIn("Retry start_orchestration", structured["next_action"])
+            self.assertIn("future_waves[0].workers[0].phase", structured["next_action"])
             log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
             self.assertFalse(log_path.exists())
 

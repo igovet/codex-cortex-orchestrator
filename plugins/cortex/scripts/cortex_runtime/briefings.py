@@ -498,6 +498,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     else:
         gate_delta += "\nThis is a writable result gate. Change only mission artifacts inside allowed_paths; Cortex derives changed paths from its server-captured baseline."
     tool_protocol = (
+        "Before every strict Cortex tool call, use the exact nested schema advertised for that tool by the active MCP tools/list surface; do not infer fields, enum values, or paths from prose or prior errors. "
         "Do not call coordinator lifecycle/gate/delegation operations. Use strict scoped worker operations with the exact Assignment identity. "
         "Call read_dispatch_briefing before project work and continue its cursor until complete=true (briefing receipt). Use read_worker_result only for listed predecessor refs; each complete read records its receipt. "
         "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>; pause. Answer=>followup_task same child; poll same ref/attempt first. Answered=>record_attempt_event, rerun, complete_attempt. Pending=>QUESTION_RECORDED. No OTHER_TERMINAL/freeform/replacement. "

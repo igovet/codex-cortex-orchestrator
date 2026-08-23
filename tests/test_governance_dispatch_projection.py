@@ -6,9 +6,6 @@ import sys
 import unittest
 from pathlib import Path
 
-import pytest
-
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins" / "cortex" / "scripts"))
 
@@ -167,7 +164,7 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
     def test_dispatch_projection_rejects_digest_for_different_json_scalar_types(self) -> None:
         governance = self._complete_governance()
         governance["policy_snapshot"]["promotion_window_days"] = "90"
-        with pytest.raises(ValueError, match="policy_snapshot_digest"):
+        with self.assertRaisesRegex(ValueError, "policy_snapshot_digest"):
             delegation_service._governance_dispatch_projection(
                 {"governance": governance},
                 {"governance": governance, "current_pipeline": ["plan"]},
