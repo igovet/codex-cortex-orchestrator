@@ -47,6 +47,13 @@ class PublicSchemaParityTests(unittest.TestCase):
                 {"user_request": "scope parity", "complexity": "C1"},
             )
 
+        microtask_item = (
+            cortex.PUBLIC_SCHEMA_REGISTRY["complete_attempt"]["properties"]["planning"]
+            ["properties"]["work_packages"]["items"]["properties"]["microtasks"]
+            ["items"]["properties"]["allowed_paths"]["items"]
+        )
+        self.assertEqual(microtask_item["not"], {"enum": [".", "*"]})
+
     def test_task_scope_text_arrays_advertise_non_empty_items(self) -> None:
         task_properties = cortex.PUBLIC_SCHEMA_REGISTRY["start_orchestration"]["properties"]["task"]["properties"]
         for field in ("requirements", "constraints", "scope", "allowed_paths", "pause_conditions"):
