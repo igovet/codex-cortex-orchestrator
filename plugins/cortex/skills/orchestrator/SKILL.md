@@ -12,6 +12,13 @@ mention `$cortex:orchestrator`. In CLI use `$cortex:orchestrator` or `/skills`.
 Bare `/cortex` and `/normal` are textual shorthand, not registered native slash
 commands. Do not use obsolete prompt aliases.
 
+When Desktop supplies the selected route as the canonical Markdown link
+`[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` and the link is not
+present in the task body, preserve the activation in the first
+`start_orchestration` call with the top-level field
+`activation_marker: "$cortex:orchestrator"`. This is the only accepted marker;
+arbitrary links and other values are not activation.
+
 Never present a bare `/cortex` or `/normal` token as a required next step or
 ask the user to send it as a recovery command. Those tokens are not native
 host commands. If activation is needed, use the Skills picker to select

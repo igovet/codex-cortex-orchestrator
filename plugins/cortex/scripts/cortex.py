@@ -165,6 +165,7 @@ QUESTION_SCHEMA = "cortex/question/v2"
 ACTIVATION_COMMAND = "/cortex"
 NORMAL_COMMAND = "/normal"
 SKILL_ROUTE_HINT = "select `cortex:orchestrator` in the Skills picker or mention `$cortex:orchestrator` in the main chat"
+DESKTOP_CORTEX_ACTIVATION_MARKER = "$cortex:orchestrator"
 PROFILE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "profiles.json"
 # Desktop inserts this local Markdown link when a user selects the Cortex
 # Orchestrator skill. It is host transport metadata, not user task content;
@@ -950,7 +951,7 @@ def canonicalize_desktop_cortex_request(value: object) -> str:
     untouched.
     """
     raw = str(value or "").strip()
-    return DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.sub("$cortex:orchestrator", raw)
+    return DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.sub(DESKTOP_CORTEX_ACTIVATION_MARKER, raw)
 
 
 def desktop_cortex_route_requested(value: object) -> bool:
@@ -10712,7 +10713,22 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Start public Cortex orchestration without caller-managed lifecycle identifiers."""
     staged_authorization_task_id: str | None = None
     try:
-        envelope = _v3_collect_fields(params, {"project_root", "task", "waves", "_follow_up"}, operation="start_orchestration")
+        envelope = _v3_collect_fields(
+            params,
+            {"project_root", "activation_marker", "task", "waves", "_follow_up"},
+            operation="start_orchestration",
+        )
+        activation_marker = params.get("activation_marker") if isinstance(params, dict) else None
+        if activation_marker is not None and activation_marker != DESKTOP_CORTEX_ACTIVATION_MARKER:
+            envelope.append({
+                "code": "start_orchestration_validation_failed",
+                "phase": "preflight",
+                "path": "activation_marker",
+                "message": "must equal the canonical Cortex activation marker",
+                "received": {"type": type(activation_marker).__name__},
+                "expected": {"type": "string", "const": DESKTOP_CORTEX_ACTIVATION_MARKER},
+                "fix": "Set activation_marker to the exact value $cortex:orchestrator or omit it when host activation is already established.",
+            })
         raw_task_probe = params.get("task") if isinstance(params, dict) else None
         if not isinstance(raw_task_probe, dict):
             envelope.append({"code": "start_orchestration_validation_failed", "path": "task", "message": "task must be an object"})
@@ -10801,8 +10817,8 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         if envelope:
             return _v3_envelope_error("start_orchestration", envelope)
         selected_project_root = select_project_root(params)
-        if set(params) - {"project_root", "task", "waves", "_follow_up"}:
-            raise ValueError("start_orchestration accepts only project_root, task, and optional waves")
+        if set(params) - {"project_root", "activation_marker", "task", "waves", "_follow_up"}:
+            raise ValueError("start_orchestration accepts only project_root, activation_marker, task, and optional waves")
         raw_task = params.get("task")
         if not isinstance(raw_task, dict):
             raise ValueError("task must be an object containing the exact user_request")
@@ -10887,7 +10903,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
         if not replayed:
             staged_authorization_task_id = task_id
-        if desktop_route_requested:
+        if desktop_route_requested or activation_marker == DESKTOP_CORTEX_ACTIVATION_MARKER:
             # A Desktop skill selection can arrive as a canonical Markdown
             # wrapper in the user request instead of a separate host route
             # activation.  Establish the same scoped activation before the

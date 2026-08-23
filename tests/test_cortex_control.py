@@ -3511,6 +3511,43 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(task["intent_clarification_required"])
         self.assertIn("Cortex intent preflight: BLOCKING", briefing)
 
+    def test_v3_start_activation_marker_survives_stripped_desktop_route(self):
+        # This reproduces the Desktop failure: the original user turn carries
+        # the selected-skill link, but the coordinator's task body does not.
+        original_user_text = (
+            "[$cortex:orchestrator](/home/user/.codex/plugins/cache/cortex/cortex/10.0.7/skills/"
+            "orchestrator/SKILL.md)\n\nсоздай лендинг"
+        )
+        task_body = "создай лендинг"
+        self.assertIn("[$cortex:orchestrator]", original_user_text)
+        self.assertNotIn("cortex:orchestrator", task_body)
+        with mock.patch.object(control, "activate_orchestration", wraps=control.activate_orchestration) as activate:
+            started = control.start_orchestration({
+                "project_root": str(self.project),
+                "activation_marker": "$cortex:orchestrator",
+                "task": {
+                    "user_request": task_body,
+                    "acceptance_criteria": ["The landing page is created."],
+                    "verification": ["Record the focused start evidence."],
+                },
+                "waves": [{"workers": [{"phase": "plan"}]}],
+            })
+        self.assertTrue(started["ok"], started)
+        self.assertTrue(any(call.args and call.args[0].get("user_command") == control.ACTIVATION_COMMAND for call in activate.call_args_list))
+
+        rejected = control.start_orchestration({
+            "project_root": str(self.project),
+            "activation_marker": "[$cortex:orchestrator](/tmp/anything)",
+            "task": {
+                "user_request": "another task",
+                "acceptance_criteria": ["The task is completed."],
+                "verification": ["Record evidence."],
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "start_validation_failed")
+        self.assertTrue(any(item.get("path") == "activation_marker" for item in rejected["diagnostics"]))
+
     def test_v3_desktop_skill_link_cache_version_does_not_split_task_identity(self):
         first = self.v3_start(
             "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"

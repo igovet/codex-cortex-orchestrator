@@ -426,7 +426,10 @@ current session, and start a new one.
 
 Cortex exposes one explicit entry point with several routes. On Desktop,
 select **Skills → Cortex Orchestrator** or mention the skill in chat. In the
-CLI, use `$cortex:orchestrator` or `/skills`.
+CLI, use `$cortex:orchestrator` or `/skills`. If Desktop passes the selected
+route as its canonical Markdown skill link but the link is stripped from the
+task body, the coordinator preserves the selection in the first
+`start_orchestration` call with `activation_marker: "$cortex:orchestrator"`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
