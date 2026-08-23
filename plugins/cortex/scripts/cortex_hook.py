@@ -645,7 +645,7 @@ def unavailable_wait_target_ids(event: dict, state: dict | None = None) -> list[
     """
     if (
         str(event.get("hook_event_name")) != "PostToolUse"
-        or str(event.get("tool_name")) not in {"Agent", "wait"}
+        or str(event.get("tool_name")) not in {"Agent", "wait", "wait_agent"}
     ):
         return []
     targets = _wait_target_ids(event)
@@ -878,7 +878,7 @@ def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | Non
     """
     if (
         str(event.get("hook_event_name")) not in {"PreToolUse", "PostToolUse"}
-        or str(event.get("tool_name")) not in {"Agent", "wait"}
+        or str(event.get("tool_name")) not in {"Agent", "wait", "wait_agent"}
     ):
         return None
     raw_input = event.get("tool_input")
@@ -1116,7 +1116,7 @@ def stopped_worker_after_wait_context(
     """
     if (
         str(event.get("hook_event_name")) != "PostToolUse"
-        or str(event.get("tool_name")) not in {"Agent", "wait"}
+        or str(event.get("tool_name")) not in {"Agent", "wait", "wait_agent"}
     ):
         return None
     attempts = [

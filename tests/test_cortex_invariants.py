@@ -962,7 +962,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_agent_hook_rejects_empty_wait_as_unspawned_dispatch(self):
         self.init(task_id="empty-wait")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
-        for tool_name in ("Agent", "wait"):
+        for tool_name in ("Agent", "wait", "wait_agent"):
             with self.subTest(tool_name=tool_name):
                 event = {
                     "hook_event_name": "PreToolUse",
@@ -1134,9 +1134,13 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__continue_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__manage_orchestration"))
         self.assertTrue(re.fullmatch(matcher, "mcp__cortex__read_worker_result"))
+        self.assertTrue(re.fullmatch(matcher, "spawn_agent"))
+        self.assertTrue(re.fullmatch(matcher, "wait_agent"))
         pre_matcher = manifest["hooks"]["PreToolUse"][0]["matcher"]
         self.assertTrue(re.fullmatch(pre_matcher, "Agent"))
         self.assertTrue(re.fullmatch(pre_matcher, "wait"))
+        self.assertTrue(re.fullmatch(pre_matcher, "spawn_agent"))
+        self.assertTrue(re.fullmatch(pre_matcher, "wait_agent"))
 
     def test_lifecycle_hook_commands_fail_open_when_a_retired_cache_path_disappears(self):
         manifest = json.loads(
