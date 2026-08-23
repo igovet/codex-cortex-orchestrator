@@ -73,7 +73,11 @@ from cortex_runtime.mcp_api import (
     serve_stdio,
     v3_response as render_v3_response,
 )
-from cortex_runtime.worker_identity import binding_from_environment, worker_binding
+from cortex_runtime.worker_identity import (
+    binding_from_environment,
+    set_binding_provider,
+    worker_binding,
+)
 from cortex_runtime.ledger_db import (
     DATABASE_SCHEMA_VERSION,
     all_lanes as db_all_lanes,
@@ -13357,6 +13361,103 @@ PUBLIC_TOOLS = build_public_tools(
 )
 
 
+def _worker_binding_from_host_session() -> dict[str, str] | None:
+    """Resolve the exact native worker from the host process identity.
+
+    A worker's MCP server is a separate process from the host hook that
+    receives ``SubagentStart``.  The hook persists the native child id in the
+    canonical ``worker_sessions`` table, while the child MCP process exposes
+    that same host-owned id through its Codex session environment.  Resolve
+    the pair lazily from the private host store so workers do not need to
+    repeat identity fields in semantic tool calls.
+
+    The resolver deliberately returns a binding only for one unambiguous,
+    active native session.  Missing, stale, malformed, or ambiguous state
+    remains unavailable and is handled by the normal server-owned recovery
+    path; it never guesses a worker or crosses project namespaces.
+    """
+    candidates = {
+        value.strip()
+        for key in CODEX_SESSION_ENV_KEYS
+        for value in [str(os.environ.get(key) or "").strip()]
+        if value and HOST_AGENT_ID_RE.fullmatch(value)
+    }
+    if not candidates:
+        return None
+    configured = str(os.environ.get(HOST_CONTROL_STORE_ENV) or "").strip()
+    base = Path(configured).expanduser() if configured else Path.home() / ".codex" / "cortex"
+    if not base.is_absolute() or base.is_symlink() or not base.is_dir():
+        return None
+    projects = base / "projects"
+    if not projects.is_dir() or projects.is_symlink():
+        return None
+    matches: list[dict[str, str]] = []
+    try:
+        project_dirs = list(projects.iterdir())
+    except OSError:
+        return None
+    for project_dir in project_dirs:
+        if (
+            not project_dir.is_dir()
+            or project_dir.is_symlink()
+            or not re.fullmatch(r"p-[0-9a-f]{64}", project_dir.name)
+        ):
+            continue
+        try:
+            index = db_task_index(project_dir)
+        except (OSError, ValueError, TypeError, sqlite3.Error):
+            continue
+        for task_id in index:
+            try:
+                sessions = db_list_worker_sessions(project_dir, task_id)
+            except (OSError, ValueError, TypeError, sqlite3.Error):
+                continue
+            loaded = None
+            for session in sessions:
+                host_id = str(session.get("host_agent_id") or "").strip()
+                if host_id not in candidates or str(session.get("status") or "") not in {"running", "idle_resumable"}:
+                    continue
+                if loaded is None:
+                    loaded = db_load_task(project_dir, task_id)
+                if loaded is None:
+                    continue
+                definition, state, _plan, _artifact_dir = loaded
+                if state.get("status") not in {"active", "blocked"}:
+                    continue
+                attempt_id = str(session.get("attempt_id") or "").strip()
+                attempt = next(
+                    (
+                        item for item in state.get("attempts", [])
+                        if isinstance(item, dict)
+                        and str(item.get("attempt_id") or "").strip() == attempt_id
+                        and not item.get("invalidated")
+                        and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
+                    ),
+                    None,
+                )
+                if not isinstance(attempt, dict):
+                    continue
+                project_value = str(definition.get("project_root") or "").strip()
+                project = Path(project_value)
+                if not project.is_absolute() or not project.is_dir() or project.is_symlink():
+                    continue
+                profile = str(attempt.get("profile") or attempt.get("agent") or "").strip()
+                dispatch_ref = str(attempt.get("dispatch_ref") or "").strip()
+                briefing_digest = str(attempt.get("briefing_digest") or "").strip().lower()
+                if not profile or not dispatch_ref or not re.fullmatch(r"[0-9a-f]{64}", briefing_digest):
+                    continue
+                matches.append({
+                    "project_root": str(project),
+                    "task_id": str(task_id),
+                    "attempt_id": attempt_id,
+                    "profile": profile,
+                    "dispatch_ref": dispatch_ref,
+                    "briefing_digest": briefing_digest,
+                    "session_id": host_id,
+                })
+    return matches[0] if len(matches) == 1 else None
+
+
 def main() -> None:
     """Keep the executable facade thin; transport lives in cortex_runtime.mcp_api."""
     audience = DEFAULT_MCP_AUDIENCE
@@ -13381,6 +13482,11 @@ def main() -> None:
     import cortex_runtime.orchestration_engine  # noqa: F401
 
     binding = binding_from_environment() if audience == "worker" else None
+    # Native Codex workers normally use the bundled default MCP audience.  A
+    # launch-time audience alone cannot carry the dispatch identity, so install
+    # a host-session resolver for every audience and let worker operations bind
+    # lazily after SubagentStart has persisted the exact child identity.
+    set_binding_provider(_worker_binding_from_host_session)
     with worker_binding(binding):
         serve_stdio(
             public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),

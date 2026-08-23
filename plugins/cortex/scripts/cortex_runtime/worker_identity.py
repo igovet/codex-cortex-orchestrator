@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import json
 import os
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 
 SERVER_OWNED_FIELDS = frozenset({
@@ -20,6 +20,7 @@ SERVER_OWNED_FIELDS = frozenset({
 })
 
 _CURRENT: ContextVar[dict[str, str] | None] = ContextVar("cortex_worker_binding", default=None)
+_BINDING_PROVIDER: Callable[[], Mapping[str, Any] | None] | None = None
 
 
 class WorkerBindingError(ValueError):
@@ -51,11 +52,35 @@ def current_binding() -> dict[str, str] | None:
 
 def require_binding() -> dict[str, str]:
     value = current_binding()
+    if value is None and _BINDING_PROVIDER is not None:
+        # Native worker MCP processes can start before the host's
+        # SubagentStart hook has persisted the binding.  Resolve lazily on
+        # each first worker operation so that this small race does not turn
+        # into an unbound worker attempt.  The provider is installed only by
+        # the executable server; unit-test imports remain fail-closed.
+        try:
+            candidate = _BINDING_PROVIDER()
+            if candidate is not None:
+                value = normalize_binding(candidate)
+                _CURRENT.set(value)
+        except (OSError, ValueError, TypeError):
+            value = None
     if value is None:
         raise WorkerBindingError(
             "worker operation requires a server-bound worker session; no worker binding is available"
         )
     return value
+
+
+def set_binding_provider(provider: Callable[[], Mapping[str, Any] | None] | None) -> None:
+    """Install the trusted host-session resolver for a server process.
+
+    This is deliberately process configuration, never a public tool field.
+    The resolver may only return an exact durable worker binding; an absent or
+    ambiguous match remains fail-closed.
+    """
+    global _BINDING_PROVIDER
+    _BINDING_PROVIDER = provider
 
 
 def bind_worker(value: Mapping[str, Any] | None) -> object:

@@ -1400,7 +1400,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertIn("bind_host_worker_from_hook", hook)
         self.assertIn("do not author digest", hook)
         self.assertIn("def stopped_worker_after_wait_context(", hook)
-        self.assertIn("stopped without an AttemptResult and is terminal failed", hook)
+        self.assertIn("Do not submit a synthetic result", hook)
+        self.assertIn("recover_inspect", hook)
         for relative in (
             "skills/cortex-control/SKILL.md",
             "skills/orchestrator/SKILL.md",

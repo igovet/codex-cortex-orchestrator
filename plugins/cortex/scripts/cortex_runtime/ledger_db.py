@@ -39,6 +39,28 @@ except ImportError:  # pragma: no cover - Windows uses the process-local guard.
 
 DATABASE_NAME = "cortex.db"
 DATABASE_SCHEMA_VERSION = 15
+# These are the migration identities emitted by the pre-canonical ledger
+# format.  They are retained only as recognition data: the current runtime
+# never replays or imports these migrations.  A database is eligible for
+# quarantine only when its history can be positively identified as one of
+# these old lineages.
+_PRECANONICAL_MIGRATION_NAMES = {
+    1: "sqlite-ledger-base",
+    2: "immutable-artifact-catalog-and-chunks",
+    3: "canonical-task-findings",
+    4: "finding-waiver-and-resolution-metadata",
+    5: "projection-jobs",
+    6: "crash-safe-prune-tombstones",
+    7: "canonical-content-blobs-and-logical-artifacts",
+    8: "revision-aware-orchestration",
+    9: "governance-ledger",
+    10: "governance-integrity-hardening",
+    11: "governance-lifecycle-authority",
+    12: "governance-lifecycle-envelope-authentication",
+    13: "attempt-result-event-protocol",
+    14: "attempt-verification-authority",
+    15: "attempt-question-decision-events",
+}
 ARTIFACT_STORAGE_CHUNK_BYTES = 32 * 1024
 # Paging is optional caller framing, not a server-side content quota.  A
 # UTF-8-safe page may exceed an extremely small caller request by one scalar.
@@ -396,6 +418,35 @@ def _database_bootstrap_lock(root: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
+def _is_recognized_precanonical_history(
+    history: list[tuple[object, ...]],
+    user_version: int,
+) -> bool:
+    """Return whether a history is a known pre-canonical migration lineage.
+
+    Checksums are intentionally not considered here: old ledgers used a
+    different checksum scheme and are never replayed.  Version/name identity
+    is sufficient to decide that the namespace is old, while rejecting an
+    arbitrary or damaged table as a candidate for destructive replacement.
+    """
+    if not history:
+        return False
+    try:
+        versions = [int(row[0]) for row in history]
+        names = [str(row[1]) for row in history]
+    except (IndexError, TypeError, ValueError):
+        return False
+    if user_version != versions[-1] or versions != list(range(versions[0], versions[-1] + 1)):
+        return False
+    for version, name in zip(versions, names):
+        expected = _PRECANONICAL_MIGRATION_NAMES.get(version)
+        # The historical fixture format used by early host bootstrap tests
+        # deliberately labels the same lineage as ``historical-vN``.
+        if name != expected and name != f"historical-v{version}":
+            return False
+    return True
+
+
 def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]) -> bool:
     """Return whether the private ledger is not the exact current one.
 
@@ -424,13 +475,41 @@ def _database_requires_quarantine(root: Path, migrations: tuple[_Migration, ...]
                 history = [tuple(row) for row in connection.execute(
                     "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
                 )]
-                if history != [expected] or user_version != migration.version:
+                if history == [expected] and user_version == migration.version:
+                    try:
+                        _assert_migration_schema(connection, migration.version)
+                    except (KeyError, TypeError, ValueError, sqlite3.Error):
+                        # A database that advertises the current canonical
+                        # migration but has lost or altered schema objects is
+                        # corruption, not an old namespace.  Do not quarantine
+                        # it: silently replacing it would hide an integrity
+                        # failure from the caller.
+                        raise
+                    return False
+
+                # A single current-version row with the canonical migration
+                # name is the identity of this release's ledger.  If its
+                # checksum or PRAGMA user_version differs, the source plan or
+                # the ledger authority was modified after creation.  Replaying
+                # the changed plan into a fresh file could create a subtly
+                # incompatible schema, so fail closed before quarantine.
+                canonical_identity = (
+                    len(history) == 1
+                    and int(history[0][0]) == migration.version
+                    and str(history[0][1]) == migration.name
+                )
+                if canonical_identity:
+                    raise ValueError("Cortex database is an unsupported pre-canonical ledger")
+
+                if _is_recognized_precanonical_history(history, user_version):
+                    # A known historical namespace is safe to isolate as a
+                    # whole and bootstrap afresh; no old rows are imported.
                     return True
-                try:
-                    _assert_migration_schema(connection, migration.version)
-                except (KeyError, TypeError, ValueError, sqlite3.Error):
-                    return True
-                return False
+
+                # Unknown or malformed history is not evidence of a prior
+                # Cortex lineage.  Preserve it and fail closed rather than
+                # risking destructive replacement of an unrelated database.
+                raise ValueError("Cortex database is an unsupported pre-canonical ledger")
             has_objects = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type IN ('table','index','trigger','view') "
                 "AND name NOT LIKE 'sqlite_%' LIMIT 1"

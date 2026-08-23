@@ -756,7 +756,9 @@ class ControlPlaneTests(unittest.TestCase):
         hook_payload = json.loads(failed_wait.stdout)
         context = hook_payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Internal lifecycle receipt", context)
-        self.assertIn("status='failed'", context)
+        self.assertIn("server recorded", context)
+        self.assertIn("recover_inspect", context)
+        self.assertNotIn("Submit exactly one result", context)
         self.assertNotIn("agent_not_found", context)
 
         after_wait = control.load_task_state_for_artifact(task_dir)
@@ -899,8 +901,11 @@ class ControlPlaneTests(unittest.TestCase):
         wait_output = json.loads(waited.stdout)
         wait_context = wait_output["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(wait_output["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-        self.assertIn("stopped without an AttemptResult and is terminal failed", wait_context)
-        self.assertIn("status='failed'", wait_context)
+        self.assertIn("server recorded", wait_context)
+        self.assertIn("recoverable", wait_context)
+        self.assertIn("Do not submit a synthetic result", wait_context)
+        self.assertIn("recover_inspect", wait_context)
+        self.assertNotIn("Submit exactly one result", wait_context)
         self.assertIn("native_worker_stopped_without_result", wait_context)
         self.assertNotIn("followup_task", wait_context)
         self.assertIn(started["task_ref"], wait_context)

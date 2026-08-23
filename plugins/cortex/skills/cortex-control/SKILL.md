@@ -220,8 +220,10 @@ paths forbidden above.
    concrete user question; otherwise wait only for bound children.
    A failed targeted wait is terminal only when the host explicitly proves the
    exact persisted child is unavailable. The lifecycle hook then records the
-   same resultless-stop recovery state; inspect once and submit its exact
-   failed result before Cortex returns any replacement dispatch. Never treat a
+   same resultless-stop recovery state; inspect once and invoke the exact
+   server-owned `recover_inspect` action before Cortex returns any replacement
+   dispatch. The coordinator must not synthesize or submit a failed result.
+   Never treat a
    timeout, transport/generic error, ambiguous multi-target error, or an error
    for another child as proof that a worker ended, and never quote raw host
    error text into task state or chat.
@@ -382,8 +384,9 @@ continuing. Never replace the worker or advance the wave for a question.
    `QUESTION_RECORDED`, do not send a corrective follow-up: `SubagentStop` has
    already classified that attempt. Call
    `manage_orchestration(intent="inspect")` once, then consume a recovered
-   result, route the durable question, or submit the exact failed result that
-   inspect returns. Only a newly returned top-level dispatch authorizes rework
+   result, route the durable question, or consume the server-owned recovery
+   receipt that `recover_inspect` returns. The coordinator must not construct a
+   failed result from the stop hook. Only a newly returned top-level dispatch authorizes rework
    after a worker is no longer resumable.
    QA, review, implementation, and corrective pipeline rework are unbounded while acceptance criteria,
    required verification, or blocking canonical findings

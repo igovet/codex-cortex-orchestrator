@@ -1159,12 +1159,14 @@ def stopped_worker_after_wait_context(
     if not dispatch_ref or not host_agent_id or not host_task_name:
         return None
     return (
-        f"Internal lifecycle receipt: attempt {attempt_id!r} stopped without an AttemptResult and is terminal failed "
-        f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_result'). Do not wait on, respawn, "
-        f"or follow up the stopped native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). "
+        f"Internal lifecycle receipt: the server recorded attempt {attempt_id!r} as recoverable after its native "
+        f"worker stopped without an AttemptResult (dispatch_ref={dispatch_ref!r}, "
+        "reason='native_worker_stopped_without_result'). Do not submit a synthetic result, retry complete_attempt, "
+        f"wait on, respawn, or follow up the stopped worker (agent_id={host_agent_id!r}, "
+        f"task_name={host_task_name!r}). "
         + (f"task_ref={public_task_ref!r}. " if public_task_ref else "")
-        + "Submit exactly one result with status='failed', this dispatch_ref, and this reason; Cortex will apply its "
-        + "server-owned corrective route automatically."
+        + "Invoke manage_orchestration with intent='recover_inspect' and this exact task_ref; consume the "
+        "server-owned recovery dispatch or receipt it returns, then continue the same task."
     )
 
 

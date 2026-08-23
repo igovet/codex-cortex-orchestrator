@@ -139,21 +139,14 @@ stopped native worker. Recovery is bounded and identity-scoped:
 3. If a stopped worker has `attempt_result_ref` values, read those results and continue the
    current step. If it has a durable question, surface the question and resume
    the same persisted worker only after the answer.
-4. If it has no AttemptResult or question, it is terminal failed with
-   `failure_reason="native_worker_stopped_without_attempt_result"`. Never wait on,
-   respawn, or call `followup_task` for that stopped child. Submit exactly one
-   non-success result to `continue_orchestration` using the current `step`, the
-   exact `dispatch_ref`, `status="failed"`, and that reason:
-
-```json
-{
-  "status": "failed",
-  "reason": "native_worker_stopped_without_attempt_result",
-  "dispatch_ref": "<exact-dispatch-ref-from-inspect>"
-}
-```
-
-   Cortex alone may then return one fresh top-level dispatch. A duplicate
+4. If it has no AttemptResult or question, it is a server-owned recoverable
+   transport stop with `failure_reason="native_worker_stopped_without_result"`.
+   Never wait on, respawn, call `followup_task`, or submit a synthetic failed
+   result for that stopped child. Call
+   `manage_orchestration(intent="recover_inspect")` once with the exact
+   `task_ref` returned by the lifecycle response. Cortex derives the stopped
+   dispatch, records the private diagnostic, and returns the corrective
+   dispatch or receipt that the coordinator must follow. A duplicate
    submission, a guessed child identity, or an empty wait is not a recovery
    action.
 

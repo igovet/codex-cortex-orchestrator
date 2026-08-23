@@ -37,14 +37,15 @@ those exact still-unstarted requests. Treat `active_workers[].host_agent_id` as
 the exact persisted native wait targets; never respawn them. A host wait-any
 form may omit explicit targets only while one of those bound workers is
 running. If an exact targeted wait receives a host identity-unavailable proof,
-the `PostToolUse` hook retires only that child as a terminal resultless stop;
-inspect it once, then use its exact failed continuation. A timeout, transport
+the `PostToolUse` hook records only that child as a terminal resultless recovery
+state; inspect it once, then invoke the server-owned `recover_inspect` action.
+A timeout, transport
 failure, generic error, or ambiguous multi-target error does not prove a child
 ended and never authorizes a replacement. Treat `stopped_workers` as non-waitable: consume their persisted
-result refs, surface durable question refs, or submit their exact failed result
-to `continue_orchestration` with its `worker` slot, `status`, `reason`, and
-the matching stopped-worker `dispatch_ref` so Cortex applies rework to that
-attempt only. Never use
+result refs, surface durable question refs, or invoke the exact server-returned
+recovery action. `recover_inspect` derives the stopped attempt, dispatch, and
+rework scope from the ledger; the coordinator must not synthesize, submit, or
+replay a failed result and must not construct a replacement payload. Never use
 `followup_task` to repair a stopped worker's result error; it is permitted only
 for the same question-paused worker after the durable answer is recorded. Each pending dispatch retains its `dispatch_ref`, immutable
 `briefing_path`, and `briefing_digest`, but the coordinator must not read or
