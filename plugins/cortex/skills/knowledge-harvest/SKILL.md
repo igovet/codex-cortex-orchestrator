@@ -171,13 +171,16 @@ AttemptResult fields `status`, `summary`, `findings`, `decisions_needed`, and
 the semantic result shape; the normal harvest flow uses only
 the semantic AttemptResult/Event protocol.
 
-The worker reviews only the exact immutable briefing issued by its compact
-dispatch bootstrap and verifies its supplied SHA-256. If the host file reader
-cannot open that exact file, it calls `read_dispatch_briefing` with the returned
-cursor from the bound session; an incomplete bounded response
+The worker first calls `read_dispatch_briefing({})` and follows only the returned
+cursor until `complete=true`. The complete server response and receipt are
+authoritative; after a successful read, do not reconstruct the path, shell-read
+the briefing again, or run a local SHA-256 check. Only if that exact call reports
+the issued host file is unavailable may it read the supplied exact path once.
+An incomplete bounded response
 may continue only with its returned cursor. A successful full briefing read
 creates a server-side receipt. A successor reads each supplied handoff through
-`read_worker_result` with the supplied result reference from its generated
+`read_worker_result` with only the supplied `attempt_result_ref` (and any
+returned cursor) from its generated
 briefing; a successful scoped predecessor read creates a server-side
 receipt. Workers do not emit digest strings, predecessor markers, changed-file
 lists, timestamps, identity, or evidence markers as authoritative data. Cortex

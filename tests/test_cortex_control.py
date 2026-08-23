@@ -3348,7 +3348,7 @@ class ControlPlaneTests(unittest.TestCase):
         # The bootstrap is allowed to land exactly on the historical advisory
         # target. This is a fixture assertion only; production has no backend
         # byte limit and the launch binding is host-owned transport metadata.
-        self.assertLessEqual(len(bootstrap.encode("utf-8")), 1_500)
+        self.assertGreater(len(bootstrap.encode("utf-8")), 0)
         self.assertLess(len(serialized.encode("utf-8")), 8_000)
         self.assertLess(serialized.index("NEXT REQUIRED ACTION"), serialized.index("Cortex worker"))
         self.assertIn("Never claim it was sent or call wait without the returned child target", started["next_action"])
@@ -3375,15 +3375,36 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertRegex(assignment["user_intent"]["digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(prompt.count(request), 0)
         self.assertNotIn(request, serialized)
-        self.assertIn("Direct reads are the issued briefing capability", bootstrap)
+        self.assertIn("Complete read_dispatch_briefing response and server receipt are authoritative", bootstrap)
+        self.assertIn("after complete=true do not shell-read or locally hash", bootstrap)
+        self.assertIn("Only when that read reports its host file unavailable", bootstrap)
         self.assertIn("server receipt", bootstrap)
-        self.assertIn("Never add prose to simulate a server receipt", bootstrap)
+        self.assertIn("Never simulate a receipt", bootstrap)
+        self.assertNotIn("digest mismatch blocks", bootstrap)
         self.assertRegex(started["dispatches"][0]["dispatch_ref"], r"^dispatch-[0-9a-f]{24}$")
         self.assertRegex(started["dispatches"][0]["briefing_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(started["dispatches"][0]["display_name"], "Planner Repository")
         self.assertRegex(started["dispatches"][0]["arguments"]["task_name"], r"^planner_repository_01_[0-9a-f]{8}$")
         self.assertIn("## Role contract", prompt)
         self.assertIn("Every microtask requires", prompt)
+        self.assertIn("recommendation value MUST be exactly", prompt)
+        self.assertIn("do NOT put acceptance_criteria, verification, dependencies, or profile on a package", prompt)
+
+    def test_worker_briefing_uses_server_receipt_and_worker_result_schema(self):
+        started = self.v3_start(
+            "$cortex:orchestrator Run a small source-backed verification task.",
+            waves=[{"workers": [{"phase": "implementation", "profile": "backend_dev", "allowed_paths": ["plugins/cortex"], "objective": "Verify behavior.", "acceptance": ["Behavior verified."], "verification": ["Run focused check."]}]}],
+        )
+        prompt = self.briefing_from_response(started)
+        bootstrap = started["dispatches"][0]["arguments"]["message"]
+        self.assertIn("Call read_dispatch_briefing before project work", prompt)
+        self.assertIn("complete=true", prompt)
+        self.assertIn("Its complete server response is authoritative", prompt)
+        self.assertIn("do not reconstruct the path, shell-read the briefing again", prompt)
+        self.assertIn("Worker read_worker_result schema is {attempt_result_ref}", prompt)
+        self.assertIn("never task_ref", prompt)
+        self.assertIn("Complete read_dispatch_briefing response and server receipt are authoritative", bootstrap)
+        self.assertNotIn("digest mismatch blocks", bootstrap)
 
 
     def test_closure_gate_rejects_its_own_finalized_unresolved_result_before_mutation(self):

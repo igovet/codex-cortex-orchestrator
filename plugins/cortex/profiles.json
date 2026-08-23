@@ -51,7 +51,7 @@
     "dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing",
     "dispatch_briefing_scope": "read_only_the_exact_briefing_path_and_never_list_or_read_other_cortex_ledger_paths",
     "dispatch_briefing_fallback": "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable",
-    "dispatch_briefing_integrity": "verify_sha256_and_read_only_mode_before_project_work",
+    "dispatch_briefing_integrity": "server_receipt_and_complete_read_are_authoritative; no_shell_reread_or_local_hash_after_success; exact_host_read_only_on_server_reported_file_unavailable",
     "dispatch_briefing_evidence": "a_successful_full_read_dispatch_briefing_call creates a server-owned AttemptEvent receipt",
     "predecessor_read_evidence": "a_successful_scoped_read_worker_result_call creates a server-owned AttemptEvent receipt",
     "worker_final_response": "compact_generated_attempt_result_ref_and_at_most_two_sentence_summary_or_exact_error",
@@ -70,8 +70,8 @@
         "purpose": "Read the one server-bound immutable briefing before project work; continue until complete=true."
       },
       "read_worker_result": {
-        "input": "{attempt_result_ref}",
-        "purpose": "Read only a predecessor ref explicitly supplied by the dispatch; identity and project scope are server-bound."
+        "input": "worker: {attempt_result_ref} plus returned cursor only; coordinator: {task_ref, attempt_result_ref} plus returned cursor",
+        "purpose": "Read only a predecessor ref explicitly supplied by the dispatch; worker identity and project scope are server-bound, and workers must never send task_ref."
       },
       "record_attempt_event": {
         "input": "{event_type, payload, event_key?}",

@@ -384,6 +384,11 @@ def build_public_schemas(
     PLANNING_PACKAGE_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
+        "description": (
+            "Canonical package shape: id, title, objective, optional package routing/tracker fields, "
+            "and microtasks. Package-level acceptance_criteria, verification, dependencies, profile, "
+            "or other worker fields are not allowed; put those fields on each microtask."
+        ),
         "properties": {
             "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
             "title": {"type": "string", "minLength": 1},

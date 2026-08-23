@@ -23,7 +23,11 @@ ends the worker. A blocked/failed result is terminal evidence for server-owned
 corrective recovery, not a Cortex stop. Only an unavailable exact identity after
 recovery is routed to a server-owned diagnostic worker. A successor worker may
 also use `read_worker_result` only for predecessor refs explicitly supplied in
-its dispatch. Workers must not call coordinator lifecycle operations. Cortex
+its dispatch. Workers must not call coordinator lifecycle operations. For
+`read_worker_result`, the worker schema is only `{attempt_result_ref}` plus a
+server-returned cursor; workers must never send `task_ref`, project identity, or
+coordinator fields. The coordinator projection may send `task_ref` together with
+`attempt_result_ref`. Cortex
 remains explicitly opt-in through a selected `cortex:orchestrator` route.
 
 The stdio MCP process has one immutable launch-time audience. An unspecified
@@ -253,10 +257,12 @@ paths forbidden above.
    timeout, transport/generic error, ambiguous multi-target error, or an error
    for another child as proof that a worker ended, and never quote raw host
    error text into task state or chat.
-4. Workers do not call lifecycle operations. A worker first reads only its
-   exact briefing path, confirms the file is
-   read-only and its SHA-256 equals `briefing_digest`, and stops on any
-   mismatch. That path, plus only the immutable user-intent and optional
+4. Workers do not call lifecycle operations. A worker first calls
+   `read_dispatch_briefing({})` and follows only the returned cursor until
+   `complete=true`; the complete server response and receipt are authoritative.
+   After a successful read, do not reconstruct the path, shell-read the briefing,
+   or run a local SHA-256 check. Only if that exact call reports the issued host
+   file is unavailable may the worker read the supplied exact path once. That path, plus only the immutable user-intent and optional
    compiled-plan paths with their exact SHA-256 values supplied in the same
    bootstrap, are the direct-read exceptions below the host-private Cortex
    state root. A compiled plan is a full immutable artifact; a briefing may
@@ -364,7 +370,8 @@ continuing. Never replace the worker or advance the wave for a question.
    not worker-authored authority. When predecessor handoffs are supplied, a
    successful scoped `read_worker_result` creates the server-owned receipt.
    A successor worker reads each supplied predecessor ref before repository
-   work through `read_worker_result`, passing only the supplied result ref from
+   work through `read_worker_result`, passing only the supplied
+   `attempt_result_ref` (and any returned cursor) from
    its generated briefing. The server binds project root, task ref, attempt,
    profile, and dispatch to the active worker session.
    Cortex rejects attempts to read an ungranted result. This scoped read does

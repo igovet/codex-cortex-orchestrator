@@ -66,6 +66,7 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
             set(planning["properties"]["work_packages"]["items"]["properties"]),
             {"id", "title", "objective", "allowed_paths", "depends_on", "gates", "microtasks", "order", "status", "required_artifacts"},
         )
+        self.assertIn("Package-level acceptance_criteria", planning["properties"]["work_packages"]["items"]["description"])
         self.assertIn(
             "profile",
             planning["properties"]["work_packages"]["items"]["properties"]["microtasks"]["items"]["properties"],
