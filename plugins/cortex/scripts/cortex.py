@@ -7683,10 +7683,19 @@ def _validation_next_action(
             "read_dispatch_briefing": "the exact task_id, attempt_id, profile, dispatch_ref, briefing_digest, and optional cursor",
             "worker_question": "action, question/options or the exact returned question_ref",
         }[operation]
+        planning_nesting = ""
+        if operation == "complete_attempt" and any(
+            path in {"$.overview", "$.work_packages"} for path in paths
+        ):
+            planning_nesting = (
+                " `overview` and `work_packages` are planning fields: move them under "
+                "`planning.overview` and `planning.work_packages`; do not submit them at the "
+                "complete_attempt top level."
+            )
         return (
             f"Retry {operation} on the same attempt. Correct the exact diagnostic paths listed in diagnostics; "
             f"send only the documented fields ({tool_fields})."
-            + path_text + suffix
+            + planning_nesting + path_text + suffix
         )
     return f"Correct every listed diagnostic and retry the same {operation} call without changing unrelated fields." + path_text + suffix
 

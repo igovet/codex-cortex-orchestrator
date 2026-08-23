@@ -367,6 +367,8 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertEqual(response["base_payload_digest"], draft["base_payload_digest"])
         self.assertEqual(response["planning_repair"]["mode"], "same_attempt_patch")
+        self.assertEqual(response["planning_repair"]["patch_paths"], ["/requirement_coverage/0/plan_refs"])
+        self.assertIn("/requirement_coverage/0/plan_refs", response["next_action"])
         self.assertIn("patches", response["planning_repair"]["instruction"])
         complete.assert_not_called()
         persisted = ledger_db.get_task_document(self.root, self.task_id, "planning_rejected_draft:plan-01")
