@@ -219,6 +219,110 @@ def _coordinator_continuation(
     }, None
 
 
+def _coordinator_terminal_continuation(
+    task_dir: Any,
+    state: Mapping[str, Any],
+    source: Mapping[str, Any],
+    result_ref: str,
+    *,
+    lifecycle_status: object,
+    result_view: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return the exact non-success receipt for a terminal current wave.
+
+    A blocked/failed AttemptResult is already terminal evidence, but it is not
+    a successful ``continuation.results`` item and therefore cannot be exposed
+    through the success-only helper above.  When the entire current wave is
+    terminal, derive the non-success result set from the immutable attempt
+    identities so the coordinator can advance to the server-owned blocked or
+    failed state without waiting for a child that no longer exists.
+    """
+    status_by_lifecycle = {
+        attempt_protocol.LIFECYCLE_BLOCKED: "blocked",
+        attempt_protocol.LIFECYCLE_FAILED: "failed",
+    }
+    if lifecycle_status not in status_by_lifecycle or source.get("invalidated"):
+        return None, "attempt_result_not_terminal_current"
+    plan = _runtime._load_orchestrate_plan(task_dir, dict(state))
+    wave = _runtime._wave_for_gates(plan, _runtime.active_gates(dict(state)))
+    if not isinstance(wave, Mapping):
+        return None, "no_active_wave"
+    wave_attempt_ids = [
+        str(item).strip()
+        for item in (wave.get("attempt_ids") or [])
+        if str(item).strip()
+    ]
+    source_attempt_id = str(source.get("attempt_id") or "").strip()
+    if not wave_attempt_ids or source_attempt_id not in wave_attempt_ids:
+        return None, "attempt_result_not_current"
+    if len(set(wave_attempt_ids)) != len(wave_attempt_ids):
+        return None, "active_wave_attempt_identity_conflict"
+    attempts = {
+        str(candidate.get("attempt_id") or "").strip(): candidate
+        for candidate in state.get("attempts") or []
+        if isinstance(candidate, Mapping)
+    }
+    root = _runtime._task_document_root(task_dir, state["task_id"])
+    terminal_results: list[dict[str, Any]] = []
+    for slot, attempt_id in enumerate(wave_attempt_ids, 1):
+        attempt = attempts.get(attempt_id)
+        if not isinstance(attempt, Mapping) or attempt.get("invalidated"):
+            return None, "parallel_wave_attempt_not_current"
+        dispatch_ref = str(attempt.get("dispatch_ref") or "").strip()
+        attempt_result_ref = str(attempt.get("attempt_result_ref") or "").strip()
+        if not dispatch_ref or not attempt_result_ref:
+            return None, "parallel_wave_results_pending"
+        canonical = attempt_protocol.get_attempt_result(
+            root, task_id=str(state["task_id"]), attempt_id=attempt_id,
+        )
+        if (
+            canonical is None
+            or str(canonical.get("result_ref") or "") != attempt_result_ref
+            or canonical.get("lifecycle_status") not in {
+                attempt_protocol.LIFECYCLE_COMPLETED,
+                attempt_protocol.LIFECYCLE_BLOCKED,
+                attempt_protocol.LIFECYCLE_FAILED,
+            }
+        ):
+            return None, "parallel_wave_results_pending"
+        result_status = str(canonical.get("status") or canonical.get("result_status") or "").strip().lower()
+        item: dict[str, Any] = {}
+        if result_status == "completed":
+            item["attempt_result_ref"] = attempt_result_ref
+        elif result_status in {"blocked", "failed"}:
+            semantic = canonical
+            summary = str(semantic.get("summary") or "").strip()
+            unresolved = semantic.get("unresolved") if isinstance(semantic.get("unresolved"), list) else []
+            reason = summary or "; ".join(
+                str(entry.get("summary") or entry.get("message") or entry)
+                if isinstance(entry, Mapping) else str(entry)
+                for entry in unresolved
+            ).strip()
+            if not reason and attempt_id == source_attempt_id:
+                result_payload = result_view.get("result") if isinstance(result_view.get("result"), Mapping) else {}
+                reason = str(result_payload.get("summary") or "").strip()
+            item.update({
+                "status": result_status,
+                "dispatch_ref": dispatch_ref,
+                "reason": reason or f"worker attempt {attempt_id} ended {result_status}",
+            })
+        else:
+            return None, "attempt_result_status_unavailable"
+        if len(wave_attempt_ids) > 1:
+            item["worker"] = slot
+        terminal_results.append(item)
+    if not any(str(item.get("status") or "") in {"blocked", "failed"} for item in terminal_results):
+        return None, "attempt_result_not_terminal_current"
+    wave_match = _runtime.re.search(r"(\d+)$", str(wave.get("wave_id") or ""))
+    if wave_match is None:
+        return None, "active_step_unavailable"
+    return {
+        "task_id": str(state["task_id"]),
+        "step": int(wave_match.group(1)),
+        "results": terminal_results,
+    }, None
+
+
 def _worker_context(params: Mapping[str, Any]) -> tuple[Any, Any, dict[str, Any], dict[str, Any], str]:
     for field in _PUBLIC_IDENTITY_FIELDS:
         if not str(params.get(field) or "").strip():
@@ -866,6 +970,14 @@ def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
             result_ref,
             lifecycle_status=view.get("lifecycle_status"),
         )
+        terminal_continuation, terminal_unavailable_reason = _coordinator_terminal_continuation(
+            task_dir,
+            state,
+            source,
+            result_ref,
+            lifecycle_status=view.get("lifecycle_status"),
+            result_view=view,
+        )
         result = {
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
@@ -886,7 +998,14 @@ def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
                 "read receipt; distinguish worker verification claims from server verification observations."
             )
         else:
-            if continuation is not None:
+            if terminal_continuation is not None:
+                result["terminal_continuation"] = terminal_continuation
+                result["next_action"] = (
+                    "Copy terminal_continuation.task_id, terminal_continuation.step, and terminal_continuation.results "
+                    "verbatim into continue_orchestration. This is a terminal blocked/failed receipt; do not wait, "
+                    "respawn, replace, or fabricate a successful result."
+                )
+            elif continuation is not None:
                 result["continuation"] = continuation
                 result["next_action"] = (
                     "Keep the existing task_ref, verify continuation.task_id against this task, and copy "
@@ -895,7 +1014,13 @@ def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
                     "next_strategy, or worker for this singleton success."
                 )
             else:
-                result["continuation_unavailable_reason"] = continuation_unavailable_reason
+                terminal_lifecycle = view.get("lifecycle_status") in {
+                    attempt_protocol.LIFECYCLE_BLOCKED,
+                    attempt_protocol.LIFECYCLE_FAILED,
+                }
+                result["continuation_unavailable_reason"] = (
+                    terminal_unavailable_reason if terminal_lifecycle else continuation_unavailable_reason
+                )
                 result["next_action"] = (
                     "This result is not the finalized current active worker slot, so it cannot authorize a continuation. "
                     "Use it only as canonical read context and follow the active task state."

@@ -248,6 +248,37 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertNotIn("private-task-ref", str(response["user_view"]))
         self.assertEqual(response["internal"]["task_ref"], "private-task-ref")
 
+    def test_inspect_does_not_wait_when_only_terminal_results_remain(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "operation": "inspect",
+                "state": "waiting_workers",
+                "wave_id": "wave-12",
+                "result": {
+                    "context_handoff": {
+                        "active_workers": [],
+                        "pending_dispatches": [],
+                        "stopped_workers": [],
+                        "completed_results": [{
+                            "attempt_id": "attempt-12",
+                            "dispatch_ref": "dispatch-12",
+                            "attempt_result_ref": "attempt-result-12",
+                            "lifecycle_status": "blocked",
+                        }],
+                    },
+                },
+            },
+            "task-12",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertIn("read_worker_result", response["next_action"])
+        self.assertIn("terminal_continuation", response["next_action"])
+        self.assertNotIn("Wait only on these exact persisted native child ids", response["next_action"])
+
     def test_active_steer_preserves_task_ref_and_resumes_same_native_worker(self) -> None:
         started = self.start()
         _, state, attempt = self.confirm_running(started, host_agent_id="native.steer:01")

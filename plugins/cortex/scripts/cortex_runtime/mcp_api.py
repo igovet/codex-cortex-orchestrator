@@ -96,7 +96,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
     "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may submit the initial full planning work breakdown. If planning validation returns diagnostics and a rejected-draft digest, Cortex has retained the complete draft and every field that passed validation: retry this same attempt with ONLY base_payload_digest plus non-empty diagnostic-scoped RFC6902 patches. Never resend or regenerate the full planning object during repair; unrelated fields are preserved server-side. The canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
     "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
-    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. The compact internal receipt retains this continuation across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
+    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view by attempt_result_ref and exact task scope. For a finalized successful result of the coordinator's current active slot, the server returns continuation={task_id,step,results}; retain task_id as an identity check and copy step/results verbatim into continue_orchestration, never increment step or use projection_ref/formatted ref text. For a current terminal blocked/failed result, the server returns terminal_continuation={task_id,step,results} with exact status, dispatch_ref, and reason; copy it verbatim into continue_orchestration and never wait, respawn, replace, or fabricate success. The compact internal receipt retains these server-derived continuations across compaction. A successful successor-worker read records an idempotent predecessor receipt; coordinators omit worker identity, while successors include their exact attempt_id/profile and may read only assigned refs.",
     "manage_governance": "Coordinator-capability-gated: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. Ordinary coordinator capabilities are short-lived and task/initiative scoped; only an explicitly trusted server project-admin grant may administer project policy. If a recovery response was lost, recover_coordinator_capability requires the same active principal, thread, task_ref, and original non-durable recovery proof; it redelivers the same pending pair until acknowledge_coordinator_recovery presents the old proof plus both replacement values and retires the old pair. Initial start-response loss remains fail-closed because no proof exists. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
@@ -1116,6 +1116,16 @@ def v3_response(
         stopped_workers = [
             item for item in handoff.get("stopped_workers", []) if isinstance(item, dict)
         ]
+        pending_dispatches = [
+            item for item in handoff.get("pending_dispatches", []) if isinstance(item, dict)
+        ]
+        terminal_results = [
+            item for item in handoff.get("completed_results", [])
+            if isinstance(item, dict)
+            and str(item.get("lifecycle_status") or "").strip().lower() in {"blocked", "failed"}
+            and str(item.get("attempt_result_ref") or "").strip()
+            and str(item.get("dispatch_ref") or "").strip()
+        ]
         finalization_pending = [item for item in stopped_workers if item.get("finalization_pending")]
         terminal_failures = [
             item for item in stopped_workers
@@ -1128,6 +1138,23 @@ def v3_response(
             and isinstance(old["result"].get("stopped_result_recovery"), dict)
         ):
             pass
+        elif (
+            outcome in {"waiting_workers", "blocked"}
+            and not active_worker_ids
+            and not pending_dispatches
+            and terminal_results
+        ):
+            refs = "; ".join(
+                f"attempt_result_ref={item['attempt_result_ref']!r}, dispatch_ref={item['dispatch_ref']!r}, "
+                f"status={str(item.get('lifecycle_status') or '').strip().lower()!r}"
+                for item in terminal_results
+            )
+            next_action = (
+                f"{coordinator_lock} No active or pending worker exists. Read each exact canonical result with "
+                f"read_worker_result(task_ref={task_ref!r}, attempt_result_ref=...) for {refs}; then copy the returned "
+                "terminal_continuation.task_id, step, and results verbatim into continue_orchestration. Do not wait, "
+                "respawn, replace, or fabricate a success result."
+            )
         elif outcome == "waiting_workers" and active_worker_ids:
             failed_result_clause = ""
             if terminal_failures:
@@ -1158,6 +1185,12 @@ def v3_response(
                 f"{coordinator_lock} Recovery found a terminal stopped worker without an AttemptResult. Never wait on, "
                 "follow up, or respawn the stopped child. Submit exactly one failed result for the current step using: "
                 + failure_targets + "; Cortex will continue unbounded corrective rework while raising reasoning effort after repeated failures."
+            )
+        elif outcome == "waiting_workers" and not active_worker_ids and not pending_dispatches:
+            next_action = (
+                f"{coordinator_lock} There are no active workers or pending dispatches. Do not wait or respawn. "
+                "Call manage_orchestration with intent=inspect/recover_inspect to obtain the durable lifecycle state "
+                "or an explicit recovery action."
             )
         else:
             next_action = (

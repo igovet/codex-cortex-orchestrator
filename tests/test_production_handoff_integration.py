@@ -376,7 +376,20 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         })
         self.assertTrue(read["ok"], read)
         self.assertNotIn("continuation", read)
-        self.assertEqual(read["continuation_unavailable_reason"], "attempt_result_not_finalized")
+        terminal_continuation = read.get("terminal_continuation")
+        self.assertIsInstance(terminal_continuation, dict)
+        assert isinstance(terminal_continuation, dict)
+        self.assertEqual(terminal_continuation["task_id"], state["task_id"])
+        self.assertEqual(terminal_continuation["step"], started["step"])
+        self.assertEqual(
+            terminal_continuation["results"],
+            [{
+                "status": "blocked",
+                "dispatch_ref": attempt["dispatch_ref"],
+                "reason": "Planner is blocked pending the required repository evidence.",
+            }],
+        )
+        self.assertIn("Copy terminal_continuation", read["next_action"])
 
         fake_success = control.continue_orchestration({
             "project_root": str(self.project),
@@ -390,12 +403,8 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         terminal_receipt = control.continue_orchestration({
             "project_root": str(self.project),
             "task_ref": started["task_ref"],
-            "step": started["step"],
-            "results": [{
-                "status": "blocked",
-                "dispatch_ref": attempt["dispatch_ref"],
-                "reason": "Planner is blocked pending the required repository evidence.",
-            }],
+            "step": terminal_continuation["step"],
+            "results": terminal_continuation["results"],
         })
         self.assertTrue(terminal_receipt["ok"], terminal_receipt)
         self.assertEqual(terminal_receipt["outcome"], "blocked")
