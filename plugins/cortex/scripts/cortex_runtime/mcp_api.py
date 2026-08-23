@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from cortex_runtime.communication import public_risks, render, render_lifecycle, render_plan
+from cortex_runtime.worker_identity import worker_request
 
 
 MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
@@ -36,6 +37,49 @@ def _public_next_action(value: object) -> str:
             value = "Inspect the same task and follow the server-returned recovery action."
     text = str(value or "").strip()
     return text or "Inspect the same task and follow the server-returned recovery action."
+
+
+def _tool_unavailable_receipt(tool: str, audience: str) -> dict[str, Any]:
+    """Return non-throwing advice when a fixed audience calls another surface.
+
+    A worker can receive a stale or copied coordinator instruction.  This is a
+    routing mismatch, not a lifecycle failure: it must not become a JSON-RPC
+    exception that makes the worker appear blocked or eligible for replacement.
+    Keep this receipt independent of request arguments so no private task
+    identity or caller payload can cross the audience boundary.
+    """
+    normalized_tool = str(tool or "").strip() or "requested tool"
+    normalized_audience = str(audience or "").strip().lower() or DEFAULT_MCP_AUDIENCE
+    code = f"tool_not_available_for_{normalized_audience}_mcp_audience"
+    coordinator_only = normalized_tool in {"manage_orchestration", "manage_governance"}
+    if coordinator_only:
+        next_action = (
+            "Return this coordinator-only request to the host coordinator through the existing task handoff. "
+            "Do not retry it from the worker channel, ask the user, replace the worker, or block the task; continue only with the worker operations in this channel."
+        )
+    else:
+        next_action = "Use only the operations published for this MCP audience and continue the current task without replacing the worker."
+    return {
+        "schema": "cortex/tool-availability/v1",
+        "ok": False,
+        "outcome": "recovery_advice",
+        "code": code,
+        "retryable": False,
+        "attempt_budget_consumed": False,
+        "worker_replacement_authorized": False,
+        "diagnostics": [{
+            "code": code,
+            "phase": "routing",
+            "path": "tool",
+            "json_pointer": "/tool",
+            "message": f"{normalized_tool} is not published for the launch-time {normalized_audience} MCP audience",
+            "received": None,
+            "expected": "an operation published for this MCP audience",
+            "field_schema": {"type": "string"},
+            "fix": next_action,
+        }],
+        "next_action": next_action,
+    }
 
 
 def _canonical_jsonrpc_request_id(value: object) -> str:
@@ -178,12 +222,12 @@ SERVER_ONLY_TOOL_NAMES = frozenset({
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Host activation context must already be established by the host before this call. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex resolves its host-bound project root from that opaque task_ref. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is a server-owned reconciliation receipt; Cortex rehydrates the exact task and continues or surfaces only a real task question.",
-    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is the canonical server-owned retry for a lost recovery response and accepts only intent, task_ref, and optional reason—never payload or future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response; Cortex derives the host-bound project root from that ref. Project-scoped prune/maintenance require project_root and omit task_ref. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: pass the exact server-issued worker_capability from the native bootstrap, then persist one self-contained task question or atomic batch with concrete outcome-based options. The capability is opaque and is not an identity field; never invent or alter it. The dispatch binding supplies task and attempt identity.",
-    "record_attempt_event": "Worker-only incremental semantic event operation. Submit the exact server-issued worker_capability from the native bootstrap, plus event_type, payload, and optional event_key; the immutable worker session supplies project/task/attempt/profile identity.",
-    "complete_attempt": "Worker-only semantic completion operation. Pass the exact server-issued worker_capability from the native bootstrap, then submit AttemptResult fields only. The immutable worker session supplies task/attempt/profile identity. Planning repair uses only base_payload_digest plus diagnostic-scoped patches.",
-    "read_dispatch_briefing": "Worker-only scoped read. Pass the exact server-issued worker_capability from the native bootstrap; the immutable worker session supplies project/task/attempt/profile, dispatch, and briefing digest. Submit only the capability and optional cursor/max_bytes.",
-    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view. Coordinators supply only the exact task_ref and attempt_result_ref; Cortex resolves the immutable project root from the host-bound task. Bound successor workers use the separate worker form and may read only predecessor refs assigned in their immutable dispatch.",
+    "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is the canonical server-owned retry for a lost recovery response and accepts only intent, task_ref, and optional reason—never payload or future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response, except the next ordinary-chat question answer: command=answer may omit both task_ref and question_ref, and the host resolves the unique idle/resumable open question from its private session ledger. Cortex derives the host-bound project root from that binding. Project-scoped prune/maintenance require project_root and omit task_ref. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
+    "worker_question": "Worker-only operation. Submit one self-contained task question or atomic batch with concrete outcome-based options; questions may cover only task requirements, never internal Cortex mechanics. The server-owned worker session supplies task, attempt, profile, and dispatch identity.",
+    "record_attempt_event": "Worker-only incremental semantic event operation. Submit event_type, payload, and optional event_key; the immutable server-owned worker session supplies project/task/attempt/profile identity.",
+    "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields only; the immutable server-owned worker session supplies task/attempt/profile identity. Planning repair uses only base_payload_digest plus diagnostic-scoped patches.",
+    "read_dispatch_briefing": "Worker-only scoped read. The immutable server-owned worker session supplies project/task/attempt/profile, dispatch, and briefing digest. Submit only optional cursor/max_bytes.",
+    "read_worker_result": "Read one canonical AttemptResult/AttemptEvent view. Coordinators supply only the exact task_ref and attempt_result_ref; Cortex resolves the immutable project root from the host-bound task. Bound successor workers supply only refs granted in their dispatch; the server-owned worker session supplies identity.",
     "manage_governance": "Host-bound coordinator governance surface: manage initiatives, typed dependencies, immutable governance records, active snapshots, constrained exceptions, and coordinator-approved policy-promotion proposals. project_root is optional when task_ref identifies the server-bound task; otherwise provide the exact project root for project-scoped administration. Normal calls are semantic forms only: Cortex derives coordinator identity and authorization from the active host/session binding, and caller-authored principal, thread_id, or capability fields are rejected. Only the explicitly discriminated recovery actions accept proof/identity fields, and only when a prior authorization response was actually lost. Every mutation names its initiative/task/record scope; worker proposals cannot approve or activate policy.",
 }
 
@@ -636,7 +680,6 @@ def build_public_schemas(
         "additionalProperties": False,
         "description": "Append one lossless semantic checkpoint. Identity, timestamps, workspace state, read receipts, and projection status are server-owned; content volume is advisory in prompts only.",
         "properties": {
-            "worker_capability": {"type": "string", "minLength": 32, "description": "Exact server-issued opaque capability from this dispatch bootstrap; never an identity field."},
             "event_type": {
                 "type": "string",
                 "enum": ["finding_added", "decision_evidence", "blocker", "verification_claimed", "progress", "note"],
@@ -650,7 +693,7 @@ def build_public_schemas(
                 "description": "Optional stable idempotency key for this fact; Cortex derives one from content when omitted.",
             },
         },
-        "required": ["worker_capability", "event_type", "payload"],
+        "required": ["event_type", "payload"],
     }
     WORKER_COMPLETE_ATTEMPT_SCHEMA = {
         "type": "object",
@@ -663,7 +706,6 @@ def build_public_schemas(
             "or semantic fields during repair."
         ),
         "properties": {
-            "worker_capability": {"type": "string", "minLength": 32, "description": "Exact server-issued opaque capability from this dispatch bootstrap; never an identity field."},
             "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
             "summary": {"type": "string", "minLength": 1},
             "findings": {"type": "array"},
@@ -709,7 +751,7 @@ def build_public_schemas(
         "required": [],
         "oneOf": [
             {
-                "required": ["worker_capability", "status", "summary", "findings", "decisions_needed", "unresolved"],
+                "required": ["status", "summary", "findings", "decisions_needed", "unresolved"],
                 "not": {
                     "anyOf": [
                         {"required": ["planning"]},
@@ -719,7 +761,7 @@ def build_public_schemas(
                 },
             },
             {
-                "required": ["worker_capability", "status", "summary", "findings", "decisions_needed", "unresolved", "planning"],
+                "required": ["status", "summary", "findings", "decisions_needed", "unresolved", "planning"],
                 "not": {
                     "anyOf": [
                         {"required": ["base_payload_digest"]},
@@ -728,7 +770,7 @@ def build_public_schemas(
                 },
             },
             {
-                "required": ["worker_capability", "base_payload_digest", "patches"],
+                "required": ["base_payload_digest", "patches"],
                 "not": {
                     "anyOf": [
                         {"required": ["status"]},
@@ -747,7 +789,6 @@ def build_public_schemas(
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "worker_capability": {"type": "string", "minLength": 32, "description": "Exact server-issued opaque capability from this dispatch bootstrap; never an identity field."},
             "action": {"type": "string", "enum": ["ask", "poll", "ask_batch", "poll_batch"]},
             "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
             "batch_ref": {"type": "string", "description": "Exact ref returned by ask_batch; required for poll_batch."},
@@ -790,7 +831,7 @@ def build_public_schemas(
                 "required": ["batch_key", "questions"],
             },
         },
-        "required": ["worker_capability", "action"],
+        "required": ["action"],
     }
     READ_WORKER_RESULT_SCHEMA = {
         "type": "object",
@@ -806,26 +847,24 @@ def build_public_schemas(
         "additionalProperties": False,
         "description": "Read one predecessor result using the immutable worker dispatch binding; the worker supplies only the canonical result ref.",
         "properties": {
-            "worker_capability": {"type": "string", "minLength": 32, "description": "Exact server-issued opaque capability from this dispatch bootstrap; never an identity field."},
             "attempt_result_ref": {"type": "string", "minLength": 1},
         },
-        "required": ["worker_capability", "attempt_result_ref"],
+        "required": ["attempt_result_ref"],
     }
     READ_DISPATCH_BRIEFING_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "worker_capability": {"type": "string", "minLength": 32, "description": "Exact server-issued opaque capability from this dispatch bootstrap; never an identity field."},
             "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing."},
             "max_bytes": {"type": "integer", "minimum": 1, "description": "Optional caller-selected UTF-8 briefing page size. Omit it to read the complete immutable briefing; Cortex does not clamp it."},
         },
-        "required": ["worker_capability"],
+        "required": [],
     }
     MANAGE_ORCHESTRATION_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Required only for project-scoped prune/maintenance; task-scoped intents derive the project root from task_ref."},
+            "project_root": {"type": "string", "minLength": 1, "format": "absolute-path", "description": "Required for project-scoped prune/maintenance; optional for an implicit ordinary-chat question answer, where it only narrows the host-private search. Other task-scoped intents derive the project root from task_ref."},
             "intent": {
                 "type": "string",
                 "enum": [
@@ -850,6 +889,7 @@ def build_public_schemas(
                     "command": {"type": "string", "enum": ["ask", "answer", "list", "updates", "inspect"]},
                     "question_ref": {"type": "string", "minLength": 1},
                     "answer": {},
+                    "answers": {"type": "object", "additionalProperties": {}},
                     "answer_en": {"type": "string", "minLength": 1},
                     "canonical_answers": {
                         "type": "object", "additionalProperties": {"type": "string", "minLength": 1},
@@ -915,7 +955,7 @@ def build_public_schemas(
                     "message must be submitted with the exact request_id; preserve revision feedback verbatim. For intent=follow_up, use the completed source task_ref and an exact "
                     "corrective user_request; optional source_result_refs select canonical result context. For intent=question normal usage is exactly "
                     "{question_ref: '<worker ref>'} plus optional localized display labels. Cortex returns one detailed "
-                    "ordinary-chat interaction containing context, consequences, options, and the mandatory LLM recommendation. For batch localization, "
+                    "ordinary-chat interaction containing context, consequences, options, and the mandatory LLM recommendation. The next ordinary-chat answer may omit both task_ref and question_ref: use command=answer with answer only, and the server resolves the unique host-bound open question and exact resumable child. For batch localization, "
                     "each ordered item uses localized_question, localized_header, localized_options, and optional "
                     "localized_custom_label. Every question "
                     "and option must be self-contained and outcome-specific; generic numbered or recommended/alternative "
@@ -936,7 +976,7 @@ def build_public_schemas(
                     "properties": {
                         "intent": {"enum": [
                             "inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource",
-                            "question", "plan_approval", "follow_up", "steer", "artifacts",
+                            "plan_approval", "follow_up", "steer", "artifacts",
                         ]},
                     },
                     "required": ["intent"],
@@ -945,9 +985,19 @@ def build_public_schemas(
             },
             {
                 "if": {
+                    "properties": {"intent": {"const": "question"}, "payload": {
+                        "properties": {"command": {"const": "answer"}},
+                        "required": ["command", "answer"],
+                    }},
+                    "required": ["intent", "payload"],
+                },
+                "then": {},
+            },
+            {
+                "if": {
                     "properties": {"intent": {"enum": [
                         "inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource",
-                        "question", "plan_approval", "follow_up", "steer", "artifacts",
+                            "plan_approval", "follow_up", "steer", "artifacts",
                     ]}},
                     "required": ["intent"],
                 },
@@ -1715,9 +1765,20 @@ def serve_stdio(
                 name = request.get("params", {}).get("name")
                 if name not in public_tools:
                     if name in all_public_names:
-                        raise ValueError(
-                            f"tool_not_available_for_{normalized_audience}_mcp_audience"
-                        )
+                        value = _tool_unavailable_receipt(name, normalized_audience)
+                        result = {
+                            "content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}],
+                            "structuredContent": value,
+                            "isError": True,
+                        }
+                        # This is a structured routing receipt, not an
+                        # unhandled tool exception.  Do not log the request:
+                        # the receipt contains all actionable advice and the
+                        # transport must not retain caller payloads here.
+                        if request_id is not None:
+                            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}, ensure_ascii=False) + "\n")
+                            sys.stdout.flush()
+                        continue
                     if name in internal_handlers:
                         raise ValueError("tool_is_internal_use_cortex_orchestration_v4")
                     raise ValueError(f"unknown tool '{name}'")
@@ -1733,7 +1794,12 @@ def serve_stdio(
                             f"{transport_session_id}:{_canonical_jsonrpc_request_id(request_id)}"
                         ),
                     }
-                value = public_tools[name][0](arguments)
+                # The native host may bind one worker out-of-band at process
+                # launch.  Capability-based resolution is deliberately
+                # request-scoped so a reused stdio process cannot carry a
+                # previous attempt's ContextVar into a corrective dispatch.
+                with worker_request():
+                    value = public_tools[name][0](arguments)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
             elif method == "ping":
                 result = {}

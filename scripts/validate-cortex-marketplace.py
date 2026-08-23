@@ -293,9 +293,9 @@ def main() -> int:
             fail("shared worker contract must define the complete question resume route")
     if (
         shared.get("dispatch_briefing_fallback")
-        != "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable"
+        != "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable"
     ):
-        fail("worker briefing fallback must be exact-identity/digest scoped")
+        fail("worker briefing fallback must use the server-owned worker binding")
     if set(shared.get("coordinator_operations", [])) != {
         "start_orchestration", "continue_orchestration", "manage_orchestration", "manage_governance",
         "read_worker_result",

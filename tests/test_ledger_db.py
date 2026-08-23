@@ -107,8 +107,8 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
             ledger_db.ensure_database(root)
             (root / "tasks").mkdir(mode=0o700)
             (root / "lanes").mkdir(mode=0o700)
-            (root / "tasks" / "legacy-artifact.md").write_text("preserve task artifact", encoding="utf-8")
-            (root / "lanes" / "legacy-lane.json").write_text("{\"legacy\":true}", encoding="utf-8")
+            (root / "tasks" / "precanonical-artifact.md").write_text("preserve task artifact", encoding="utf-8")
+            (root / "lanes" / "precanonical-lane.json").write_text("{\"fixture\":true}", encoding="utf-8")
             old_key = ledger_db._governance_lifecycle_key_path(root)
             old_key.parent.mkdir(mode=0o700, exist_ok=True)
             old_key.write_bytes(b"o" * 32)
@@ -156,15 +156,15 @@ class LedgerDatabaseTests(HostPrivateControlStoreTestMixin, unittest.TestCase):
                     connection.execute("SELECT value FROM old_host_state").fetchone()[0],
                     "preserve",
                 )
-            self.assertFalse((root / "tasks" / "legacy-artifact.md").exists())
-            self.assertFalse((root / "lanes" / "legacy-lane.json").exists())
+            self.assertFalse((root / "tasks" / "precanonical-artifact.md").exists())
+            self.assertFalse((root / "lanes" / "precanonical-lane.json").exists())
             self.assertEqual(
-                (archives[0] / "tasks" / "legacy-artifact.md").read_text(encoding="utf-8"),
+                (archives[0] / "tasks" / "precanonical-artifact.md").read_text(encoding="utf-8"),
                 "preserve task artifact",
             )
             self.assertEqual(
-                (archives[0] / "lanes" / "legacy-lane.json").read_text(encoding="utf-8"),
-                "{\"legacy\":true}",
+                (archives[0] / "lanes" / "precanonical-lane.json").read_text(encoding="utf-8"),
+                "{\"fixture\":true}",
             )
             self.assertEqual((archives[0] / "governance-lifecycle.key").read_bytes(), b"o" * 32)
             self.assertNotEqual(old_key.read_bytes(), b"o" * 32)

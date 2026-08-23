@@ -50,7 +50,7 @@
     "recovery_operations": ["manage_orchestration"],
     "dispatch_transport": "compact_native_bootstrap_to_one_scoped_immutable_briefing",
     "dispatch_briefing_scope": "read_only_the_exact_briefing_path_and_never_list_or_read_other_cortex_ledger_paths",
-    "dispatch_briefing_fallback": "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable",
+    "dispatch_briefing_fallback": "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable",
     "dispatch_briefing_integrity": "verify_sha256_and_read_only_mode_before_project_work",
     "dispatch_briefing_evidence": "a_successful_full_read_dispatch_briefing_call creates a server-owned AttemptEvent receipt",
     "predecessor_read_evidence": "a_successful_scoped_read_worker_result_call creates a server-owned AttemptEvent receipt",

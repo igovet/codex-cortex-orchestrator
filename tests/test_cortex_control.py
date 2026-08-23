@@ -3303,9 +3303,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertGreater(len(prompt.encode("utf-8")), 15_000)
         self.assertIn("Prompt volume targets are advisory worker guidance only", prompt)
         # The bootstrap is allowed to land exactly on the historical advisory
-        # target.  This is a fixture assertion only; production has no
-        # backend byte limit and the opaque worker capability is part of the
-        # native transport contract.
+        # target. This is a fixture assertion only; production has no backend
+        # byte limit and the launch binding is host-owned transport metadata.
         self.assertLessEqual(len(bootstrap.encode("utf-8")), 1_500)
         self.assertLess(len(serialized.encode("utf-8")), 8_000)
         self.assertLess(serialized.index("NEXT REQUIRED ACTION"), serialized.index("Cortex worker"))

@@ -260,14 +260,21 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
                 "params": {"name": "manage_governance", "arguments": recovery_arguments},
             },
         )
-        self.assertEqual(worker_response["error"]["code"], -32602)
+        self.assertIn("result", worker_response)
+        worker_receipt = worker_response["result"]["structuredContent"]
+        self.assertTrue(worker_response["result"]["isError"])
+        self.assertEqual(worker_receipt["schema"], "cortex/tool-availability/v1")
         self.assertEqual(
-            worker_response["error"]["message"],
+            worker_receipt["code"],
             "tool_not_available_for_worker_mcp_audience",
         )
+        self.assertEqual(worker_receipt["outcome"], "recovery_advice")
+        self.assertFalse(worker_receipt["worker_replacement_authorized"])
+        self.assertIn("host coordinator", worker_receipt["next_action"])
         serialized_worker_response = json.dumps(worker_response, sort_keys=True)
         self.assertNotIn(str(authorization["coordinator_capability"]), serialized_worker_response)
         self.assertNotIn(str(authorization["coordinator_recovery_proof"]), serialized_worker_response)
+        self.assertNotIn(task_ref, serialized_worker_response)
 
         registry = cortex._operation_registry(cortex.ledger_root({"project_root": str(self.project)}))
         unchanged = next(iter(registry["tasks"].values()))["start"]

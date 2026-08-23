@@ -75,7 +75,6 @@ from cortex_runtime.mcp_api import (
 )
 from cortex_runtime.worker_identity import (
     binding_from_environment,
-    set_binding_provider,
     worker_binding,
 )
 from cortex_runtime.ledger_db import (
@@ -2162,9 +2161,9 @@ def ledger_root(params: dict[str, Any] | None = None) -> Path:
     _ensure_private_directory(path, "Cortex host project ledger")
     ensure_ledger_database(path)
     _record_host_project_identity(path, project)
-    # Task capability files and optional exports remain beneath the same
-    # private host store.  A worker receives only an exact capability path or
-    # the scoped public artifact fallback; it never receives a browsable
+    # Task artifacts and optional exports remain beneath the same private host
+    # store. A worker receives only an exact briefing path or the scoped public
+    # artifact fallback; it never receives a browsable
     # workspace-local control directory.
     _ensure_private_directory(path / "tasks", "Cortex host task-artifact directory")
     _ensure_private_directory(path / "lanes", "Cortex host lane directory")
@@ -4167,7 +4166,18 @@ def planning_diagnostic_pointer(raw: str) -> str:
     """Convert a planner diagnostic path to the canonical RFC6901 pointer."""
     raw = str(raw or "").strip()
     if raw.startswith("/"):
+        # Public planning repairs operate on the planning sibling itself, so
+        # tolerate a request-level ``/planning/...`` pointer but normalize it
+        # to the draft root before it reaches apply_planning_repair.
+        if raw == "/planning":
+            return "/"
+        if raw.startswith("/planning/"):
+            return raw[len("/planning"):]
         return raw
+    if raw.startswith("$."):
+        raw = raw[2:]
+    elif raw == "$":
+        raw = "planning"
     if raw == "planning":
         return "/"
     if raw.startswith("planning."):
@@ -4196,7 +4206,7 @@ def planning_diagnostic_patch_paths(diagnostics: Sequence[Mapping[str, Any]]) ->
         # target and canonical_json_pointer remains the request-level pointer.
         raw = diagnostic.get("patch_path") or diagnostic.get("path")
         if diagnostic.get("patch_path"):
-            pointer = str(diagnostic["patch_path"])
+            pointer = planning_diagnostic_pointer(str(diagnostic["patch_path"]))
         else:
             raw = diagnostic.get("canonical_path") or raw
             pointer = planning_diagnostic_pointer(str(raw)) if raw else ""
@@ -8105,12 +8115,12 @@ def _validation_next_action(
         )
     if operation in {"complete_attempt", "record_attempt_event", "repair_planning", "read_worker_result", "read_dispatch_briefing", "worker_question"}:
         tool_fields = {
-            "complete_attempt": "worker_capability plus status, summary, findings, decisions_needed, unresolved, claims, planning, or PATCH fields base_payload_digest and patches",
-            "record_attempt_event": "worker_capability plus event_type, payload, and optional event_key",
-            "repair_planning": "worker_capability plus base_payload_digest and non-empty diagnostic-scoped patches only",
-            "read_worker_result": "worker_capability plus attempt_result_ref for a successor worker, or task_ref and attempt_result_ref for the coordinator",
-            "read_dispatch_briefing": "worker_capability plus optional cursor (the server derives task, attempt, profile, dispatch, and briefing digest)",
-            "worker_question": "worker_capability plus action, question/options or the exact returned question_ref",
+            "complete_attempt": "status, summary, findings, decisions_needed, unresolved, claims, planning, or PATCH fields base_payload_digest and patches; worker identity is server-bound",
+            "record_attempt_event": "event_type, payload, and optional event_key; worker identity is server-bound",
+            "repair_planning": "base_payload_digest and non-empty diagnostic-scoped patches only; worker identity is server-bound",
+            "read_worker_result": "attempt_result_ref for a bound successor worker (identity is server-bound), or task_ref and attempt_result_ref for the coordinator",
+            "read_dispatch_briefing": "optional cursor; the server-bound worker session supplies task, attempt, profile, dispatch, and briefing digest",
+            "worker_question": "action, question/options, or the exact returned question_ref; worker identity is server-bound",
         }[operation]
         planning_nesting = ""
         if operation == "complete_attempt" and any(
@@ -8525,7 +8535,7 @@ CANONICAL_PLAN_APPROVAL_POLICIES = {"auto", "required"}
 CANONICAL_STATUS_VALUES = set(TERMINAL_ATTEMPT_STATUSES)
 
 
-def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None, diagnostics: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candidates: list[dict[str, Any]] | None = None, diagnostics: list[dict[str, Any]] | None = None, task_ref: str | None = None) -> dict[str, Any]:
     diagnostic_list = diagnostics or [{"code": code, "message": redact(message, 1000)}]
     result = {
         "schema": PUBLIC_ORCHESTRATION_SCHEMA,
@@ -8543,6 +8553,8 @@ def _v3_error(code: str, message: object, *, outcome: str = "needs_input", candi
         result["validation"] = _validation_contract(code, diagnostic_list)
     if candidates is not None:
         result["candidates"] = candidates
+    if task_ref:
+        result["task_ref"] = task_ref
     return result
 
 
@@ -11917,6 +11929,389 @@ def _v3_question_resume_contract(
     }, None
 
 
+QUESTION_RESUME_CONTRACT_SCHEMA = "cortex/question-resume-contract/v1"
+
+
+def _ordinary_chat_question_candidates(
+    params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Find one server-owned open question without trusting model identity.
+
+    The ordinary user-message ingress deliberately does not accept either a
+    task ref or a question ref.  It searches only host-private ledgers and
+    requires one unambiguous question whose native session is resumable.  A
+    caller-provided project root narrows the search, but it is never used as
+    task identity and the question/attempt binding is still checked below.
+    """
+    requested_root = str(params.get("project_root") or "").strip()
+    roots: list[Path] = []
+    if requested_root:
+        roots.append(existing_ledger_root({"project_root": requested_root}))
+    else:
+        projects = _host_control_projects_for_lookup()
+        if projects is None or not projects.exists():
+            return []
+        for candidate in sorted(projects.iterdir(), key=lambda item: item.name):
+            try:
+                if candidate.is_dir() and not candidate.is_symlink():
+                    roots.append(_assert_private_directory(candidate, "Cortex host project ledger"))
+            except (OSError, ValueError):
+                continue
+
+    session_id = str(
+        params.get("session_id")
+        or params.get("thread_id")
+        or next((os.environ.get(key) for key in CODEX_SESSION_ENV_KEYS if os.environ.get(key)), "")
+    ).strip()
+    candidates: list[dict[str, Any]] = []
+    for root in roots:
+        try:
+            for task_id in sorted(read_task_index(root)):
+                loaded = _v3_task_state(root, task_id)
+                if loaded is None:
+                    continue
+                task_dir, state, task = loaded
+                if state.get("status") not in {"active", "blocked", "needs_input"}:
+                    continue
+                bindings = _host_session_bindings(root)
+                bound_session = str(bindings.get("tasks", {}).get(task_id) or "").strip()
+                if session_id and bound_session and bound_session != session_id:
+                    continue
+                open_questions = _open_blocking_questions(task_dir, state)
+                if not open_questions:
+                    continue
+                for question in open_questions:
+                    attempt_id = safe_id(str(question.get("attempt_id") or ""))
+                    attempt = _attempt(state, attempt_id)
+                    if attempt.get("invalidated") or attempt.get("status") != "running":
+                        continue
+                    sessions = [
+                        item for item in db_list_worker_sessions(root, task_id)
+                        if str(item.get("attempt_id") or "") == attempt_id
+                        and item.get("status") == "idle_resumable"
+                        and bool(item.get("resumable"))
+                    ]
+                    if len(sessions) != 1:
+                        continue
+                    candidates.append({
+                        "root": root,
+                        "task_dir": task_dir,
+                        "task": task,
+                        "state": state,
+                        "task_id": task_id,
+                        "question": question,
+                        "attempt": attempt,
+                        "session": sessions[0],
+                        "bound_session": bound_session,
+                    })
+        except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error):
+            # A stale or partially initialized project ledger cannot become a
+            # user-visible blocker and cannot be guessed into a resume target.
+            continue
+    return candidates
+
+
+def _ordinary_chat_answer_submission_id(task_id: str, question_id: str, answer: object) -> str:
+    """Return the host-owned identity used for ordinary-chat answer delivery."""
+    return "chat-question-" + digest_text(canonical_json.dumps({
+        "task_id": task_id,
+        "question_id": question_id,
+        "answer": answer,
+    }))[:32]
+
+
+def _ordinary_chat_question_replay_candidates(
+    params: dict[str, Any],
+    answer: object,
+) -> list[dict[str, Any]]:
+    """Find an already-answered ordinary-chat message for receipt replay.
+
+    The open-question lookup intentionally stops seeing a question after its
+    durable answer transition.  A transport retry of that same chat message
+    must nevertheless replay the server-owned receipt instead of being
+    misclassified as a new task.  Matching is exact on the task/question
+    pair and the host-derived submission id; no model-supplied identity is
+    accepted.
+    """
+    requested_root = str(params.get("project_root") or "").strip()
+    roots: list[Path] = []
+    if requested_root:
+        roots.append(existing_ledger_root({"project_root": requested_root}))
+    else:
+        projects = _host_control_projects_for_lookup()
+        if projects is None or not projects.exists():
+            return []
+        for candidate in sorted(projects.iterdir(), key=lambda item: item.name):
+            try:
+                if candidate.is_dir() and not candidate.is_symlink():
+                    roots.append(_assert_private_directory(candidate, "Cortex host project ledger"))
+            except (OSError, ValueError):
+                continue
+
+    session_id = str(
+        params.get("session_id")
+        or params.get("thread_id")
+        or next((os.environ.get(key) for key in CODEX_SESSION_ENV_KEYS if os.environ.get(key)), "")
+    ).strip()
+    candidates: list[dict[str, Any]] = []
+    for root in roots:
+        try:
+            for task_id in sorted(read_task_index(root)):
+                loaded = _v3_task_state(root, task_id)
+                if loaded is None:
+                    continue
+                task_dir, state, task = loaded
+                if state.get("status") not in {"active", "blocked", "needs_input"}:
+                    continue
+                bindings = _host_session_bindings(root)
+                bound_session = str(bindings.get("tasks", {}).get(task_id) or "").strip()
+                if session_id and bound_session and bound_session != session_id:
+                    continue
+                for question in _question_records(question_bus_paths(task_dir), state):
+                    if question.get("status") != "answered":
+                        continue
+                    question_id = str(question.get("question_id") or "").strip()
+                    submission_id = _ordinary_chat_answer_submission_id(task_id, question_id, answer)
+                    if str(question.get("answer_submission_id") or "") != submission_id:
+                        continue
+                    attempt_id = safe_id(str(question.get("attempt_id") or ""))
+                    attempt = _attempt(state, attempt_id)
+                    if attempt.get("invalidated"):
+                        continue
+                    sessions = [
+                        item for item in db_list_worker_sessions(root, task_id)
+                        if str(item.get("attempt_id") or "") == attempt_id
+                    ]
+                    if len(sessions) != 1:
+                        continue
+                    candidates.append({
+                        "root": root,
+                        "task_dir": task_dir,
+                        "task": task,
+                        "state": state,
+                        "task_id": task_id,
+                        "question": question,
+                        "attempt": attempt,
+                        "session": sessions[0],
+                        "bound_session": bound_session,
+                    })
+        except (OSError, ValueError, json.JSONDecodeError, sqlite3.Error):
+            continue
+    return candidates
+
+
+def resume_question_from_ordinary_chat(params: dict[str, Any]) -> dict[str, Any]:
+    """Record a normal user message and prepare exact-child continuation.
+
+    This is a host ingress, not a model-facing identity protocol.  The input
+    contains only the user's task-domain message (and optional host routing
+    context); task, attempt, question, and native child identity are derived
+    from the durable question/session binding.  With no open question the
+    message is explicitly classified as a new task instead of being attached
+    to stale orchestration state.
+    """
+    raw_answer = params.get("message", params.get("answer"))
+    forced_candidate = params.get("_candidate")
+    if isinstance(raw_answer, (dict, list)):
+        answer = raw_answer
+        answer_text = json.dumps(raw_answer, ensure_ascii=False, sort_keys=True)
+    else:
+        answer_text = str(raw_answer or "").strip()
+        answer = answer_text
+    if not answer_text:
+        raise ValueError("ordinary chat message is required")
+    replay = False
+    candidates = [forced_candidate] if isinstance(forced_candidate, dict) else _ordinary_chat_question_candidates(params)
+    if not candidates and not isinstance(forced_candidate, dict):
+        candidates = _ordinary_chat_question_replay_candidates(params, answer)
+        replay = bool(candidates)
+    if not candidates:
+        return {
+            "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+            "ok": True,
+            "outcome": "new_task",
+            "requires_user_decision": False,
+            "user_view": {
+                "message_type": "new_task",
+                "message": "Я готов начать новую задачу с вашего сообщения." if str(params.get("user_language") or "en").lower().startswith("ru") else "I’m ready to start a new task from your message.",
+                "requires_user_decision": False,
+            },
+            "next_action": "Route this message through normal task creation.",
+        }
+    if len(candidates) != 1:
+        # A host may submit an answer map for one or more parallel question
+        # pauses.  Keys are matched only against server-returned durable
+        # records; the model never chooses an attempt or manufactures refs.
+        if len(candidates) > 1 and isinstance(raw_answer, dict):
+            answer_map = raw_answer.get("answers") if isinstance(raw_answer.get("answers"), dict) else raw_answer
+            if isinstance(answer_map, dict):
+                matched = [
+                    item for item in candidates
+                    if str(item["question"].get("question_id") or "") in answer_map
+                    or str(item["attempt"].get("attempt_id") or "") in answer_map
+                ]
+                if matched:
+                    resumed: list[dict[str, Any]] = []
+                    for item in matched:
+                        question_key = str(item["question"].get("question_id") or "")
+                        if question_key in answer_map:
+                            value = answer_map[question_key]
+                        else:
+                            value = answer_map[str(item["attempt"].get("attempt_id") or "")]
+                        resumed.append(resume_question_from_ordinary_chat({
+                            **params,
+                            "message": value,
+                            "_candidate": item,
+                        }))
+                    return {
+                        "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+                        "ok": True,
+                        "outcome": "question_answered",
+                        "requires_user_decision": False,
+                        "resume_contracts": [item.get("resume_contract") for item in resumed if item.get("resume_contract")],
+                        "dispatches": [dispatch for item in resumed for dispatch in item.get("dispatches", [])],
+                        "user_view": {
+                            "message_type": "progress",
+                            "message": "Ответы записаны. Продолжаю задачи." if str(params.get("user_language") or "en").lower().startswith("ru") else "Your answers were recorded. I’m continuing the tasks.",
+                            "requires_user_decision": False,
+                        },
+                        "internal": {"answered_count": len(resumed)},
+                    }
+        if len(candidates) > 1:
+            language = str(params.get("user_language") or "en")
+            return {
+                "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+                "ok": True,
+                "outcome": "question_clarification_required",
+                "requires_user_decision": True,
+                "user_view": {
+                    "message_type": "decision_required",
+                    "message": "Уточните, к какому решению относится ваш ответ." if language.lower().startswith("ru") else "Please clarify which task decision your answer addresses.",
+                    "question": "Выберите решение, которое нужно продолжить." if language.lower().startswith("ru") else "Choose the task decision to continue.",
+                    "requires_user_decision": True,
+                },
+                "internal": {"open_question_count": len(candidates)},
+            }
+        # Ambiguous durable state is not permission to guess.  Keep the
+        # visible result neutral; diagnostics remain server-side only.
+        return {
+            "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+            "ok": True,
+            "outcome": "new_task",
+            "requires_user_decision": False,
+            "user_view": {
+                "message_type": "new_task",
+                "message": "Я готов начать новую задачу с вашего сообщения." if str(params.get("user_language") or "en").lower().startswith("ru") else "I’m ready to start a new task from your message.",
+                "requires_user_decision": False,
+            },
+            "next_action": "Route this message through normal task creation.",
+            "internal": {"resume_rejected": "ambiguous_open_question"},
+        }
+
+    candidate = candidates[0]
+    state = candidate["state"]
+    question = candidate["question"]
+    task_id = str(candidate["task_id"])
+    question_id = safe_id(str(question.get("question_id") or ""))
+    attempt_id = safe_id(str(question.get("attempt_id") or ""))
+    language = str(params.get("user_language") or state.get("user_language") or "en")
+    submission_id = _ordinary_chat_answer_submission_id(task_id, question_id, answer)
+    answer_params = {
+        "project_root": str(candidate["task"].get("project_root") or params.get("project_root") or ""),
+        "task_id": task_id,
+        "principal": state.get("principal"),
+        "thread_id": state.get("thread_id"),
+        "question_id": question_id,
+        "submission_id": submission_id,
+        "answer": answer,
+        **({"answer_en": str(params.get("answer_en") or "").strip()} if str(params.get("answer_en") or "").strip() else {}),
+        "resume_context": {
+            "source": "ordinary_chat_message",
+            "interaction_ref": question_id,
+            "user_language": language,
+        },
+    }
+    # ``answer_worker_question`` performs the authoritative state-locked
+    # transition and emits both question_answered and decision_resolved.
+    answered = {"status": "answered", "idempotent": replay}
+    if not replay:
+        answered = answer_worker_question(answer_params)
+    try:
+        db_append_attempt_message(candidate["root"], {
+            "message_id": "question-answer-" + digest_text(canonical_json.dumps({
+                "task_id": task_id,
+                "question_id": question_id,
+                "answer": answer,
+            }))[:40],
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "source": "user",
+            "kind": "question_answer",
+            "original_text": answer_text,
+            "original_language": language,
+            "canonical_en": str(params.get("answer_en") or answer_text).strip(),
+            "task_revision": max(1, int(state.get("revision") or 1)),
+        })
+    except sqlite3.IntegrityError:
+        # A replay of the same ordinary message is an idempotent answer, not
+        # a second delivery to the worker.
+        pass
+    attempt = candidate["attempt"]
+    session = candidate["session"]
+    host_agent_id = str(session.get("host_agent_id") or (attempt.get("host_spawn") or {}).get("agent_id") or "")
+    host_task_name = str(session.get("host_task_name") or (attempt.get("host_spawn") or {}).get("task_name") or "")
+    if not host_agent_id or not host_task_name:
+        # The answer remains durable, but no follow-up target is fabricated.
+        return {
+            "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+            "ok": True,
+            "outcome": "question_answered_not_resumable",
+            "requires_user_decision": False,
+            "user_view": {
+                "message_type": "progress",
+                "message": "Ваш ответ записан. Продолжение задачи будет восстановлено автоматически." if language.lower().startswith("ru") else "Your answer was recorded. The task will continue from its saved state.",
+                "requires_user_decision": False,
+            },
+            "internal": {"resume_rejected": "native_session_identity_unavailable"},
+        }
+    contract = {
+        "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+        "question_ref": question_id,
+        "attempt_id": attempt_id,
+        "profile": canonical_profile(attempt.get("profile") or ""),
+        "dispatch_ref": str(attempt.get("dispatch_ref") or ""),
+    }
+    message = (
+        "Cortex recorded the user's answer for this exact question. Resume this same attempt; first poll "
+        f"worker_question(action='poll', question_ref={question_id!r}), then continue the existing work."
+    )
+    return {
+        "schema": QUESTION_RESUME_CONTRACT_SCHEMA,
+        "ok": True,
+        "outcome": "question_answered",
+        "requires_user_decision": False,
+        "resume_contract": contract,
+        "idempotent": bool(replay),
+        "user_view": {
+            "message_type": "progress",
+            "message": "Ответ записан. Продолжаю задачу." if language.lower().startswith("ru") else "Your answer was recorded. I’m continuing the task.",
+            "requires_user_decision": False,
+        },
+        "dispatches": [] if replay else [{
+            "call": "followup_task",
+            "target": host_agent_id,
+            "arguments": {"target": host_agent_id, "message": message},
+        }],
+        "internal": {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "host_agent_id": host_agent_id,
+            "host_task_name": host_task_name,
+            "answer_status": answered.get("status"),
+        },
+    }
+
+
 def _v3_question_response(response: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     status_value = str(result.get("status") or "").strip()
@@ -12748,6 +13143,13 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
             response["outcome"] = "needs_correction"
             return response
+        implicit_question_answer = (
+            intent == "question"
+            and not str(params.get("task_ref") or "").strip()
+            and isinstance(params.get("payload"), dict)
+            and str((params.get("payload") or {}).get("command") or "").strip() == "answer"
+            and not str((params.get("payload") or {}).get("question_ref") or "").strip()
+        )
         if intent == "recover_blocked" and "payload" in params:
             diagnostics = [{
                 "code": "manage_orchestration_validation_failed",
@@ -12763,7 +13165,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             response = _v3_envelope_error("manage_orchestration", diagnostics, task_ref=resolved_task_ref)
             response["outcome"] = "needs_correction"
             return response
-        if intent not in {"prune", "maintenance"} and "project_root" in params:
+        if intent not in {"prune", "maintenance", "question"} and "project_root" in params:
             diagnostics = [{
                 "code": "manage_orchestration_validation_failed",
                 "phase": "identity",
@@ -12787,6 +13189,14 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             # permits writes only through explicit, confirmed actions.
             root = existing_ledger_root(params)
             return manage_health_maintenance(root, params.get("payload"))
+        if implicit_question_answer:
+            payload = params.get("payload") or {}
+            return resume_question_from_ordinary_chat({
+                "project_root": params.get("project_root"),
+                "message": payload.get("answers", payload.get("answer")),
+                "answer_en": payload.get("answer_en"),
+                "user_language": payload.get("user_language"),
+            })
         if not str(params.get("task_ref") or "").strip():
             return _v3_task_ref_required_error(f"manage_orchestration intent '{intent}'")
         bound_params = _bind_task_project_root(
@@ -13673,102 +14083,6 @@ PUBLIC_TOOLS = build_public_tools(
 )
 
 
-def _worker_binding_from_capability(worker_capability: str) -> dict[str, str] | None:
-    """Resolve the exact native worker from the host process identity.
-
-    A worker's MCP server is a separate process from the host hook and does
-    not receive a reliable child thread id.  Resolve the dispatch using only
-    the server-issued opaque capability carried by the immutable bootstrap.
-    The capability is never an identity field and cannot select another
-    attempt: its digest must match exactly one active attempt in one ledger.
-
-    The resolver deliberately returns a binding only for one unambiguous,
-    active native session.  Missing, stale, malformed, or ambiguous state
-    remains unavailable and is handled by the normal server-owned recovery
-    path; it never guesses a worker or crosses project namespaces.
-    """
-    capability = str(worker_capability or "").strip()
-    if len(capability) < 32 or len(capability) > 256:
-        return None
-    capability_digest = hashlib.sha256(capability.encode("utf-8")).hexdigest()
-    configured = str(os.environ.get(HOST_CONTROL_STORE_ENV) or "").strip()
-    base = Path(configured).expanduser() if configured else Path.home() / ".codex" / "cortex"
-    if not base.is_absolute() or base.is_symlink() or not base.is_dir():
-        return None
-    projects = base / "projects"
-    if not projects.is_dir() or projects.is_symlink():
-        return None
-    matches: list[dict[str, str]] = []
-    try:
-        project_dirs = list(projects.iterdir())
-    except OSError:
-        return None
-    for project_dir in project_dirs:
-        if (
-            not project_dir.is_dir()
-            or project_dir.is_symlink()
-            or not re.fullmatch(r"p-[0-9a-f]{64}", project_dir.name)
-        ):
-            continue
-        try:
-            index = db_task_index(project_dir)
-        except (OSError, ValueError, TypeError, sqlite3.Error):
-            continue
-        for task_id in index:
-            try:
-                sessions = db_list_worker_sessions(project_dir, task_id)
-            except (OSError, ValueError, TypeError, sqlite3.Error):
-                continue
-            loaded = None
-            for session in sessions:
-                host_id = str(session.get("host_agent_id") or "").strip()
-                session_status = str(session.get("status") or "")
-                if session_status not in {"awaiting_spawn", "running", "idle_resumable"}:
-                    continue
-                if loaded is None:
-                    loaded = db_load_task(project_dir, task_id)
-                if loaded is None:
-                    continue
-                definition, state, _plan, _artifact_dir = loaded
-                if state.get("status") not in {"active", "blocked"}:
-                    continue
-                attempt_id = str(session.get("attempt_id") or "").strip()
-                attempt = next(
-                    (
-                        item for item in state.get("attempts", [])
-                        if isinstance(item, dict)
-                        and str(item.get("attempt_id") or "").strip() == attempt_id
-                        and not item.get("invalidated")
-                        and item.get("status") in {AWAITING_HOST_SPAWN, "running"}
-                    ),
-                    None,
-                )
-                if not isinstance(attempt, dict):
-                    continue
-                if str(attempt.get("worker_capability_digest") or "") != capability_digest:
-                    continue
-                project_value = str(definition.get("project_root") or "").strip()
-                project = Path(project_value)
-                if not project.is_absolute() or not project.is_dir() or project.is_symlink():
-                    continue
-                profile = str(attempt.get("profile") or attempt.get("agent") or "").strip()
-                dispatch_ref = str(attempt.get("dispatch_ref") or "").strip()
-                briefing_digest = str(attempt.get("briefing_digest") or "").strip().lower()
-                if not profile or not dispatch_ref or not re.fullmatch(r"[0-9a-f]{64}", briefing_digest):
-                    continue
-                matches.append({
-                    "project_root": str(project),
-                    "task_id": str(task_id),
-                    "attempt_id": attempt_id,
-                    "profile": profile,
-                    "dispatch_ref": dispatch_ref,
-                    "briefing_digest": briefing_digest,
-                    "worker_capability_digest": capability_digest,
-                    "session_id": host_id,
-                })
-    return matches[0] if len(matches) == 1 else None
-
-
 def main() -> None:
     """Keep the executable facade thin; transport lives in cortex_runtime.mcp_api."""
     audience = DEFAULT_MCP_AUDIENCE
@@ -13792,12 +14106,12 @@ def main() -> None:
     # already-running process still serves a host session.
     import cortex_runtime.orchestration_engine  # noqa: F401
 
-    binding = binding_from_environment() if audience == "worker" else None
-    # Native Codex workers normally use the bundled default MCP audience.  A
-    # launch-time audience alone cannot carry the dispatch identity, so install
-    # a host-session resolver for every audience and let worker operations bind
-    # lazily after SubagentStart has persisted the exact child identity.
-    set_binding_provider(_worker_binding_from_capability)
+    # A native worker may use the default MCP audience (the desktop host does
+    # not always launch a role-specific server).  The launch-time binding is
+    # therefore consumed independently of the audience; absent binding keeps
+    # the normal coordinator form unchanged, while a bound process exposes
+    # the strict worker identity to the shared read_worker_result handler.
+    binding = binding_from_environment()
     with worker_binding(binding):
         serve_stdio(
             public_tools=public_tools_for_audience(PUBLIC_TOOLS, audience),

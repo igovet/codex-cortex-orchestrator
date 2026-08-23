@@ -24,7 +24,7 @@ state.
 | AttemptResult | SQLite attempt row | complete_attempt writes; coordinator and compilers read | Canonical semantic result plus server observations |
 | AttemptEvent | SQLite append-only event stream | record_attempt_event writes; runtime reads | Canonical incremental evidence |
 | Read observations | SQLite task/attempt rows | briefing and predecessor-result reads create them | Canonical server observation |
-| Immutable dispatch briefing | SQLite artifact catalog plus digest-checked capability file | Runtime creates; worker reads exact grant | Required for native dispatch |
+| Immutable dispatch briefing | SQLite artifact catalog plus digest-checked briefing file | Runtime creates; worker reads exact grant | Required for native dispatch |
 | results/*.json and results/markdown/*.md | Projection service | Runtime writes; humans and tooling read | Rebuildable view |
 | journal, planning, handoff views, indexes | Projection service | Runtime writes; humans read | Rebuildable view |
 | cortex.db-wal, cortex.db-shm, .state.lock | SQLite and coordination | Runtime | Incidental machinery, never evidence |

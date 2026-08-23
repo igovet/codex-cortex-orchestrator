@@ -188,6 +188,18 @@ class ValidationAggregatorTests(unittest.TestCase):
         self.assertIn("planning.work_packages", next_action)
         self.assertIn("do not submit them", next_action)
 
+    def test_worker_validation_next_actions_use_only_semantic_fields(self):
+        for operation in (
+            "complete_attempt", "record_attempt_event", "repair_planning",
+            "read_worker_result", "read_dispatch_briefing", "worker_question",
+        ):
+            with self.subTest(operation=operation):
+                next_action = cortex._validation_next_action(
+                    operation, [{"path": "$.payload"}],
+                )
+                self.assertNotIn("capability", next_action.lower())
+                self.assertIn("server-bound", next_action)
+
     def test_public_management_form_advertises_nested_future_wave_fields(self):
         schema = cortex.PUBLIC_SCHEMA_REGISTRY["manage_orchestration"]
         payload = schema["properties"]["payload"]

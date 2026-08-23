@@ -332,14 +332,10 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                         "task_id": str(state["task_id"]),
                         "attempt_id": str(attempt["attempt_id"]),
                         "profile": str(dispatch["profile"]),
-                        "worker_capability": str(attempt["worker_capability"]),
-                        "worker_capability_digest": str(attempt["worker_capability_digest"]),
                     },
                 ))
-                worker_capability = str(attempt["worker_capability"])
                 if not question_chat_cycle_seen:
                     asked = worker_rpc.tool("worker_question", {
-                        "worker_capability": worker_capability,
                         "action": "ask",
                         "header": "Cold-boot rollout decision",
                         "question": "Which rollout policy should the cold-boot worker preserve before completing its assigned gate?",
@@ -402,7 +398,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                         },
                     })
                     polled = worker_rpc.tool("worker_question", {
-                        "worker_capability": worker_capability,
                         "action": "poll",
                         "question_ref": question_ref,
                     })
@@ -436,13 +431,9 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                         "profile": str(dispatch["profile"]),
                         "dispatch_ref": str(attempt["dispatch_ref"]),
                         "briefing_digest": str(attempt["briefing_digest"]),
-                        "worker_capability": worker_capability,
-                        "worker_capability_digest": str(attempt["worker_capability_digest"]),
                     },
                 ))
-                briefing = briefing_rpc.tool("read_dispatch_briefing", {
-                    "worker_capability": worker_capability,
-                })
+                briefing = briefing_rpc.tool("read_dispatch_briefing", {})
                 if not briefing.get("ok") or not briefing.get("briefing_receipt"):
                     raise AssertionError(f"read_dispatch_briefing failed: {briefing}")
                 briefing_text = briefing.get("briefing")
@@ -484,7 +475,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 })
                 for predecessor_ref in attempt.get("context_result_refs") or []:
                     predecessor = worker_rpc.tool("read_worker_result", {
-                        "worker_capability": worker_capability,
                         "attempt_result_ref": predecessor_ref,
                     })
                     if not predecessor.get("ok") or not predecessor.get("predecessor_receipt"):
@@ -506,7 +496,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 # server-observed/canonical; the worker sends semantic facts
                 # only.
                 verification = worker_rpc.tool("record_attempt_event", {
-                    "worker_capability": worker_capability,
                     "event_type": "verification_claimed",
                     "event_key": f"cold-boot-verification-{current['step']}-{index}",
                     "payload": worker_result["verification_claimed"],
@@ -514,7 +503,6 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
                 if not verification.get("ok"):
                     raise AssertionError(f"record_attempt_event failed: {verification}")
                 completion = {
-                    "worker_capability": worker_capability,
                     "status": "completed",
                     "summary": worker_result["summary"],
                     "findings": worker_result["findings"],

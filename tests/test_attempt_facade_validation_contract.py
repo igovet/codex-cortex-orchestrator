@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import unittest
 from pathlib import Path
 
@@ -131,6 +132,48 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
         self.assertEqual(response["planning_repair"]["patch_paths"], ["/requirement_coverage/4/plan_refs"])
         self.assertEqual(response["base_payload_digest"], "sha256:abc")
         self.assertIn("/requirement_coverage/4/plan_refs", response["next_action"])
+
+    def test_planning_receipt_is_bounded_and_projects_only_invalid_subschemas(self):
+        response = attempt_facade._planning_repair_failure(
+            {
+                "schema": "cortex/orchestration/v5",
+                "ok": False,
+                "diagnostics": [
+                    {"code": "planning_validation_failed", "path": "planning.overview", "message": "bad overview"},
+                    {"code": "planning_validation_failed", "path": "planning.work_packages[0].microtasks[0].verification", "message": "bad verification"},
+                ],
+                "validation": {
+                    "schema": "cortex/validation-error/v1",
+                    "operation": "complete_attempt",
+                    "diagnostics_are_complete": True,
+                },
+            },
+            {"attempt_id": "plan-01", "base_payload_digest": "sha256:abc"},
+        )
+
+        diagnostics = response["diagnostics"]
+        self.assertEqual(
+            [item["json_pointer"] for item in diagnostics],
+            ["/overview", "/work_packages/0/microtasks/0/verification"],
+        )
+        self.assertEqual(
+            response["planning_repair"]["patch_paths"],
+            ["/overview", "/work_packages/0/microtasks/0/verification"],
+        )
+        self.assertEqual(
+            response["validation"]["invalid_json_pointers"],
+            ["/overview", "/work_packages/0/microtasks/0/verification"],
+        )
+        self.assertEqual(response["base_payload_digest"], "sha256:abc")
+        serialized = json.dumps(response, ensure_ascii=False)
+        self.assertLess(len(serialized), 20_000)
+        self.assertNotIn("bearer", serialized.lower())
+        self.assertNotIn("coordinator_capability", serialized)
+        self.assertEqual(
+            set(diagnostics[0]["field_schema"]),
+            {"type", "minLength"},
+        )
+        self.assertEqual(diagnostics[0]["field_schema"]["type"], "string")
 
 
 if __name__ == "__main__":

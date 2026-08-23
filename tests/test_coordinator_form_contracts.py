@@ -85,6 +85,21 @@ class CoordinatorFormContractTests(unittest.TestCase):
         self.assertEqual(response["outcome"], "needs_correction")
         self.assertEqual(response["diagnostics"][0]["path"], "intent")
 
+    def test_management_unavailable_task_scope_is_structured_and_nonblocking(self) -> None:
+        # Exercise the exact branch that previously called _v3_error with an
+        # unsupported task_ref keyword and escaped as a transport TypeError.
+        with mock.patch.object(cortex, "_bind_task_project_root", return_value=None):
+            response = cortex.manage_orchestration({
+                "intent": "inspect",
+                "task_ref": "task-unavailable",
+            })
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["code"], "task_scope_unavailable")
+        self.assertEqual(response["outcome"], "needs_input")
+        self.assertEqual(response["task_ref"], "task-unavailable")
+        self.assertTrue(response["dispatches"] == [])
+        self.assertFalse(response.get("worker_replacement_authorized", False))
+
     def test_continue_shape_errors_are_aggregated(self) -> None:
         response = cortex.continue_orchestration({
             "task_ref": "task-bound",

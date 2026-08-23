@@ -236,6 +236,24 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
         durable = json.dumps(registry, sort_keys=True)
         self.assertNotIn('"coordinator_capability"', durable)
 
+    def test_normal_governance_rejects_caller_authored_identity_and_capability(self) -> None:
+        """Normal governance derives identity from host activation, never caller fields."""
+        started, _, _ = self._start("Reject caller-authored governance identity.")
+        rejected = cortex.manage_governance({
+            "action": "inspect",
+            "task_ref": str(started["task_ref"]),
+            "initiative_ref": "initiative-bound",
+            "principal": "caller-spoof",
+            "thread_id": "caller-thread-spoof",
+            "coordinator_capability": "a" * 64,
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "manage_governance_validation_failed")
+        self.assertEqual(
+            {item["path"] for item in rejected["diagnostics"]},
+            {"principal", "thread_id", "coordinator_capability"},
+        )
+
     def test_recovery_cannot_cross_task_binding(self) -> None:
         """A recovery request must resolve through the active host task binding."""
         self._start("Bind recovery to the first task.")
@@ -268,7 +286,7 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
             1,
         )
 
-    def _legacy_failed_start_clears_staged_authorization_and_revokes_its_verifiers(self) -> None:
+    def test_failed_start_clears_staged_authorization_and_revokes_its_verifiers(self) -> None:
         """A failed response must not leave an in-memory retry/recovery secret."""
         payload = {
             "project_root": str(self.project),
@@ -282,7 +300,7 @@ class GovernanceCapabilitySecurityTests(HostPrivateControlStoreTestMixin, unitte
             },
             "waves": [{"workers": [{"phase": "discover"}]}],
         }
-        with mock.patch.object(cortex, "orchestrate", side_effect=RuntimeError("forced start failure")):
+        with mock.patch.object(cortex, "_engine_orchestrate", side_effect=RuntimeError("forced start failure")):
             failed = cortex.start_orchestration(payload)
         self.assertFalse(failed["ok"])
         registry = cortex._operation_registry(self.ledger)

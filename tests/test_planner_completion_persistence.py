@@ -115,12 +115,12 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
 
     def test_schema_has_a_patch_only_repair_variant(self) -> None:
         schema = cortex.PUBLIC_SCHEMA_REGISTRY["complete_attempt"]
-        # Worker identity is injected by the server-bound transport; the
-        # opaque capability is the sole worker-authored transport token.
+        # Worker identity and bearer transport are server-owned; the repair
+        # branch contains only the semantic patch proof.
         self.assertEqual(schema["required"], [])
         repair = next(
             branch for branch in schema["oneOf"]
-            if set(branch["required"]) == {"worker_capability", "base_payload_digest", "patches"}
+            if set(branch["required"]) == {"base_payload_digest", "patches"}
         )
         self.assertIn({"required": ["planning"]}, repair["not"]["anyOf"])
         for field in ("status", "summary", "findings", "decisions_needed", "unresolved", "claims"):
@@ -260,7 +260,7 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
             self.root, task_id=self.task_id, attempt_id="plan-01",
         ))
 
-    def test_top_level_planning_fields_are_rejected_without_legacy_alias_recovery(self) -> None:
+    def test_top_level_planning_fields_are_rejected_without_alias_recovery(self) -> None:
         """Planning is accepted only under the canonical nested sibling."""
         attempt = {
             "attempt_id": "plan-01", "gate": "plan", "profile": "planner",
@@ -463,6 +463,13 @@ class PlannerCompletionPersistenceTests(unittest.TestCase):
             diagnostics,
             ["/work_packages/1/microtasks/0/verification"],
         ))
+        self.assertEqual(
+            cortex.planning_diagnostic_patch_paths([
+                {"path": "$.planning.work_packages[0].microtasks[0].verification"},
+                {"patch_path": "/planning/overview"},
+            ]),
+            ["/work_packages/0/microtasks/0/verification", "/overview"],
+        )
 
     def test_planner_recovery_rejects_changed_semantic_envelope_without_mutation(self) -> None:
         """A materialization retry cannot replace the immutable planner result."""

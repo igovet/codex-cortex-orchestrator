@@ -58,7 +58,7 @@ def _dispatch_diagnostic_defaults(item: dict[str, Any], params: dict[str, Any] |
     if "received" not in result and params is not None and path.startswith("$."):
         result["received"] = params.get(path[2:])
     result.setdefault("expected", schema)
-    result.setdefault("fix", f"Correct only {path} according to field_schema, retain the exact worker_capability, then retry read_dispatch_briefing on the same attempt.")
+    result.setdefault("fix", f"Correct only {path} according to field_schema, then retry read_dispatch_briefing on the same attempt.")
     return result
 def _bounded_artifact_max_bytes(value: Any, *, label: str) -> tuple[int | None, int | None, bool]:
     """Validate an optional caller-selected artifact page size."""
@@ -113,7 +113,7 @@ def _dispatch_briefing_failure(exc: BaseException, *, params: dict[str, Any] | N
             "code": "dispatch_briefing_request_invalid",
             "diagnostics": diagnostics,
             "retryable": True, "attempt_budget_consumed": False,
-            "next_action": "Correct every listed path according to its field_schema, retain the exact worker_capability and any returned cursor, then retry read_dispatch_briefing on this same attempt. No briefing write or replacement worker is authorized.",
+            "next_action": "Correct every listed path according to its field_schema, retain any returned cursor, then retry read_dispatch_briefing on this same attempt. No briefing write or replacement worker is authorized.",
             "validation": {
                 "schema": "cortex/validation-error/v1",
                 "diagnostics_are_complete": True,
@@ -146,7 +146,7 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
     try:
         original = dict(params)
         params = bind_semantic_params(original)
-        allowed = {"worker_capability", "cursor", "max_bytes"}
+        allowed = {"cursor", "max_bytes"}
         unknown = sorted(set(original) - allowed)
         if unknown:
             raise ValidationFailure([{"code": "dispatch_briefing_request_invalid", "path": f"$.{field}", "message": "unsupported read_dispatch_briefing field", "fix": "Remove this field and retry on the same worker attempt."} for field in unknown])
@@ -222,7 +222,7 @@ def read_dispatch_briefing(params: dict[str, Any]) -> dict[str, Any]:
                 result["next_cursor"] = _runtime.db_encode_artifact_cursor(root, {"type": "briefing_read", "task_id": state["task_id"], "artifact_ref": artifact["artifact_ref"], "digest_sha256": briefing_digest, "byte_offset": part["next_byte_offset"], "audience": audience})
             if part["complete"]:
                 result["briefing_receipt"] = attempt_protocol.acknowledge_briefing(root, task_id=state["task_id"], attempt_id=attempt_id, dispatch_ref=dispatch_ref, digest=briefing_digest)
-            result["next_action"] = "If complete is false, call read_dispatch_briefing again with the same exact worker_capability and returned next_cursor. Do not substitute another briefing or read another Cortex path."
+            result["next_action"] = "If complete is false, call read_dispatch_briefing again with the returned next_cursor. Do not substitute another briefing or read another Cortex path."
             return result
         receipt = attempt_protocol.acknowledge_briefing(root, task_id=state["task_id"], attempt_id=attempt_id, dispatch_ref=dispatch_ref, digest=briefing_digest)
         return {**base, "briefing": briefing, "briefing_receipt": receipt, "next_action": "Follow this complete validated briefing. Cortex recorded the server-owned read receipt; do not author an acknowledgement marker or read another Cortex ledger path or briefing."}

@@ -73,6 +73,132 @@ def _facade_schema(operation: str) -> dict[str, Any]:
     return schema if isinstance(schema, dict) else _FACADE_FIELDS[operation]
 
 
+def _compact_facade_schema(operation: str) -> dict[str, Any]:
+    """Return a bounded public envelope for validation receipts.
+
+    The generated ``complete_attempt`` schema contains the entire planner
+    contract (and can be very large in a real installation).  It is useful to
+    the tool registry, but is the wrong payload for a field-level error: a
+    worker must receive the invalid field's contract, never the whole request
+    schema or a private worker-session property.
+    """
+    fallback = _FACADE_FIELDS.get(operation, {"type": "object"})
+    if operation != "complete_attempt":
+        return json.loads(json.dumps(fallback, ensure_ascii=False))
+    properties = {
+        "status": {"type": "string"},
+        "summary": {"type": "string"},
+        "findings": {"type": "array"},
+        "decisions_needed": {"type": "array"},
+        "unresolved": {"type": "array"},
+        "claims": {"type": "array"},
+        "planning": {"type": "object"},
+        "base_payload_digest": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+        "patches": {"type": "array", "items": {"type": "object"}},
+    }
+    return {"type": "object", "additionalProperties": False, "properties": properties}
+
+
+def _planning_path_segments(path: object) -> list[str]:
+    """Extract segments below the planning root from a public diagnostic."""
+    raw = str(path or "").strip()
+    if raw.startswith("/"):
+        segments = [part.replace("~1", "/").replace("~0", "~") for part in raw[1:].split("/")]
+        if segments and segments[0] == "planning":
+            segments = segments[1:]
+        return [segment for segment in segments if segment]
+    if raw.startswith("$."):
+        raw = raw[2:]
+    elif raw.startswith("$"):
+        raw = raw[1:]
+    if raw == "planning":
+        return []
+    if raw.startswith("planning."):
+        raw = raw[len("planning."):]
+    segments: list[str] = []
+    for part in raw.split("."):
+        if not part:
+            continue
+        head, _, indexes = part.partition("[")
+        if head:
+            segments.append(head)
+        while indexes:
+            index, _, indexes = indexes.partition("]")
+            if index:
+                segments.append(index)
+            if indexes.startswith("["):
+                indexes = indexes[1:]
+            else:
+                break
+    return segments
+
+
+def _is_planning_diagnostic(diagnostic: Mapping[str, Any]) -> bool:
+    path = str(diagnostic.get("path") or diagnostic.get("canonical_path") or "").strip()
+    code = str(diagnostic.get("code") or "").strip().lower()
+    return (
+        path == "planning"
+        or path.startswith("planning.")
+        or path.startswith("$.planning")
+        or path.startswith("/planning")
+        or code.startswith("planning_")
+    )
+
+
+def _planning_field_schema(path: object) -> dict[str, Any]:
+    """Project only the invalid planning field's schema for a receipt."""
+    schema = _facade_schema("complete_attempt")
+    planning = schema.get("properties", {}).get("planning") if isinstance(schema, dict) else None
+    if not isinstance(planning, dict):
+        return {"type": "object"}
+    selected: Any = planning
+    for segment in _planning_path_segments(path):
+        if not isinstance(selected, dict):
+            break
+        properties = selected.get("properties")
+        if isinstance(properties, dict) and segment in properties:
+            selected = properties[segment]
+            continue
+        items = selected.get("items")
+        if isinstance(items, dict) and segment.isdigit():
+            selected = items
+            continue
+        break
+    if not isinstance(selected, dict):
+        return {"type": "object"}
+    # A planning schema cannot contain worker credentials, but copy it before
+    # attaching it to a response so future registry mutations cannot leak into
+    # an already-created diagnostic.
+    return json.loads(json.dumps(selected, ensure_ascii=False))
+
+
+def _planning_json_pointer(path: object) -> str:
+    """Return an RFC 6901 pointer rooted at the rejected planning draft."""
+    segments = _planning_path_segments(path)
+    return "/" + "/".join(
+        segment.replace("~", "~0").replace("/", "~1") for segment in segments
+    ) if segments else "/"
+
+
+def _validation_request_schema(operation: str, diagnostics: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Keep validation receipts bounded and free of worker-session fields."""
+    if operation == "complete_attempt" and any(
+        isinstance(item, Mapping) and _is_planning_diagnostic(item) for item in diagnostics
+    ):
+        # The rejected draft and planning_repair.patch_paths carry the precise
+        # planning contract.  Do not repeat the complete nested schema here.
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "planning": {"type": "object"},
+                "base_payload_digest": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+                "patches": {"type": "array", "items": {"type": "object"}},
+            },
+        }
+    return _compact_facade_schema(operation)
+
+
 def _json_pointer(path: object) -> str:
     """Convert the public diagnostic path to an RFC 6901 pointer."""
     raw = str(path or "$")
@@ -89,7 +215,7 @@ def _json_pointer(path: object) -> str:
 
 
 def _facade_validation_failure(operation: str, params: Mapping[str, Any], fields: Sequence[str]) -> ValidationFailure:
-    schema = _facade_schema(operation)
+    schema = _compact_facade_schema(operation)
     diagnostics = []
     for field in fields:
         path = f"$.{field}"
@@ -110,6 +236,7 @@ def _facade_validation_failure(operation: str, params: Mapping[str, Any], fields
 def _facade_required_failure(operation: str, params: Mapping[str, Any]) -> ValidationFailure | None:
     """Collect missing required properties before any context lookup or write."""
     schema = _facade_schema(operation)
+    receipt_schema = _compact_facade_schema(operation)
     diagnostics: list[dict[str, Any]] = []
     required_fields = list(schema.get("required", []))
     # The public completion form has two valid branches: a normal semantic
@@ -132,7 +259,7 @@ def _facade_required_failure(operation: str, params: Mapping[str, Any]) -> Valid
                 "message": f"required field {field!r} is missing or empty",
                 "received": value,
                 "expected": schema.get("properties", {}).get(field, {"type": "string"}),
-                "field_schema": schema,
+                "field_schema": receipt_schema.get("properties", {}).get(field, {"type": "string"}),
                 "fix": f"Provide {path} using the exact value from the worker briefing, then retry {operation}.",
             })
     return ValidationFailure(diagnostics) if diagnostics else None
@@ -391,11 +518,19 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
     # operation; its contract is supplemented with the exact tool schema.
     for item in diagnostics:
         if isinstance(item, dict) and not finalization:
+            planning_diagnostic = operation == "complete_attempt" and _is_planning_diagnostic(item)
             if item.get("path"):
-                item.setdefault("json_pointer", _json_pointer(item["path"]))
+                item["json_pointer"] = (
+                    _planning_json_pointer(item["path"])
+                    if planning_diagnostic else _json_pointer(item["path"])
+                )
             item.setdefault("phase", "payload")
             item.setdefault("fix", f"Correct {item.get('path', '$')} and retry {operation} on the same attempt.")
-            item.setdefault("field_schema", _facade_schema(operation) if operation in _FACADE_FIELDS else {"type": "object"})
+            if planning_diagnostic:
+                item["field_schema"] = _planning_field_schema(item.get("path"))
+                item["expected"] = item["field_schema"]
+            else:
+                item.setdefault("field_schema", _compact_facade_schema(operation) if operation in _FACADE_FIELDS else {"type": "object"})
     result = {
         "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
         "ok": False,
@@ -419,7 +554,7 @@ def _public_failure(operation: str, exc: Exception, *, finalization: bool = Fals
             "schema": "cortex/validation-error/v1",
             "operation": operation,
             "diagnostics_are_complete": True,
-            "request_schema": _facade_schema(operation) if operation in _FACADE_FIELDS else {"type": "object"},
+            "request_schema": _validation_request_schema(operation, diagnostics),
             "invalid_paths": [item.get("path") for item in diagnostics if isinstance(item, dict) and item.get("path")],
             "invalid_json_pointers": [item.get("json_pointer") for item in diagnostics if isinstance(item, dict) and item.get("json_pointer") is not None],
             "retry": {"same_call": True, "preserve_valid_fields": True, "replacement_worker_authorized": False},
@@ -444,24 +579,25 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
     draft_diagnostics = draft.get("diagnostics")
     if isinstance(draft_diagnostics, list) and draft_diagnostics:
         diagnostics = [dict(item) for item in draft_diagnostics if isinstance(item, dict)]
-        if diagnostics:
-            # Draft diagnostics are replayed from the immutable document, so
-            # apply the same public receipt normalization that _public_failure
-            # applies to a fresh exception.  This keeps retries machine-
-            # readable even after the first response has been persisted.
-            for item in diagnostics:
-                path = item.get("path")
-                if path:
-                    item.setdefault("json_pointer", _json_pointer(path))
-                item.setdefault("phase", "payload")
-                item.setdefault(
-                    "fix",
-                    f"Correct {path or '$'} and retry complete_attempt on the same attempt.",
-                )
-                item.setdefault("field_schema", _facade_schema("complete_attempt"))
-            response["diagnostics"] = diagnostics
     else:
-        diagnostics = response.get("diagnostics") or []
+        diagnostics = [dict(item) for item in (response.get("diagnostics") or []) if isinstance(item, dict)]
+    # Draft diagnostics are replayed from the immutable document, so apply the
+    # same public receipt normalization that _public_failure applies to a fresh
+    # exception.  This also covers a direct recovery receipt whose response
+    # already contains diagnostics but no persisted draft details.
+    for item in diagnostics:
+        path = item.get("path")
+        if path:
+            item["json_pointer"] = _planning_json_pointer(path)
+        item.setdefault("phase", "payload")
+        item.setdefault(
+            "fix",
+            f"Correct {path or '$'} and retry complete_attempt on the same attempt.",
+        )
+        item["field_schema"] = _planning_field_schema(path)
+        item["expected"] = item["field_schema"]
+    if diagnostics:
+        response["diagnostics"] = diagnostics
     response["base_payload_digest"] = draft.get("base_payload_digest")
     response["rejected_draft_ref"] = f"planning_rejected_draft:{draft.get('attempt_id', '')}"
     response["planning_repair"] = {
@@ -498,6 +634,21 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
         "a replacement worker; the server preserves every valid rejected-draft field."
         + path_hint
     )
+    # _public_failure may have built a generic envelope before the immutable
+    # draft was loaded.  Re-project the validation receipt to the bounded
+    # planning-only contract after replaying the draft diagnostics.
+    if isinstance(response.get("validation"), dict):
+        response["validation"]["request_schema"] = _validation_request_schema(
+            "complete_attempt", diagnostics,
+        )
+        response["validation"]["invalid_paths"] = [
+            item.get("path") for item in diagnostics
+            if isinstance(item, dict) and item.get("path")
+        ]
+        response["validation"]["invalid_json_pointers"] = [
+            item.get("json_pointer") for item in diagnostics
+            if isinstance(item, dict) and item.get("json_pointer") is not None
+        ]
     return response
 
 
@@ -506,8 +657,7 @@ def record_attempt_event(params: dict[str, Any]) -> dict[str, Any]:
     try:
         original = dict(params)
         params = bind_semantic_params(original)
-        params["worker_capability"] = original.get("worker_capability")
-        allowed = {"worker_capability", "event_type", "payload", "event_key"}
+        allowed = {"event_type", "payload", "event_key"}
         unknown = sorted(set(original) - allowed)
         if unknown:
             raise _facade_validation_failure("record_attempt_event", params, unknown)
@@ -677,9 +827,7 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
     try:
         original = dict(params)
         params = bind_semantic_params(original)
-        params["worker_capability"] = original.get("worker_capability")
         allowed = {
-            "worker_capability",
             "status", "summary", "findings", "decisions_needed", "unresolved", "claims",
             "planning", "base_payload_digest", "patches",
             # Private server-to-server handoff used only after a validated
@@ -827,11 +975,9 @@ def complete_attempt(params: dict[str, Any]) -> dict[str, Any]:
             "schema": _runtime.PUBLIC_ORCHESTRATION_SCHEMA,
             "ok": True,
             "outcome": "attempt_completed",
-            # Put the bearer lookup token first and label the generated view
-            # separately.  Native parents frequently serialize this object
-            # verbatim; keeping the canonical token first reduces accidental
-            # selection of the non-authoritative projection ref while the
-            # prompt/schema still require the field name to be copied exactly.
+            # Put the canonical result reference first and label the generated
+            # projection separately. Native parents frequently serialize this
+            # object verbatim, so the authoritative reference must be obvious.
             "attempt_result_ref": canonical["result_ref"],
             "projection_ref": projection["projection_ref"],
             "summary": canonical["summary"],
@@ -916,8 +1062,7 @@ def repair_planning(params: dict[str, Any], *, _trusted: bool = False) -> dict[s
         original = dict(params)
         if not _trusted:
             params = bind_semantic_params(original)
-            params["worker_capability"] = original.get("worker_capability")
-        allowed = {"worker_capability", "base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
+        allowed = {"base_payload_digest", "patches", "planning", "status", "summary", "findings", "decisions_needed", "unresolved", "claims"}
         unknown = sorted(set(original) - (allowed | (_PUBLIC_IDENTITY_FIELDS if _trusted else set())))
         if unknown:
             raise _facade_validation_failure("repair_planning", params, unknown)
@@ -990,14 +1135,18 @@ def read_worker_result(params: dict[str, Any]) -> dict[str, Any]:
     """
     try:
         original = dict(params)
-        # A fresh successor's first call carries the server-issued capability;
-        # resolve it before choosing the coordinator form.  A coordinator may
-        # never smuggle a worker capability into its task-scoped read form.
-        if str(original.get("worker_capability") or "").strip():
+        # A bound successor supplies only attempt_result_ref. Resolve the
+        # server-owned binding before choosing the coordinator form, including
+        # in the default MCP audience where the same public handler is shared.
+        # A coordinator form is distinguished by its explicit task_ref, never
+        # by model-authored identity fields.
+        if "task_ref" not in original:
             params = bind_semantic_params(original)
+        else:
+            params = original
         binding = current_binding()
         if binding is not None:
-            unknown = sorted(set(original) - {"worker_capability", "attempt_result_ref"})
+            unknown = sorted(set(original) - {"attempt_result_ref"})
             if unknown:
                 raise _facade_validation_failure("read_worker_result", params, unknown)
             project = _runtime.select_project_root({"project_root": binding["project_root"]})

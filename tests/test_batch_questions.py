@@ -82,6 +82,34 @@ class BatchQuestionTests(unittest.TestCase):
         with worker_identity.worker_binding(self._identity(state, attempt)):
             return control.worker_question(params)
 
+    def _mark_idle_resumable(self, state, attempt, *, child_id="child-a"):
+        """Model the host's persisted stop after a worker question."""
+        attempt["status"] = "running"
+        attempt["lifecycle_status"] = "paused_awaiting_user"
+        attempt["host_stop_outcome"] = "awaiting_user"
+        attempt["host_resumable"] = True
+        attempt["host_spawn"] = {
+            "agent_id": child_id,
+            "task_name": f"{attempt['attempt_id']}-worker",
+            "tool": "spawn_agent",
+        }
+        control.save_state(
+            next((self.ledger / "tasks").iterdir()),
+            next((self.ledger / "tasks").iterdir()) / "state.sqlite",
+            state,
+            "host_stop_for_question",
+            attempt["attempt_id"],
+        )
+        control.db_put_worker_session(self.ledger, {
+            "task_id": state["task_id"],
+            "attempt_id": attempt["attempt_id"],
+            "host_agent_id": child_id,
+            "host_task_name": attempt["host_spawn"]["task_name"],
+            "host_tool": "spawn_agent",
+            "status": "idle_resumable",
+            "resumable": True,
+        })
+
     @staticmethod
     def _batch():
         return {
@@ -280,6 +308,120 @@ class BatchQuestionTests(unittest.TestCase):
         resolved = events[-1]["payload"]
         self.assertEqual(resolved["question_ref"], question_ref)
         self.assertIn("gradual", resolved["answer"])
+
+    def test_ordinary_chat_answer_routes_without_task_or_question_ref(self):
+        started, state, attempt = self._start()
+        asked = self._worker_question(state, attempt, {
+            "action": "ask",
+            "question": "Which rollout policy should the implementation follow?",
+            "header": "Rollout policy",
+            "options": [
+                {"option_id": "gradual", "label_en": "Use a gradual rollout"},
+                {"option_id": "immediate", "label_en": "Use an immediate rollout"},
+            ],
+            "recommended_option_ids": ["gradual"],
+            "recommendation": "Use a gradual rollout because it limits the blast radius.",
+        })
+        self._mark_idle_resumable(state, attempt)
+        routed = control.manage_orchestration({
+            "project_root": str(self.project),
+            "intent": "question",
+            "payload": {
+                "command": "answer",
+                "answer": "Use the gradual rollout and keep rollback under five minutes.",
+            },
+        })
+        self.assertEqual(routed["outcome"], "question_answered")
+        self.assertEqual(routed["resume_contract"]["attempt_id"], attempt["attempt_id"])
+        self.assertEqual(routed["dispatches"][0]["target"], "child-a")
+        self.assertNotIn("task_ref", routed["user_view"]["message"])
+        self.assertNotIn("idle_resumable", routed["user_view"]["message"])
+        events = attempt_protocol.list_attempt_events(
+            self.ledger, task_id=state["task_id"], attempt_id=attempt["attempt_id"]
+        )
+        self.assertEqual([event["event_type"] for event in events][-3:], [
+            "question_created", "question_answered", "decision_resolved",
+        ])
+
+    def test_ordinary_chat_answer_replay_returns_receipt_without_new_task_or_followup(self):
+        started, state, attempt = self._start()
+        asked = self._worker_question(state, attempt, {
+            "action": "ask",
+            "question": "Which rollout policy should the implementation follow?",
+            "header": "Rollout policy",
+            "options": [
+                {"option_id": "gradual", "label_en": "Use a gradual rollout"},
+                {"option_id": "immediate", "label_en": "Use an immediate rollout"},
+            ],
+            "recommended_option_ids": ["gradual"],
+            "recommendation": "Use a gradual rollout.",
+        })
+        self._mark_idle_resumable(state, attempt)
+        ordinary_answer = {
+            "project_root": str(self.project),
+            "intent": "question",
+            "payload": {
+                "command": "answer",
+                "answer": "Use the gradual rollout.",
+            },
+        }
+        first = control.manage_orchestration(ordinary_answer)
+        self.assertEqual(first["outcome"], "question_answered")
+        self.assertFalse(first.get("idempotent"))
+        self.assertEqual(len(first["dispatches"]), 1)
+        replay = control.manage_orchestration(ordinary_answer)
+        self.assertEqual(replay["outcome"], "question_answered")
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(replay["resume_contract"], first["resume_contract"])
+        self.assertEqual(replay["dispatches"], [])
+        self.assertNotEqual(replay["outcome"], "new_task")
+        questions = control.list_worker_questions({
+            "project_root": str(self.project),
+            "task_id": state["task_id"],
+            "principal": state["principal"],
+            "status": "answered",
+        })
+        self.assertEqual(len(questions["questions"]), 1)
+
+    def test_parallel_ordinary_chat_answer_map_resumes_only_selected_attempt(self):
+        _, state, first = self._start()
+        first_question = self._worker_question(state, first, {
+            "action": "ask", "question": "Which storage policy should be used?",
+            "header": "Storage policy", "options": [
+                {"option_id": "existing", "label_en": "Keep the existing storage"},
+                {"option_id": "new", "label_en": "Create new storage"},
+            ], "recommended_option_ids": ["existing"],
+            "recommendation": "Keep existing storage to preserve compatibility.",
+        })
+        # Add an independent active attempt in the same wave only for this
+        # focused routing contract; both native sessions are resumable.
+        second = dict(first)
+        second["attempt_id"] = "attempt-parallel-b"
+        second["host_spawn"] = None
+        state["attempts"].append(second)
+        task_dir = next((self.ledger / "tasks").iterdir())
+        control.save_state(task_dir, task_dir / "state.sqlite", state, "parallel_fixture", second["attempt_id"])
+        second_question = self._worker_question(state, second, {
+            "action": "ask", "question": "Which cache policy should be used?",
+            "header": "Cache policy", "options": [
+                {"option_id": "bounded", "label_en": "Use bounded caching"},
+                {"option_id": "none", "label_en": "Disable caching"},
+            ], "recommended_option_ids": ["bounded"],
+            "recommendation": "Use bounded caching to retain predictable resource use.",
+        })
+        self._mark_idle_resumable(state, first, child_id="child-a")
+        self._mark_idle_resumable(state, second, child_id="child-b")
+        routed = control.resume_question_from_ordinary_chat({
+            "project_root": str(self.project),
+            "message": {"answers": {first_question["question_ref"]: {"option_ids": ["existing"]}}},
+        })
+        self.assertEqual(routed["outcome"], "question_answered")
+        self.assertEqual([item["target"] for item in routed["dispatches"]], ["child-a"])
+        open_questions = control.list_worker_questions({
+            "project_root": str(self.project), "task_id": state["task_id"],
+            "principal": state["principal"], "status": "open",
+        })
+        self.assertEqual([item["question_id"] for item in open_questions["questions"]], [second_question["question_ref"]])
 
     def test_runtime_has_no_nested_elicitation_adapter(self):
         self.assertFalse(hasattr(control, "_request_mcp_elicitation"))

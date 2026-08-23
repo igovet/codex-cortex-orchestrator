@@ -1798,7 +1798,7 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         self.assertEqual(
             shared["dispatch_briefing_fallback"],
-            "scoped_paged_read_dispatch_briefing_with_exact_identity_digest_and_returned_cursor_only_when_host_file_read_is_unavailable",
+            "scoped_paged_read_dispatch_briefing_with_server_owned_worker_binding_and_returned_cursor_only_when_host_file_read_is_unavailable",
         )
         self.assertEqual(
             shared["repository_intelligence"],

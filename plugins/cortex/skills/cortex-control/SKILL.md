@@ -267,13 +267,13 @@ paths forbidden above.
    the directory, mutable state, baselines, delegation packages, another
    briefing, or result artifacts. If the
    host filesystem read says this exact path is missing or unreadable, the
-   worker must call `read_dispatch_briefing` with the exact opaque
-   `worker_capability` from its native bootstrap. That same capability is
-   required on **every** worker tool call, including file-readable briefings.
-   This is a server-issued bearer
-   capability, not an identity field; never invent, transform, or reuse one
-   from another dispatch. The worker may call `read_dispatch_briefing` without
-   repeating identity fields;
+   worker must call `read_dispatch_briefing` using its server-owned worker
+   session. Worker tools carry semantic fields only; the host binds the
+   session out-of-band and supplies the binding internally. No caller token is
+   part of the model-facing schema, prompt, or diagnostics, and the worker
+   must not invent, transform, copy, or reuse transport identity from another
+   dispatch. The worker may call `read_dispatch_briefing` without repeating
+   identity fields;
    the bound worker session supplies project root, task, attempt, profile,
    dispatch, and digest.
    An incomplete bounded response may continue only with its returned cursor.
@@ -727,7 +727,11 @@ the user's language as one ordinary **final assistant message**, then end the
 turn without calling any UI, input, approval, or elicitation tool. The user's
 next ordinary message resumes the same durable task: preserve its exact text,
 record it against the same `interaction_ref`, and only then resume the exact
-same worker. The coordinator may pass
+same worker. When parallel workers have open questions, each question retains
+its own task, attempt, dispatch, and interaction binding: answering A resumes
+only A while B remains resumable. An unscoped message that cannot be mapped
+unambiguously becomes one task-level clarification; the coordinator never
+guesses between workers. The coordinator may pass
 `localized_question`, `localized_header`, `localized_options`, and
 `localized_custom_label` as transient user-language labels; the stored
 question remains canonical English. For a response with
@@ -892,7 +896,8 @@ operations and task-scoped follow-ups derive it from the server-owned binding.
 Runtime state stays in
 the host-private default `~/.codex/cortex/projects/p-<sha256>/` root (or a
 private, outside-workspace `CORTEX_HOST_STATE_DIR` override) using the
-canonical `cortex/v8` ledger. `CORTEX_ROOT`, `/tmp`, and symlink
+`cortex/v8` API envelope over the canonical SQLite schema v15 ledger.
+`CORTEX_ROOT`, `/tmp`, and symlink
 traversal remain forbidden. A project-local `.codex/cortex` database is
 moved only by same-filesystem atomic rename after secure database/split-state
 validation; unsafe or cross-filesystem state fails closed.

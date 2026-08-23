@@ -676,7 +676,7 @@ record model, capability boundary, and integrity rules, see the
    what happens next; early reads and rereads remain link-free.
 7. **Approval and adaptive replanning.** `plan_approval` defaults to `auto` at
    every complexity. A visible plan-approval hold is allowed only when the
-   user explicitly requested plan approval; a legacy or policy-generated
+   user explicitly requested plan approval; an internal policy-generated
    reapproval signal is advisory and does not pause the task. When explicit
    approval is requested, the review records the plan revision, planner result
    reference, verified-predecessor digest, and semantic future-pipeline digest.
@@ -729,10 +729,13 @@ server-owned recovery and corrective work. A missing file, transport error, or
 lost native acknowledgement does not become a user-facing Cortex blocker.
 A serialization, view, or infrastructure failure after `WORK_COMPLETED` is
 retried against the same attempt and never creates a replacement worker.
-An active dispatched attempt without a finalized canonical result blocks gate
-pass, handoff, terminal acceptance, and coordinator completion. A native child
-binding is recovery metadata only; the coordinator must read the result,
-receive the server-derived continuation, and only then close that child.
+An active dispatched attempt without a finalized canonical result prevents an
+unverified gate pass, handoff, terminal acceptance, or coordinator completion;
+it does not block the orchestration route. Cortex continues through the
+server-derived wait, retry, or corrective dispatch until the exact result is
+available. A native child binding is recovery metadata only; the coordinator
+must read the result, receive the server-derived continuation, and only then
+close that child.
 
 ### 10.0.7 ContextCompiler and HandoffCompiler boundaries
 
@@ -776,11 +779,12 @@ serialization, and handoff work without dispatching the worker again. This
 prevents duplicate edits and keeps the original evidence, event sequence,
 checks, and workspace observations authoritative across compaction and resume.
 
-The `Stop` hook blocks a coordinator final answer while a durably bound worker
-is still active. `SessionStart`, `SubagentStart`, `PreToolUse`, and
-`PostToolUse` keep the native identity and the ledger state aligned. Optional
-private telemetry is retention-bounded and fail-open when SQLite is busy; lifecycle authority
-remains fail-closed at the canonical mutation boundary.
+The `Stop` hook is telemetry-only: it records native identity and ledger
+alignment but never blocks or silences a coordinator turn. `SessionStart`,
+`SubagentStart`, `PreToolUse`, and `PostToolUse` keep the native identity and
+ledger state aligned. Optional private telemetry is retention-bounded and
+fail-open when SQLite is busy; lifecycle authority remains fail-closed only at
+the canonical mutation boundary.
 
 ### 10.0.7 public API and audience boundary
 
@@ -914,9 +918,9 @@ union is exactly nine operations and the audience is fixed for the stdio
 process.
 
 Every worker assignment is an immutable, digest-checked briefing. The native
-bootstrap carries a fresh opaque `worker_capability` for that dispatch, plus
-the issued briefing path and digest. The worker sends that exact capability on
-every worker MCP call; Cortex derives task and dispatch identity server-side.
+host binds the worker session out-of-band for that dispatch, alongside the
+issued briefing path and digest. Worker MCP calls contain semantic fields
+only; Cortex derives task and dispatch identity from the server-owned binding.
 The worker reads and verifies the briefing before project work. Result
 links are `attempt_result_ref`, `context_result_refs`, and
 `predecessor_result_refs`. Compact inspect and recovery responses keep scoped
