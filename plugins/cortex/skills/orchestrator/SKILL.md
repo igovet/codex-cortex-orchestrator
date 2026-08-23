@@ -79,6 +79,12 @@ explicit `task_ref` or task number is a new-task request. A Codex thread ID is
 not a Cortex `task_ref` unless the user explicitly supplies it as the task
 identifier.
 
+The server may replay a start only when it can prove that the call is a retry
+of the same private MCP transport request (for example, the host lost one
+response). This is not content-based deduplication: a new start call with the
+same wording, project, or task fields is still a new task. Never infer or
+manufacture the private request identity in coordinator arguments.
+
 ## Turn-local read discipline
 
 Maintain a turn-local evidence index of every fully read skill, file, and

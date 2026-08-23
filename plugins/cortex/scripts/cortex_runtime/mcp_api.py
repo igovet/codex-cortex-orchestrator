@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import sys
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -35,6 +36,24 @@ def _public_next_action(value: object) -> str:
             value = "Inspect the same task and follow the server-returned recovery action."
     text = str(value or "").strip()
     return text or "Inspect the same task and follow the server-returned recovery action."
+
+
+def _canonical_jsonrpc_request_id(value: object) -> str:
+    """Encode a JSON-RPC id with its JSON type before lifecycle composition."""
+    if value is None:
+        return "null:null"
+    if isinstance(value, bool):
+        return "boolean:" + ("true" if value else "false")
+    if isinstance(value, int):
+        return f"number:integer:{value}"
+    if isinstance(value, float):
+        return "number:float:" + json.dumps(value, allow_nan=False, separators=(",", ":"))
+    if isinstance(value, str):
+        return "string:" + json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    # JSON-RPC ids should be string or number, but preserve a typed, stable
+    # encoding for malformed/forward-compatible JSON values rather than
+    # allowing their string representations to collide.
+    return "json:" + json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _public_user_view(rendered: object) -> dict[str, Any]:
@@ -1657,6 +1676,12 @@ def serve_stdio(
     # the CLI entry point to pass an already-filtered mapping.
     public_tools = public_tools_for_audience(public_tools, normalized_audience)
     all_public_names = frozenset(PUBLIC_TOOL_DESCRIPTIONS)
+    # JSON-RPC request ids are scoped to one MCP connection.  Include a fresh
+    # connection nonce before handing the id to lifecycle code so a new Codex
+    # thread that starts a fresh MCP process can never replay a prior thread's
+    # numeric id.  A repeated id on this same transport remains a stable
+    # request identity for server-side idempotency.
+    transport_session_id = secrets.token_hex(16)
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -1699,6 +1724,15 @@ def serve_stdio(
                 arguments = request.get("params", {}).get("arguments", {})
                 if not isinstance(arguments, dict):
                     raise ValueError("tool arguments must be an object")
+                if name == "start_orchestration" and ("id" not in request or request_id is None):
+                    raise ValueError("start_orchestration requires a non-null JSON-RPC id for a mutating transport request")
+                if name == "start_orchestration" and request_id is not None:
+                    arguments = {
+                        **arguments,
+                        "_transport_request_id": (
+                            f"{transport_session_id}:{_canonical_jsonrpc_request_id(request_id)}"
+                        ),
+                    }
                 value = public_tools[name][0](arguments)
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, indent=2)}], "structuredContent": value}
             elif method == "ping":

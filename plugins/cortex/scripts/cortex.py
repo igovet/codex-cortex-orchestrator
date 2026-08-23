@@ -8325,6 +8325,7 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
         "operation", "submission_id", "project_root", "principal", "thread_id",
         "task", "task_id", "wave_id", "waves", "host_capabilities", "completions", "payload",
         "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate", "terminal_recovery",
+        "_materialization_fence",
     }
     for key in sorted(set(params) - allowed_top_level):
         diagnostics.append(_request_diagnostic(key, "unsupported orchestrate parameter", "a documented orchestrate parameter"))
@@ -8757,6 +8758,70 @@ def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
     return result
 
 
+def _v3_start_materialization_pending(task_ref: str) -> dict[str, Any]:
+    """Return a durable retry receipt while another caller owns materialization."""
+    result = _v3_error(
+        "start_materialization_pending",
+        "the same transport start is currently being materialized by Cortex",
+        outcome="materialization_pending",
+    )
+    result.update({
+        "ok": False,
+        "task_ref": task_ref,
+        "task_created": False,
+        "retryable": True,
+        "requires_retry": True,
+        "attempt_budget_consumed": False,
+        "worker_replacement_authorized": False,
+        "replayed": True,
+        "recovery": {"mode": "materialization_lease", "automatic": True},
+        "next_action": (
+            "Cortex is materializing this exact task under its durable transport lease. "
+            "Retry the identical start request with the same transport request id after the next receipt; "
+            "do not create a new request or select another task."
+        ),
+    })
+    return result
+
+
+def _v3_release_start_materialization_lease(
+    root: Path,
+    task_id: str,
+    owner: str | None,
+) -> None:
+    """Make a failed owner retryable without disturbing another owner."""
+    if not owner:
+        return
+    try:
+        with state_lock(root):
+            registry = _operation_registry(root)
+            changed = False
+            for reservation in registry.get("starts", {}).values():
+                if (
+                    isinstance(reservation, dict)
+                    and str(reservation.get("task_id") or "") == str(task_id)
+                    and str(reservation.get("materialization_owner") or "") == owner
+                ):
+                    reservation["materialization_status"] = "retryable"
+                    reservation.pop("materialization_owner", None)
+                    reservation.pop("materialization_lease_expires_at", None)
+                    changed = True
+            record = registry.get("tasks", {}).get(str(task_id))
+            start = record.get("start") if isinstance(record, dict) else None
+            if isinstance(start, dict) and str(start.get("materialization_owner") or "") == owner:
+                start["materialization_status"] = "retryable"
+                start.pop("materialization_owner", None)
+                start.pop("materialization_lease_expires_at", None)
+                changed = True
+            if changed:
+                _write_operation_registry(root, registry)
+    except Exception:
+        # The original start failure is authoritative; cleanup must never
+        # replace it with a secondary persistence diagnostic. The in-memory
+        # bearer was already removed by the caller before this helper runs.
+        return
+
+
 def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
     """Refuse project-wide fallback selection for task-scoped public calls."""
     result = _v3_error(
@@ -8788,6 +8853,10 @@ COORDINATOR_CAPABILITY_RE = re.compile(r"^[0-9a-f]{64}$")
 # and the governance domain is not asked to trust caller-authored roles.
 COORDINATOR_CAPABILITY_CLAIMS_SCHEMA = "cortex/coordinator-capability/v3"
 COORDINATOR_CAPABILITY_TTL_SECONDS = 8 * 60 * 60
+# Keep the ownership window longer than a normal engine start so concurrent
+# retries cannot take over while the original caller is still materializing;
+# an interrupted caller becomes recoverable after this bounded lease.
+START_MATERIALIZATION_LEASE_SECONDS = 5 * 60
 TASK_COORDINATOR_CAPABILITY_ACTIONS = frozenset({
     "inspect", "inspect_initiative",
     "history", "list_records", "snapshot", "snapshot_inspect",
@@ -9028,6 +9097,45 @@ def _stage_coordinator_capability(root: Path, task_id: str) -> tuple[str, str, s
             recovery_proof,
         )
     return capability, digest, recovery_proof_digest
+
+
+def _start_materialization_lease_expiry() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=START_MATERIALIZATION_LEASE_SECONDS)).isoformat()
+
+
+def _start_materialization_lease_active(value: object) -> bool:
+    try:
+        return parse_expiry(value, "materialization_lease_expires_at") > datetime.now(timezone.utc)
+    except ValueError:
+        return False
+
+
+def _v3_materialization_fence(
+    root: Path,
+    task_id: str,
+    owner: str | None,
+    generation: int | None,
+) -> bool:
+    """Check the current owner/generation before engine durable mutations."""
+    if not owner or not isinstance(generation, int):
+        return False
+    registry = _operation_registry(root)
+    reservations = registry.get("starts", {})
+    records = [
+        value for value in reservations.values()
+        if isinstance(value, dict) and str(value.get("task_id") or "") == str(task_id)
+    ]
+    if not records:
+        record = registry.get("tasks", {}).get(str(task_id))
+        start = record.get("start") if isinstance(record, dict) else None
+        records = [start] if isinstance(start, dict) else []
+    return any(
+        str(item.get("materialization_status") or "") == "reserved"
+        and str(item.get("materialization_owner") or "") == owner
+        and item.get("materialization_generation") == generation
+        and _start_materialization_lease_active(item.get("materialization_lease_expires_at"))
+        for item in records
+    )
 
 
 def _take_coordinator_capability(root: Path, task_id: str) -> tuple[str, str] | None:
@@ -10000,7 +10108,7 @@ def _v3_resolve_task(
     params: dict[str, Any],
     *,
     include_completed: bool = False,
-    require_task_ref: bool = False,
+    require_task_ref: bool = True,
 ) -> tuple[Path, dict[str, Any], dict[str, Any], str] | dict[str, Any]:
     root = ledger_root(params)
     candidates = _v3_task_candidates(params, include_completed=include_completed)
@@ -10011,17 +10119,12 @@ def _v3_resolve_task(
         selected = next((item for item in candidates if item["task_ref"] == requested), None)
         if selected is None:
             return _v3_error("unknown_task_ref", "task_ref does not identify a selectable Cortex task")
-    elif len(candidates) == 1:
-        selected = candidates[0]
     elif not candidates:
         return _v3_error("no_active_task", "No active Cortex task exists in this project root.")
     else:
-        public_candidates = [{key: item[key] for key in ("task_ref", "user_request", "status")} for item in candidates]
         return _v3_error(
-            "task_selection_required",
-            "Several Cortex tasks are active; retry with one returned task_ref.",
-            outcome="needs_selection",
-            candidates=public_candidates,
+            "task_ref_required",
+            "task-scoped Cortex calls require the exact task_ref returned by start_orchestration.",
         )
     loaded = _v3_task_state(root, str(selected["task_id"]))
     if loaded is None:
@@ -10575,40 +10678,118 @@ def _v3_consumed_continue_replay(
     return None
 
 
+class StartRequestConflict(ValueError):
+    """A transport request id was reused for a different start payload."""
+
+    def __init__(self, *, request_id: str, expected_digest: str, received_digest: str) -> None:
+        self.request_id = request_id
+        self.expected_digest = expected_digest
+        self.received_digest = received_digest
+        super().__init__("transport request identity was reused with a different start payload")
+
+
 def _v3_start_reservation(
     params: dict[str, Any],
     task: dict[str, Any],
-) -> tuple[str, str, str, str, str, bool]:
+    *,
+    request_digest: str,
+) -> tuple[str, str, str, str, str, bool, str | None, int, bool]:
     root = ledger_root(params)
-    # The canonical user-authored request is the active-task identity boundary.
-    # Coordinator-derived language metadata, waves, routing, or verification
-    # refinements must not turn a retry into a second active task.
-    # Governance inputs are part of the immutable start contract.  A retry
-    # with the same prose but a different initiative or requested floor must
-    # not silently replay an already-created task under a weaker/other policy.
-    start_digest = _orchestrate_request_digest({
-        "user_request": task.get("user_request"),
-        "initiative_ref": task.get("initiative_ref"),
-        "governance_mode": task.get("governance_mode"),
-        "risk_triggers": task.get("risk_triggers"),
-        "governance_triggers": task.get("governance_triggers"),
-        "multiple_repositories": task.get("multiple_repositories"),
-        "related_tasks": task.get("related_tasks"),
-        "long_lived_lanes": task.get("long_lived_lanes"),
-        "conflicting_resources": task.get("conflicting_resources"),
-        "multi_session_handoff": task.get("multi_session_handoff"),
-    })
+    # Start idempotency belongs to the transport request, not to semantic
+    # task text.  A new thread can legitimately submit the same task wording
+    # and must receive a fresh durable task.  Only a repeated request on the
+    # same MCP connection (the private transport identity injected by
+    # serve_stdio) may replay its original receipt.
+    transport_request_id = str(params.get("_transport_request_id") or "").strip()
     with state_lock(root):
         registry = _operation_registry(root)
-        prior = registry["starts"].get(start_digest)
-        if isinstance(prior, dict):
+        prior = registry["starts"].get(transport_request_id) if transport_request_id else None
+        if transport_request_id and isinstance(prior, dict):
+            prior_digest = str(prior.get("request_digest") or "")
+            if prior_digest and prior_digest != request_digest:
+                raise StartRequestConflict(
+                    request_id=transport_request_id,
+                    expected_digest=prior_digest,
+                    received_digest=request_digest,
+                )
             task_id = str(prior.get("task_id") or "")
             loaded = _v3_task_state(root, task_id) if task_id else None
-            # Reuse an in-flight reservation as well as a materialized active
-            # task. Two MCP processes can observe the digest after reservation
-            # but before the engine creates the task ledger; allocating a
-            # second task here would split one idempotent start across sessions.
-            if loaded is None or loaded[1].get("status") in {"active", "blocked", "needs_input"}:
+            # A reservation without a task ledger is not a successful replay:
+            # the first caller may have died between reservation and engine
+            # materialization. Re-stage fresh one-response credentials and
+            # let the same task id resume materialization atomically. Once a
+            # task exists, every lifecycle status (including completed and
+            # cancelled) is an immutable replay of that task identity.
+            if loaded is None:
+                if (
+                    str(prior.get("materialization_status") or "") == "reserved"
+                    and _start_materialization_lease_active(prior.get("materialization_lease_expires_at"))
+                    and str(prior.get("materialization_owner") or "").strip()
+                ):
+                    return (
+                        task_id,
+                        str(prior["task_ref"]),
+                        str(prior["principal"]),
+                        str(prior.get("thread_id") or prior["principal"]),
+                        str(prior["submission_id"]),
+                        False,
+                        None,
+                        int(prior.get("materialization_generation") or 1),
+                        True,
+                    )
+                owner = secrets.token_hex(16)
+                generation = int(prior.get("materialization_generation") or 0) + 1
+                _, capability_digest, recovery_proof_digest = _stage_coordinator_capability(root, task_id)
+                prior.update({
+                    "materialization_status": "reserved",
+                    "materialization_owner": owner,
+                    "materialization_generation": generation,
+                    "materialization_lease_expires_at": _start_materialization_lease_expiry(),
+                    "coordinator_capability_digest": capability_digest,
+                    "coordinator_recovery_proof_digest": recovery_proof_digest,
+                    "coordinator_capability_claims": _capability_claims(
+                        task_id=task_id,
+                        principal=str(prior.get("principal") or ""),
+                        thread_id=str(prior.get("thread_id") or prior.get("principal") or ""),
+                        initiative_ref=str(task.get("initiative_ref") or "") or None,
+                    ),
+                    "updated_at": now(),
+                })
+                registry["starts"][transport_request_id] = prior
+                task_record = registry["tasks"].setdefault(task_id, {})
+                start_record = task_record.setdefault("start", {})
+                start_record.update({
+                    "materialization_status": "reserved",
+                    "materialization_owner": owner,
+                    "materialization_generation": generation,
+                    "materialization_lease_expires_at": prior["materialization_lease_expires_at"],
+                    "coordinator_capability_digest": capability_digest,
+                    "coordinator_recovery_proof_digest": recovery_proof_digest,
+                    "coordinator_capability_claims": prior["coordinator_capability_claims"],
+                })
+                try:
+                    _write_operation_registry(root, registry)
+                except Exception:
+                    # A recovery reservation must not leave a raw bearer in
+                    # process memory when its durable CAS did not commit.
+                    _take_coordinator_capability(root, task_id)
+                    raise
+                return (
+                    task_id,
+                    str(prior["task_ref"]),
+                    str(prior["principal"]),
+                    str(prior.get("thread_id") or prior["principal"]),
+                    str(prior["submission_id"]),
+                    False,
+                    owner,
+                    generation,
+                    False,
+                )
+            else:
+                if str(loaded[1].get("status") or "") in {"completed", "cancelled"}:
+                    # A terminal replay must never leave an undelivered
+                    # in-memory coordinator bearer eligible for later pickup.
+                    _take_coordinator_capability(root, task_id)
                 return (
                     task_id,
                     str(prior["task_ref"]),
@@ -10616,6 +10797,9 @@ def _v3_start_reservation(
                     str(prior.get("thread_id") or prior["principal"]),
                     str(prior["submission_id"]),
                     True,
+                    None,
+                    int(prior.get("materialization_generation") or 1),
+                    False,
                 )
         objective_slug = v3_task_slug(task["user_request"])
         task_id = safe_id(f"{objective_slug}-{secrets.token_hex(4)}")
@@ -10639,10 +10823,22 @@ def _v3_start_reservation(
             "coordinator_capability_digest": capability_digest,
             "coordinator_recovery_proof_digest": recovery_proof_digest,
             "coordinator_capability_claims": capability_claims,
+            "materialization_status": "reserved",
+            "materialization_owner": secrets.token_hex(16),
+            "materialization_generation": 1,
+            "materialization_lease_expires_at": _start_materialization_lease_expiry(),
             "created_at": now(),
         }
-        registry["starts"][start_digest] = reservation
-        registry["tasks"].setdefault(task_id, {})["start"] = {"digest": start_digest, **reservation}
+        if transport_request_id:
+            registry["starts"][transport_request_id] = {
+                "request_digest": request_digest,
+                **reservation,
+            }
+        registry["tasks"].setdefault(task_id, {})["start"] = {
+            "digest": request_digest,
+            "transport_request_id": transport_request_id or None,
+            **reservation,
+        }
         try:
             _write_operation_registry(root, registry)
         except Exception:
@@ -10651,16 +10847,43 @@ def _v3_start_reservation(
             # failed persistence path into raw-authorization delivery.
             _take_coordinator_capability(root, task_id)
             raise
-        return task_id, task_ref, principal, thread_id, submission_id, False
+        return task_id, task_ref, principal, thread_id, submission_id, False, reservation["materialization_owner"], 1, False
+
+
+def _v3_start_request_digest(
+    *,
+    project_root: Path,
+    task: dict[str, Any],
+    waves: list[dict[str, Any]],
+) -> str:
+    """Digest only stable canonical start semantics for transport replay.
+
+    Follow-up context contains a server-created timestamp for auditability;
+    that timestamp is not request semantics and must not make a retry conflict
+    with its own server-owned stable transport identity.
+    """
+    canonical_task = dict(task)
+    follow_up = canonical_task.get("follow_up")
+    if isinstance(follow_up, dict) and "created_at" in follow_up:
+        canonical_task["follow_up"] = {
+            key: value for key, value in follow_up.items() if key != "created_at"
+        }
+    return _orchestrate_request_digest({
+        "project_root": str(project_root),
+        "task": canonical_task,
+        "waves": waves,
+    })
 
 
 def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Start public Cortex orchestration without caller-managed lifecycle identifiers."""
     staged_authorization_task_id: str | None = None
+    reserved_task_id: str | None = None
+    materialization_owner: str | None = None
     try:
         envelope = _v3_collect_fields(
             params,
-            {"project_root", "task", "waves", "_follow_up"},
+            {"project_root", "task", "waves", "_follow_up", "_transport_request_id"},
             operation="start_orchestration",
         )
         raw_task_probe = params.get("task") if isinstance(params, dict) else None
@@ -10764,7 +10987,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         if envelope:
             return _v3_envelope_error("start_orchestration", envelope)
         selected_project_root = select_project_root(params)
-        if set(params) - {"project_root", "task", "waves", "_follow_up"}:
+        if set(params) - {"project_root", "task", "waves", "_follow_up", "_transport_request_id"}:
             raise ValueError("start_orchestration accepts only project_root, task, waves, and optional _follow_up")
         raw_task = params.get("task")
         if not isinstance(raw_task, dict):
@@ -10845,7 +11068,19 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
             if params.get("waves") is not None else _v3_auto_waves(task)
         )
-        task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
+        request_digest = _v3_start_request_digest(
+            project_root=selected_project_root,
+            task=task,
+            waves=waves,
+        )
+        task_id, task_ref, principal, thread_id, submission_id, replayed, materialization_owner, materialization_generation, materialization_pending = _v3_start_reservation(
+            params,
+            task,
+            request_digest=request_digest,
+        )
+        reserved_task_id = task_id
+        if materialization_pending:
+            return _v3_start_materialization_pending(task_ref)
         if not replayed:
             staged_authorization_task_id = task_id
         if replayed:
@@ -10897,7 +11132,49 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "task": {**task, "task_id": task_id},
             "waves": waves,
             "host_capabilities": _v3_host_capabilities(),
+            "_materialization_fence": lambda: _v3_materialization_fence(
+                ledger_root(params), task_id, materialization_owner, materialization_generation,
+            ),
         })
+        with state_lock(ledger_root(params)):
+            registry = _operation_registry(ledger_root(params))
+            reservation_key = str(params.get("_transport_request_id") or "").strip()
+            reservation = (
+                registry.get("starts", {}).get(reservation_key)
+                if reservation_key
+                else None
+            )
+            task_record = registry["tasks"].setdefault(task_id, {})
+            task_start = task_record.setdefault("start", {})
+
+            # Materialization is committed only by the lease owner that fenced
+            # the engine call.  This applies to both transport-backed starts
+            # and direct/source-mode starts (which have no ``starts`` entry).
+            # A late owner must never clear a newer takeover's reservation.
+            def owned(record: Any) -> bool:
+                return bool(
+                    isinstance(record, dict)
+                    and str(record.get("materialization_status") or "") == "reserved"
+                    and str(record.get("materialization_owner") or "") == str(materialization_owner or "")
+                    and record.get("materialization_generation") == materialization_generation
+                )
+
+            materialized_at = now()
+            changed = False
+            if owned(reservation):
+                reservation["materialization_status"] = "materialized"
+                reservation.pop("materialization_owner", None)
+                reservation.pop("materialization_lease_expires_at", None)
+                reservation["materialized_at"] = materialized_at
+                changed = True
+            if owned(task_start):
+                task_start["materialization_status"] = "materialized"
+                task_start.pop("materialization_owner", None)
+                task_start.pop("materialization_lease_expires_at", None)
+                task_start["materialized_at"] = materialized_at
+                changed = True
+            if changed:
+                _write_operation_registry(ledger_root(params), registry)
         if isinstance(old, dict):
             old["governance"] = governance
         response = _v3_response(old, task_ref, start_replayed=replayed)
@@ -10918,6 +11195,8 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
         return response
     except OperationRegistryError as exc:
+        if reserved_task_id and materialization_owner:
+            _v3_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
             _revoke_coordinator_capability(
@@ -10925,7 +11204,26 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 reason="start_authorization_response_unavailable",
             )
         return _v3_start_state_blocked_error(exc)
+    except StartRequestConflict as exc:
+        diagnostic = {
+            "code": "start_request_identity_conflict",
+            "phase": "transport",
+            "path": "request",
+            "json_pointer": "",
+            "message": "the transport request identity was already used with a different canonical start payload",
+            "received": {"digest": exc.received_digest},
+            "expected": {"digest": exc.expected_digest},
+            "field_schema": {"type": "object", "additionalProperties": False},
+            "fix": "Resend the original payload unchanged for this request identity, or issue a new transport request with a new request id to create a new task.",
+        }
+        response = _v3_envelope_error("start_orchestration", [diagnostic])
+        response["outcome"] = "needs_correction"
+        response["retryable"] = True
+        response["task_created"] = False
+        return response
     except ValidationFailure as exc:
+        if reserved_task_id and materialization_owner:
+            _v3_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
             _revoke_coordinator_capability(
@@ -10934,6 +11232,8 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
         return _v3_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        if reserved_task_id and materialization_owner:
+            _v3_release_start_materialization_lease(ledger_root(params), reserved_task_id, materialization_owner)
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
             _revoke_coordinator_capability(
@@ -12525,10 +12825,22 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
             follow_up_task = dict(follow_up["task"])
             follow_up_task["user_language"] = task_definition.get("user_language") or state.get("user_language") or "en"
+            # Follow-up creation is a new task, but retries of the same
+            # completed-source operation must not create duplicate corrective
+            # tasks.  Supply a server-owned transport identity derived from
+            # the immutable source task, selected result refs, and exact
+            # corrective payload.  It is intentionally not exposed to the
+            # public start schema or copied from caller input.
+            follow_up_request_id = "follow-up-" + digest_text(_orchestrate_request_digest({
+                "source_task_id": state["task_id"],
+                "source_result_refs": source_context["source_result_refs"],
+                "corrective_task": follow_up_task,
+            }))[:48]
             started = start_orchestration({
                 "project_root": params["project_root"],
                 "task": follow_up_task,
                 "_follow_up": source_context,
+                "_transport_request_id": follow_up_request_id,
             })
             if not started.get("ok"):
                 return started

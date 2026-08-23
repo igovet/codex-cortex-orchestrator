@@ -2685,19 +2685,17 @@ class ControlPlaneTests(unittest.TestCase):
 
 
 
-    def test_v3_repeated_exact_start_is_idempotent_but_changed_work_creates_a_new_task(self):
+    def test_v3_repeated_direct_start_is_always_new_but_changed_work_creates_a_new_task(self):
         first = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
         replay = self.v3_start("stable objective", waves=[{"workers": [{"phase": "discover"}]}])
         changed = self.v3_start("stable objective complete end to end", waves=[{"workers": [{"phase": "discover"}]}])
         self.assertTrue(replay["ok"])
-        self.assertEqual(replay["task_ref"], first["task_ref"])
+        self.assertNotEqual(replay["task_ref"], first["task_ref"])
         self.assertTrue(changed["ok"])
         self.assertNotEqual(changed["task_ref"], first["task_ref"])
-        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 2)
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 3)
         self.assertFalse(first["replayed"])
-        self.assertTrue(replay["replayed"])
-        self.assertEqual(replay["dispatches"], [])
-        self.assertIn("Do not invoke or repeat any worker dispatch", replay["next_action"])
+        self.assertFalse(replay["replayed"])
 
 
 
@@ -2956,7 +2954,7 @@ class ControlPlaneTests(unittest.TestCase):
         registry = control._operation_registry(self.ledger)
         self.assertEqual(len(registry["tasks"]), 3)
 
-    def test_v3_concurrent_identical_starts_share_the_pending_reservation(self):
+    def test_v3_repeated_direct_identical_starts_are_distinct_requests(self):
         task = {
             "user_request": "one concurrent idempotent task", "complexity": "C1",
             "acceptance_criteria": ["The requested outcome is observed."],
@@ -2968,14 +2966,285 @@ class ControlPlaneTests(unittest.TestCase):
             "waves": [{"workers": [{"phase": "discover"}]}],
         }
         # Source-mode tests share one SQLite connection boundary; exercise
-        # the same reservation invariant with serialized callers. Native host
-        # concurrency is covered by the server integration contract.
+        # the new-task contract with serialized callers. Transport replay is
+        # covered by the JSON-RPC test below; direct calls have no transport
+        # request identity and must never deduplicate by semantic text.
         responses = [control.start_orchestration(params) for _ in range(3)]
         self.assertTrue(all(item["ok"] for item in responses))
-        self.assertEqual(len({item["task_ref"] for item in responses}), 1)
+        self.assertEqual(len({item["task_ref"] for item in responses}), 3)
         registry = control._operation_registry(self.ledger)
-        self.assertEqual(len(registry["starts"]), 1)
-        self.assertEqual(len(registry["tasks"]), 1)
+        self.assertEqual(len(registry["starts"]), 0)
+        self.assertEqual(len(registry["tasks"]), 3)
+        for task_record in registry["tasks"].values():
+            start_record = task_record["start"]
+            self.assertEqual(start_record["materialization_status"], "materialized")
+            self.assertNotIn("materialization_owner", start_record)
+            self.assertNotIn("materialization_lease_expires_at", start_record)
+
+    def test_v3_transport_request_replay_is_idempotent_and_conflict_is_atomic(self):
+        script = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex.py"
+        self.host_store.chmod(0o700)
+        task = {
+            "user_request": "one transport idempotent task", "complexity": "C1",
+            "acceptance_criteria": ["The requested outcome is observed."],
+            "verification": ["Run an authoritative outcome check."],
+        }
+        arguments = {
+            "project_root": str(self.project),
+            "task": task,
+            "waves": [{"workers": [{"phase": "discover"}]}],
+        }
+        changed = {**arguments, "task": {**task, "user_request": "changed transport payload"}}
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": arguments}},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": arguments}},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "start_orchestration", "arguments": changed}},
+        ]
+        completed = subprocess.run(
+            [sys.executable, str(script), "--mcp-audience=coordinator"],
+            input="\n".join(json.dumps(item) for item in requests) + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            env={**os.environ, control.HOST_CONTROL_STORE_ENV: str(self.host_store)},
+        )
+        responses = [
+            json.loads(line)["result"]["structuredContent"]
+            for line in completed.stdout.splitlines()
+            if line.strip() and "structuredContent" in json.loads(line).get("result", {})
+        ]
+        self.assertEqual(len(responses), 3)
+        self.assertTrue(responses[0]["ok"])
+        self.assertTrue(responses[1]["ok"])
+        self.assertEqual(responses[0]["task_ref"], responses[1]["task_ref"])
+        self.assertTrue(responses[1]["replayed"])
+        self.assertFalse(responses[2]["ok"])
+        self.assertEqual(responses[2]["code"], "start_validation_failed")
+        self.assertEqual(responses[2]["diagnostics"][0]["code"], "start_request_identity_conflict")
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
+
+    def test_v3_transport_replay_keeps_identity_after_terminal_status(self):
+        params = {
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "terminal transport replay",
+                "complexity": "C1",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+            },
+            "waves": [{"workers": [{"phase": "discover"}]}],
+            "_transport_request_id": "transport-terminal-replay",
+        }
+        started = control.start_orchestration(params)
+        self.assertTrue(started["ok"])
+        task_id = next(iter(control.read_task_index(self.ledger)))
+        state = self.task_state(self.ledger / "tasks" / control.read_task_index(self.ledger)[task_id]["directory"])
+        for terminal_status in ("completed", "cancelled"):
+            state["status"] = terminal_status
+            state["updated_at"] = control.now()
+            self.write_task_state(state)
+            control._stage_coordinator_capability(self.ledger, task_id)
+            self.assertIsNotNone(control._PENDING_COORDINATOR_CAPABILITIES.get(control._pending_coordinator_capability_key(self.ledger, task_id)))
+            replay = control.start_orchestration(params)
+            self.assertTrue(replay["ok"], replay)
+            self.assertEqual(replay["task_ref"], started["task_ref"])
+            self.assertTrue(replay["replayed"])
+            self.assertIsNone(control._PENDING_COORDINATOR_CAPABILITIES.get(control._pending_coordinator_capability_key(self.ledger, task_id)))
+            self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
+
+    def test_v3_reserved_transport_retry_materializes_same_task(self):
+        params = {
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "resume a reserved transport start",
+                "complexity": "C1",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+            },
+            "waves": [{"workers": [{"phase": "discover"}]}],
+            "_transport_request_id": "transport-reserved-retry",
+        }
+        original_engine = control._engine_orchestrate
+        try:
+            control._engine_orchestrate = lambda _params: (_ for _ in ()).throw(RuntimeError("simulate pre-materialization loss"))
+            failed = control.start_orchestration(params)
+        finally:
+            control._engine_orchestrate = original_engine
+        self.assertFalse(failed["ok"])
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 0)
+        retried = control.start_orchestration(params)
+        self.assertTrue(retried["ok"], retried)
+        self.assertFalse(retried["replayed"])
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
+        replay = control.start_orchestration(params)
+        self.assertTrue(replay["ok"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["task_ref"], retried["task_ref"])
+
+    def test_v3_reserved_transport_lease_serializes_materialization_owner(self):
+        params = {
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "serialize concurrent reserved start",
+                "complexity": "C1",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+            },
+            "waves": [{"workers": [{"phase": "discover"}]}],
+            "_transport_request_id": "transport-lease-owner",
+        }
+        original_engine = control._engine_orchestrate
+        engine_started = threading.Event()
+        release_engine = threading.Event()
+
+        def blocking_engine(arguments):
+            engine_started.set()
+            self.assertTrue(release_engine.wait(5))
+            return original_engine(arguments)
+
+        result: list[dict[str, Any]] = []
+        try:
+            control._engine_orchestrate = blocking_engine
+            owner_thread = threading.Thread(target=lambda: result.append(control.start_orchestration(params)))
+            owner_thread.start()
+            self.assertTrue(engine_started.wait(5))
+            pending = control.start_orchestration(params)
+            self.assertFalse(pending["ok"])
+            self.assertEqual(pending["outcome"], "materialization_pending")
+            self.assertTrue(pending["requires_retry"])
+            release_engine.set()
+            owner_thread.join(5)
+        finally:
+            release_engine.set()
+            control._engine_orchestrate = original_engine
+        self.assertFalse(owner_thread.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["ok"], result[0])
+        self.assertEqual(pending["task_ref"], result[0]["task_ref"])
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 1)
+
+    def test_v3_expired_owner_is_fenced_from_late_materialization_commit(self):
+        params = {
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "fence a late expired materialization owner",
+                "complexity": "C1",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+            },
+            "waves": [{"workers": [{"phase": "discover"}]}],
+            "_transport_request_id": "transport-fencing-race",
+        }
+        original_engine = control._engine_orchestrate
+        engine_started = threading.Event()
+        release_engine = threading.Event()
+        captured: dict[str, Any] = {}
+
+        def late_engine(arguments):
+            captured.update(arguments)
+            engine_started.set()
+            self.assertTrue(release_engine.wait(5))
+            self.assertFalse(arguments["_materialization_fence"]())
+            raise RuntimeError("late owner fenced")
+
+        result: list[dict[str, Any]] = []
+        try:
+            control._engine_orchestrate = late_engine
+            owner_thread = threading.Thread(target=lambda: result.append(control.start_orchestration(params)))
+            owner_thread.start()
+            self.assertTrue(engine_started.wait(5))
+            registry = control._operation_registry(self.ledger)
+            reservation_key = next(key for key, value in registry["starts"].items() if value.get("task_id"))
+            reservation = registry["starts"][reservation_key]
+            task_id = reservation["task_id"]
+            old_generation = int(reservation["materialization_generation"])
+            with control.state_lock(self.ledger):
+                registry = control._operation_registry(self.ledger)
+                replacement = registry["starts"][reservation_key]
+                replacement["materialization_owner"] = "replacement-owner"
+                replacement["materialization_generation"] = old_generation + 1
+                replacement["materialization_lease_expires_at"] = control._start_materialization_lease_expiry()
+                _task_record = registry["tasks"][task_id]["start"]
+                _task_record.update({
+                    "materialization_owner": "replacement-owner",
+                    "materialization_generation": old_generation + 1,
+                    "materialization_lease_expires_at": replacement["materialization_lease_expires_at"],
+                })
+                control._write_operation_registry(self.ledger, registry)
+            release_engine.set()
+            owner_thread.join(5)
+        finally:
+            release_engine.set()
+            control._engine_orchestrate = original_engine
+        self.assertFalse(owner_thread.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0]["ok"])
+        self.assertEqual(len(list((self.ledger / "tasks").iterdir())), 0)
+
+    def test_v3_recovery_reservation_persistence_failure_clears_staged_capability(self):
+        params = {
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "clear capability after reservation persistence failure",
+                "complexity": "C1",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+            },
+            "waves": [{"workers": [{"phase": "discover"}]}],
+            "_transport_request_id": "transport-recovery-persistence-failure",
+        }
+        original_engine = control._engine_orchestrate
+        try:
+            control._engine_orchestrate = lambda _arguments: (_ for _ in ()).throw(RuntimeError("initial materialization failure"))
+            failed = control.start_orchestration(params)
+        finally:
+            control._engine_orchestrate = original_engine
+        self.assertFalse(failed["ok"])
+        task_id = next(iter(control._operation_registry(self.ledger)["tasks"]))
+        with mock.patch.object(control, "_write_operation_registry", side_effect=RuntimeError("persistence unavailable")):
+            retry = control.start_orchestration(params)
+        self.assertFalse(retry["ok"])
+        self.assertIsNone(control._PENDING_COORDINATOR_CAPABILITIES.get(control._pending_coordinator_capability_key(self.ledger, task_id)))
+
+    def test_v3_follow_up_retry_uses_server_owned_stable_transport_identity(self):
+        source = self.v3_start("complete source for corrective follow-up", waves=[{"workers": [{"phase": "discover"}]}])
+        self.assertTrue(source["ok"])
+        source_id = next(iter(control.read_task_index(self.ledger)))
+        index = control.read_task_index(self.ledger)
+        source_dir = self.ledger / "tasks" / index[source_id]["directory"]
+        source_state = self.task_state(source_dir)
+        source_state["status"] = "completed"
+        source_state["updated_at"] = control.now()
+        self.write_task_state(source_state)
+        payload = {
+            "user_request": "apply the bounded corrective follow-up",
+            "acceptance_criteria": ["The corrective outcome is observed."],
+            "verification": ["Run the corrective outcome check."],
+        }
+        with mock.patch.object(control, "start_orchestration", wraps=control.start_orchestration) as start_spy:
+            first = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": source["task_ref"],
+                "intent": "follow_up",
+                "payload": payload,
+            })
+            second = control.manage_orchestration({
+                "project_root": str(self.project),
+                "task_ref": source["task_ref"],
+                "intent": "follow_up",
+                "payload": payload,
+            })
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(first["follow_up"]["new_task_ref"], second["follow_up"]["new_task_ref"])
+        self.assertTrue(second["replayed"])
+        calls = start_spy.call_args_list
+        self.assertGreaterEqual(len(calls), 2)
+        request_ids = [call.args[0].get("_transport_request_id") for call in calls]
+        self.assertTrue(request_ids[0])
+        self.assertEqual(request_ids[0], request_ids[1])
 
 
 

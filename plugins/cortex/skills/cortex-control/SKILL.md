@@ -668,7 +668,12 @@ Preserve the `task_ref` returned by a **successful** start and pass it on every
 later task-scoped lifecycle and result-read call. Different task contracts can
 run concurrently below one project root; the project registry is
 lock-serialized and task records remain isolated. An exact duplicate active
-start is an idempotent replay. An omitted ref always fails closed with
+start is an idempotent replay **only when the server recognizes the same
+private transport request identity** (for example, a retry of one lost MCP
+response). A separate MCP call with a new request identity is never a replay,
+even when its task payload is byte-for-byte identical or has the same wording;
+it creates a new task. The coordinator must not manufacture, copy, or expose
+that private identity. An omitted ref always fails closed with
 `task_ref_required`; never inspect, list, infer, or select a project task as
 recovery. A failed start without a `task_ref` created no recoverable task.
 

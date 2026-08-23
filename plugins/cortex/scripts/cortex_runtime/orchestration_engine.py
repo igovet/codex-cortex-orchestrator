@@ -537,7 +537,10 @@ def _orchestrate_transaction_path(root: Path, submission_id: str) -> Path:
 
 
 def _orchestrate_request_digest(params: dict[str, Any]) -> str:
-    return digest_text(canonical_json.dumps(params))
+    # Private server callbacks (for example the start materialization fence)
+    # are execution authority, not request semantics and are not JSON data.
+    semantic_params = {key: value for key, value in params.items() if not str(key).startswith("_")}
+    return digest_text(canonical_json.dumps(semantic_params))
 
 
 def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
@@ -1693,6 +1696,12 @@ def _plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -
 
 
 def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
+    materialization_fence = params.get("_materialization_fence")
+
+    def assert_materialization_owner() -> None:
+        if callable(materialization_fence) and not materialization_fence():
+            raise RuntimeError("start materialization ownership was lost before durable commit")
+
     task = params.get("task")
     if not isinstance(task, dict):
         raise ValueError("start requires a task object")
@@ -1713,6 +1722,7 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
     _preflight_dispatch_context(task, {})
     root = ledger_root(params)
     with state_lock(root):
+        assert_materialization_owner()
         activated = activate_orchestration({**params, "user_command": ACTIVATION_COMMAND})
         if not activated.get("active"):
             raise ValueError(str(activated.get("next_action") or "orchestration activation failed"))
@@ -1726,6 +1736,7 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
             existing_state = None
             existing_task_dir = None
         if existing_state is None:
+            assert_materialization_owner()
             classification_id = str(transaction.get("context", {}).get("classification_id") or "")
             # Checkpoints are durable only after the encompassing state
             # transaction commits.  If an exception rolled that transaction
@@ -1858,6 +1869,7 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
         state["plan_approval_user_requested"] = explicit_plan_review
         save_state(task_dir, task_dir / "state.sqlite", state, "plan_approval_policy", "recorded explicit plan-review intent")
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "plan_recorded")
+        assert_materialization_owner()
         prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
         _checkpoint_orchestrate_transaction(transaction_path, transaction, "wave_prepared", wave_id=prepared["wave_id"], attempt_ids=prepared["attempt_ids"])
         return _orchestrate_response(

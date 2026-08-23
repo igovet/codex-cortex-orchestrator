@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+_AUTO_REQUEST_ID = object()
+
+
 class JsonRpcHarness:
     def __init__(
         self,
@@ -49,11 +52,18 @@ class JsonRpcHarness:
             raise RuntimeError("unexpected MCP server")
         self.notify("notifications/initialized", {})
 
-    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        request_id: object = _AUTO_REQUEST_ID,
+    ) -> dict[str, Any]:
         if self.process.stdin is None or self.process.stdout is None:
             raise RuntimeError("MCP process pipes are unavailable")
-        request_id = self.next_id
-        self.next_id += 1
+        if request_id is _AUTO_REQUEST_ID:
+            request_id = self.next_id
+            self.next_id += 1
         self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
         self.process.stdin.flush()
         line = self.process.stdout.readline()
@@ -85,7 +95,13 @@ class JsonRpcHarness:
         self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n")
         self.process.stdin.flush()
 
-    def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        request_id: object = _AUTO_REQUEST_ID,
+    ) -> dict[str, Any]:
         task_scoped = (
             name in {"continue_orchestration", "read_worker_result"}
             or (
@@ -99,7 +115,11 @@ class JsonRpcHarness:
         payload = dict(arguments)
         if self.audience != "worker" and not task_scoped:
             payload["project_root"] = str(self.project_root)
-        return self.request("tools/call", {"name": name, "arguments": payload})["structuredContent"]
+        return self.request(
+            "tools/call",
+            {"name": name, "arguments": payload},
+            request_id=request_id,
+        )["structuredContent"]
 
     def close(self) -> None:
         if self._closed:

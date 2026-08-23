@@ -231,8 +231,13 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
             "read_worker_result",
         ]:
             raise AssertionError(f"unexpected Cortex public tools: {names}")
-        current = rpc.tool("start_orchestration", start_request)
-        replay = rpc.tool("start_orchestration", start_request)
+        # A transport identity is the JSON-RPC request id within this server
+        # connection, not the semantic request body.  Reusing the exact id
+        # must replay the committed response; a fresh id with identical
+        # content is a distinct new task.
+        current = rpc.tool("start_orchestration", start_request, request_id="cold-boot-start")
+        replay = rpc.tool("start_orchestration", start_request, request_id="cold-boot-start")
+        fresh = rpc.tool("start_orchestration", start_request)
         if (
             not current.get("ok")
             or current.get("replayed") is not False
@@ -240,10 +245,19 @@ def _run(base: Path, project: Path, host_state_dir: Path, server: Path) -> dict[
             or replay.get("task_ref") != current.get("task_ref")
             or not current.get("dispatches")
             or replay.get("dispatches") != []
+            or not fresh.get("ok")
+            or fresh.get("replayed") is not False
+            or fresh.get("task_ref") == current.get("task_ref")
+            or not fresh.get("dispatches")
         ):
-            raise AssertionError("identical start did not replay its committed response")
+            raise AssertionError("transport identity start replay/new-task semantics are incorrect")
         task_ref = str(current["task_ref"])
-        task_directory = next((ledger / "tasks").iterdir()).name
+        task_index = cortex.read_task_index(ledger)
+        task_id = next(
+            item_id for item_id in task_index
+            if cortex._v3_task_ref(item_id) == task_ref
+        )
+        task_directory = task_index[task_id]["directory"]
 
     # A fresh process must reconstruct the active relative step read-only.
     with JsonRpcHarness(server, project, host_state_dir, audience="coordinator") as rpc, ExitStack() as workers:

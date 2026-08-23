@@ -33,6 +33,58 @@ class McpCapabilityBoundaryTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
+    def test_jsonrpc_request_id_encoding_preserves_json_types(self) -> None:
+        encode = mcp_api._canonical_jsonrpc_request_id
+        self.assertNotEqual(encode(1), encode("1"))
+        self.assertNotEqual(encode(None), encode("null"))
+        self.assertNotEqual(encode(False), encode(0))
+        self.assertEqual(encode(1), encode(1))
+
+    def test_null_jsonrpc_id_is_rejected_for_mutating_start(self) -> None:
+        handler = mock.Mock(return_value={"ok": True})
+        request = {
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "tools/call",
+            "params": {"name": "start_orchestration", "arguments": {}},
+        }
+        output = io.StringIO()
+        with mock.patch.object(mcp_api.sys, "stdin", io.StringIO(json.dumps(request) + "\n")), \
+            mock.patch.object(mcp_api.sys, "stdout", output), \
+            mock.patch("cortex_runtime.mcp_api.log_tool_error", create=True):
+            mcp_api.serve_stdio(
+                public_tools={"start_orchestration": (handler, {})},
+                internal_handlers={},
+                server_version="9.2.22",
+                instructions="test",
+                log_tool_error=mock.Mock(),
+                audience="coordinator",
+            )
+        self.assertEqual(output.getvalue(), "")
+        handler.assert_not_called()
+
+    def test_missing_jsonrpc_id_is_rejected_for_mutating_start(self) -> None:
+        handler = mock.Mock(return_value={"ok": True})
+        request = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "start_orchestration", "arguments": {}},
+        }
+        output = io.StringIO()
+        with mock.patch.object(mcp_api.sys, "stdin", io.StringIO(json.dumps(request) + "\n")), \
+            mock.patch.object(mcp_api.sys, "stdout", output), \
+            mock.patch("cortex_runtime.mcp_api.log_tool_error", create=True):
+            mcp_api.serve_stdio(
+                public_tools={"start_orchestration": (handler, {})},
+                internal_handlers={},
+                server_version="9.2.22",
+                instructions="test",
+                log_tool_error=mock.Mock(),
+                audience="coordinator",
+            )
+        self.assertEqual(output.getvalue(), "")
+        handler.assert_not_called()
+
     def test_stdio_ledger_busy_is_structured_and_skips_tool_error_log(self) -> None:
         def busy_handler(_arguments: dict[str, object]) -> dict[str, object]:
             raise cortex.LedgerBusyError(
