@@ -432,9 +432,9 @@ class GovernanceIntegrityTests(unittest.TestCase):
         initiative = self.initiative("task-success")
         governance.link_task(self.root, initiative_ref=initiative["initiative_ref"], task_id="task-8", relationship="deliverable")
         governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="active")
-        with self.assertRaisesRegex(governance.GovernanceError, "terminal success") as raised:
-            governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="completed")
-        self.assertEqual(raised.exception.code, "linked_task_unresolved")
+        advisory = governance.transition_initiative(self.root, initiative_ref=initiative["initiative_ref"], status="completed")
+        self.assertFalse(advisory["applied"])
+        self.assertTrue(any(item["code"] == "linked_task_unresolved" for item in advisory["advisories"]))
         loaded = ledger_db.load_task(self.root, "task-8")
         assert loaded is not None
         state = loaded[1]
@@ -516,8 +516,9 @@ class GovernanceIntegrityTests(unittest.TestCase):
         governance.add_dependency(
             self.root, source_type="initiative", source_ref=source["initiative_ref"], target_type="initiative", target_ref=target["initiative_ref"], dependency_type="requires",
         )
-        with self.assertRaisesRegex(governance.GovernanceError, "unresolved blocks/requires"):
-            governance.transition_initiative(self.root, initiative_ref=source["initiative_ref"], status="completed")
+        advisory = governance.transition_initiative(self.root, initiative_ref=source["initiative_ref"], status="completed")
+        self.assertFalse(advisory["applied"])
+        self.assertTrue(any(item["code"] == "dependency_unresolved" for item in advisory["advisories"]))
         governance.transition_initiative(self.root, initiative_ref=target["initiative_ref"], status="completed")
         self.assertEqual(
             governance.transition_initiative(self.root, initiative_ref=source["initiative_ref"], status="completed")["status"],

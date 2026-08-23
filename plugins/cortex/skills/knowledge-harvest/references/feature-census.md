@@ -141,7 +141,13 @@ page without repeating repository-wide discovery.
 
 ## Failure conditions
 
-Fail the harvest or return a blocker instead of claiming completion when:
+The completeness contract fails when required inventory, coverage, or
+documentation evidence is missing, contradictory, or silently excluded.
+
+## Corrective findings
+
+Record a finding and dispatch the appropriate corrective owner instead of
+claiming completion when:
 
 - only recent commits were scanned without a validated complete baseline;
 - a large repository received one broad explorer with no domain partitioning;

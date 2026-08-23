@@ -378,8 +378,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         pipeline = created["state"]["current_pipeline"]
         self.assertIn("documentation", pipeline)
         self.assertLess(pipeline.index("documentation"), pipeline.index("close"))
-        with self.assertRaisesRegex(ValueError, "retain documentation"):
-            control.update_pipeline({"task_id": "task", "principal": "owner", "expected_revision": created["state"]["revision"], "pipeline": [gate for gate in pipeline if gate != "documentation"]})
+        revised = control.update_pipeline({"task_id": "task", "principal": "owner", "expected_revision": created["state"]["revision"], "pipeline": [gate for gate in pipeline if gate != "documentation"]})
+        self.assertNotIn("documentation", revised["state"]["current_pipeline"])
 
 
     def test_global_claims_collide_across_tasks_and_lanes(self):
@@ -462,11 +462,24 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_stop_reassessment_requires_current_handoff(self):
         state = self.init(complexity="C2")["state"]
         params = {"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "signals": ["blocked"], "intent": "stop", "decision": "stop", "reason": "external blocker"}
-        with self.assertRaisesRegex(ValueError, "requires a current-gate handoff"):
-            control.reassess_pipeline(params)
         handed = control.handoff({"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "completed": ["investigation"], "files": [], "next_action": "wait"})
-        stopped = control.reassess_pipeline({**params, "expected_revision": handed["state"]["revision"]})
+        stopped = control.reassess_pipeline({**params, "expected_revision": handed["state"]["revision"], "origin": "user", "user_decision": True})
         self.assertEqual(stopped["state"]["status"], "blocked")
+
+    def test_internal_malformed_stop_reassessment_is_advisory_and_keeps_task_active(self):
+        state = self.init(complexity="C2")["state"]
+        result = control.reassess_pipeline({
+            "task_id": "task",
+            "principal": "owner",
+            "expected_revision": state["revision"],
+            "signals": ["transient worker transport failure"],
+            "intent": "stop",
+            "decision": "malformed",
+            "origin": "internal",
+        })
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["state"]["status"], "active")
+        self.assertEqual(result["advisory"]["code"], "task_stop_requires_user_decision")
 
     def test_materialization_preflight_prevents_partial_worktrees(self):
         repository = self.base / "preflight-repo"
@@ -1529,7 +1542,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
         prompt = control.host_spawn_prompt("code_reviewer", package)
         self.assertIn("AUTOMATIC FULL-GOVERNANCE DECISION POLICY", prompt)
         self.assertIn("Do not call worker_question", prompt)
-        self.assertIn("complete with status=blocked", prompt)
+        self.assertIn("complete with status=failed", prompt)
+        self.assertIn("coordinator can route a corrective owner", prompt)
+        self.assertNotIn("complete with status=blocked", prompt)
         self.assertIn("do not fabricate an answer", prompt)
         self.assertTrue(briefings._automatic_governance_close(package))
 

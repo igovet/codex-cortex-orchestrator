@@ -10,7 +10,7 @@ policy is a dispatch-time routing decision; adaptive replanning is a separate,
 evidence-backed change to future semantic waves.
 
 1. Identify the new evidence and the assumption it invalidates.
-2. Decide whether to add a specialist, re-sequence work, widen validation, reduce scope, or stop for a user decision.
+2. Decide whether to add a specialist, re-sequence work, widen validation, reduce scope, or, only when the user task itself is ambiguous, stop for a user decision. Internal Cortex policy, gate, planner, retry, routing, ledger, worker, and recovery conditions are coordinator advice and must be delegated or repaired without asking the user.
 3. Record the revised plan and why it changed in the parent thread. The
    coordinator must explicitly classify the replacement as material or as a
    no-op/transport-only change; Cortex must not infer materiality from result
@@ -22,17 +22,17 @@ Typical adaptations:
 - New schema or data migration: add `database_architect` before a writer.
 - Discovered UI surface: add `ux_designer` or `accessibility_engineer` before review.
 - High-risk auth, payments, or sensitive-data change: add `security_auditor` and require explicit verification.
-- QA proves the plan wrong: use the final `planner` to re-plan, preserve the
-  previous plan/approval in history, reset required approval to `pending_plan`,
-  and stop after the replacement Planner until the user approves again. A
-  stale plan revision, predecessor digest, or semantic pipeline digest blocks
-  post-plan dispatch with recoverable reapproval guidance.
+- QA proves the plan wrong: preserve the previous plan in history and let the
+  orchestrator choose whether to re-plan, add a specialist, or correct the
+  current owner. A stale plan revision, predecessor digest, or semantic
+  pipeline digest is advisory evidence for the next corrective dispatch; it
+  never forces a Planner recovery or a user reapproval pause.
 
-For required approval, approval is bound to the plan revision, plan result ref,
-verified predecessor evidence digest, and semantic future-pipeline digest. A
-replacement must be a singleton Planner wave after scope, discovery, and all
-pre-implementation design gates. No-op and transport-only replacements retain
-the existing approval.
+When approval is explicitly requested by the user, bind it to the plan
+revision, plan result ref, verified predecessor evidence digest, and semantic
+future-pipeline digest. A replacement may use a Planner wave or another
+coordinator-chosen owner after the available evidence; no-op and transport-only
+replacements retain the existing approval.
 
 Pipeline rework is unbounded while acceptance criteria, required verification,
 or canonical findings remain unresolved. Failure counts are durable audit and
@@ -41,3 +41,10 @@ each unresolved cycle (`high`, then `xhigh`, then `max`) and routes eligible
 ordinary work to Terra after two failures unless the user explicitly selected
 a model. Use a materially different `next_strategy` or replan when evidence
 supports it, but never require either merely to authorize another correction.
+
+Question Firewall: a user question may cover only task requirements, scope,
+acceptance/product behavior, or explicit external/destructive authorization.
+Mark such a question with `context.decision_scope` when possible. Never turn a
+policy or lifecycle recommendation into a user question; return it as
+`orchestrator_advice`, preserve the evidence, and let the orchestrator choose
+the next corrective wave.

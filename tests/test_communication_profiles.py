@@ -49,12 +49,13 @@ class CommunicationProfileTests(unittest.TestCase):
         required = {
             "start": ("ready_to_spawn", "started"),
             "progress": ("waiting_workers", "progress"),
-            "approval": ("awaiting_plan_approval", "question"),
-            "question": ("needs_input", "question"),
-            "problem": ("error", "error"),
-            # ``blocked`` is an internal ledger state; it is presented as a
-            # recoverable question rather than a user-visible hard stop.
-            "blocker": ("blocked", "question"),
+            # Technical lifecycle labels are presented as silent progress
+            # while recovery continues. Only an explicit task question or
+            # user-requested plan approval opts into a decision view.
+            "approval": ("awaiting_plan_approval", "progress"),
+            "question": ("needs_input", "progress"),
+            "problem": ("error", "progress"),
+            "blocker": ("blocked", "progress"),
             "completion": ("completed", "completed"),
         }
         for label, (outcome, expected_kind) in required.items():
@@ -78,7 +79,7 @@ class CommunicationProfileTests(unittest.TestCase):
                     "blocked", config={"communication_profile": "natural", "user_language": language}
                 )
                 visible = f"{result['message']} {result['next_step']}".lower()
-                self.assertEqual(result["message_type"], communication.message_type("question"))
+                self.assertEqual(result["message_type"], communication.message_type("progress"))
                 self.assertNotIn("blocked", visible)
                 self.assertNotIn("blocker", visible)
                 self.assertTrue(result["quality"]["ok"], result)

@@ -48,6 +48,19 @@ MESSAGE_TYPES = {
     "error": "Something went wrong",
 }
 
+_TECHNICAL_RECOVERY_MESSAGE = {
+    "en": (
+        "The task is continuing automatically.",
+        "No action is needed while recovery continues.",
+        "progress",
+    ),
+    "ru": (
+        "Задача автоматически продолжает работу.",
+        "Пока выполняется восстановление, действий не требуется.",
+        "progress",
+    ),
+}
+
 
 _LIFECYCLE_MESSAGES = {
     "ready_to_spawn": (
@@ -349,19 +362,45 @@ def render(message: str, *, kind: object = "progress", next_step: str = "Continu
 
 
 def render_lifecycle(outcome: object, *, ok: bool = True, config: Mapping[str, Any] | None = None,
-                     metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Render a safe human-facing lifecycle update beside the coordinator receipt."""
-    key = str(outcome or "error").strip().lower() if ok else "error"
+                     metadata: Mapping[str, Any] | None = None,
+                     user_question: bool = False,
+                     explicit_plan_approval: bool = False) -> dict[str, Any]:
+    """Render lifecycle text with a strict technical-state presentation firewall.
+
+    ``blocked``, technical ``needs_input`` and ``error`` receipts are internal
+    recovery states. They never become a visible user question or tell the
+    user to repair/retry Cortex. A visible decision is opt-in only for a real
+    task question or an explicitly requested plan approval.
+    """
+    metadata_value = metadata if isinstance(metadata, Mapping) else {}
+    raw_key = str(outcome or "error").strip().lower()
+    allow_decision = bool(
+        user_question
+        or explicit_plan_approval
+        or metadata_value.get("user_question") is True
+        or metadata_value.get("explicit_plan_approval") is True
+    )
+    technical_keys = {"blocked", "needs_input", "error"}
+    if (raw_key in technical_keys and not allow_decision) or (raw_key == "awaiting_plan_approval" and not allow_decision):
+        key = "technical_recovery"
+    else:
+        key = raw_key if ok else "technical_recovery"
     message, next_step, kind = _LIFECYCLE_MESSAGES.get(key, _LIFECYCLE_MESSAGES["needs_input"])
     language = _language(config)
-    message, next_step = _LIFECYCLE_TRANSLATIONS[language].get(key, (message, next_step))
-    if select_profile(config) == "compact":
+    if key == "technical_recovery":
+        message, next_step, kind = _TECHNICAL_RECOVERY_MESSAGE[language]
+    else:
+        message, next_step = _LIFECYCLE_TRANSLATIONS[language].get(key, (message, next_step))
+    if select_profile(config) == "compact" and key != "technical_recovery":
         message, next_step = _COMPACT_LIFECYCLE[language].get(key, (message, next_step))
     result = render(message, kind=kind, next_step=next_step, config=config, metadata=metadata)
-    if key == "waiting_workers":
+    if key in {"waiting_workers", "technical_recovery"}:
         result["output_policy"] = "silent"
+        result["allowed_visible_events"] = []
+    if key == "technical_recovery":
+        result["presentation_policy"] = "internal_recovery"
     if select_profile(config) == "technical":
-        result["technical_context"] = {"outcome": key, "ok": bool(ok)}
+        result["technical_context"] = {"outcome": raw_key, "ok": bool(ok), "visible": key != "technical_recovery"}
     return result
 
 

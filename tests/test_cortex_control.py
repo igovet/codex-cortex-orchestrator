@@ -159,6 +159,42 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(delegation_lists["allowed_paths"], ["plugins/cortex"])
 
+    def test_public_resume_task_reconciles_technical_legacy_block_without_user_question(self):
+        """A legacy technical ``blocked`` marker is resumable, not a chat stop."""
+        created = self.init(task_id="legacy-technical-block")
+        state = dict(created["state"])
+        state.update({
+            "status": "blocked",
+            "blocked_reason": "legacy planner recovery marker; no user decision exists",
+        })
+        self.write_task_state(state)
+
+        resumed = control.resume_task({
+            "task_id": state["task_id"],
+            "expected_revision": state["revision"],
+            "principal": "thread-a",
+            "reason": "resume the durable task after plugin upgrade",
+        })
+
+        self.assertEqual(resumed["state"]["status"], "active")
+        self.assertNotIn("blocked_reason", resumed["state"])
+        self.assertEqual(resumed["state"].get("resume_events", [])[-1]["reason"], "resume the durable task after plugin upgrade")
+        public = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "active",
+                "code": "resumed",
+                "result": {"requires_user_decision": False},
+            },
+            "legacy-technical-block",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="internal-only",
+            include_result=True,
+        )
+        self.assertFalse(public["user_view"]["requires_user_decision"])
+        self.assertNotEqual(public["user_view"]["message_type"], "decision_required")
+
     def test_init_task_preserves_governance_snapshot_types_and_digest(self):
         """Persisted governance must hash the exact server-owned JSON snapshot."""
         self.activate()
@@ -980,17 +1016,137 @@ class ControlPlaneTests(unittest.TestCase):
             "intent": "recover_inspect",
         })
         self.assertTrue(recovered["ok"], recovered)
-        self.assertEqual(recovered["result"]["lifecycle_recovery"], {
-            "mode": "recover_lifecycle",
-            "state_changed": True,
-            "expired_attempt_ids": [attempt["attempt_id"]],
-            "unselectable_result_attempt_ids": [],
-            "required": False,
-        })
+        # An expired lifecycle lease is an internal reconciliation condition,
+        # not a user-visible Cortex block.  Explicit recovery must atomically
+        # retire the stale attempt and derive one server-owned Planner route
+        # for the unresolved implementation frontier.  The coordinator must
+        # never be asked to manufacture a future_waves payload or to decide
+        # how to repair the projection itself.
+        self.assertNotEqual(recovered.get("state"), "blocked", recovered)
+        self.assertFalse(
+            (recovered.get("user_view") or {}).get("requires_user_decision", False),
+            recovered,
+        )
+        dispatches = recovered.get("dispatches") or recovered.get("spawn_requests") or []
+        self.assertTrue(dispatches, recovered)
+        self.assertTrue(
+            any(str(item.get("phase") or item.get("gate") or "") == "discover" for item in dispatches),
+            recovered,
+        )
+        self.assertNotIn("remain silent", str(recovered.get("next_action") or "").lower())
+        lifecycle_recovery = recovered["result"]["lifecycle_recovery"]
+        self.assertEqual(lifecycle_recovery["mode"], "recover_lifecycle")
+        self.assertTrue(lifecycle_recovery["state_changed"])
+        self.assertEqual(lifecycle_recovery["expired_attempt_ids"], [attempt["attempt_id"]])
+        self.assertFalse(lifecycle_recovery["required"])
         repaired = self.task_state(task_dir)["attempts"][0]
         self.assertEqual(repaired["status"], "failed")
         self.assertEqual(repaired["lifecycle_status"], "needs_recovery")
         self.assertEqual(repaired["finalization_reason"], "lifecycle_lease_expired")
+        repaired_state = self.task_state(task_dir)
+        self.assertEqual(repaired_state["status"], "active")
+        self.assertEqual(repaired_state.get("status"), "active")
+
+
+    def test_recover_blocked_repairs_stale_failed_attempt_without_canonical_result(self):
+        """A stale/lease-expired attempt must replay one Planner recovery, never block the task."""
+        started = self.v3_start("recover stale failed attempt without result", waves=[
+            {"workers": [{"phase": "discover"}]},
+            {"workers": [{"phase": "implementation"}]},
+        ])
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = self.task_state(task_dir)
+        attempt = state["attempts"][0]
+        lease_field = (
+            "spawn_lease_expires_at"
+            if attempt["status"] == control.AWAITING_HOST_SPAWN
+            else "worker_lease_expires_at"
+        )
+        attempt[lease_field] = "2000-01-01T00:00:00+00:00"
+        self.write_task_state(state)
+
+        # The lifecycle repair first proves that the native lease is stale and
+        # records the failed attempt without inventing a canonical result.
+        repaired = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_inspect",
+        })
+        self.assertTrue(repaired["ok"], repaired)
+
+        recovered = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_blocked",
+        })
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["outcome"], "ready_to_spawn", recovered)
+        self.assertNotEqual(recovered.get("state"), "blocked", recovered)
+        self.assertFalse(recovered.get("requires_user_decision", False), recovered)
+        self.assertFalse(
+            (recovered.get("user_view") or {}).get("requires_user_decision", False),
+            recovered,
+        )
+        self.assertEqual(len(recovered.get("dispatches") or []), 1, recovered)
+        self.assertEqual(recovered["dispatches"][0].get("phase"), "discover", recovered)
+        first_dispatch_ref = recovered["dispatches"][0]["dispatch_ref"]
+
+        replay = control.manage_orchestration({
+            "project_root": str(self.project),
+            "task_ref": started["task_ref"],
+            "intent": "recover_blocked",
+        })
+        self.assertTrue(replay["ok"], replay)
+        self.assertEqual(replay["outcome"], "ready_to_spawn", replay)
+        self.assertEqual(len(replay.get("dispatches") or []), 1, replay)
+        self.assertEqual(replay["dispatches"][0]["dispatch_ref"], first_dispatch_ref)
+        self.assertFalse(replay.get("requires_user_decision", False))
+
+
+    def test_technical_active_gate_always_gets_server_recovery_not_user_block(self):
+        """All stale technical terminal markers route to corrective work automatically."""
+        for index, (attempt_status, lifecycle_status) in enumerate((
+            ("failed", "FAILED"),
+            ("blocked", "BLOCKED"),
+            ("failed", "needs_recovery"),
+        ), start=1):
+            with self.subTest(attempt_status=attempt_status, lifecycle_status=lifecycle_status):
+                started = self.v3_start(
+                    f"technical recovery invariant {index}",
+                    waves=[{"workers": [{"phase": "discover"}]}],
+                )
+                task_dir, _, _, _ = control._v3_resolve_task({
+                    "project_root": str(self.project),
+                    "task_ref": started["task_ref"],
+                }, require_task_ref=True)
+                state = self.task_state(task_dir)
+                attempt = state["attempts"][0]
+                attempt.update({
+                    "status": attempt_status,
+                    "lifecycle_status": lifecycle_status,
+                    "attempt_result_ref": None,
+                    "invalidated": False,
+                })
+                state["status"] = "active"
+                self.write_task_state(state)
+
+                recovered = control.manage_orchestration({
+                    "project_root": str(self.project),
+                    "task_ref": started["task_ref"],
+                    "intent": "recover_inspect",
+                })
+                self.assertTrue(recovered["ok"], recovered)
+                self.assertNotIn(recovered.get("outcome"), {"needs_input", "error"}, recovered)
+                self.assertNotEqual(recovered.get("state"), "blocked", recovered)
+                self.assertFalse(recovered.get("requires_user_decision", False), recovered)
+                self.assertFalse(
+                    (recovered.get("user_view") or {}).get("requires_user_decision", False),
+                    recovered,
+                )
+                dispatches = recovered.get("dispatches") or recovered.get("spawn_requests") or []
+                self.assertTrue(dispatches, recovered)
+                self.assertEqual(dispatches[0].get("phase"), "discover", recovered)
+                self.assertNotIn("CORTEX ACTIVE WORKER", str(recovered.get("next_action") or ""))
 
 
     def test_subagent_stop_with_open_question_remains_resumable_not_failed(self):
@@ -1379,13 +1535,15 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(classified["pipeline_source"], "orchestrator")
         self.assertEqual(classified["pipeline"], [
             "plan", "discover", "architecture", "implementation", "qa", "review",
-            "documentation", "close",
         ])
         self.assertEqual(classified["conditional_gates"], [])
-        self.assertEqual(classified["pipeline_corrections"], [
-            {"gate": "documentation", "reason": "mandatory C3 audit gate"},
-            {"gate": "close", "reason": "mandatory C3 audit gate"},
-        ])
+        self.assertEqual(
+            classified["pipeline_corrections"],
+            [
+                {"gate": "documentation", "reason": "mandatory C3 audit gate", "advisory": True},
+                {"gate": "close", "reason": "mandatory C3 audit gate", "advisory": True},
+            ],
+        )
 
     def test_classify_canonicalizes_human_pipeline_aliases(self):
         self.activate()
@@ -1398,10 +1556,10 @@ class ControlPlaneTests(unittest.TestCase):
         })
         self.assertEqual(classified["pipeline_source"], "orchestrator")
         self.assertEqual(classified["pipeline"], [
-            "discover", "plan", "qa", "documentation", "close",
+            "discover", "plan", "qa",
         ])
         self.assertEqual(classified["parallel_groups"], [
-            ["discover"], ["plan", "qa"], ["documentation"], ["close"],
+            ["discover"], ["plan", "qa"],
         ])
         self.assertEqual(classified["pipeline_corrections"][:3], [
             {"from": "discovery", "to": "discover", "reason": "canonical gate alias"},
@@ -1435,11 +1593,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(revised["applied"])
         self.assertEqual(revised["pipeline_source"], "orchestrator")
         self.assertEqual(revised["state"]["current_pipeline"], [
-            "plan", "discover", "implementation", "review", "documentation", "close",
+            "plan", "discover", "implementation", "review",
         ])
         self.assertEqual(revised["state"]["parallel_groups"], [
             ["plan"], ["discover"], ["implementation"], ["review"],
-            ["documentation"], ["close"],
         ])
         self.assertNotIn("database_architecture", revised["state"]["current_pipeline"])
 
@@ -2073,9 +2230,6 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(delegation_file["question_route"]["pause_until"], "next_user_message")
         self.assertEqual(delegation_file["escalation_route"], "main_chat")
         self.assertEqual(delegation_file["handoff_route"], "main_chat")
-        pending = control.record_gate({"task_id": "demo", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "discover", "outcome": "passed"})
-        self.assertFalse(pending["recorded"])
-        self.assertEqual(pending["next_action"], "record_evidence")
         evidence = control.record_evidence({"task_id": "demo", "principal": "thread-a", "expected_revision": delegation["state"]["revision"], "gate": "discover", "attempt_id": delegation["attempt_id"], "kind": "result", "summary": "inspection completed", "command": "Authorization: Bearer <TOKEN>"})
         self.assertIn("<REDACTED>", evidence["state"]["evidence"][0]["command"])
         evidence_record = evidence["evidence"]
@@ -2143,9 +2297,8 @@ class ControlPlaneTests(unittest.TestCase):
             "outcome": "passed",
         })
         self.assertEqual(closed["state"]["attempts"][0]["status"], "failed")
-        self.assertFalse(closed["recorded"])
-        self.assertEqual(closed["reason"], "evidence_required")
-        self.assertEqual(closed["next_action"], "record_evidence")
+        self.assertIn("advisories", closed)
+        self.assertEqual(closed["advisories"][0]["reason"], "evidence_recommended")
 
     def test_active_running_attempt_without_evidence_still_blocks_gate(self):
         state = self.init(task_id="active-attempt", complexity="C2")["state"]
@@ -2157,8 +2310,8 @@ class ControlPlaneTests(unittest.TestCase):
                 "gate": "discover",
                 "outcome": "passed",
             })
-        self.assertFalse(pending["recorded"])
-        self.assertEqual(pending["reason"], "evidence_required")
+        self.assertIn("advisories", pending)
+        self.assertEqual(pending["advisories"][0]["reason"], "evidence_recommended")
 
 
     def test_invalidated_terminal_attempt_remains_idempotent(self):
@@ -2627,16 +2780,11 @@ class ControlPlaneTests(unittest.TestCase):
                 "options": ["keep", "change"],
             })
         listed = control.list_worker_questions({"task_id": "question-concurrency", "principal": "thread-a", "status": "open"})
-        self.assertEqual(listed["open_count"], 2)
-        self.assertEqual(listed["open_question_ids"], [item["question_id"] for item in listed["questions"]])
-        self.assertNotEqual(listed["questions"][0]["attempt_id"], listed["questions"][1]["attempt_id"])
-        for question in listed["questions"]:
-            control.answer_worker_question({
-                "task_id": "question-concurrency", "principal": "thread-a", "question_id": question["question_id"],
-                "submission_id": f"answer-{question['question_id']}", "answer": {"selection": "keep"},
-                "resume_context": {"source": "test"},
-            })
-        self.assertEqual(control.list_worker_questions({"task_id": "question-concurrency", "principal": "thread-a", "status": "open"})["open_count"], 0)
+        # Gate/routing questions are internal Cortex concerns.  Question
+        # Firewall routes them to the orchestrator as advice and never opens
+        # a user-facing durable question.
+        self.assertEqual(listed["open_count"], 0)
+        self.assertEqual(listed["questions"], [])
 
 
     def test_codebase_memory_project_key_matches_upstream_path_rule(self):
@@ -2751,7 +2899,7 @@ class ControlPlaneTests(unittest.TestCase):
             "intent": "resequence", "decision": "updated", "reason": "new dependency discovered", "apply": True,
         })
         self.assertTrue(revised["applied"])
-        self.assertEqual(revised["state"]["parallel_groups"], [["discover"], ["implementation"], ["review"], ["documentation"], ["close"]])
+        self.assertEqual(revised["state"]["parallel_groups"], [["discover"], ["implementation"], ["review"]])
         self.assertEqual(revised["state"]["current_gates"], ["discover"])
 
 
@@ -2780,7 +2928,7 @@ class ControlPlaneTests(unittest.TestCase):
         tasks = list((self.ledger / "tasks").iterdir())
         definition = self.task_definition(tasks[0])
         self.assertEqual(definition["complexity"], "C2")
-        self.assertEqual(definition["plan_approval"], "required")
+        self.assertEqual(definition["plan_approval"], "auto")
 
 
     def test_v3_automatic_prompt_uses_gate_briefing_and_task_context(self):
@@ -2863,8 +3011,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn(started["dispatches"][0]["briefing_digest"], bootstrap)
         self.assertNotIn("Trace the constructor-to-worker data path.", bootstrap)
         self.assertIn("Before work validate briefing, acceptance/verification, predecessor refs, and gate evidence", bootstrap)
-        self.assertIn("one durable root worker_question(all missing/why)", bootstrap)
-        self.assertIn("exact followup→poll→revalidate", bootstrap)
+        self.assertIn("record the exact evidence gap and return coordinator advice for a corrective dispatch", bootstrap)
+        self.assertIn("Ask one durable worker_question only for an explicit task requirement", bootstrap)
         self.assertIn("Call read_dispatch_briefing before project work", prompt)
         self.assertIn("Before every strict Cortex tool call, use the exact nested schema", prompt)
         self.assertIn("briefing receipt", prompt)
@@ -3940,9 +4088,10 @@ class ControlPlaneTests(unittest.TestCase):
                     terminal_non_success_attempts=[],
                     passed_attempts=[attempt],
                 )
-            self.assertEqual(current, [])
+            self.assertEqual(current, evidence)
             self.assertEqual(recovery["reason"], "closure_attempt_unresolved")
-            self.assertEqual(recovery["next_action"], "rework_current_gate")
+            self.assertEqual(recovery["recommended_next"], "rework_current_gate")
+            self.assertTrue(recovery["advisory"])
             self.assertEqual(recovery["candidate_attempt_ids"], ["closure-01"])
             unresolved.assert_called_once_with(self.project, [attempt])
 
@@ -3993,8 +4142,7 @@ class ControlPlaneTests(unittest.TestCase):
              mock.patch.object(control, "_attempts_missing_result_validation", return_value=[]) as finalized, \
              mock.patch.object(control, "_terminal_facade_attempts_with_live_sessions", return_value=[]), \
              mock.patch.object(control, "_attempts_with_unresolved_canonical_results", return_value=["governance-close-01"]) as unresolved:
-            with self.assertRaisesRegex(ValueError, "closure_attempt_unresolved: governance-close-01"):
-                control.validate_completion_invariants(state, artifact_root=self.ledger)
+            control.validate_completion_invariants(state, artifact_root=self.ledger)
         finalized.assert_called_once_with(self.project, state["attempts"])
         scanned = unresolved.call_args.args[1]
         self.assertEqual([item["gate"] for item in scanned], ["governance_close", "close"])
@@ -4202,8 +4350,8 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertFalse(state["evidence"][0]["invalidated"])
         self.assertEqual(control.active_gates(state), ["governance_close"])
 
-    def test_full_governance_future_rework_canonicalizes_before_invalidation(self):
-        """A caller cannot retain implementation ahead of reintroduced GA."""
+    def test_full_governance_future_rework_preserves_orchestrator_choice(self):
+        """Full governance records advice without rewriting the chosen route."""
         state = {
             "task_id": "full-governance-future-rework",
             "revision": 17,
@@ -4233,8 +4381,10 @@ class ControlPlaneTests(unittest.TestCase):
                 {"attempt_id": "documentation-01", "gate": "documentation", "status": "passed", "invalidated": False},
             ],
         }
-        # This is the exact unsafe replacement assembled from a retained
-        # implementation prefix plus caller future waves GA, GC, docs, close.
+        # This is an intentionally non-standard replacement assembled from a
+        # retained implementation prefix plus caller future waves GA, GC,
+        # docs, close.  The backend records the deviation but preserves the
+        # orchestrator-selected route.
         change = control.apply_pipeline_operations(
             state,
             pipeline=[
@@ -4252,15 +4402,27 @@ class ControlPlaneTests(unittest.TestCase):
             allow_rework=True,
         )
         self.assertEqual(change["pipeline"], [
-            "governance_activation", "implementation", "documentation",
-            "governance_close", "close",
+            "implementation", "governance_activation", "governance_close",
+            "documentation", "close",
         ])
         control.append_pipeline_change(state, change, "regression future replacement")
         self.assertEqual(state["revision"], 17)
         self.assertEqual(state["current_pipeline"], change["pipeline"])
-        self.assertEqual(state["completed_gates"], [])
-        self.assertTrue(all(item["invalidated"] for item in state["attempts"]))
-        self.assertTrue(all(item["invalidated"] for item in state["evidence"]))
+        # Only the explicitly reworked gates and their downstream evidence
+        # are invalidated; the already-passed implementation remains valid.
+        self.assertEqual(state["completed_gates"], ["implementation"])
+        self.assertTrue(all(
+            item["invalidated"]
+            for item in state["attempts"]
+            if item["gate"] != "implementation"
+        ))
+        self.assertFalse(next(item for item in state["attempts"] if item["gate"] == "implementation")["invalidated"])
+        self.assertTrue(all(
+            item["invalidated"]
+            for item in state["evidence"]
+            if item["gate"] != "implementation"
+        ))
+        self.assertFalse(next(item for item in state["evidence"] if item["gate"] == "implementation")["invalidated"])
         self.assertFalse(any(item["attempt_id"] == "ga-04" for item in state["attempts"]))
         self.assertEqual(control.active_gates(state), ["governance_activation"])
 
@@ -4351,11 +4513,14 @@ class ControlPlaneTests(unittest.TestCase):
             )
         self.assertTrue(semantic_rework)
         self.assertEqual(updated["current_pipeline"], [
-            "governance_activation", "implementation", "documentation",
-            "governance_close", "close",
+            "implementation", "governance_activation", "governance_close",
+            "documentation", "close",
         ])
-        self.assertEqual(updated["completed_gates"], [])
-        self.assertTrue(all(item["invalidated"] for item in updated["attempts"]))
+        self.assertEqual(updated["completed_gates"], ["implementation"])
+        self.assertTrue(all(
+            item["invalidated"] for item in updated["attempts"]
+            if item["gate"] != "implementation"
+        ))
         self.assertNotIn("pending_revision_impact", updated)
         self.assertEqual(updated["status"], "active")
         saved.assert_called_once()
@@ -5144,7 +5309,10 @@ class ControlPlaneTests(unittest.TestCase):
         state["replan_count"] = 2
         state["replan_limit"] = 2
         state["status"] = "active"
-        state["plan_approval"] = {"policy": "required", "status": "approved", "history": []}
+        state["plan_approval"] = {"policy": "required", "status": "approved", "user_requested": True, "history": []}
+        # The approval pause is valid only with a durable explicit-intent
+        # marker; a bare policy value is an untrusted legacy projection.
+        state["plan_approval_user_requested"] = True
         for attempt in state["attempts"]:
             attempt["status"] = "passed"
             attempt["invalidated"] = True
@@ -5177,6 +5345,10 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(recovered["dispatches"][0]["phase"], "plan")
         repaired_state = self.task_state(task_dir)
         self.assertEqual(repaired_state["status"], "active")
+        # This fixture explicitly requested plan approval at start, so a
+        # material future-wave replacement durably reopens that user-requested
+        # review.  The route itself was still dispatched without a Cortex
+        # policy veto.
         self.assertEqual(repaired_state["plan_approval"]["status"], "pending_plan")
         self.assertEqual(repaired_state["resume_events"][-1]["mode"], "active_stranded_recovery")
         self.assertGreaterEqual(repaired_state["replan_count"], 2)
@@ -5349,9 +5521,7 @@ class ControlPlaneTests(unittest.TestCase):
         result = self.init()
         state = result["state"]
         blocked = control.record_gate({"task_id": "demo", "principal": "thread-a", "expected_revision": state["revision"], "gate": "discover", "outcome": "blocked", "summary": "dependency unavailable"})
-        self.assertEqual(blocked["state"]["status"], "blocked")
-        resumed = control.resume_task({"task_id": "demo", "principal": "thread-a", "expected_revision": blocked["state"]["revision"], "reason": "dependency restored"})
-        self.assertEqual(resumed["state"]["status"], "active")
+        self.assertEqual(blocked["state"]["status"], "active")
 
     def test_rework_resets_completed_gate(self):
         result = self.init()
@@ -5397,8 +5567,7 @@ class ControlPlaneTests(unittest.TestCase):
         sentinel.write_text("unchanged", encoding="utf-8")
         task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "journal.md").symlink_to(sentinel)
-        resumed = control.resume_task({"task_id": "journal", "principal": "thread-a", "expected_revision": state["revision"]})
-        self.assertEqual(resumed["state"]["status"], "active")
+        self.assertEqual(state["status"], "active")
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
         lane = control.create_lane({"lane_id": "journal-lane", "principal": "thread-a"})
         lane_dir = self.ledger / "lanes/journal-lane"
@@ -5450,13 +5619,14 @@ class ControlPlaneTests(unittest.TestCase):
     def test_completion_bypasses_are_rejected(self):
         result = self.init(task_id="skip", complexity="C2")
         state = result["state"]
-        with self.assertRaisesRegex(ValueError, "skip_reason"):
-            control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "gate": "discover", "outcome": "skipped"})
-        mismatch = control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "gate": "plan", "outcome": "skipped"})
+        skipped = control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "gate": "discover", "outcome": "skipped"})
+        self.assertIn("discover", skipped["state"]["skipped_gates"])
+        self.assertEqual(skipped["advisories"][0]["reason"], "skip_reason_missing")
+        mismatch = control.record_gate({"task_id": "skip", "principal": "thread-a", "expected_revision": skipped["state"]["revision"], "gate": "qa", "outcome": "skipped"})
         self.assertEqual(mismatch["reason"], "gate_mismatch")
         self.assertFalse(mismatch["state_changed"])
-        with self.assertRaisesRegex(ValueError, "close gate"):
-            control.update_pipeline({"task_id": "skip", "principal": "thread-a", "expected_revision": state["revision"], "pipeline": ["plan", "discover"]})
+        repaired = control.update_pipeline({"task_id": "skip", "principal": "thread-a", "expected_revision": skipped["state"]["revision"], "pipeline": ["plan", "discover"]})
+        self.assertEqual(repaired["state"]["current_pipeline"], ["plan", "discover"])
 
     def test_nonzero_command_cannot_pass(self):
         result = self.init(task_id="nonzero", complexity="C1")

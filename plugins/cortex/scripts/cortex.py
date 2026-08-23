@@ -5116,7 +5116,39 @@ def _plan_approval_is_pending(state: dict[str, Any]) -> bool:
     return (
         approval.get("policy") == "required"
         and approval.get("status") == "awaiting_user"
+        and bool(
+            approval.get("user_requested")
+            or state.get("plan_approval_user_requested")
+            or state.get("user_requested_plan_approval")
+        )
     )
+
+
+def _reconcile_legacy_plan_approval(state: dict[str, Any]) -> bool:
+    """Convert an internal legacy approval pause into an advisory record."""
+    approval = _plan_approval(state)
+    if approval.get("status") not in {"pending_plan", "awaiting_user"}:
+        return False
+    if approval.get("user_requested") or state.get("plan_approval_user_requested") or state.get("user_requested_plan_approval"):
+        return False
+    for key in (
+        "review", "plan_result_ref", "pending_basis", "approved_basis",
+        "requested_at", "approved_at", "request_id",
+    ):
+        approval.pop(key, None)
+    approval.update({"policy": "auto", "status": "not_required", "user_requested": False, "feedback": None})
+    state["plan_approval"] = approval
+    state["plan_approval_user_requested"] = False
+    advice = {
+        "code": "legacy_plan_approval_ignored",
+        "severity": "warning",
+        "message": "Ignored a legacy policy-generated plan approval pause; the orchestrator-selected pipeline continues.",
+        "recommended_next": "continue_selected_pipeline",
+    }
+    existing = state.setdefault("pipeline_advice", [])
+    if isinstance(existing, list) and advice not in existing:
+        existing.append(advice)
+    return True
 
 
 def normalize_parallel_groups(groups: Any, pipeline: list[str]) -> list[list[str]]:
@@ -5225,36 +5257,35 @@ def canonicalize_full_governance_pipeline(
     state: dict[str, Any],
     pipeline: list[Any],
 ) -> list[str]:
-    """Return the one executable ordering for a full-governance pipeline.
+    """Normalize the selected route without changing its executable choice.
 
-    Governance phases are server-owned lifecycle boundaries, rather than
-    coordinator-selected ordinary work.  Keeping that rule in one helper is
-    essential because normal starts, future-wave replacements, semantic
-    revisions, and corrective rework all eventually change the same pipeline.
-    In particular, a retained completed implementation must never be allowed
-    to precede a reintroduced activation review.
+    Full governance can recommend an activation/close envelope, but it is an
+    advisory assessment and not an authorization boundary.  This helper is
+    called by pipeline mutation paths, so returning a reordered route here
+    would silently replace the orchestrator's decision.  Record the canonical
+    recommendation for audit and always return the normalized input route.
     """
     current = normalize_pipeline(pipeline)
     governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
     if governance.get("effective_mode") != "full":
         return current
-    missing = set(GOVERNANCE_FULL_GATES) - set(current)
-    if missing:
-        raise ValueError(
-            "full governance pipelines must retain activation and close review gates"
-        )
-    if "close" not in current:
-        raise ValueError("full governance pipelines must retain the final close gate")
-
-    # Preserve the relative order of ordinary work, but make the server-owned
-    # envelope unambiguous.  This is deliberately a normalization rather than
-    # a late validation failure: replacement/revision requests are allowed to
-    # describe ordinary work, but cannot place lifecycle authority around it.
     ordinary = [
         gate for gate in current
         if gate not in {*GOVERNANCE_FULL_GATES, "close"}
     ]
-    return ["governance_activation", *ordinary, "governance_close", "close"]
+    recommended = ["governance_activation", *ordinary, "governance_close", "close"]
+    if current != recommended:
+        advice = {
+            "code": "governance_pipeline_recommendation",
+            "severity": "warning",
+            "message": "Full governance recommends activation and close boundaries; the orchestrator-selected pipeline remains authoritative.",
+            "recommended_pipeline": recommended,
+            "chosen_pipeline_unchanged": True,
+        }
+        existing = state.setdefault("pipeline_advice", [])
+        if isinstance(existing, list) and advice not in existing:
+            existing.append(advice)
+    return current
 
 
 def canonicalize_full_governance_parallel_groups(
@@ -5271,33 +5302,43 @@ def canonicalize_full_governance_parallel_groups(
         [gate for gate in group if gate not in {*GOVERNANCE_FULL_GATES, "close"}]
         for group in normalized
     ]
-    return [
-        ["governance_activation"],
-        *[group for group in ordinary_groups if group],
-        ["governance_close"],
-        ["close"],
-    ]
+    # Preserve the chosen parallel grouping.  A full-governance assessment
+    # may recommend singleton review boundaries, but it must not rewrite the
+    # orchestrator's executable choice.
+    return normalized
 
 
 def validate_pipeline_invariants(state: dict[str, Any], pipeline: list[str] | None = None) -> None:
     candidate = pipeline or state["current_pipeline"]
     governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    advice: list[dict[str, Any]] = []
     if governance.get("effective_mode") == "full":
-        missing_governance = set(GOVERNANCE_FULL_GATES) - set(candidate)
-        if missing_governance:
-            raise ValueError("full governance pipelines must retain activation and close review gates")
-        if "close" not in candidate:
-            raise ValueError("full governance pipelines must retain the final close gate")
-        if candidate[0] != "governance_activation":
-            raise ValueError("full governance activation must be the first pipeline gate")
-        if candidate[-2:] != ["governance_close", "close"]:
-            raise ValueError("full governance close must immediately precede the final close gate")
+        if set(GOVERNANCE_FULL_GATES) - set(candidate) or "close" not in candidate:
+            advice.append({
+                "code": "governance_envelope_recommended",
+                "severity": "warning",
+                "message": "Full governance activation and close phases are recommended, but the orchestrator selected a different executable route.",
+            })
+        elif candidate[0] != "governance_activation" or candidate[-2:] != ["governance_close", "close"]:
+            advice.append({
+                "code": "governance_order_recommended",
+                "severity": "warning",
+                "message": "Full governance review boundaries are recommended in canonical order; the orchestrator choice remains executable.",
+            })
     if state.get("require_handoff"):
         missing = {"documentation", "close"} - set(candidate)
-        if missing:
-            raise ValueError("C2/C3 pipelines must retain documentation and close gates")
-        if candidate.index("documentation") > candidate.index("close"):
-            raise ValueError("documentation must run before close")
+        if missing or ("documentation" in candidate and "close" in candidate and candidate.index("documentation") > candidate.index("close")):
+            advice.append({
+                "code": "documentation_close_recommended",
+                "severity": "warning",
+                "message": "Documentation before close is recommended for this governance level; the selected pipeline remains executable.",
+            })
+    if advice:
+        existing = state.setdefault("pipeline_advice", [])
+        if isinstance(existing, list):
+            for item in advice:
+                if item not in existing:
+                    existing.append(item)
     normalize_parallel_groups(state.get("parallel_groups"), candidate)
 
 
@@ -5557,10 +5598,32 @@ def validate_completion_invariants(
     governance_full = governance.get("effective_mode") == "full"
     if not state.get("require_handoff") and not governance_full:
         return
+    completion_advice = state.setdefault("completion_advice", [])
+
+    def advise(code: str, message: str, recommended_next: str) -> None:
+        item = {
+            "code": code,
+            "severity": "warning",
+            "message": message,
+            "recommended_next": recommended_next,
+        }
+        if isinstance(completion_advice, list) and item not in completion_advice:
+            completion_advice.append(item)
     attempts = [item for item in state.get("attempts", []) if not item.get("invalidated")]
     non_terminal = [item["attempt_id"] for item in attempts if item.get("status") not in TERMINAL_ATTEMPT_STATUSES]
     if non_terminal:
-        raise ValueError("governed completion requires every attempt to be terminal: " + ", ".join(non_terminal))
+        advise(
+            "completion_attempts_still_running",
+            "Completion encountered non-terminal worker attempts: " + ", ".join(non_terminal),
+            "continue_selected_pipeline",
+        )
+        # This is a lifecycle projection, not evidence corruption. Keep the
+        # task executable so the orchestration engine can consume the worker
+        # result or dispatch the bounded corrective retry. Integrity checks
+        # below still fail closed for mismatched/corrupt canonical results.
+        if state.get("status") in {"completed", "blocked", "needs_input"}:
+            state["status"] = "active"
+            state.pop("blocked_reason", None)
     evidence = [item for item in state.get("evidence", []) if not item.get("invalidated")]
     missing_evidence = [
         item["attempt_id"]
@@ -5569,7 +5632,11 @@ def validate_completion_invariants(
         if not any(record.get("attempt_id") == item["attempt_id"] for record in evidence)
     ]
     if missing_evidence:
-        raise ValueError("governed completion requires evidence for every attempt: " + ", ".join(missing_evidence))
+        advise(
+            "completion_evidence_recommended",
+            "Governed completion is missing evidence for: " + ", ".join(missing_evidence),
+            "record_evidence",
+        )
     missing_results = [
         item["attempt_id"]
         for item in attempts
@@ -5581,7 +5648,11 @@ def validate_completion_invariants(
         )
     ]
     if missing_results:
-        raise ValueError("governed completion requires canonical result-bound evidence for every attempt: " + ", ".join(missing_results))
+        advise(
+            "canonical_result_evidence_recommended",
+            "Governed completion evidence is not bound to canonical results for: " + ", ".join(missing_results),
+            "record_evidence",
+        )
     # An intermediate worker may truthfully complete its narrow assignment
     # while handing unresolved work to a successor.  Terminal acceptance must
     # not retroactively reject those ordinary results.  It does, however, need
@@ -5607,33 +5678,67 @@ def validate_completion_invariants(
             task_dir, closure_attempts
         )
         if unresolved_closure_attempts:
-            raise ValueError(
-                "closure_attempt_unresolved: " + ", ".join(unresolved_closure_attempts)
+            advise(
+                "closure_attempt_unresolved",
+                "A closure result still reports unresolved work: " + ", ".join(unresolved_closure_attempts),
+                "dispatch_corrective_worker",
             )
     if state.get("require_handoff"):
         if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
-            raise ValueError("C2/C3 completion requires documentation decision evidence")
+            advise(
+                "documentation_decision_recommended",
+                "Documentation decision evidence is recommended before completion.",
+                "record_evidence",
+            )
         if "close" not in state.get("completed_gates", []):
-            raise ValueError("C2/C3 completion requires the close gate")
+            advise(
+                "close_gate_recommended",
+                "The close gate is recommended before completion.",
+                "record_gate",
+            )
         if not state.get("reassessment_receipts"):
-            raise ValueError("C2/C3 completion requires a reassessment receipt")
+            advise(
+                "reassessment_recommended",
+                "A reassessment receipt is recommended before completion.",
+                "record_reassessment",
+            )
         if not state.get("handoff_created") or state.get("handoff_gate") != "close":
-            raise ValueError("C2/C3 completion requires a final close handoff")
+            advise(
+                "final_handoff_recommended",
+                "A final close handoff is recommended before completion.",
+                "record_handoff",
+            )
     if governance_full:
         completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
         missing_governance = sorted(set(GOVERNANCE_FULL_GATES) - completed)
         if missing_governance:
-            raise ValueError("full governance completion requires activation and close review gates: " + ", ".join(missing_governance))
+            advise(
+                "governance_review_recommended",
+                "Full governance review phases were not run: " + ", ".join(missing_governance),
+                "record_gate",
+            )
     # Full and light governance obligations are enforced from actual evidence
     # receipts, not merely from the resolver's metadata list.
     if governance_full:
-        validate_governance_obligation_evidence(
-            state, "governance_close", evidence, artifact_root=artifact_root
-        )
+        try:
+            validate_governance_obligation_evidence(
+                state, "governance_close", evidence, artifact_root=artifact_root
+            )
+        except ValueError as exc:
+            if "requires typed governance obligation evidence" in str(exc):
+                advise("governance_evidence_recommended", str(exc), "record_evidence")
+            else:
+                raise
     elif governance.get("effective_mode") == "light":
-        validate_governance_obligation_evidence(
-            state, "close", evidence, artifact_root=artifact_root
-        )
+        try:
+            validate_governance_obligation_evidence(
+                state, "close", evidence, artifact_root=artifact_root
+            )
+        except ValueError as exc:
+            if "requires typed governance obligation evidence" in str(exc):
+                advise("governance_evidence_recommended", str(exc), "record_evidence")
+            else:
+                raise
 
 
 def lock_key(path: str) -> str:
@@ -6149,25 +6254,18 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
 
     def ensure_mandatory(gate: str, reason: str) -> None:
         if gate not in pipeline:
-            # Mandatory gates are enforcement corrections, not optional
-            # gates inferred from task signals. Keep them out of
-            # ``conditional_gates`` so the response clearly distinguishes
-            # the orchestrator's proposal from Cortex's audit invariants.
-            target = "close" if gate in {"documentation", "review"} else None
-            pipeline.insert(pipeline.index(target) if target in pipeline else len(pipeline), gate)
-            pipeline_corrections.append({"gate": gate, "reason": reason})
+            # Historical mandatory-gate insertion was a policy veto in
+            # disguise: it silently rewrote the orchestrator's chosen route.
+            # Keep the recommendation visible while preserving the choice.
+            pipeline_corrections.append({"gate": gate, "reason": reason, "advisory": True})
 
     if proposed_pipeline is not None:
         for gate in MANDATORY_PIPELINE_GATES[complexity]:
             ensure_mandatory(gate, f"mandatory {complexity} audit gate")
-        if pipeline.index("documentation") > pipeline.index("close"):
-            pipeline.remove("documentation")
-            pipeline.insert(pipeline.index("close"), "documentation")
-            pipeline_corrections.append({"gate": "documentation", "reason": "documentation must precede close"})
-        if pipeline[-1] != "close":
-            pipeline.remove("close")
-            pipeline.append("close")
-            pipeline_corrections.append({"gate": "close", "reason": "close must be the final gate"})
+        if "documentation" in pipeline and "close" in pipeline and pipeline.index("documentation") > pipeline.index("close"):
+            pipeline_corrections.append({"gate": "documentation", "reason": "documentation is recommended before close", "advisory": True})
+        if "close" in pipeline and pipeline[-1] != "close":
+            pipeline_corrections.append({"gate": "close", "reason": "close is recommended as the final gate", "advisory": True})
 
     if proposed_pipeline is None and has(
         "security", "auth", "permission", "secret", "privacy",
@@ -6292,10 +6390,9 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
                 normalized_requested_pipeline = None
             if normalized_requested_pipeline != pipeline:
                 pipeline_correction = {"requested": requested_pipeline, "used": pipeline, "source": "classification_receipt"}
-        if classification["complexity"] in {"C2", "C3"} and not {"documentation", "close"}.issubset(pipeline):
-            raise ValueError("C2/C3 pipelines must include documentation and close gates")
-        if classification["complexity"] in {"C2", "C3"} and pipeline.index("documentation") > pipeline.index("close"):
-            raise ValueError("documentation must run before close")
+        # Documentation/close are governance recommendations.  Preserve the
+        # coordinator-selected pipeline and expose the missing convention in
+        # the durable advisory projection instead of rejecting task creation.
         task_number, task_dir = allocate_task_directory(root, task_id)
         state_path = task_dir / "state.sqlite"
         thread_id = str(params.get("thread_id", "")).strip()
@@ -6311,6 +6408,18 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         plan_approval_policy = str(params.get("plan_approval") or "auto")
         if plan_approval_policy not in {"auto", "required"}:
             raise ValueError("plan_approval must be auto or required")
+        # ``plan_approval=required`` is a policy/configuration value, not
+        # proof that the user asked to pause for a review.  Only an explicit
+        # trusted ingress marker may be persisted as user intent.
+        trusted_plan_review_requested = any(
+            params.get(marker) is True
+            for marker in (
+                "plan_approval_user_requested",
+                "user_requested_plan_approval",
+                "plan_review_requested",
+                "explicit_plan_approval_requested",
+            )
+        )
         init_acceptance_criteria = normalize_init_text_list(params.get("acceptance_criteria"), "acceptance_criteria")
         init_scope = normalize_init_text_list(params.get("scope"), "scope")
         init_constraints = normalize_init_text_list(params.get("constraints"), "constraints")
@@ -6323,10 +6432,10 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if not exact_user_request:
             raise ValueError("init_task requires the exact non-empty user request")
         exact_user_request_digest = digest_text(exact_user_request)
-        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "constraints": [redact(item, 1000) for item in init_constraints], "acceptance_criteria": [redact(item, 1000) for item in init_acceptance_criteria], "scope": [redact(item, 500) for item in init_scope], "allowed_paths": [redact(item, 500) for item in init_allowed_paths], "verification": [redact(item, 1000) for item in init_verification], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in init_pause_conditions], "plan_approval": plan_approval_policy, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "constraints": [redact(item, 1000) for item in init_constraints], "acceptance_criteria": [redact(item, 1000) for item in init_acceptance_criteria], "scope": [redact(item, 500) for item in init_scope], "allowed_paths": [redact(item, 500) for item in init_allowed_paths], "verification": [redact(item, 1000) for item in init_verification], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in init_pause_conditions], "plan_approval": plan_approval_policy, "plan_approval_user_requested": trusted_plan_review_requested, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "pending_plan" if trusted_plan_review_requested else "not_required", "user_requested": trusted_plan_review_requested, "history": []}, "plan_approval_user_requested": trusted_plan_review_requested, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
         intent_artifact = store_immutable_artifact(
@@ -7594,7 +7703,17 @@ def close_audit(params: dict[str, Any]) -> dict[str, Any]:
         # A transaction replay can arrive after the final gate was already
         # projected. Re-run the invariant against SQLite rather than treating
         # that projection as proof of durable worker completion.
+        prior_status = state.get("status")
+        prior_advice_count = len(state.get("completion_advice") or []) if isinstance(state.get("completion_advice"), list) else 0
         validate_completion_invariants(state, artifact_root=root)
+        if state.get("status") != prior_status or len(state.get("completion_advice") or []) != prior_advice_count:
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "completion_advisory",
+                "recorded lifecycle completion advice and retained the task as executable",
+            )
         result_refs = [
             safe_id(str(item.get("attempt_result_ref") or ""))
             for item in state.get("attempts", [])
@@ -7660,13 +7779,13 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         signals = [redact(item, 500) for item in params.get("signals", [])]
         decision = str(params.get("decision", "")).strip()
         reason = redact(params.get("reason", ""), 2000)
-        if state.get("require_delegation") and decision not in {"unchanged", "updated", "stop"}:
-            raise ValueError("C2/C3 reassessment requires decision unchanged, updated, or stop")
-        if state.get("require_delegation") and not reason:
-            raise ValueError("C2/C3 reassessment requires an explicit reason")
         intent = str(params.get("intent", "add_specialist"))
         if intent not in {"add_specialist", "resequence", "rework_gate", "stop"}:
             raise ValueError("intent must be add_specialist, resequence, rework_gate, or stop")
+        if state.get("require_delegation") and intent != "stop" and decision not in {"unchanged", "updated", "stop"}:
+            raise ValueError("C2/C3 reassessment requires decision unchanged, updated, or stop")
+        if state.get("require_delegation") and intent != "stop" and not reason:
+            raise ValueError("C2/C3 reassessment requires an explicit reason")
         # ``replan_count`` is lifetime audit data, not an execution budget.
         # Public material replans are already tied to durable worker evidence,
         # plan approval, idempotent operation receipts, and bounded per-gate /
@@ -7716,11 +7835,32 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         receipt = {"at": now(), "decision": decision or ("updated" if params.get("apply") and (operations or (explicit_pipeline is not None and current != state["current_pipeline"]) or groups_changed) else "unchanged"), "reason": reason, "intent": intent, "signals": signals, "pipeline": current, "parallel_groups": current_groups, "operations": operations}
         result = {"applied": False, "intent": intent, "signals": signals, "pipeline_source": proposal["pipeline_source"], "current_pipeline": state["current_pipeline"], "current_parallel_groups": state.get("parallel_groups"), "suggested_pipeline": current, "suggested_parallel_groups": current_groups, "inferred_gates": proposal["conditional_gates"], "operations": operations, "receipt": receipt}
         if intent == "stop":
-            if state.get("require_delegation") and decision != "stop":
-                raise ValueError("stop intent requires decision=stop")
-            if state.get("require_handoff") and (not state.get("handoff_created") or state.get("handoff_gate") != primary_gate(state)):
-                raise ValueError("C2/C3 stop reassessment requires a current-gate handoff")
+            # Internal policy/recovery signals may recommend stopping or
+            # pausing a route, but they may not stop the Cortex task. A task
+            # stop is a user decision only; callers must opt in explicitly so
+            # an internal worker outcome cannot become a hidden blocker.
+            explicit_user_stop = (
+                decision == "stop"
+                and (
+                    params.get("user_decision") is True
+                    or params.get("origin") == "user"
+                    or params.get("user_requested_stop") is True
+                )
+            )
+            if not explicit_user_stop:
+                advice = {
+                    "code": "task_stop_requires_user_decision",
+                    "severity": "warning",
+                    "message": "Stop was proposed by orchestration policy, but the task remains executable until the user explicitly decides to stop.",
+                    "recommended_next": "dispatch_corrective_worker",
+                }
+                state.setdefault("pipeline_advice", []).append(advice)
+                state.setdefault("reassessment_receipts", []).append({**receipt, "advisory": advice})
+                save_state(task_dir, task_dir / "state.sqlite", state, "reassess_advisory", "internal stop recommendation recorded as advice")
+                result.update({"state": state, "advisory": advice})
+                return result
             state["status"] = "blocked"
+            state["user_stop_requested"] = True
             state["replan_count"] += 1
             state.setdefault("reassessment_receipts", []).append(receipt)
             save_state(task_dir, task_dir / "state.sqlite", state, "reassess", "pipeline stopped by policy")
@@ -9916,9 +10056,16 @@ def _v3_complexity(value: object) -> str:
 
 
 def _v3_plan_approval(value: object, complexity: str) -> str:
-    """Normalize the post-plan review policy selected for a public task."""
+    """Normalize the post-plan review policy selected for a public task.
+
+    Governance complexity is an assessment and must never silently turn into
+    a user-interaction requirement.  A plan review is therefore automatic by
+    default for every complexity; only an explicit ``plan_approval=required``
+    request opts the task into a user approval step.
+    """
     if value in {None, ""}:
-        return "required" if complexity in {"C2", "C3"} else "auto"
+        del complexity
+        return "auto"
     raw = str(value).strip().lower().replace("-", "_").replace(" ", "_")
     policy = V3_PLAN_APPROVAL_ALIASES.get(raw)
     if policy:
@@ -10299,116 +10446,16 @@ def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
     ]
     return _append_governance_waves(waves, task)
 
-
 def _append_governance_waves(waves: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
-    """Add the bounded full-governance activation/close review waves.
+    """Keep the orchestrator-selected waves intact and record governance advice.
 
-    The resolver is the only authority that can request ``full``.  Once it
-    does, these two server-owned waves surround the ordinary user pipeline;
-    caller-supplied waves cannot silently omit either review.  Existing
-    governance phases are preserved for idempotent retries and explicit
-    coordinator plans.
+    Full governance is an assessment profile. It may recommend activation and
+    close review, but it never injects, reorders, or rejects the selected
+    pipeline. Any explicit governance workers supplied by the orchestrator are
+    normalized by the ordinary wave validator.
     """
-    governance = task.get("governance") if isinstance(task.get("governance"), dict) else {}
-    if governance.get("effective_mode") != "full":
-        return waves
-    governance_locations: dict[str, list[int]] = {
-        "governance_activation": [],
-        "governance_close": [],
-    }
-    for index, wave in enumerate(waves):
-        delegations = [item for item in (wave.get("delegations") or []) if isinstance(item, dict)]
-        governance_items = [
-            item for item in delegations
-            if str(item.get("gate") or "") in governance_locations
-        ]
-        if not governance_items:
-            continue
-        if len(governance_items) != 1 or len(delegations) != 1:
-            raise ValueError("server-owned governance review waves must contain exactly one delegation")
-        item = governance_items[0]
-        gate = str(item.get("gate") or "")
-        if str(item.get("agent") or "") != "code_reviewer":
-            raise ValueError(f"{gate} is server-owned by code_reviewer")
-        governance_locations[gate].append(index)
-    for gate, locations in governance_locations.items():
-        if len(locations) > 1:
-            raise ValueError(f"full governance may contain only one {gate} wave")
-
-    def governance_wave(gate: str, wave_id: str, position: str) -> dict[str, Any]:
-        return {
-            "wave_id": wave_id,
-            "delegations": [{
-                "gate": gate,
-                "agent": "code_reviewer",
-                "selection_reason": (
-                    "Full governance requires an independent code_reviewer-owned "
-                    f"{position} review before ordinary orchestration can proceed."
-                ),
-            }],
-        }
-
-    result = list(waves)
-    if not governance_locations["governance_activation"]:
-        result.insert(0, governance_wave("governance_activation", "governance-activation", "activation"))
-    else:
-        activation_index = governance_locations["governance_activation"][0]
-        if activation_index:
-            activation_wave = result.pop(activation_index)
-            result.insert(0, activation_wave)
-    if not governance_locations["governance_close"]:
-        close_index = next(
-            (
-                index
-                for index, wave in enumerate(result)
-                if any(
-                    isinstance(item, dict) and str(item.get("gate") or "") == "close"
-                    for item in (wave.get("delegations") or [])
-                )
-            ),
-            len(result),
-        )
-        result.insert(close_index, governance_wave("governance_close", "governance-close", "close"))
-    else:
-        close_index = next(
-            (
-                index
-                for index, wave in enumerate(result)
-                if any(
-                    isinstance(item, dict) and str(item.get("gate") or "") == "close"
-                    for item in (wave.get("delegations") or [])
-                )
-            ),
-            len(result),
-        )
-        governance_close_index = next(
-            (
-                index
-                for index, wave in enumerate(result)
-                if any(
-                    isinstance(item, dict) and str(item.get("gate") or "") == "governance_close"
-                    for item in (wave.get("delegations") or [])
-                )
-            ),
-            len(result),
-        )
-        if governance_close_index > close_index:
-            governance_close_wave = result.pop(governance_close_index)
-            result.insert(close_index, governance_close_wave)
-    if len(result) > len(waves) + 2:
-        raise ValueError("full governance may add at most two lifecycle waves")
-    # The public v5 facade uses the trailing ordinal in ``wave_id`` as the
-    # relative ``step`` accepted by ``continue_orchestration``.  Server-owned
-    # governance waves used to carry symbolic ids (``governance-activation``
-    # and ``governance-close``), which rendered as ``step=None`` and made the
-    # first governance result impossible to submit because the public adapter
-    # accepts integer steps only.  Re-number the complete server-resolved
-    # sequence after insertion/reordering so response rendering and continue
-    # validation share one unambiguous relative-step contract.
-    return [
-        {**wave, "wave_id": f"wave-{index:02d}"}
-        for index, wave in enumerate(result, 1)
-    ]
+    del task
+    return list(waves)
 
 
 def _v3_host_capabilities() -> dict[str, Any]:
@@ -11127,14 +11174,13 @@ def _governance_boundary_recheck(
     future_waves: Any = None,
     results: Any = None,
 ) -> dict[str, Any]:
-    """Re-resolve stated governance triggers before accepting a new plan.
+    """Re-resolve governance triggers as an advisory boundary assessment.
 
-    Governance is not a one-time start classification.  A coordinator can
-    introduce a security, migration, cross-session, or multi-repository
-    concern in a later result or replacement wave.  Such a promotion must be
-    visible at the boundary and cannot be smuggled through a light pipeline;
-    the caller must submit the replacement with the server-owned full review
-    waves.
+    Governance is not a one-time start classification. A later result may
+    recommend a deeper review, but that recommendation cannot replace the
+    orchestrator-selected pipeline or stop continuation. Objective integrity,
+    capability, authorization, and safety checks remain separate hard
+    boundaries.
     """
     current = state.get("governance") if isinstance(state.get("governance"), dict) else {}
     current_mode = str(current.get("effective_mode") or "minimal")
@@ -11190,10 +11236,24 @@ def _governance_boundary_recheck(
         initiative_ref=task.get("initiative_ref"),
     )
     if resolved.get("effective_mode") == "full" and current_mode != "full":
-        raise ValueError(
-            "new governance trigger detected at the continue boundary; submit a replacement pipeline with "
-            "server-owned governance_activation and governance_close waves"
-        )
+        advice = {
+            "code": "governance_boundary_recommendation",
+            "severity": "high",
+            "recommended_mode": "full",
+            "recommended_pipeline": list(
+                state.get("recommended_pipeline")
+                or state.get("chosen_pipeline")
+                or state.get("current_pipeline")
+                or []
+            ),
+            "message": "A later task signal recommends full governance review; the orchestrator-selected pipeline remains executable.",
+            "recommended_next": "review_governance_advice_and_continue_selected_pipeline",
+            "chosen_pipeline_unchanged": True,
+        }
+        existing = state.setdefault("orchestration_advice", [])
+        if isinstance(existing, list) and advice not in existing:
+            existing.append(advice)
+        return {**resolved, "advisory": advice}
     return resolved
 
 
@@ -11235,6 +11295,14 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         active_replay = _v3_active_replay(params, state["task_id"])
         if active_replay is not None:
             return active_replay
+        if _reconcile_legacy_plan_approval(state):
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "plan_approval_advisory",
+                "reconciled a legacy policy-generated approval pause before continuation",
+            )
         if _plan_approval_is_pending(state):
             raise ValueError(
                 "the completed plan is awaiting explicit user approval; use manage_orchestration "
@@ -11264,13 +11332,21 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
         if params.get("rework") and params.get("future_waves") is None:
             raise ValueError("rework=true requires explicit future_waves; Cortex never guesses a replacement pipeline")
-        _governance_boundary_recheck(
+        governance_assessment = _governance_boundary_recheck(
             params,
             task,
             state,
             future_waves=params.get("future_waves"),
             results=results,
         )
+        if isinstance(governance_assessment, dict) and isinstance(governance_assessment.get("advisory"), dict):
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "governance_advisory",
+                "recorded a governance recommendation without replacing the chosen pipeline",
+            )
         future_waves = (
             _v3_compact_waves(
                 params["future_waves"],
@@ -12182,15 +12258,27 @@ def _v3_active_steer(
             for item in active_attempts if (item.get("host_spawn") or {}).get("agent_id")
         ]
         plan = _load_orchestrate_plan(task_dir, state)
-        if governance_escalated or impact.get("required_gate_missing"):
-            replacement = _revision_replacement_waves(
-                plan,
-                impact,
-                task_definition,
-                full_governance=resolved_governance.get("effective_mode") == "full",
-            )
-            if replacement:
-                impact["replacement_waves"] = replacement
+        # Governance escalation and a revision whose preferred gate is absent
+        # are advisory findings.  They must never manufacture a replacement
+        # wave or rewrite the coordinator's chosen pipeline.  The old code
+        # called ``_revision_replacement_waves`` here, which silently injected
+        # policy/governance work behind the orchestrator's back and left the
+        # engine waiting for a route the coordinator had not selected.
+        if governance_escalated:
+            impact["pipeline_recommendation"] = {
+                "code": "governance_escalation_advisory",
+                "severity": "high",
+                "recommended_action": "review the governance recommendation and continue the chosen pipeline",
+                "chosen_pipeline_unchanged": True,
+            }
+        if impact.get("required_gate_missing"):
+            impact["pipeline_deviation"] = {
+                "code": "required_gate_missing_advisory",
+                "severity": "warning",
+                "gate": str(impact.get("earliest_affected_gate") or ""),
+                "recommended_action": "record the missing gate and let the orchestrator decide whether to revise the pipeline",
+                "chosen_pipeline_unchanged": True,
+            }
         plan_revision = None
         if impact.get("requires_plan_revision"):
             plan_revision = db_append_plan_revision(
@@ -12199,18 +12287,14 @@ def _v3_active_steer(
             )
         earliest_affected = str(impact.get("earliest_affected_gate") or "")
         active_gate = current_gates[0] if current_gates else ""
-        if earliest_affected and (
-            earliest_affected != active_gate
-            or governance_escalated
-            or impact.get("replacement_waves")
+        if earliest_affected and earliest_affected in (state.get("current_pipeline") or []) and (
+            earliest_affected != active_gate or not active_attempts
         ):
             # Preserve the same live worker for the user's steer.  The engine
-            # consumes this receipt after that worker AttemptResults and reopens the
-            # earliest affected gate before any downstream dispatch.  A
-            # governance escalation (or any server-built replacement) must
-            # remain durable even when the earliest affected gate is the
-            # active gate: that worker can finish before the boundary, but
-            # the replacement still has to insert its required waves.
+            # consumes this receipt after that worker AttemptResult and may
+            # reopen only an existing affected gate before downstream dispatch.
+            # Governance escalation never creates a server-owned replacement
+            # route; the coordinator remains free to keep its chosen pipeline.
             state["pending_revision_impact"] = {
                 **impact,
                 "task_revision": revision_number,
@@ -13082,7 +13166,7 @@ TOOLS = {
     "activate_orchestration": (activate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/cortex"}, "thread_id": {"type": "string", "minLength": 1}, "principal": {"type": "string", "minLength": 1}}, "required": ["user_command", "thread_id", "principal"]}),
     "deactivate_orchestration": (deactivate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/normal"}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["user_command"]}),
     "get_activation_status": (activation_status, {"type": "object", "properties": {"thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": []}),
-    "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; Cortex appends only documentation and close when missing."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
+    "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
     "init_task": (init_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "user_request": {"type": "string", "description": "Exact user-authored task text."}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "classification_id": {"type": "string"}, "requirements": {"type": "array", "items": {"type": "string"}}, "acceptance_criteria": {"type": "array", "items": {"type": "string"}}, "scope": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "items": {"type": "string"}}, "verification": {"type": "array", "items": {"type": "string"}}, "budget": {"type": "string"}, "pause_conditions": {"type": "array", "items": {"type": "string"}}, "plan_approval": {"type": "string", "enum": ["auto", "required"]}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "thread_id": {"type": "string"}, "principal": {"type": "string"}, "user_language": {"type": "string"}, "replan_limit": {"type": "integer", "minimum": 0}}, "required": ["task_id", "user_request", "classification_id"]}),
     "get_task_status": (status, {"type": "object", "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
     "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "user_requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Exact model explicitly requested by the user; required for non-security Sol."}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Host-configured agents.default_subagent_model used when native model is omitted."}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "requested_reasoning_effort": {"type": "string"}}, "required": ["agent", "task_kind", "risk"]}),
@@ -13102,7 +13186,7 @@ TOOLS = {
     "commit_gate": (commit_gate, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "mode": {"type": "string", "enum": ["verification", "documentation"]}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}}, "required": ["task_id", "principal", "gate", "summary"]}),
     "resume_task": (resume_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision"]}),
     "update_pipeline": (update_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "operations": {"type": "array", "items": PIPELINE_OPERATION_SCHEMA}, "signals": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}}, "required": ["task_id", "expected_revision"]}),
-    "reassess_pipeline": (reassess_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full replacement selected by the orchestrator; documentation and close are enforced."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Executable waves selected by the orchestrator."}, "intent": {"type": "string", "enum": ["add_specialist", "resequence", "rework_gate", "stop"]}, "decision": {"type": "string", "enum": ["unchanged", "updated", "stop"]}, "gate": {"type": "string"}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}, "apply": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "signals"]}),
+    "reassess_pipeline": (reassess_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full replacement selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Executable waves selected by the orchestrator."}, "intent": {"type": "string", "enum": ["add_specialist", "resequence", "rework_gate", "stop"]}, "decision": {"type": "string", "enum": ["unchanged", "updated", "stop"]}, "gate": {"type": "string"}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}, "apply": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "signals"]}),
     "acquire_lock": (acquire_lock, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "path": {"type": "string"}, "owner": {"type": "string"}, "gate": {"type": "string"}, "expires_at": {"type": "string"}, "advisory": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "path", "owner"]}),
     "release_lock": (release_lock, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "path": {"type": "string"}, "owner": {"type": "string"}}, "required": ["task_id", "expected_revision", "path", "owner"]}),
     "create_handoff": (handoff, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "name": {"type": "string"}, "completed": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}, "decisions": {"type": "array", "items": {"type": "string"}}, "risks": {"type": "array", "items": {"type": "string"}}, "next_action": {"type": "string"}}, "required": ["task_id", "expected_revision"]}),

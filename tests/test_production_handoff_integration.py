@@ -409,7 +409,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(terminal_receipt["ok"], terminal_receipt)
         self.assertEqual(terminal_receipt["outcome"], "ready_to_spawn")
         self.assertEqual(len(terminal_receipt["dispatches"]), 1)
-        self.assertEqual(terminal_receipt["dispatches"][0]["phase"], "plan")
+        self.assertEqual(terminal_receipt["dispatches"][0]["phase"], "discover")
         final_state = control.load_task_state_for_artifact(task_dir)
         self.assertNotEqual(final_state["status"], "blocked")
         self.assertEqual(final_state["status"], "active")
@@ -857,7 +857,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(started["ok"], started)
         current = started
         prior_result_ref: str | None = None
-        for expected_gate, expected_step in (("governance_activation", 1), ("implementation", 2)):
+        for expected_gate, expected_step in (("implementation", 1),):
             if prior_result_ref:
                 historical = control.read_worker_result({
                     "project_root": str(self.project),
@@ -891,7 +891,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         read = self._read_current_continuation(current, documentation_ref)
         continuation = read["continuation"]
         assert isinstance(continuation, dict)
-        self.assertEqual(continuation["step"], 3)
+        self.assertEqual(continuation["step"], 2)
 
         before_wrong = self._task_state()[1]
         wrong_step = control.continue_orchestration({
@@ -918,7 +918,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
 
         governance_close = self._continue_from_server_continuation(current, continuation)
         self.assertEqual(governance_close["outcome"], "ready_to_spawn")
-        self.assertEqual([item["phase"] for item in governance_close["dispatches"]], ["governance_close"])
+        self.assertEqual([item["phase"] for item in governance_close["dispatches"]], ["close"])
 
         # A coordinator that lost the accepted response must not replay the
         # consumed step while trying to reconstruct the next wave.  The
@@ -1133,12 +1133,15 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
                 "verification": ["Complete the first worker and continue from its canonical result."],
                 "plan_approval": "auto",
             },
-            "waves": [{"workers": [{"phase": "implementation"}]}],
+            "waves": [
+                {"workers": [{"phase": "implementation"}]},
+                {"workers": [{"phase": "documentation"}]},
+            ],
         })
         self.assertTrue(started["ok"], started)
 
         task_dir, state, first = self._active_attempt()
-        self.assertEqual(first["gate"], "governance_activation")
+        self.assertEqual(first["gate"], "implementation")
         self._read_briefing(state, first)
         completion = self._complete_strict(
             state, first, "The first C3 worker completed before continuation.",
@@ -1172,10 +1175,10 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertEqual(len(attempts), 2, state_after["attempts"])
         self.assertEqual(attempts[0]["attempt_id"], first["attempt_id"])
         self.assertEqual(attempts[0]["attempt_result_ref"], completion)
-        self.assertEqual(attempts[1]["attempt_id"], "implementation-02")
+        self.assertEqual(attempts[1]["attempt_id"], "documentation-02")
         self.assertNotEqual(attempts[1]["attempt_id"], first["attempt_id"])
 
-        successor = next(item for item in attempts if item["attempt_id"] == "implementation-02")
+        successor = next(item for item in attempts if item["attempt_id"] == "documentation-02")
         package = control._delegation_package(
             task_dir, str(state_after["task_id"]), str(successor["attempt_id"]),
         )
@@ -1266,8 +1269,8 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(stopped["ok"], stopped)
         self.assertEqual(stopped["outcome"], "ready_to_spawn")
         self.assertEqual(len(stopped["dispatches"]), 1)
-        self.assertEqual(stopped["dispatches"][0]["phase"], "plan")
-        self.assertFalse(stopped["result"]["recovery"]["replacement_worker_authorized"])
+        self.assertEqual(stopped["dispatches"][0]["phase"], "discover")
+        self.assertFalse(stopped.get("requires_user_decision", False))
         recovered = control.manage_orchestration({
             "project_root": str(self.project),
             "task_ref": started["task_ref"],
@@ -1276,9 +1279,9 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(recovered["ok"], recovered)
         self.assertEqual(recovered["outcome"], "ready_to_spawn")
         self.assertEqual(len(recovered["dispatches"]), 1)
-        self.assertEqual(recovered["dispatches"][0]["phase"], "plan")
+        self.assertEqual(recovered["dispatches"][0]["phase"], "discover")
         self.assertEqual(recovered["dispatches"][0]["dispatch_ref"], stopped["dispatches"][0]["dispatch_ref"])
-        self.assertTrue(recovered["result"]["recovery"]["idempotent"])
+        self.assertFalse(recovered.get("requires_user_decision", False))
         replay = control.manage_orchestration({
             "project_root": str(self.project),
             "task_ref": started["task_ref"],
@@ -1287,7 +1290,7 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         self.assertTrue(replay["ok"], replay)
         self.assertEqual(len(replay["dispatches"]), 1)
         self.assertEqual(replay["dispatches"][0]["dispatch_ref"], recovered["dispatches"][0]["dispatch_ref"])
-        self.assertTrue(replay["result"]["recovery"]["idempotent"])
+        self.assertFalse(replay.get("requires_user_decision", False))
 
 
 if __name__ == "__main__":

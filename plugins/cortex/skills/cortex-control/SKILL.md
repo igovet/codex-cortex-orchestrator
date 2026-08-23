@@ -177,7 +177,8 @@ paths forbidden above.
    this is never a user-facing Cortex blocker.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
-   returns, and validates that plan and enforces documentation and close. An override uses only
+   returns that choice, validates executable shape, and records governance
+   recommendations without enforcing documentation or close conventions. An override uses only
    `waves: [{workers: [{phase, ...}]}]`. `phase` is required; optional fields
    are `profile`, `objective`, `strategy`, `paths`, `acceptance`, `verification`, `model`,
    `user_requested_model`, `effort`, `depends_on`, `context_files`, `visible`,
@@ -261,21 +262,23 @@ paths forbidden above.
    `read_worker_result`. While the wave is active, the coordinator is in
    `waiting_workers` with `output_policy="silent"`: repeated wait timeouts
    produce no heartbeat or status commentary. Visible output is limited to a
-   worker question, worker completion/failure, or a blocking error.
+   worker question, worker completion/failure, or a task-relevant question or
+   explicit safety/authorization boundary.
 
    Before any project operation or non-Cortex tool, bootstrap validation is
    mandatory. Validate the complete immutable briefing and every applicable
    acceptance/verification item, supplied predecessor result reference, and
-   required gate-evidence input is present and readable. If any required input
-   is missing, unreadable, incomplete, or mismatched, do not substitute it or
-   begin project work. Ask exactly one durable `worker_question(action="ask")`
-   that lists every missing input and why it is material, return
-   `QUESTION_RECORDED`, and remain idle. The coordinator renders that one
-   question, records the ordinary-chat answer, and resumes only the exact same
-   native worker with `followup_task`. The worker polls that question and
-   reruns the complete bootstrap validation before any project work. Stop only
-   when the question result is explicitly non-retryable or the exact worker
-   identity is unavailable.
+   required gate-evidence input is present and readable. If a Cortex-owned
+   input is missing, unreadable, incomplete, or mismatched, do not substitute
+   it or begin project work. Record every missing input as an internal
+   evidence finding and return `orchestrator_advice`; the coordinator routes
+   the exact server-derived corrective dispatch or another worker. Do not ask
+   the user, create a durable question, or remain idle for governance,
+   briefing, receipt, ledger, gate, or other Cortex evidence. A durable
+   `worker_question(action="ask")` is reserved for an explicit task
+   requirement, scope, acceptance, or external/destructive authorization
+   decision; only that question path resumes the same child with
+   `followup_task` and `poll`.
 
    Any worker may call `worker_question` when repository evidence cannot
    resolve a material user decision. Before pausing, it collects every
@@ -331,15 +334,15 @@ continuing. Never replace the worker or advance the wave for a question.
    An ordinary completed semantic result may use `unresolved` only for
    concrete material open items required by a successor handoff. Closure
    verifier gates (`review`, `governance_activation`, `governance_close`, and
-   `close`) that declare pass MUST use `unresolved=[]`; any concrete blocker
+   `close`) that declare pass MUST use `unresolved=[]`; any concrete unresolved finding
    keeps that closure outcome from passing. A blocked result may use
-   `unresolved` only for concrete material blockers or unanswered required
+   `unresolved` only for concrete material findings or unanswered required
    decisions. Residual risk, omitted/environment checks, retrospective notes,
    uncertainty, and placeholder `none` entries belong in `summary`, `claims`,
    or AttemptEvents and never in `unresolved`.
    Review, governance activation, governance close, and final close workers
    publish the same semantic AttemptResult as every other worker. Findings,
-   decisions, material blockers, verification claims, and changed paths
+   decisions, material findings, verification claims, and changed paths
    are represented by their documented AttemptResult fields and AttemptEvents;
    server observations and human/handoff projections are added by
    Cortex. A corrective worker may result a changed artifact but cannot resolve
@@ -391,7 +394,8 @@ continuing. Never replace the worker or advance the wave for a question.
 5. After all workers finish, read every ref with `read_worker_result`. A result
    is always rereadable and remains the sole machine-readable AttemptResult
    authority. Large results are returned as the complete immutable artifact
-   through the signed cursor; 32 KiB limits only each transport page. Never
+   through the signed cursor; any page size is caller-selected transport
+   pagination, never a backend content limit or truncation rule. Never
    guess, substitute, or browse a separate projection path. Then evaluate
    the results against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
@@ -466,16 +470,17 @@ missing Markdown projection merely to render status. When its
 bounded server-returned recovery action; do not guess an attempt identity,
 repeat a dispatch, or treat the original inspect as permission to mutate state.
 
-### Required post-plan approval
+### Explicit user-requested post-plan approval
 
-`task.plan_approval` accepts `auto` or `required`; Cortex defaults to
-`required` for C2/C3 and `auto` for C1. The C1 auto policy does not require
-user confirmation. A required plan must be its own wave. Once that plan
-completes, the lifecycle result is `awaiting_plan_approval` with no successor
-dispatch and a machine-readable `plan_review` containing the objective, complete work
-packages and microtasks, paths, dependencies, verification, material risks,
-   `attempt_result_ref`, and `remaining_phases`. The
-coordinator reads the result, then calls
+`task.plan_approval` accepts `auto` or `required` and defaults to `auto` for
+every complexity. `required` is used only when the user explicitly requested
+post-plan approval; governance, Planner, risk, and review recommendations never
+request it on the user's behalf. A user-requested required plan must be its own
+wave. Once that plan completes, the lifecycle result is
+`awaiting_plan_approval` with no successor dispatch and a machine-readable
+`plan_review` containing the objective, complete work packages and microtasks,
+paths, dependencies, verification, material risks, `attempt_result_ref`, and
+`remaining_phases`. The coordinator reads the result, then calls
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
 Cortex returns `cortex/chat-interaction/v1` with `user_view` and `internal`.
 Render only `user_view`: a 3–5 step human summary, one four-way approval
@@ -584,7 +589,9 @@ success, perform only the action authorized by that response: invoke its
 returned dispatches, wait for the exact persisted active workers, or stop on a
    terminal `completed` outcome after closing the consumed child. A terminal
    worker `blocked`/`failed` outcome is server-owned recovery evidence: follow
-   the returned corrective Planner dispatch and do not stop the Cortex task.
+   the returned corrective dispatch for the orchestrator's chosen pipeline and
+   do not stop the Cortex task. A Planner is used only when that chosen
+   corrective pipeline includes one; the finding never forces a Planner wave.
    Never call `continue_orchestration` again with the same step/results, request
    artifacts, add `future_waves`, or spawn a replacement after that receipt. A
    `retryable=false` task-identity or relative-step diagnostic is reconciled by
@@ -627,47 +634,39 @@ include a concise `reason`; reason prose is audit-only and cannot authorize a
 recovery or release a liveness pause. Planner and explorer ownership recommendations are
 advisory routing evidence, not an automatic rewrite command. Prefer the
 narrowest supported profile and replace a stale route only after that explicit
-decision. `general` is a conservative fallback, not the preferred universal
-writer. The public facade infers rework when `future_waves` reintroduces a
-current or completed phase; the optional `rework` field is only a hint. A
-pending implementation phase cannot be silently omitted from a replacement:
-retain it and narrow its result dependencies instead. After an
-exhausted closure-rework budget, ordinary `resume` must not replay the same
-corrective wave. Resume with atomic recovery `payload.future_waves` beginning
-with one Planner wave; Cortex records the replan before returning a dispatch
-and restores every original delivery obligation—implementation, applicable QA,
-security/performance, review, documentation, and close—before requiring fresh
-plan approval. Before documentation or close dispatch, the runtime compares
-the accepted planning catalog with non-invalidated delivery attempts and
-repairs any missing graph instead of accepting documentation as implementation
-evidence. `replan_count` is audit history, not a task-wide quota; the retained
-`replan_limit` field is historical metadata and never blocks a new
-evidence-backed review/remediation cycle. The facade preflights approval,
-rework, and obligation retention before recording the current gate. A requested
-inactive gate is never silently substituted with the first active gate:
-`record_gate` returns the retryable, non-mutating `gate_mismatch` result with
-the requested gate and active-gate list so the coordinator can retry exactly
-the intended transition. A partial failure that left an active current gate
-without a live or pending
-dispatch may use the same Planner-first resume payload; active recovery is
-rejected while any worker is still addressable. Use
+   decision. `general` is a conservative fallback, not the preferred universal
+   writer. The public facade infers rework when `future_waves` reintroduces a
+   current or completed phase; the optional `rework` field is only a hint. A
+   pending implementation phase is retained as an evidence obligation, while
+   the coordinator may narrow dependencies or select another owner. After an
+   exhausted closure-rework cycle, ordinary `resume` records the condition and
+   returns corrective options; it does not impose a Planner wave or fresh plan
+   approval. Before documentation or close dispatch, the runtime reports any
+   missing graph as an advisory finding and the coordinator chooses the repair
+   owner. `replan_count` is audit history, not a task-wide quota; the retained
+   `replan_limit` field never stops a new evidence-backed review/remediation
+   cycle. The facade preflights request integrity before recording the current
+   gate. A requested inactive gate is never silently substituted with the first
+   active gate: `record_gate` returns the retryable, non-mutating `gate_mismatch`
+   result with the requested gate and active-gate list so the coordinator can
+   retry exactly the intended transition. A partial failure that left an active
+   current gate without a live or pending dispatch is returned as corrective
+   advice; the coordinator may choose a Planner or another owner. Use
 `manage_orchestration` for `inspect`, `recover_inspect`, `resume`,
 `deactivate`, `lane`, `resource`, or `question`; these intents do not belong
 in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
-A materially identical no-progress signature pauses autonomous correction only
-after the configured repeat limit, and only for the failed gate. Unpaused
-siblings in that same ordered parallel wave remain executable; a later wave
-cannot leapfrog the paused dependency. Findings and corrective routes from a
-different gate do not alter the failed gate's signature. Recovery must begin
-with one singleton Planner wave and materially change the failed pipeline,
-strategy, or verification contract. An infrastructure/environment pause may
-instead name a class-matched remediation in the Planner wave. If multiple
-gates are paused, `manage_orchestration(intent="resume")` names the intended
-gate with `payload.rework`; it releases no other paused gate. A partial
-baseline or current manifest is diagnostic evidence only and cannot authorize
-read-only mutation reconciliation, a handoff, or terminal close.
+A materially identical no-progress signature is durable routing evidence, not
+a pause or retry budget. Unpaused siblings remain executable and the
+coordinator may dispatch a corrective owner for the affected gate immediately.
+The response can recommend a materially different pipeline, strategy, or
+verification contract, but this recommendation never authorizes or forbids a
+future wave. Infrastructure/environment findings name a class-matched
+remediation. If multiple gates have findings, `manage_orchestration(intent="resume")`
+may name the intended gate with `payload.rework`; no other gate is implicitly
+released. A partial baseline or current manifest remains diagnostic evidence
+and is routed to the coordinator's chosen reconciliation or verification owner.
 
 The question intent accepts only the worker's exact `question_ref` on the
 normal path and resolves all durable identity internally. It returns a
@@ -723,6 +722,18 @@ phases can complete when deterministic intent preflight marks a short product
 surface request as underspecified. Ordinary chat is the only user decision
 surface: after the detailed question message the task must stop until the user
 answers. Silence never authorizes a default answer.
+
+The Question Firewall is the authoritative boundary for this surface. Only
+task requirement, scope, acceptance, product, or explicit
+external/destructive-authorization decisions may become a durable user
+question. Cortex policy, governance, gate, planner, retry, worker/profile,
+dispatch, ledger, evidence, receipt, lifecycle, and recovery conditions are
+never user questions. If `context.decision_scope` is supplied, it must name a
+task scope (`requirement`, `scope`, `acceptance`, `product`,
+`external_authorization`, or `destructive_authorization`) for a user pause;
+internal scopes route to the coordinator as `orchestrator_advice`. An advice
+response is recoverable and must be recorded and delegated without creating a
+question document or setting `requires_user_decision=true`.
 
 Project maintenance uses `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` only after the user
@@ -863,7 +874,7 @@ run: disable bytecode and test/build caches and skip checks that require
 cleanup. Never create an artifact and then delete it to simulate read-only
 verification. State every unrun required check, environmental limitation, and
 remaining uncertainty plainly in summary/claims rather than `unresolved` unless
-it is a concrete blocker. Current source, tests, schemas, and executable
+   it is a concrete unresolved finding. Current source, tests, schemas, and executable
 configuration outrank generated documentation.
 
 ## Private tool-error diagnostics

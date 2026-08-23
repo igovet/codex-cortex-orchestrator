@@ -73,6 +73,34 @@ _GENERIC_NUMBERED_QUESTION = re.compile(
     re.IGNORECASE,
 )
 
+# Question Firewall
+# -----------------
+# A worker question is a user-facing pause only when the worker needs an
+# actual task decision.  Cortex's own mechanics are coordinator concerns and
+# must be returned as internal advice, never persisted as a question.  The
+# explicit ``context.decision_scope`` marker is the authoritative classifier;
+# the conservative text fallback protects older workers that do not send it.
+_QUESTION_TASK_SCOPES = {
+    "task", "task_decision", "requirement", "requirements", "scope", "product",
+    "acceptance", "acceptance_criteria", "external_authorization",
+    "destructive_authorization", "user_choice",
+}
+_QUESTION_INTERNAL_SCOPES = {
+    "internal", "cortex", "policy", "governance", "routing", "recovery",
+    "ledger", "lifecycle", "worker", "profile", "gate", "technical",
+}
+_QUESTION_INTERNAL_MARKERS = (
+    "cortex", "ledger", "mcp", "attempt", "dispatch", "worker", "profile",
+    "recovery", "replay", "receipt", "gate", "governance", "planner",
+    "retry", "retries", "orchestrator", "orchestration", "pipeline",
+)
+_QUESTION_TASK_MARKERS = (
+    "requirement", "scope", "acceptance", "product", "customer", "user-visible",
+    "user visible", "feature", "behavior", "behaviour", "api", "interface",
+    "output", "deploy", "deployment", "production", "external", "delete",
+    "destructive", "publish", "send", "release", "data", "security",
+)
+
 # Keep boundary diagnostics aligned with the public MCP form.  These are
 # intentionally small field schemas: the response contains only the fields
 # that failed, while the tool declaration remains the complete form.
@@ -115,6 +143,88 @@ def _question_diagnostic(path: str, message: str, *, received: Any = _MISSING, e
     if expected is not None:
         item["expected"] = expected
     return item
+
+
+def _question_firewall_scope(params: dict[str, Any]) -> dict[str, Any]:
+    """Classify a proposed question at the user-decision boundary.
+
+    The returned projection is deliberately small and safe to persist in an
+    internal response.  It is not a policy gate: an internal question is
+    converted into coordinator advice so the orchestrator can choose a
+    corrective dispatch or delegate the missing work.
+    """
+    action = str(params.get("action") or "ask").strip().lower()
+    candidates: list[tuple[str, object, object]] = []
+    if action == "ask_batch" and isinstance(params.get("batch"), dict):
+        for index, item in enumerate(params["batch"].get("questions") or []):
+            if isinstance(item, dict):
+                candidates.append((
+                    f"batch.questions[{index}]",
+                    item.get("question"),
+                    item.get("context"),
+                ))
+    else:
+        candidates.append(("question", params.get("question"), params.get("context")))
+
+    internal: list[dict[str, Any]] = []
+    for path, raw_question, raw_context in candidates:
+        question = str(raw_question or "").strip().casefold()
+        context = raw_context if isinstance(raw_context, dict) else {}
+        declared = str(
+            context.get("decision_scope")
+            or context.get("question_scope")
+            or context.get("classification")
+            or ""
+        ).strip().casefold().replace("-", "_").replace(" ", "_")
+        if declared in _QUESTION_TASK_SCOPES:
+            continue
+        if declared in _QUESTION_INTERNAL_SCOPES:
+            internal.append({"path": path, "scope": declared or "internal"})
+            continue
+        haystack = " ".join((question, json.dumps(context, ensure_ascii=False, sort_keys=True))).casefold()
+        matched_internal = [marker for marker in _QUESTION_INTERNAL_MARKERS if marker in haystack]
+        matched_task = [marker for marker in _QUESTION_TASK_MARKERS if marker in haystack]
+        # A task marker gives legacy workers a compatibility escape hatch for
+        # questions whose product behavior happens to mention retries, gates,
+        # or deployment.  Internal-only wording remains coordinator advice.
+        if matched_internal and not matched_task:
+            internal.append({
+                "path": path,
+                "scope": "internal",
+                "matched_terms": matched_internal[:8],
+            })
+    return {
+        "allowed": not internal,
+        "category": "task_decision" if not internal else "internal_cortex",
+        "internal": internal,
+    }
+
+
+def _question_firewall_advice(params: dict[str, Any]) -> dict[str, Any] | None:
+    """Return coordinator advice for a question that must not reach the user."""
+    decision = _question_firewall_scope(params)
+    if decision["allowed"]:
+        return None
+    return {
+        "schema": PUBLIC_ORCHESTRATION_SCHEMA,
+        "ok": True,
+        "outcome": "orchestrator_advice",
+        "requires_user_decision": False,
+        "question_firewall": {
+            "decision": "route_to_orchestrator",
+            "category": decision["category"],
+            "internal_questions": decision["internal"],
+        },
+        "advice": (
+            "This is an internal Cortex condition, not a user task decision. "
+            "Record it as orchestration evidence and choose or delegate the corrective action."
+        ),
+        "next_action": (
+            "Return this internal condition to the coordinator as advice; do not ask the user, "
+            "do not persist a worker question, and continue through the coordinator's corrective dispatch."
+        ),
+        "recoverable": True,
+    }
 
 def _canonical_json_bytes(value: object, *, label: str, maximum: int) -> int:
     """Validate one lossless strict JSON value without a size quota."""
@@ -997,6 +1107,10 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
         preflight.append(_question_diagnostic("$.batch", "ask_batch requires batch", received=params.get("batch"), expected={"type": "object"}))
     if preflight:
         raise ValidationFailure(preflight)
+    if action in {"ask", "ask_batch"}:
+        firewall_advice = _question_firewall_advice(params)
+        if firewall_advice is not None:
+            return firewall_advice
     profile = canonical_profile(params.get("profile") or "")
     if profile not in AGENTS:
         raise ValueError("profile must be an exact Cortex worker profile")
@@ -1204,14 +1318,17 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
         diagnostics = normalized
         return {
             "schema": PUBLIC_ORCHESTRATION_SCHEMA,
-            "ok": False,
-            "outcome": "blocked" if terminal else "needs_correction",
+            "ok": True if terminal else False,
+            "outcome": "orchestrator_advice" if terminal else "needs_correction",
             "code": code,
             "diagnostics": diagnostics,
-            "retryable": not terminal,
+            # A lost/expired worker question is an internal routing fact, not
+            # a Cortex stop. The coordinator must derive a corrective owner;
+            # caller-correctable schema errors remain same-attempt retries.
+            "retryable": True,
             "attempt_budget_consumed": False,
             "next_action": (
-                "Stop this worker call because the response is explicitly non-retryable; do not create a replacement worker."
+                "Record this worker-question lifecycle condition as orchestrator advice, then route the same task to a corrective owner; do not ask the user, stop Cortex, or create a duplicate worker."
                 if terminal else
                 "Correct every listed path in the worker_question request according to its field_schema, preserve all other fields, and call worker_question again with the same project_root, task_id, attempt_id, and profile."
             ),
@@ -1219,7 +1336,12 @@ def worker_question(params: dict[str, Any]) -> dict[str, Any]:
                 "schema": "cortex/validation-error/v1",
                 "diagnostics_are_complete": True,
                 "invalid_paths": [item.get("path") for item in diagnostics if item.get("path")],
-                "retry": {"same_attempt": True, "attempt_budget_consumed": False, "replacement_worker_authorized": False},
+                "retry": {
+                    "same_attempt": not terminal,
+                    "same_task_corrective_dispatch": terminal,
+                    "attempt_budget_consumed": False,
+                    "replacement_worker_authorized": False,
+                },
                 "apply_all_diagnostics_atomically": True,
             },
             "repair": {
@@ -2290,12 +2412,32 @@ def cortex_question(params: dict[str, Any]) -> dict[str, Any]:
     if not task_id or not principal or (not question and not question_id):
         raise ValueError("cortex.question requires task_id, principal, and question or question_id")
 
+    # Main-chat question creation is subject to the same firewall as the
+    # worker facade.  Existing durable records are checked below after they
+    # are loaded; new requests are rejected from the user surface before any
+    # task-document write can occur.
+    if question and not question_id:
+        firewall_advice = _question_firewall_advice(params)
+        if firewall_advice is not None:
+            return firewall_advice
+
     durable: dict[str, Any] | None = None
     if question_id:
         question_id = safe_id(question_id)
         if question_id.startswith("batch-"):
             return _cortex_question_batch(params, question_id)
         record = _question_record_for_main(params, question_id)
+        firewall_advice = _question_firewall_advice({
+            **params,
+            "question": record.get("question"),
+            "context": record.get("context"),
+        })
+        if firewall_advice is not None:
+            return {
+                **firewall_advice,
+                "question_id": question_id,
+                "durable": {"question": record},
+            }
         if record.get("status") == "superseded":
             return {
                 "schema": QUESTION_SCHEMA,

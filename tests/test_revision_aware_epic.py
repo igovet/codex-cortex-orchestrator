@@ -297,7 +297,7 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertFalse(response["requires_user_decision"])
         self.assertFalse(response["user_view"]["requires_user_decision"])
         self.assertNotEqual(response["user_view"]["message_type"], "decision_required")
-        self.assertEqual(response["user_view"]["message_type"], "Something went wrong")
+        self.assertEqual(response["user_view"]["message_type"], "Progress update")
         self.assertIn("manage_orchestration", response["next_action"])
 
     def test_public_boundary_allows_only_explicit_question_to_pause_chat(self) -> None:

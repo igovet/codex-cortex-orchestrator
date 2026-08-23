@@ -82,6 +82,47 @@ def _is_user_decision_event(outcome: object, result: object = None) -> bool:
     return bool(result.get("requires_user_decision") or result.get("question"))
 
 
+def _explicit_plan_approval_requested(
+    response: Mapping[str, Any],
+    result: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return only durable, explicit user intent for plan approval.
+
+    Older lifecycle receipts used ``plan_reapproval_required`` for both a
+    policy-generated Planner recommendation and a genuine user-requested
+    review.  The policy-generated form must not pause the public pipeline.
+    Do not infer intent from ``requires_user_decision`` or from the legacy
+    error code; those fields are precisely what old receipts over-reported.
+    """
+    containers: list[Mapping[str, Any]] = [response]
+    if isinstance(result, Mapping):
+        containers.append(result)
+    for key in ("state_summary", "plan_approval", "task", "pipeline", "request"):
+        value = response.get(key)
+        if isinstance(value, Mapping):
+            containers.append(value)
+    for container in tuple(containers):
+        for key in ("plan_review", "approval"):
+            value = container.get(key)
+            if isinstance(value, Mapping):
+                containers.append(value)
+    for container in containers:
+        if any(
+            container.get(marker) is True
+            for marker in (
+                "plan_approval_user_requested",
+                "user_requested_plan_approval",
+                "plan_review_requested",
+                "explicit_plan_approval_requested",
+            )
+        ):
+            return True
+        approval = container.get("plan_approval")
+        if isinstance(approval, Mapping) and approval.get("user_requested") is True:
+            return True
+    return False
+
+
 def _public_user_view_with_decision(
     rendered: object,
     *,
@@ -155,7 +196,7 @@ PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
     "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is a server-owned reconciliation receipt; Cortex rehydrates the exact task and continues or surfaces only a real task question.",
     "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is an idempotent server-owned retry for a lost recovery response and accepts no coordinator-authored future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
-    "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
+    "worker_question": "Worker-only operation: persist one self-contained task question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. Questions may cover only task requirements, scope, acceptance/product behavior, or explicit external/destructive authorization; Cortex policy, gates, planner, retries, workers, routing, ledger, and recovery are returned as orchestrator advice and never shown as user questions. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget.",
     "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
     "complete_attempt": "Worker-only semantic completion operation. Submit AttemptResult fields: status, summary, findings, decisions_needed, unresolved items, and claims; a planner on the plan gate may submit the initial full planning work breakdown. If planning validation returns diagnostics and a rejected-draft digest, Cortex has retained the complete draft and every field that passed validation: retry this same attempt with ONLY base_payload_digest plus non-empty diagnostic-scoped RFC6902 patches. Never resend or regenerate the full planning object during repair; unrelated fields are preserved server-side. The canonical AttemptResult is immutable and no replacement worker is authorized. Cortex records WORK_COMPLETED before finalization and returns the canonical attempt_result_ref plus a regenerated non-authoritative view reference. Finalization failure is retried on the same completed attempt and never authorizes a replacement worker.",
     "read_dispatch_briefing": "Worker-only scoped read: read exactly the immutable briefing identified by the task, attempt, profile, dispatch, and SHA-256 tuple. A successful complete read records an idempotent server-owned briefing receipt; the worker never copies an acknowledgement marker into semantic output.",
@@ -519,7 +560,16 @@ def build_public_schemas(
                     },
                     "budget": {"type": "string"},
                     "pause_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    "plan_approval": {"type": "string", "enum": ["auto", "required"], "description": "Post-plan user review policy. Defaults to required for C2/C3 and auto for C1."},
+                    "plan_approval": {
+                        "type": "string",
+                        "enum": ["auto", "required"],
+                        "description": (
+                            "Post-plan user review policy. Defaults to auto for every complexity; "
+                            "required is valid only when the user explicitly requested plan approval. "
+                            "Governance, Planner, risk, and review recommendations never request approval "
+                            "on the user's behalf."
+                        ),
+                    },
                     "initiative_ref": {"type": "string", "pattern": "^initiative-[A-Za-z0-9_.:-]+$", "description": "Optional existing initiative scope; the server verifies the reference before task creation."},
                     "governance_mode": {"type": "string", "enum": ["auto", "required", "off"], "description": "Requested governance floor. required always resolves to full. off is valid only for C1 after risk_triggers supplies every documented hard/topology trigger as an explicit boolean false; text and positive structured triggers still force full governance."},
                     "risk_triggers": {"type": ["array", "object"], "description": "Explicit stated governance trigger classes. governance_mode=off requires an exhaustive boolean object; auto/required may use an object or array. No numeric scope inference is applied."},
@@ -863,7 +913,14 @@ def build_public_schemas(
                     "language": {"type": "string"},
                     "complexity": {"type": ["string", "integer"]},
                     "replan_limit": {"type": "integer", "minimum": 0},
-                    "plan_approval": {"type": "string", "enum": ["auto", "required"]},
+                    "plan_approval": {
+                        "type": "string",
+                        "enum": ["auto", "required"],
+                        "description": (
+                            "Explicit plan-review intent for the task. Use required only when the user asked "
+                            "to approve plans; internal recommendations remain advisory."
+                        ),
+                    },
                     "result_refs": {"type": "array", "uniqueItems": True, "items": {"type": "string", "minLength": 1}},
                     "question": {"type": "string", "minLength": 1},
                     "header": {"type": "string"},
@@ -898,7 +955,7 @@ def build_public_schemas(
                     "placeholders are rejected. If Cortex returns "
                     "awaiting_translation, submit its translation_request unchanged except for the English translation: "
                     "a single question uses {question_ref, answer, answer_en}; a batch uses {question_ref, canonical_answers}. "
-                    "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after an exhausted closure-rework cycle, payload.future_waves must begin with a Planner recovery wave; Cortex infers rework and records the replacement before dispatch. When several no-progress gates are paused, payload.rework names the exact gate to release. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
+                    "Cortex resolves task/principal/thread and never opens nested UI. For intent=resume after a closure-rework cycle, payload.future_waves is the coordinator's chosen corrective pipeline; Planner is one recommendation, not a required first wave. No-progress findings are recorded as routing evidence and do not pause other executable work; payload.rework may name the exact gate to update when several findings exist. Never add guessed identity fields. Artifacts accepts a bounded list, metadata, or read "
                     "action and opaque cursors; it never returns all bodies together. Prune requires confirmation='PRUNE' "
                     "and accepts older_than_days (default 7). Maintenance accepts action=health|checkpoint|backup|verify_backup_restore|optimize|vacuum|reconcile_projections. Every mutating maintenance action requires its exact action-specific confirmation; backup creates a private .cortex-backup DR bundle containing the SQLite ledger, governance lifecycle key, and fingerprint manifest, and verify_backup_restore validates that bundle on a fresh disposable host root through the governance layer. Normal wave progression never uses this field."
                 ),
@@ -1082,14 +1139,45 @@ def v3_response(
             "requires_user_decision": requires_user_decision,
         }
         if old.get("code") == "plan_reapproval_required":
-            response["outcome"] = "plan_reapproval_required"
-            # Plan reapproval is a typed user decision, not a coordinator
-            # lock.  Keep the action concrete and let user_view carry the
-            # approval interaction without exposing routing policy text.
-            response["next_action"] = str(old.get("next_action") or (
-                "Call manage_orchestration with intent=plan_approval for the same task_ref "
-                "and submit the user's explicit approve, revise, or cancel decision."
-            ))
+            explicit_plan_review = _explicit_plan_approval_requested(old, old_result)
+            requires_user_decision = explicit_plan_review
+            if explicit_plan_review:
+                response["outcome"] = "plan_reapproval_required"
+                # This is the only legacy form that may pause the visible
+                # chat: the durable receipt contains an explicit user intent
+                # marker, rather than merely a policy-generated recommendation.
+                response["requires_user_decision"] = True
+                response["next_action"] = str(old.get("next_action") or (
+                    "Call manage_orchestration with intent=plan_approval for the same task_ref "
+                    "and submit the user's explicit approve, revise, or cancel decision."
+                ))
+            else:
+                # Legacy policy defaults (notably C2/C3's former implicit
+                # required mode) are advisory evidence.  They must not be
+                # exposed as approval stops or copied into user_view as a
+                # question.  Keep the original diagnostics for audit, while
+                # routing the chosen pipeline through normal recovery.
+                response["outcome"] = "recovery_pending"
+                response["code"] = "plan_reapproval_advisory"
+                response["requires_user_decision"] = False
+                response["advisory"] = {
+                    "code": "plan_reapproval_advisory",
+                    "source_code": "plan_reapproval_required",
+                    "severity": "warning",
+                    "requires_user_decision": False,
+                    "message": "Legacy plan-review policy was normalized to orchestrator-owned advice.",
+                }
+                response["recovery"] = {
+                    "mode": "orchestrator_owned",
+                    "action": "continue_chosen_pipeline",
+                    "same_task": True,
+                    "replacement_worker": False,
+                }
+                response["next_action"] = (
+                    f"Continue the chosen pipeline for task_ref={task_ref!r} using the server-returned "
+                    "continuation or corrective dispatch; record the plan recommendation as advisory and "
+                    "do not call intent=plan_approval or ask the user."
+                )
         if task_ref:
             response["task_ref"] = task_ref
         if include_result and "result" in old:
