@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from cortex_runtime import ledger_db
+from cortex_runtime import canonical_json, ledger_db
 
 
 GOVERNANCE_SCHEMA = "cortex/governance/v1"
@@ -68,13 +68,7 @@ def _now() -> str:
 
 def _canonical(value: Any) -> str:
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
+        return canonical_json.dumps(value)
     except (TypeError, ValueError) as exc:
         raise GovernanceError("governance content must be strict JSON", code="content_invalid") from exc
 
@@ -95,7 +89,7 @@ def _bounded_governance_text(value: Any, *, label: str, required: bool = False) 
 
 
 def _digest(value: Any) -> str:
-    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+    return canonical_json.digest(value)
 
 
 def _parse_timestamp(value: Any, label: str) -> datetime:

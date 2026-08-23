@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from cortex_runtime import attempt_protocol, communication
+from cortex_runtime import attempt_protocol, canonical_json, communication
 from cortex_runtime.validation import ValidationFailure, collect_validations
 
 from cortex_runtime.core.runtime_bindings import bind_symbols
@@ -119,9 +119,7 @@ def _question_diagnostic(path: str, message: str, *, received: Any = _MISSING, e
 def _canonical_json_bytes(value: object, *, label: str, maximum: int) -> int:
     """Validate one lossless strict JSON value without a size quota."""
     try:
-        encoded = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
-        ).encode("utf-8")
+        encoded = canonical_json.dumps(value).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be JSON-serializable") from exc
     del label, maximum
@@ -707,7 +705,7 @@ def _batch_payload(params: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if len(keys) != len(set(keys)):
         raise ValueError("batch question_key values must be unique")
     batch = {"batch_key": batch_key, "questions": questions}
-    content_digest = digest_text(json.dumps(batch, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    content_digest = digest_text(canonical_json.dumps(batch))
     return batch, content_digest
 
 
@@ -1066,7 +1064,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
             _question_config(params)
             submission_id = safe_id(
                 f"public-{attempt_id}-question-"
-                + digest_text(json.dumps({
+                + digest_text(canonical_json.dumps({
                     "question": question,
                     "context": params.get("context"),
                     "header": params.get("header"),
@@ -1076,7 +1074,7 @@ def _worker_question_impl(params: dict[str, Any]) -> dict[str, Any]:
                     "recommendation": params.get("recommendation"),
                     "recommended_option_ids": params.get("recommended_option_ids"),
                     "recommended_answer": params.get("recommended_answer"),
-                }, ensure_ascii=False, sort_keys=True, default=str))[:16]
+                }))[:16]
             )
             result = publish_worker_question({
                 **params,
@@ -1339,7 +1337,7 @@ def answer_worker_question(params: dict[str, Any]) -> dict[str, Any]:
             "selections": [option_map[item] for item in option_ids],
             "custom_response": custom_text,
         }
-        answer_digest = digest_text(json.dumps({"answer": answer, "answer_en": answer_en, "resume_context": resume_context}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        answer_digest = digest_text(canonical_json.dumps({"answer": answer, "answer_en": answer_en, "resume_context": resume_context}))
         if record.get("status") == "answered":
             if record.get("answer_submission_id") != submission_id:
                 raise ValueError("worker question has already been answered")

@@ -111,6 +111,7 @@ def build_public_schemas(
     question_option_schema: dict[str, Any],
     available_gates: set[str] | None = None,
     pipeline_gate_aliases: Mapping[str, str] | None = None,
+    profile_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build the nine fresh public contracts independently of handlers."""
     # The runtime supplies these from its authoritative contract.  Keeping a
@@ -123,6 +124,9 @@ def build_public_schemas(
         "governance_close",
     })
     gate_aliases = dict(pipeline_gate_aliases or {})
+    profile_aliases = dict(profile_aliases or {})
+    public_phase_values = sorted(canonical_gates | set(gate_aliases))
+    public_profile_values = sorted(set(agents) | set(profile_aliases))
     EXECUTED_TEST_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -158,6 +162,16 @@ def build_public_schemas(
         "uniqueItems": True,
         "items": {"type": "string", "minLength": 1},
     }
+    PLANNING_NARROW_PATHS_SCHEMA = {
+        "type": "array",
+        "minItems": 1,
+        "uniqueItems": True,
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {"enum": [".", "*"]},
+        },
+    }
     PLANNING_DEPENDENCIES_SCHEMA = {
         "type": "array",
         "uniqueItems": True,
@@ -184,8 +198,12 @@ def build_public_schemas(
             "id": {"type": "string", "maxLength": 80, "pattern": "^[a-z0-9][a-z0-9_-]*$"},
             "title": {"type": "string", "minLength": 1},
             "objective": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": sorted(agents)},
-            "allowed_paths": PLANNING_PATHS_SCHEMA,
+            "profile": {
+                "type": "string",
+                "enum": public_profile_values,
+                "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
+            },
+            "allowed_paths": PLANNING_NARROW_PATHS_SCHEMA,
             "depends_on": PLANNING_DEPENDENCIES_SCHEMA,
             "status": {"type": "string", "enum": ["pending", "ready", "running", "blocked", "completed", "skipped"]},
             "order": {"type": "integer", "minimum": 1},
@@ -298,7 +316,7 @@ def build_public_schemas(
             },
             "profile": {
                 "type": "string",
-                "enum": sorted(agents),
+                "enum": public_profile_values,
                 "description": "Optional canonical Cortex profile name; omit it to use the phase owner. Accepted convenience aliases are normalized before persistence.",
             },
             "objective": {"type": "string"},
@@ -310,7 +328,10 @@ def build_public_schemas(
             "paths": {"type": "array", "items": {"type": "string"}},
             "allowed_paths": {
                 "type": "array", "minItems": 1,
-                "items": {"type": "string", "minLength": 1},
+                "items": {
+                    "type": "string", "minLength": 1,
+                    "not": {"enum": [".", "*"]},
+                },
                 "description": (
                     "Canonical server-owned worker write scope. Paths must be narrow, project-relative, and "
                     "must not be `.` or `*`; Cortex validates and normalizes them before dispatch."
@@ -330,7 +351,7 @@ def build_public_schemas(
             "depends_on": {
                 "type": "array",
                 "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1, "enum": sorted(canonical_gates)},
+                "items": {"type": "string", "minLength": 1, "enum": public_phase_values},
                 "description": (
                     "Optional exact prerequisite phases whose verified AttemptResults this worker must receive. "
                     "Omit to receive every completed predecessor result; use an empty list only when the worker "
@@ -388,20 +409,20 @@ def build_public_schemas(
                 "additionalProperties": False,
                 "properties": {
                     "user_request": {"type": "string", "minLength": 1, "description": "Exact user-authored task text. Do not paraphrase, normalize, or expand it."},
-                    "requirements": {"type": "array", "items": {"type": "string"}},
-                    "constraints": {"type": "array", "items": {"type": "string"}, "description": "Explicit non-negotiable task constraints compiled as first-class canonical context."},
+                    "requirements": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Explicit non-negotiable task constraints compiled as first-class canonical context."},
                     "acceptance_criteria": {
                         "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
                         "description": "Required observable outcomes, except harvest routes where Cortex supplies the exhaustive census contract.",
                     },
-                    "scope": {"type": "array", "items": {"type": "string"}},
-                    "allowed_paths": {"type": "array", "items": {"type": "string"}},
+                    "scope": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "allowed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     "verification": {
                         "type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1},
                         "description": "Required authoritative checks, except harvest routes where Cortex supplies the census checks.",
                     },
                     "budget": {"type": "string"},
-                    "pause_conditions": {"type": "array", "items": {"type": "string"}},
+                    "pause_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     "plan_approval": {"type": "string", "enum": ["auto", "required"], "description": "Post-plan user review policy. Defaults to required for C2/C3 and auto for C1."},
                     "initiative_ref": {"type": "string", "pattern": "^initiative-[A-Za-z0-9_.:-]+$", "description": "Optional existing initiative scope; the server verifies the reference before task creation."},
                     "governance_mode": {"type": "string", "enum": ["auto", "required", "off"], "description": "Requested governance floor. required always resolves to full. off is valid only for C1 after risk_triggers supplies every documented hard/topology trigger as an explicit boolean false; text and positive structured triggers still force full governance."},
@@ -496,7 +517,7 @@ def build_public_schemas(
             "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": sorted(agents)},
+            "profile": {"type": "string", "enum": public_profile_values},
             "event_type": {
                 "type": "string",
                 "enum": ["finding_added", "decision_evidence", "blocker", "verification_claimed", "progress", "note"],
@@ -526,7 +547,7 @@ def build_public_schemas(
             "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": sorted(agents)},
+            "profile": {"type": "string", "enum": public_profile_values},
             "status": {"type": "string", "enum": ["completed", "blocked", "failed"]},
             "summary": {"type": "string", "minLength": 1},
             "findings": {"type": "array"},
@@ -613,7 +634,7 @@ def build_public_schemas(
             "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": sorted(agents)},
+            "profile": {"type": "string", "enum": public_profile_values},
             "action": {"type": "string", "enum": ["ask", "poll", "ask_batch", "poll_batch"]},
             "question_ref": {"type": "string", "description": "Exact ref returned by ask; required for poll."},
             "batch_ref": {"type": "string", "description": "Exact ref returned by ask_batch; required for poll_batch."},
@@ -666,7 +687,7 @@ def build_public_schemas(
             "task_ref": {"type": "string", "description": "Exact opaque task reference; required for every result read."},
             "attempt_result_ref": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1, "description": "Successor workers copy the exact attempt id from their dispatch; coordinators omit it."},
-            "profile": {"type": "string", "enum": sorted(agents), "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
+            "profile": {"type": "string", "enum": public_profile_values, "description": "Successor workers copy the exact profile from their dispatch; coordinators omit it."},
         },
         "required": ["project_root", "task_ref", "attempt_result_ref"],
     }
@@ -677,7 +698,7 @@ def build_public_schemas(
             "project_root": {"type": "string", "minLength": 1, "format": "absolute-path"},
             "task_id": {"type": "string", "minLength": 1},
             "attempt_id": {"type": "string", "minLength": 1},
-            "profile": {"type": "string", "enum": sorted(agents)},
+            "profile": {"type": "string", "enum": public_profile_values},
             "dispatch_ref": {"type": "string", "minLength": 1},
             "briefing_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "cursor": {"type": "string", "description": "Opaque continuation cursor for the same large immutable briefing; task, worker identity, dispatch and digest remain required on every call."},
@@ -733,14 +754,14 @@ def build_public_schemas(
                     "localized_custom_label": {"type": "string"},
                     "source_task_ref": {"type": "string", "minLength": 1},
                     "user_request": {"type": "string", "minLength": 1},
-                    "requirements": {"type": "array", "items": {"type": "string"}},
-                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "requirements": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                    "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     "acceptance_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                    "scope": {"type": "array", "items": {"type": "string"}},
+                    "scope": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     "allowed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     "verification": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
                     "budget": {"type": "string"},
-                    "pause_conditions": {"type": "array", "items": {"type": "string"}},
+                    "pause_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     "user_language": {"type": "string"},
                     "language": {"type": "string"},
                     "complexity": {"type": ["string", "integer"]},

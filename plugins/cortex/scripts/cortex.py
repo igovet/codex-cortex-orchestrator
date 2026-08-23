@@ -150,6 +150,7 @@ from cortex_runtime.governance import (
     manage_governance as manage_governance_service,
     resolve_governance,
 )
+from cortex_runtime import canonical_json
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback; atomic replace still applies.
@@ -1249,9 +1250,7 @@ def stable_project_id(project: Path) -> str:
         "device": int(info.st_dev),
         "inode": int(info.st_ino),
     }
-    return "p-" + hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return "p-" + canonical_json.digest(identity)
 
 
 _HOST_PROJECT_IDENTITY_KEY = "host_project_identity"
@@ -1763,7 +1762,7 @@ def capture_project_manifest(root: Path | None = None, policy: dict[str, Any] | 
         "at": budget["at"],
     }
     digest_payload: Any = {"entries": entries, "partial_manifest": partial_descriptor} if budget["partial"] else entries
-    encoded = json.dumps(digest_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    encoded = canonical_json.dumps(digest_payload)
     if policy is None:
         active_policy["gitignore_rules"] = discovered_rules
     active_policy["effective_ignored_roots"] = sorted(Path(*parts).as_posix() for parts in ignored_roots)
@@ -1859,14 +1858,14 @@ def manifest_snapshot_ref(manifest: dict[str, Any]) -> str:
     # ``manifest.digest`` deliberately fingerprints project entries only.  A
     # snapshot must also pin the frozen ignore policy and root, otherwise two
     # captures could have the same entries but different reconciliation scope.
-    snapshot_digest = digest_text(json.dumps({
+    snapshot_digest = digest_text(canonical_json.dumps({
         "schema": manifest.get("schema"),
         "project_root": manifest.get("project_root"),
         "policy": manifest.get("policy"),
         "entries": manifest.get("entries"),
         "entry_count": manifest.get("entry_count"),
         "manifest_digest": manifest_digest,
-    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    }))
     return f"{MANIFEST_SNAPSHOT_PREFIX}{snapshot_digest}"
 
 
@@ -2315,7 +2314,7 @@ def classify_task(params: dict[str, Any]) -> dict[str, Any]:
             "classification_id": receipt_id,
             "activation_key": key,
             "complexity": result["complexity"],
-            "requirements_digest": digest_text(json.dumps(normalized_requirements, sort_keys=True)),
+            "requirements_digest": digest_text(canonical_json.dumps(normalized_requirements)),
             # The receipt is the authoritative classification contract.  Keep
             # the bounded task requirements here so init_task need not ask the
             # coordinator to reproduce a second, byte-identical copy.
@@ -3024,6 +3023,13 @@ def sanitize_structured(value: Any) -> Any:
         return {str(key): "<REDACTED>" if SENSITIVE_KEY_RE.search(str(key)) else sanitize_structured(item) for key, item in value.items()}
     if isinstance(value, list):
         return [sanitize_structured(item) for item in value]
+    # Preserve JSON scalar types.  Governance policy snapshots are hashed
+    # before they enter init_task; stringifying numeric values here would make
+    # the persisted snapshot differ from the server-owned digest.  Unknown
+    # Python objects still get the historical string representation so this
+    # helper remains safe for incidental host metadata.
+    if value is None or isinstance(value, (bool, int)) or (isinstance(value, float) and math.isfinite(value)):
+        return value
     return redact(value, 2000)
 
 
@@ -3925,8 +3931,7 @@ def _plan_tracker_document(
 
 def planning_payload_digest(value: Any) -> str:
     """Return the stable digest used by same-attempt planning repair."""
-    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return "sha256:" + canonical_json.digest(value)
 
 
 def planning_rejected_draft_document(
@@ -4198,7 +4203,7 @@ def materialize_planning_payload(
                 kind="planning_revision",
                 title=f"{revision}:package:{package_id}",
                 mime_type="application/json",
-                content=json.dumps(package_record, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                content=canonical_json.dumps(package_record),
                 export_path=package_path,
             )
             next(summary for summary in summaries if summary["id"] == package_id)["artifact_ref"] = metadata["artifact_ref"]
@@ -4332,7 +4337,7 @@ def _question_payload(params: dict[str, Any]) -> tuple[str, Any, bool, dict[str,
     require_internal_english(config["options"], "worker question options")
     require_internal_english(config["recommendation"], "worker question recommendation")
     require_internal_english(config["recommended_answer"], "worker question recommended_answer")
-    digest = digest_text(json.dumps({"question": sanitized_question, "context": context, "blocking": blocking, "config": config}, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    digest = digest_text(canonical_json.dumps({"question": sanitized_question, "context": context, "blocking": blocking, "config": config}))
     return sanitized_question, context, blocking, config, digest
 
 
@@ -4443,9 +4448,8 @@ def _resolved_user_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict
             "answer_option_ids": [safe_id(str(item)) for item in record.get("answer_option_ids") or []],
             "answered_at": record.get("answered_at"),
         }
-        decision["decision_digest"] = digest_text(json.dumps(
+        decision["decision_digest"] = digest_text(canonical_json.dumps(
             {key: decision[key] for key in ("source_type", "source_ref", "question_key", "question_en", "answer_en", "answer_option_ids")},
-            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ))
         decisions.append(decision)
 
@@ -4479,9 +4483,8 @@ def _resolved_user_decisions(task_dir: Path, state: dict[str, Any]) -> list[dict
                 "answer_option_ids": [safe_id(str(item)) for item in answer.get("answer_option_ids") or []],
                 "answered_at": answer.get("answered_at") or batch.get("answered_at"),
             }
-            decision["decision_digest"] = digest_text(json.dumps(
+            decision["decision_digest"] = digest_text(canonical_json.dumps(
                 {key: decision[key] for key in ("source_type", "source_ref", "question_key", "question_en", "answer_en", "answer_option_ids")},
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             ))
             decisions.append(decision)
     decisions.sort(key=lambda item: (str(item.get("answered_at") or ""), item["source_ref"], item["question_key"]))
@@ -6163,11 +6166,11 @@ def status(params: dict[str, Any]) -> dict[str, Any]:
     root, task_dir, state = load_state(str(params["task_id"]), params)
     authorize_principal(state, params)
     task = load_task_definition(task_dir, state)
-    receipt_id = "status-" + digest_text(json.dumps({
+    receipt_id = "status-" + digest_text(canonical_json.dumps({
         "task_id": state["task_id"],
         "principal": state.get("principal", "local"),
         "revision": state["revision"],
-    }, sort_keys=True))[:24]
+    }))[:24]
     active = activation_record(root, {"thread_id": state.get("thread_id"), "principal": state.get("principal")}, state["task_id"])
     return {"task": task, "state": state, "active": bool(active), "status_receipt": receipt_id, "ledger_root": str(root)}
 
@@ -6259,11 +6262,11 @@ def prepare_delegations(params: dict[str, Any]) -> dict[str, Any]:
         authorize(current_state, params)
         current_wave = active_gates(current_state)
         staged: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        status_receipt = "status-" + digest_text(json.dumps({
+        status_receipt = "status-" + digest_text(canonical_json.dumps({
             "task_id": current_state["task_id"],
             "principal": current_state.get("principal", "local"),
             "revision": current_state["revision"],
-        }, sort_keys=True))[:24]
+        }))[:24]
         observed = {
             "task": load_task_definition(task_dir, current_state),
             "state": current_state,
@@ -6889,7 +6892,7 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "attempt_result_ref": attempt_result_ref,
         "kind": kind,
         "summary": redact(summary),
-        "digest": redact(params.get("digest", ""), 256) or digest_text(json.dumps(execution, sort_keys=True) if execution else params.get("command", summary)),
+        "digest": redact(params.get("digest", ""), 256) or digest_text(canonical_json.dumps(execution) if execution else params.get("command", summary)),
         "command": redact(params.get("command", ""), 1000),
         "argv": [redact(item, 500) for item in execution.get("argv", [])],
         "cwd": execution.get("cwd"),
@@ -6907,7 +6910,7 @@ def _record_evidence_locked(task_dir: Path, state: dict[str, Any], params: dict[
         "independent_reviewer": bool(params.get("independent_reviewer")) if "independent_reviewer" in params else None,
         "created_at": now(),
     }
-    canonical_content = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical_content = canonical_json.dumps(evidence)
     artifact = store_immutable_artifact(
         task_dir,
         state["task_id"],
@@ -7167,7 +7170,7 @@ def _record_commit_gate_recovery(
     """Persist bounded fast-path failures so a bad adapter cannot hang a task."""
     gate = str(params.get("gate") or primary_gate(state) or "unknown")
     reason = redact(error, 1000)
-    failure_key = digest_text(json.dumps({"gate": gate, "mode": mode, "error": reason}, sort_keys=True))
+    failure_key = digest_text(canonical_json.dumps({"gate": gate, "mode": mode, "error": reason}))
     events = state.setdefault("recovery_events", [])
     previous = [
         item for item in events
@@ -7652,6 +7655,20 @@ def _validation_next_action(
     )
     paths = [str(item.get("path")) for item in diagnostics if isinstance(item, dict) and item.get("path")]
     path_text = f" Fix these exact paths first: {', '.join(paths)}." if paths else ""
+    if operation == "start_orchestration":
+        task_rule = (
+            " For task paths, use the nested task field_schema: requirements, constraints, scope, "
+            "allowed_paths, and pause_conditions are arrays of strings; acceptance_criteria and "
+            "verification are non-empty arrays of non-empty strings."
+            if any(path == "task" or path.startswith("task.") for path in paths)
+            else ""
+        )
+        return (
+            "Retry start_orchestration with the same project_root and task.user_request. "
+            "Correct every listed path according to the advertised start_orchestration schema; "
+            "preserve every valid field and do not create a task until all listed paths are valid."
+            + task_rule + path_text + suffix
+        )
     if operation in {"manage_orchestration", "management_failed", "manage_orchestration_validation_failed"}:
         identity = (
             f" Keep task_ref={task_ref!r} and the same project_root." if task_ref else
@@ -7680,10 +7697,19 @@ def _validation_next_action(
             "read_dispatch_briefing": "the exact task_id, attempt_id, profile, dispatch_ref, briefing_digest, and optional cursor",
             "worker_question": "action, question/options or the exact returned question_ref",
         }[operation]
+        planning_nesting = ""
+        if operation == "complete_attempt" and any(
+            path in {"$.overview", "$.work_packages"} for path in paths
+        ):
+            planning_nesting = (
+                " `overview` and `work_packages` are planning fields: move them under "
+                "`planning.overview` and `planning.work_packages`; do not submit them at the "
+                "complete_attempt top level."
+            )
         return (
             f"Retry {operation} on the same attempt. Correct the exact diagnostic paths listed in diagnostics; "
             f"send only the documented fields ({tool_fields})."
-            + path_text + suffix
+            + planning_nesting + path_text + suffix
         )
     return f"Correct every listed diagnostic and retry the same {operation} call without changing unrelated fields." + path_text + suffix
 
@@ -7790,6 +7816,82 @@ def _enrich_validation_diagnostics(
         diagnostic.setdefault("fix", f"Correct {path} according to field_schema and retry {operation} with unrelated fields unchanged.")
         enriched.append(diagnostic)
     return enriched
+
+
+def _start_exception_diagnostics(exc: BaseException, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Turn late start validation exceptions into field-level form errors.
+
+    The initial envelope pass catches missing/unknown keys, but normalization
+    and wave compilation happen later in the same atomic start transaction.
+    Those checks must use the same public field contract instead of falling
+    through to the coordinator-only lock text. ValidationFailure already
+    carries complete nested diagnostics; the mapping below covers scalar/list
+    checks that intentionally remain strict helpers.
+    """
+    if isinstance(exc, ValidationFailure):
+        return [dict(item) for item in exc.diagnostics]
+
+    message = redact(str(exc), 1000)
+    raw_task = params.get("task") if isinstance(params, Mapping) else None
+    task_schema: dict[str, Any] = {}
+    registry = globals().get("PUBLIC_SCHEMA_REGISTRY")
+    start_schema = registry.get("start_orchestration") if isinstance(registry, dict) else None
+    if isinstance(start_schema, dict):
+        properties = start_schema.get("properties")
+        task_schema = properties.get("task", {}) if isinstance(properties, dict) and isinstance(properties.get("task"), dict) else {}
+    task_properties = task_schema.get("properties", {}) if isinstance(task_schema, dict) else {}
+
+    path: str | None = None
+    received: Any = None
+    field_schema: dict[str, Any] | None = None
+    match = re.fullmatch(r"(?P<field>[a-z_]+) must be a current canonical text array", message)
+    if match:
+        field = match.group("field")
+        path = f"task.{field}"
+        received = raw_task.get(field) if isinstance(raw_task, dict) else None
+        field_schema = task_properties.get(field) if isinstance(task_properties, dict) else None
+    elif message.startswith("task requirements must be a current canonical text array"):
+        path = "task.requirements"
+        received = raw_task.get("requirements") if isinstance(raw_task, dict) else None
+        field_schema = task_properties.get("requirements") if isinstance(task_properties, dict) else None
+    else:
+        match = re.fullmatch(r"task\.(?P<field>[a-z_]+) must be (?:an array of non-empty strings|a boolean|a BCP-47-like lowercase language tag)", message)
+        if match:
+            field = match.group("field")
+            path = f"task.{field}"
+            received = raw_task.get(field) if isinstance(raw_task, dict) else None
+            field_schema = task_properties.get(field) if isinstance(task_properties, dict) else None
+        elif message.startswith("task.acceptance_criteria") or message.startswith("task.verification"):
+            field = "acceptance_criteria" if message.startswith("task.acceptance_criteria") else "verification"
+            path = f"task.{field}"
+            received = raw_task.get(field) if isinstance(raw_task, dict) else None
+            field_schema = task_properties.get(field) if isinstance(task_properties, dict) else None
+        elif message.startswith("waves must be"):
+            path = "waves"
+            received = params.get("waves") if isinstance(params, Mapping) else None
+            properties = start_schema.get("properties", {}) if isinstance(start_schema, dict) else {}
+            field_schema = properties.get("waves") if isinstance(properties, dict) else None
+
+    if path is None:
+        # Keep a deterministic field location even for a late environmental
+        # or governance check. The full message remains available, but the
+        # caller receives a repairable start form rather than an internal lock.
+        path = "task" if message.startswith(("task ", "task.", "orchestration requires")) else "request"
+        field_schema = task_schema if path == "task" and isinstance(task_schema, dict) else start_schema
+        received = raw_task if path == "task" else None
+
+    diagnostic: dict[str, Any] = {
+        "code": "start_orchestration_validation_failed",
+        "phase": "preflight",
+        "path": path,
+        "message": message,
+        "received": received,
+        "expected": field_schema or "a value accepted by the advertised start_orchestration schema",
+        "fix": f"Correct {path} according to field_schema and retry start_orchestration without changing unrelated fields.",
+    }
+    if isinstance(field_schema, dict):
+        diagnostic["field_schema"] = field_schema
+    return [diagnostic]
 
 
 def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -10197,6 +10299,74 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 })
             if not str(raw_task_probe.get("user_request") or "").strip():
                 envelope.append({"code": "start_orchestration_validation_failed", "path": "task.user_request", "message": "is required"})
+            # Validate nested task collections at the public boundary before
+            # normalization can raise a scalar ValueError.  The latter used
+            # to collapse `task.scope: "..."` into a bare message, so the
+            # caller could not see the failing path or the exact advertised
+            # field schema and models often retried the same malformed form.
+            task_schema = (
+                PUBLIC_SCHEMA_REGISTRY.get("start_orchestration", {})
+                .get("properties", {})
+                .get("task", {})
+                .get("properties", {})
+            )
+            for field in ("requirements", "constraints", "acceptance_criteria", "scope", "allowed_paths", "verification", "pause_conditions"):
+                value = raw_task_probe.get(field)
+                if value is None:
+                    continue
+                field_path = f"task.{field}"
+                field_schema = task_schema.get(field) if isinstance(task_schema, dict) else None
+                if not isinstance(value, list):
+                    envelope.append({
+                        "code": "start_orchestration_validation_failed",
+                        "phase": "preflight",
+                        "path": field_path,
+                        "message": "must be an array of non-empty strings",
+                        "received": {"type": type(value).__name__},
+                        "expected": field_schema or {"type": "array", "items": {"type": "string", "minLength": 1}},
+                        "field_schema": field_schema or {"type": "array", "items": {"type": "string", "minLength": 1}},
+                        "fix": f"Replace {field_path} with an array containing only non-empty strings; preserve every valid task field.",
+                    })
+                else:
+                    for index, item in enumerate(value):
+                        if not isinstance(item, str) or not item.strip():
+                            item_path = f"{field_path}[{index}]"
+                            envelope.append({
+                                "code": "start_orchestration_validation_failed",
+                                "phase": "preflight",
+                                "path": item_path,
+                                "message": "must be a non-empty string",
+                                "received": {"type": type(item).__name__},
+                                "expected": {"type": "string", "minLength": 1},
+                                "field_schema": {"type": "string", "minLength": 1},
+                                "fix": f"Replace {item_path} with a non-empty string and preserve every valid task field.",
+                            })
+            # The conditional task contract is also a nested form rule.  Keep
+            # missing/empty required controls in the same structured receipt
+            # as type errors, rather than allowing _required_task_result_contract
+            # to raise a generic ValueError after the boundary pass.
+            if not _is_knowledge_harvest_task(raw_task_probe):
+                missing_required_fields = [
+                    field for field in ("acceptance_criteria", "verification")
+                    if raw_task_probe.get(field) is None
+                    or (isinstance(raw_task_probe.get(field), list) and not raw_task_probe.get(field))
+                ]
+                for field in ("acceptance_criteria", "verification"):
+                    value = raw_task_probe.get(field)
+                    if value is None or (isinstance(value, list) and not value):
+                        field_path = f"task.{field}"
+                        field_schema = task_schema.get(field) if isinstance(task_schema, dict) else None
+                        missing_text = ", ".join(f"task.{item}" for item in missing_required_fields)
+                        envelope.append({
+                            "code": "start_orchestration_validation_failed",
+                            "phase": "preflight",
+                            "path": field_path,
+                            "message": f"{missing_text} are required and must contain at least one non-empty string",
+                            "received": ({"type": "null"} if value is None else {"type": "array", "length": 0}),
+                            "expected": field_schema or {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                            "field_schema": field_schema or {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                            "fix": f"Provide {field_path} as an array with at least one non-empty string; preserve every valid task field.",
+                        })
         if "waves" in params and params.get("waves") is not None and not isinstance(params.get("waves"), list):
             envelope.append({"code": "start_orchestration_validation_failed", "path": "waves", "message": "must be an array"})
         if envelope:
@@ -10364,6 +10534,14 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 reason="start_authorization_response_unavailable",
             )
         return _v3_start_state_blocked_error(exc)
+    except ValidationFailure as exc:
+        if staged_authorization_task_id:
+            _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
+            _revoke_coordinator_capability(
+                ledger_root(params), staged_authorization_task_id,
+                reason="start_authorization_response_unavailable",
+            )
+        return _v3_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
     except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
         if staged_authorization_task_id:
             _take_coordinator_capability(ledger_root(params), staged_authorization_task_id)
@@ -10371,7 +10549,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                 ledger_root(params), staged_authorization_task_id,
                 reason="start_authorization_response_unavailable",
             )
-        return _v3_error("start_validation_failed", exc)
+        return _v3_envelope_error("start_orchestration", _start_exception_diagnostics(exc, params))
 
 
 def _v3_status(value: object, *, has_attempt_result: bool) -> str:
@@ -11111,7 +11289,7 @@ def _v3_plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]
         "task_id": str(state.get("task_id") or ""),
         "pending_basis": pending_basis,
     }
-    return "plan-approval-" + digest_text(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))[:32]
+    return "plan-approval-" + digest_text(canonical_json.dumps(seed))[:32]
 
 
 PLAN_APPROVAL_TRANSLATIONS: dict[str, tuple[str, str, str, str, str]] = {
@@ -12434,6 +12612,10 @@ PUBLIC_SCHEMA_REGISTRY = build_public_schemas(
     question_option_schema=QUESTION_OPTION_SCHEMA,
     available_gates=AVAILABLE_GATES,
     pipeline_gate_aliases=PIPELINE_GATE_ALIASES,
+    profile_aliases={
+        **PROFILE_ALIASES,
+        **{alias: "general" for alias in V3_AUTOMATIC_IMPLEMENTATION_PROFILE_ALIASES},
+    },
 )
 START_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["start_orchestration"]
 CONTINUE_ORCHESTRATION_SCHEMA = PUBLIC_SCHEMA_REGISTRY["continue_orchestration"]

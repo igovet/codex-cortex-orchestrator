@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_runtime.core.runtime_bindings import bind_symbols, bound_symbol
-from cortex_runtime import attempt_protocol
+from cortex_runtime import attempt_protocol, canonical_json
 from cortex_runtime.context_compiler import context_domain_from_canonical
 
 
@@ -503,7 +503,7 @@ def _orchestrate_transaction_path(root: Path, submission_id: str) -> Path:
 
 
 def _orchestrate_request_digest(params: dict[str, Any]) -> str:
-    return digest_text(json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    return digest_text(canonical_json.dumps(params))
 
 
 def _begin_orchestrate_transaction(root: Path, params: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
@@ -1430,7 +1430,7 @@ def _plan_approval_request_id(state: dict[str, Any], approval: dict[str, Any]) -
         "task_id": str(state.get("task_id") or ""),
         "pending_basis": pending_basis,
     }
-    return "plan-approval-" + digest_text(json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))[:32]
+    return "plan-approval-" + digest_text(canonical_json.dumps(seed))[:32]
 
 
 def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transaction: dict[str, Any]) -> dict[str, Any]:
@@ -1527,7 +1527,7 @@ def _orchestrate_start(params: dict[str, Any], transaction_path: Path, transacti
         existing_plan = db_load_task(_ledger_root_for_artifact(task_dir), task_id)
         existing_plan = existing_plan[2] if existing_plan is not None else None
         if existing_plan is not None:
-            if digest_text(json.dumps(_orchestrate_wave_contract(existing_plan.get("waves")), sort_keys=True)) != digest_text(json.dumps(_orchestrate_wave_contract(waves), sort_keys=True)):
+            if digest_text(canonical_json.dumps(_orchestrate_wave_contract(existing_plan.get("waves")))) != digest_text(canonical_json.dumps(_orchestrate_wave_contract(waves))):
                 raise ValueError("existing task has a different orchestration wave plan")
             plan = existing_plan
         else:
@@ -1591,12 +1591,7 @@ def _semantic_future_pipeline(plan: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _semantic_future_pipeline_digest(plan: dict[str, Any]) -> str:
-    return digest_text(json.dumps(
-        _semantic_future_pipeline(plan),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ))
+    return digest_text(canonical_json.dumps(_semantic_future_pipeline(plan)))
 
 
 def _semantic_pipeline_gates(pipeline: list[dict[str, Any]]) -> set[str]:
@@ -2109,7 +2104,7 @@ def _verified_plan_predecessor_basis(
             "result_ref": result_ref,
             "content_digest": str(canonical.get("content_digest") or ""),
         })
-    digest = digest_text(json.dumps(basis, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    digest = digest_text(canonical_json.dumps(basis))
     return basis, digest
 
 
@@ -2506,16 +2501,16 @@ def _corrective_evidence(
         # identity. Equivalent failures frequently differ only in agent or
         # transport phrasing; grouping them by outcome/failure class prevents
         # that prose churn from bypassing the no-progress circuit breaker.
-        "result_digest": digest_text(json.dumps(failure_observations, ensure_ascii=False, sort_keys=True)),
-        "verification_digest": digest_text(json.dumps(verification_contract, ensure_ascii=False, sort_keys=True)),
+        "result_digest": digest_text(canonical_json.dumps(failure_observations)),
+        "verification_digest": digest_text(canonical_json.dumps(verification_contract)),
         "failure_classes": failure_classes or ["product"],
-        "strategy_digest": digest_text(json.dumps(strategy_values, ensure_ascii=False, sort_keys=True)),
+        "strategy_digest": digest_text(canonical_json.dumps(strategy_values)),
     }
-    evidence["signature"] = digest_text(json.dumps(evidence, ensure_ascii=False, sort_keys=True))
+    evidence["signature"] = digest_text(canonical_json.dumps(evidence))
     # Keep a privacy-preserving audit trail that can explain why two attempts
     # were grouped, but do not let mutable prose participate in the liveness
     # identity calculated immediately above.
-    evidence["reason_audit_digest"] = digest_text(json.dumps(raw_reasons, ensure_ascii=False, sort_keys=True))
+    evidence["reason_audit_digest"] = digest_text(canonical_json.dumps(raw_reasons))
     return evidence
 
 
@@ -3023,10 +3018,10 @@ def _replace_future_orchestrate_waves(
     rework_gates = sorted(completed_set & requested_future_gates)
     if rework_gates and not params.get("allow_rework", False):
         raise ValueError("future_waves cannot reintroduce completed gates without allow_rework=true")
-    rework_request_digest = digest_text(json.dumps({
+    rework_request_digest = digest_text(canonical_json.dumps({
         "completed_gate_rework": rework_gates,
         "future_pipeline": _semantic_future_pipeline(candidate_plan),
-    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) if rework_gates else ""
+    })) if rework_gates else ""
     rework_history = state.get("rework_history")
     rework_history = [
         dict(item) for item in rework_history
@@ -4287,11 +4282,11 @@ def _orchestrate_question(params: dict[str, Any]) -> dict[str, Any]:
         # The user's next ordinary chat message is the durable resume event.
         # Coordinator-only identity and idempotency data are server-derived;
         # the model supplies only the exact interaction ref and answer.
-        call_payload["submission_id"] = "chat-" + digest_text(json.dumps({
+        call_payload["submission_id"] = "chat-" + digest_text(canonical_json.dumps({
             "question_id": payload.get("question_id"),
             "answer": payload.get("answer"),
             "answer_en": payload.get("answer_en"),
-        }, ensure_ascii=False, sort_keys=True, default=str))[:24]
+        }))[:24]
         call_payload["resume_context"] = {
             "source": "ordinary_chat_message",
             "interaction_ref": payload.get("question_id"),

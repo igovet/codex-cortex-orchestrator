@@ -40,6 +40,26 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
                 self.assertIn(operation, response["next_action"])
                 self.assertNotIn("COORDINATOR LOCK", response["next_action"])
 
+    def test_complete_attempt_exposes_full_nested_planning_schema(self):
+        schema = attempt_facade._facade_schema("complete_attempt")
+        planning = schema["properties"]["planning"]
+        self.assertEqual(
+            set(planning["properties"]),
+            {
+                "overview", "requirement_coverage", "recommendation",
+                "recommendation_rationale", "resolved_questions", "risks",
+                "work_packages",
+            },
+        )
+        self.assertEqual(
+            set(planning["properties"]["work_packages"]["items"]["properties"]),
+            {"id", "title", "objective", "allowed_paths", "depends_on", "gates", "microtasks", "order", "status"},
+        )
+        self.assertIn(
+            "profile",
+            planning["properties"]["work_packages"]["items"]["properties"]["microtasks"]["items"]["properties"],
+        )
+
     def test_missing_identity_fields_are_returned_in_one_validation_response(self):
         response = attempt_facade.record_attempt_event({})
 
@@ -61,6 +81,36 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
         self.assertIn("repair_planning", response["next_action"])
         self.assertIn("same planner attempt", response["next_action"])
         self.assertIn("replacement worker", response["next_action"])
+
+    def test_full_planning_retry_replays_original_diagnostics_and_patch_paths(self):
+        response = attempt_facade._planning_repair_failure(
+            {
+                "schema": "cortex/orchestration/v5",
+                "ok": False,
+                "diagnostics": [{
+                    "code": "complete_attempt_invalid",
+                    "path": "$.planning",
+                    "message": "planner rejected draft requires PATCH-only repair",
+                }],
+            },
+            {
+                "attempt_id": "plan-01",
+                "base_payload_digest": "sha256:abc",
+                "diagnostics": [{
+                    "code": "planning_coverage_invalid",
+                    "path": "planning.requirement_coverage[4].plan_refs",
+                    "message": "unknown plan item",
+                }],
+            },
+        )
+
+        self.assertEqual(
+            [item["path"] for item in response["diagnostics"]],
+            ["planning.requirement_coverage[4].plan_refs"],
+        )
+        self.assertEqual(response["planning_repair"]["patch_paths"], ["/requirement_coverage/4/plan_refs"])
+        self.assertEqual(response["base_payload_digest"], "sha256:abc")
+        self.assertIn("/requirement_coverage/4/plan_refs", response["next_action"])
 
 
 if __name__ == "__main__":

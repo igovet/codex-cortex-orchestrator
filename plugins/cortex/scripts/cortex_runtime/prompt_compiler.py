@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from cortex_runtime import canonical_json
+
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_CONTRACT_PATH = PLUGIN_ROOT / "prompt-contracts.json"
@@ -58,9 +60,7 @@ class PromptSection:
 
 
 def _contract_digest(contract: Mapping[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return canonical_json.digest(contract)
 
 
 def _validate_contract(payload: object) -> dict[str, Any]:

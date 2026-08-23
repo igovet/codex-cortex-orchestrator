@@ -298,7 +298,19 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
     diagnostic paths prevents the coordinator from regenerating a full plan
     and accidentally rewriting valid packages, paths, or verification data.
     """
-    diagnostics = response.get("diagnostics") or []
+    # A rejected draft is immutable and is the authoritative source of the
+    # planning validation contract.  If the caller accidentally resubmits the
+    # full planning object, the boundary error is intentionally generic
+    # (PATCH-only is required), but that generic error must not replace the
+    # original field-level diagnostics.  Replaying the draft diagnostics keeps
+    # the retry actionable and prevents a second regeneration loop.
+    draft_diagnostics = draft.get("diagnostics")
+    if isinstance(draft_diagnostics, list) and draft_diagnostics:
+        diagnostics = [dict(item) for item in draft_diagnostics if isinstance(item, dict)]
+        if diagnostics:
+            response["diagnostics"] = diagnostics
+    else:
+        diagnostics = response.get("diagnostics") or []
     response["base_payload_digest"] = draft.get("base_payload_digest")
     response["rejected_draft_ref"] = f"planning_rejected_draft:{draft.get('attempt_id', '')}"
     response["planning_repair"] = {
@@ -322,11 +334,18 @@ def _planning_repair_failure(response: dict[str, Any], draft: dict[str, Any]) ->
             "Patch only those paths; all other rejected-draft fields are retained server-side."
         ),
     }
+    patch_paths = _runtime.planning_diagnostic_patch_paths(diagnostics)
+    path_hint = (
+        " Exact PATCH paths: " + ", ".join(patch_paths) + "."
+        if patch_paths else
+        " Use only the diagnostic-scoped paths returned by planning_repair.patch_paths."
+    )
     response["next_action"] = (
         "Call repair_planning on this same planner attempt with base_payload_digest copied exactly from "
         "the rejected draft and patches containing only the returned planning_repair.patch_paths. "
         "Do not resend the full planning object, inspect or modify the project, or spawn/request/authorize "
         "a replacement worker; the server preserves every valid rejected-draft field."
+        + path_hint
     )
     return response
 

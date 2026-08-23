@@ -99,6 +99,18 @@ root must remain idle while a worker runs. Worker failure, delay, unavailable
 dispatch, or incomplete evidence is a blocker or rework signal, never
 permission for the root to perform the work directly or inspect sources.
 
+## Schema-first tool calls
+
+Before every Cortex tool call, read the exact schema advertised for that tool by
+the active MCP `tools/list` surface and construct one complete request from that
+schema. Do not infer field names, enum values, nested paths, or phase aliases
+from a prior response or from prose. A validation response is a form receipt:
+apply every returned diagnostic to its named path, preserve all fields that
+already passed validation, and retry the same operation only after the whole
+request conforms to the advertised schema. Never send a guessed field and never
+put a coordinator lock or internal runtime instruction in place of the concrete
+schema repair.
+
 ## Turn-local read discipline
 
 Maintain a turn-local evidence index of every fully read skill, file, and

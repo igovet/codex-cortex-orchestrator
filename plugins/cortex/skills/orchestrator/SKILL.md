@@ -292,6 +292,12 @@ result processing, unbounded rework escalation, steer/follow-up distinction, mod
 recovery, and completion contract. Do not restate or reinterpret that protocol
 here.
 
+Before every Cortex lifecycle or recovery tool call, use the exact nested JSON
+schema advertised for that tool by the active MCP `tools/list` surface. Never
+infer field names, enum values, or nested paths from prose, a prior error, or
+the transcript; apply all returned field diagnostics atomically to the same
+request and preserve fields that already passed validation.
+
 Before `start_orchestration`, ordinary tasks have non-empty
 `task.acceptance_criteria` and `task.verification` grounded in the exact user
 request or verified authority. Ask the user first when a material criterion

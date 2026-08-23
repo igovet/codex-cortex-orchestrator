@@ -153,6 +153,19 @@ class ValidationAggregatorTests(unittest.TestCase):
             "review", "scope", "security", "ux",
         ])
 
+    def test_complete_attempt_next_action_nests_planning_fields(self):
+        next_action = cortex._validation_next_action(
+            "complete_attempt",
+            [
+                {"path": "$.overview"},
+                {"path": "$.work_packages"},
+            ],
+        )
+
+        self.assertIn("planning.overview", next_action)
+        self.assertIn("planning.work_packages", next_action)
+        self.assertIn("do not submit them", next_action)
+
     def test_public_management_form_advertises_nested_future_wave_fields(self):
         schema = cortex.PUBLIC_SCHEMA_REGISTRY["manage_orchestration"]
         payload = schema["properties"]["payload"]

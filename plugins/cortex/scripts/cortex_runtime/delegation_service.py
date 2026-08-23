@@ -68,7 +68,7 @@ bind_symbols(
 )
 from cortex_runtime.projection_service import enqueue as enqueue_projection, materialize_job
 from cortex_runtime.ledger_db import fail_projection_job, list_projection_jobs, get_task_document as db_get_task_document
-from cortex_runtime import attempt_protocol
+from cortex_runtime import attempt_protocol, canonical_json
 
 
 def _canonical_text_items(
@@ -130,6 +130,13 @@ def _governance_dispatch_projection(
     ]
     snapshot = governance.get("policy_snapshot")
     snapshot_copy = json.loads(json.dumps(snapshot, ensure_ascii=False, sort_keys=True)) if isinstance(snapshot, dict) else {}
+    supplied_snapshot_digest = str(governance.get("policy_snapshot_digest") or "").strip().lower()
+    if snapshot_copy and supplied_snapshot_digest:
+        expected_snapshot_digest = canonical_json.digest(snapshot_copy)
+        if supplied_snapshot_digest != expected_snapshot_digest:
+            raise ValueError(
+                "governance policy_snapshot_digest does not match the exact canonical policy_snapshot"
+            )
     return {
         "schema": governance.get("schema") or "cortex/governance/v1",
         "requested_mode": governance.get("requested_mode"),
@@ -140,7 +147,7 @@ def _governance_dispatch_projection(
         "initiative_ref": governance.get("initiative_ref") or "",
         "autonomous_scope_ref": governance.get("autonomous_scope_ref") or "",
         "policy_snapshot": snapshot_copy,
-        "policy_snapshot_digest": governance.get("policy_snapshot_digest"),
+        "policy_snapshot_digest": supplied_snapshot_digest or None,
         "manifest_ref": str(manifest_ref or "").strip(),
         "manifest_digest": str(manifest_digest or "").strip(),
         "current_pipeline": pipeline,
@@ -400,11 +407,11 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             {"requested": requested_revision, "used": state["revision"]}
             if requested_revision is not None and requested_revision != state["revision"] else None
         )
-        expected_status_receipt = "status-" + digest_text(json.dumps({
+        expected_status_receipt = "status-" + digest_text(canonical_json.dumps({
             "task_id": state["task_id"],
             "principal": state.get("principal", "local"),
             "revision": state["revision"],
-        }, sort_keys=True))[:24]
+        }))[:24]
         status_receipt = str(params.get("status_receipt") or "").strip()
         observed = (
             {"status_receipt": expected_status_receipt, "revision": state["revision"]}
@@ -570,9 +577,7 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
             context_result_refs,
         )
         all_resolved_user_decisions = _resolved_user_decisions(task_dir, state)
-        resolved_user_decisions_digest = digest_text(json.dumps(
-            all_resolved_user_decisions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ))
+        resolved_user_decisions_digest = digest_text(canonical_json.dumps(all_resolved_user_decisions))
         # Preserve every resolved user decision in the immutable briefing.
         # Concision is prompt guidance, never a backend byte quota.
         resolved_user_decisions = list(all_resolved_user_decisions)
@@ -798,11 +803,8 @@ def record_delegation(params: dict[str, Any]) -> dict[str, Any]:
                 # compiled-plan artifact.  A digest keeps the compact
                 # briefing auditable without making plan cardinality consume
                 # its transport budget.
-                "package_ids_digest": digest_text(json.dumps(
+                "package_ids_digest": digest_text(canonical_json.dumps(
                     [str(item) for item in compiled_plan.get("package_ids") or []],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
                 )),
                 "read_required": True,
             }

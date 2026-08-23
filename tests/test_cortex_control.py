@@ -159,6 +159,44 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(delegation_lists["allowed_paths"], ["plugins/cortex"])
 
+    def test_init_task_preserves_governance_snapshot_types_and_digest(self):
+        """Persisted governance must hash the exact server-owned JSON snapshot."""
+        self.activate()
+        classified = control.classify_task({"complexity": "C1", "requirements": [], "principal": "thread-a"})
+        snapshot = {
+            "schema": "cortex/governance-policy/v1",
+            "required_floor": "full",
+            "promotion_window_days": 90,
+            "promotion_threshold_scopes": 3,
+        }
+        governance_context = {
+            "schema": "cortex/governance/v1",
+            "requested_mode": "auto",
+            "effective_mode": "full",
+            "policy_snapshot": snapshot,
+            "policy_snapshot_digest": hashlib.sha256(
+                json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        }
+        created = control.init_task({
+            "task_id": "governance-digest-types",
+            "user_request": "preserve governance digest types",
+            "complexity": "C1",
+            "classification_id": classified["classification_id"],
+            "principal": "thread-a",
+            "governance": governance_context,
+        })
+        persisted = control.db_load_task(self.ledger, created["task_id"])[0]["governance"]
+        persisted_snapshot = persisted["policy_snapshot"]
+        self.assertIs(type(persisted_snapshot["promotion_window_days"]), int)
+        self.assertIs(type(persisted_snapshot["promotion_threshold_scopes"]), int)
+        self.assertEqual(
+            persisted["policy_snapshot_digest"],
+            hashlib.sha256(
+                json.dumps(persisted_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        )
+
     def test_oversized_requirements_round_trip_before_classify_and_init_persistence(self):
         self.activate()
         requirement = " ".join(
@@ -2833,6 +2871,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("one durable root worker_question(all missing/why)", bootstrap)
         self.assertIn("exact followup→poll→revalidate", bootstrap)
         self.assertIn("Call read_dispatch_briefing before project work", prompt)
+        self.assertIn("Before every strict Cortex tool call, use the exact nested schema", prompt)
         self.assertIn("briefing receipt", prompt)
         self.assertIn("Finish with complete_attempt", prompt)
 
@@ -2975,6 +3014,27 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "start_validation_failed")
         self.assertIn("task.acceptance_criteria", rejected["diagnostics"][0]["message"])
         self.assertIn("task.verification", rejected["diagnostics"][0]["message"])
+        tasks = self.ledger / "tasks"
+        self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
+
+    def test_v3_start_reports_nested_scope_schema_error_before_normalization(self):
+        rejected = control.start_orchestration({
+            "project_root": str(self.project),
+            "task": {
+                "user_request": "preserve the scope boundary",
+                "acceptance_criteria": ["The requested outcome is observed."],
+                "verification": ["Run an authoritative outcome check."],
+                "scope": "Текущий репозиторий",
+            },
+        })
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["code"], "start_validation_failed")
+        diagnostic = next(item for item in rejected["diagnostics"] if item.get("path") == "task.scope")
+        self.assertEqual(diagnostic["message"], "must be an array of non-empty strings")
+        self.assertEqual(diagnostic["received"], {"type": "str"})
+        self.assertEqual(diagnostic["field_schema"], {"type": "array", "items": {"type": "string", "minLength": 1}})
+        self.assertIn("task.scope", rejected["next_action"])
+        self.assertIn("task.scope", rejected["validation"]["invalid_paths"])
         tasks = self.ledger / "tasks"
         self.assertTrue(not tasks.exists() or not any(tasks.iterdir()))
 
@@ -5584,7 +5644,9 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(structured["ok"], False)
             self.assertEqual(structured["code"], "start_validation_failed")
             self.assertIn("unknown worker phase", structured["diagnostics"][0]["message"])
-            self.assertIn("COORDINATOR LOCK", structured["next_action"])
+            self.assertNotIn("COORDINATOR LOCK", structured["next_action"])
+            self.assertIn("Retry start_orchestration", structured["next_action"])
+            self.assertIn("future_waves[0].workers[0].phase", structured["next_action"])
             log_path = Path(home) / ".codex" / "logs" / "cortex-tool-errors.jsonl"
             self.assertFalse(log_path.exists())
 
