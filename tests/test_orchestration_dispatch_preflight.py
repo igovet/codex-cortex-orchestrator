@@ -29,6 +29,25 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.tear_down_host_private_control_store()
         self.temp.cleanup()
 
+    def test_internal_blocked_state_projects_to_server_recovery_not_manual_blocker(self) -> None:
+        response = orchestration_engine._orchestrate_response(
+            "advance",
+            {
+                "task_id": "blocked-projection",
+                "status": "blocked",
+                "revision": 1,
+                "attempts": [],
+                "completed_gates": [],
+                "skipped_gates": [],
+                "current_pipeline": [],
+            },
+        )
+        self.assertEqual(response["state"], "blocked")
+        self.assertIn("server-derived corrective dispatch", response["next_action"])
+        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
+        self.assertNotIn("resolve the blocker", response["next_action"])
+        self.assertNotIn("stop the task", response["next_action"])
+
     def test_advance_rejects_uncompilable_context_before_any_gate_or_attempt_mutation(self) -> None:
         """A compiler failure must retain the exact active source wave for retry.
 
@@ -116,7 +135,7 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.assertEqual(public["outcome"], "error")
         self.assertNotEqual(public["user_message"].get("message_type"), "Question")
         self.assertEqual(public["dispatches"], [])
-        self.assertIn("COORDINATOR LOCK", public["next_action"])
+        self.assertNotIn("COORDINATOR LOCK", public["next_action"])
 
         # The exact same request can be reserved again; no gates_recorded
         # partial state forces a synthetic completion, replacement worker, or
@@ -151,7 +170,7 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
         self.assertNotEqual(public["user_message"].get("message_type"), "Question")
         self.assertEqual(public["dispatches"], [])
         self.assertTrue(public["recoverable"])
-        self.assertIn("COORDINATOR LOCK", public["next_action"])
+        self.assertNotIn("COORDINATOR LOCK", public["next_action"])
 
     def test_public_ingress_aggregates_envelope_errors_without_initializing_ledger(self) -> None:
         response = control.start_orchestration({

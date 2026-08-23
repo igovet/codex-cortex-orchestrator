@@ -5,11 +5,31 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
 
 import cortex
+from cortex_runtime.mcp_api import _public_next_action
 
 from cortex_runtime.validation import ValidationFailure, collect_validations
 
 
 class ValidationAggregatorTests(unittest.TestCase):
+    def test_public_next_action_strips_legacy_internal_lock_without_losing_repair(self):
+        legacy = (
+            "COORDINATOR LOCK: root is coordination-only. Never inspect, search, read, edit, build, test, or run the target project, "
+            "Cortex plugin source/cache, .codex state, or runtime internals. The public MCP schema and this response are authoritative. "
+            "Use only Cortex lifecycle, exact dispatches, waiting, result evaluation, user communication, and safe recovery. "
+            "All project operations belong to workers; failure or delay never authorizes direct project work. "
+            "Inspect the same task and follow the server-returned recovery action."
+        )
+        action = _public_next_action(legacy)
+        self.assertEqual(action, "Inspect the same task and follow the server-returned recovery action.")
+        self.assertNotIn("COORDINATOR LOCK", action)
+
+    def test_consumed_receipt_is_recoverable_needs_input_not_public_block(self):
+        response = cortex._v3_consumed_continue_error("task-example")
+        self.assertEqual(response["outcome"], "needs_input")
+        self.assertTrue(response["retryable"])
+        self.assertIn("intent=inspect", response["next_action"])
+        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
+
     def test_collects_independent_failures_in_declared_path_order(self):
         with self.assertRaises(ValidationFailure) as caught:
             collect_validations(

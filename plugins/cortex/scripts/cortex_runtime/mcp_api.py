@@ -21,6 +21,28 @@ MCP_AUDIENCES = frozenset({"default", "coordinator", "worker"})
 DEFAULT_MCP_AUDIENCE = "default"
 
 
+def _public_next_action(value: object) -> str:
+    """Return a user/LLM-safe action without internal routing guards.
+
+    Older persisted receipts can still carry the former ``COORDINATOR LOCK``
+    prefix even though the current public contract no longer exposes it.  A
+    receipt must remain actionable when read through a newer plugin, so strip
+    only that private prefix and retain the concrete operation that follows.
+    Never expose the coordinator's implementation-only prohibition as a
+    visible blocker.
+    """
+    text = str(value or "").strip()
+    marker = "COORDINATOR LOCK:"
+    if marker in text:
+        text = text.split(marker, 1)[1].strip()
+        boundary = "All project operations belong to workers; failure or delay never authorizes direct project work."
+        if boundary in text:
+            text = text.split(boundary, 1)[1].strip()
+        elif "NEXT REQUIRED ACTION:" in text:
+            text = text.split("NEXT REQUIRED ACTION:", 1)[1].strip()
+    return text or "Inspect the same task and follow the server-returned recovery action."
+
+
 def _public_user_view(rendered: object) -> dict[str, Any]:
     """Return only presentation fields; transport metadata stays internal."""
     if not isinstance(rendered, dict):
@@ -31,6 +53,35 @@ def _public_user_view(rendered: object) -> dict[str, Any]:
         "risks", "why_it_matters", "output_policy",
     )
     return {key: rendered[key] for key in allowed if key in rendered}
+
+
+def _is_user_decision_event(outcome: object, result: object = None) -> bool:
+    """Return whether this response is allowed to pause the visible chat.
+
+    Technical validation/recovery states may use ``needs_input`` internally
+    for compatibility with the lifecycle ledger, but they are not questions.
+    Only an explicit plan-approval state or a server-returned question may
+    request a user decision at the public MCP boundary.
+    """
+    if str(outcome or "").strip().lower() == "awaiting_plan_approval":
+        return True
+    if not isinstance(result, Mapping):
+        return False
+    return bool(result.get("requires_user_decision") or result.get("question"))
+
+
+def _public_user_view_with_decision(
+    rendered: object,
+    *,
+    requires_user_decision: bool,
+) -> dict[str, Any]:
+    """Add the strict decision bit without leaking transport metadata."""
+    view = _public_user_view(rendered)
+    view["requires_user_decision"] = bool(requires_user_decision)
+    view["message_type"] = "decision_required" if requires_user_decision else (
+        "progress" if view.get("message_type") == "Question" else view.get("message_type", "Update")
+    )
+    return view
 
 
 def _internal_protocol(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -1003,6 +1054,9 @@ def v3_response(
         retry_tool = "start_orchestration" if operation == "start" else "continue_orchestration"
         raw_outcome = str(old.get("state", "needs_input"))
         public_outcome = "needs_input" if raw_outcome == "blocked" else raw_outcome
+        old_result = old.get("result") if isinstance(old.get("result"), dict) else {}
+        requires_user_decision = _is_user_decision_event(public_outcome, old_result)
+        server_action = str(old.get("next_action") or "").strip()
         response = {
             "schema": public_schema,
             "ok": False,
@@ -1012,7 +1066,8 @@ def v3_response(
             "diagnostics": diagnostics,
             "dispatches": [],
             "recoverable": bool(old.get("recoverable", True)),
-            "next_action": f"{coordinator_lock} Correct every diagnostic and retry {retry_tool} without touching the target project.",
+            "next_action": server_action or f"Correct every diagnostic and retry {retry_tool} with the same task; do not mutate unrelated fields.",
+            "requires_user_decision": requires_user_decision,
         }
         if old.get("code") == "plan_reapproval_required":
             response["outcome"] = "plan_reapproval_required"
@@ -1039,7 +1094,10 @@ def v3_response(
             response.get("outcome"), ok=False, config=communication_config,
             metadata={"code": response.get("code"), "recoverable": response.get("recoverable")},
         )
-        response["user_view"] = _public_user_view(response["user_message"])
+        response["next_action"] = _public_next_action(response.get("next_action"))
+        response["user_view"] = _public_user_view_with_decision(
+            response["user_message"], requires_user_decision=requires_user_decision,
+        )
         response["internal"] = _internal_protocol(response)
         return response
     requests = old.get("spawn_requests") if isinstance(old.get("spawn_requests"), list) else []
@@ -1157,9 +1215,9 @@ def v3_response(
             )
         else:
             next_action = (
-                f"{coordinator_lock} A user decision is required for this orchestration condition. "
-                "Surface the exact diagnostics/question from result, then resume the same task after the user's answer; "
-                "do not wait or create a replacement worker."
+                str(old.get("next_action") or "").strip()
+                or "Call manage_orchestration with intent=inspect for the same task, then follow the returned "
+                "server-owned recovery action; do not wait, respawn, or create a replacement worker."
             )
     else:
         next_action = (
@@ -1293,8 +1351,14 @@ def v3_response(
         "next_action": next_action,
         "dispatches": dispatches,
     }
+    requires_user_decision = _is_user_decision_event(outcome, old.get("result"))
+    # ``needs_input`` is also used by the durable ledger for technical
+    # recovery.  Render that case as an error/progress update unless the
+    # server explicitly attached a real question or plan approval.
+    visible_outcome = outcome if requires_user_decision or outcome != "needs_input" else "error"
+    response["requires_user_decision"] = requires_user_decision
     response["user_message"] = render_lifecycle(
-        outcome, config=communication_config,
+        visible_outcome, config=communication_config,
         metadata={"outcome": outcome, "step": step},
     )
     if outcome == "waiting_workers":
@@ -1332,11 +1396,17 @@ def v3_response(
                 f"{coordinator_lock} Stop now and wait for the user's next message. Keep the plan pending; do not "
                 "dispatch, revise, or send approval/cancellation commentary."
             )
+    response["next_action"] = _public_next_action(response.get("next_action"))
     if outcome == "awaiting_plan_approval":
         review = (old.get("result") or {}).get("plan_review") if isinstance(old.get("result"), dict) else None
         if isinstance(review, dict):
             response["plan_review"] = review
-    response["user_view"] = None if outcome == "waiting_workers" else _public_user_view(response["user_message"])
+    response["user_view"] = (
+        None if outcome == "waiting_workers" else
+        _public_user_view_with_decision(
+            response["user_message"], requires_user_decision=requires_user_decision,
+        )
+    )
     if outcome == "awaiting_plan_approval" and isinstance(response.get("plan_review"), dict):
         review = response["plan_review"]
         packages = review.get("work_packages") if isinstance(review.get("work_packages"), list) else []

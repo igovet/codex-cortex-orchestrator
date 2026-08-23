@@ -600,11 +600,13 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         for response in (rejected, rejected_again):
             self.assertFalse(response["ok"], response)
             self.assertEqual(response["code"], "continue_receipts_already_consumed")
-            self.assertEqual(response["outcome"], "blocked")
+            # Reusing a consumed receipt is a retryable idempotency correction,
+            # never a public Cortex block.
+            self.assertEqual(response["outcome"], "needs_input")
             self.assertEqual(response["task_ref"], started["task_ref"])
-            self.assertFalse(response["retryable"])
+            self.assertTrue(response["retryable"])
             self.assertEqual(response["dispatches"], [])
-            self.assertIn("manage_orchestration intent=inspect", response["next_action"])
+            self.assertIn("manage_orchestration with intent=inspect", response["next_action"])
         self.assertEqual(rejected["diagnostics"], rejected_again["diagnostics"])
         self.assertEqual(rejected["next_action"], rejected_again["next_action"])
         self.assertEqual(self._task_state()[1], before_snapshot)

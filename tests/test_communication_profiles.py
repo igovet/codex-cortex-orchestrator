@@ -52,7 +52,9 @@ class CommunicationProfileTests(unittest.TestCase):
             "approval": ("awaiting_plan_approval", "question"),
             "question": ("needs_input", "question"),
             "problem": ("error", "error"),
-            "blocker": ("blocked", "blocked"),
+            # ``blocked`` is an internal ledger state; it is presented as a
+            # recoverable question rather than a user-visible hard stop.
+            "blocker": ("blocked", "question"),
             "completion": ("completed", "completed"),
         }
         for label, (outcome, expected_kind) in required.items():
@@ -68,6 +70,18 @@ class CommunicationProfileTests(unittest.TestCase):
                 self.assertTrue(result["next_step"])
                 self.assertTrue(result["quality"]["ok"], result)
                 self.assertNotRegex(result["message"], communication._INTERNAL_RE)
+
+    def test_blocked_internal_state_is_presented_as_recovery_not_a_user_block(self):
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                result = communication.render_lifecycle(
+                    "blocked", config={"communication_profile": "natural", "user_language": language}
+                )
+                visible = f"{result['message']} {result['next_step']}".lower()
+                self.assertEqual(result["message_type"], communication.message_type("question"))
+                self.assertNotIn("blocked", visible)
+                self.assertNotIn("blocker", visible)
+                self.assertTrue(result["quality"]["ok"], result)
 
     def test_profiles_localize_and_have_distinct_detail_levels(self):
         natural = communication.render_lifecycle(

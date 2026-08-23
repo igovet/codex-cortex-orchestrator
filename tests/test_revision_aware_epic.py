@@ -279,6 +279,49 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertIn("terminal_continuation", response["next_action"])
         self.assertNotIn("Wait only on these exact persisted native child ids", response["next_action"])
 
+    def test_public_boundary_does_not_turn_technical_needs_input_into_a_question(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "needs_input",
+                "wave_id": "wave-recovery",
+                "next_action": "call manage_orchestration with intent=inspect for the same task",
+                "result": {"outcome": "technical_recovery", "requires_user_decision": False},
+            },
+            "task-recovery",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertFalse(response["requires_user_decision"])
+        self.assertFalse(response["user_view"]["requires_user_decision"])
+        self.assertNotEqual(response["user_view"]["message_type"], "decision_required")
+        self.assertEqual(response["user_view"]["message_type"], "Something went wrong")
+        self.assertIn("manage_orchestration", response["next_action"])
+
+    def test_public_boundary_allows_only_explicit_question_to_pause_chat(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "needs_input",
+                "wave_id": "wave-question",
+                "next_action": "surface the exact question and resume the same task",
+                "result": {
+                    "outcome": "awaiting_user",
+                    "question": "Which permitted option should be used?",
+                },
+            },
+            "task-question",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertTrue(response["requires_user_decision"])
+        self.assertTrue(response["user_view"]["requires_user_decision"])
+        self.assertEqual(response["user_view"]["message_type"], "decision_required")
+
     def test_active_steer_preserves_task_ref_and_resumes_same_native_worker(self) -> None:
         started = self.start()
         _, state, attempt = self.confirm_running(started, host_agent_id="native.steer:01")

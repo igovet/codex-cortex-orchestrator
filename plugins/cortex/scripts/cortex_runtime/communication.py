@@ -76,9 +76,9 @@ _LIFECYCLE_MESSAGES = {
         "completed",
     ),
     "blocked": (
-        "The task is blocked until the reported issue is resolved.",
-        "Resolve the blocker, then resume the task.",
-        "blocked",
+        "The task needs automatic recovery for the recorded issue before it can continue.",
+        "Cortex will route the issue to the same task or ask for one concrete decision.",
+        "question",
     ),
     "needs_input": (
         "The task needs a clear decision before it can continue.",
@@ -96,7 +96,7 @@ _SAFE_FALLBACKS = {
     "started": ("The task has started.", "Continue when ready."),
     "progress": ("The task is in progress.", "Continue when the update is ready."),
     "completed": ("The task is complete.", "Review the result."),
-    "blocked": ("The task is blocked.", "Resolve the issue, then resume the task."),
+    "blocked": ("The task needs recovery.", "Cortex will route the issue or ask for one decision."),
     "question": ("A decision is needed before the task can continue.", "Provide the requested decision."),
     "error": ("The task could not continue.", "Correct the issue and retry."),
 }
@@ -104,7 +104,7 @@ _SAFE_FALLBACKS_RU = {
     "started": ("Задача начата.", "Продолжите, когда будете готовы."),
     "progress": ("Задача выполняется.", "Продолжите после получения обновления."),
     "completed": ("Задача завершена.", "Проверьте результат."),
-    "blocked": ("Задача заблокирована.", "Устраните проблему и возобновите задачу."),
+    "blocked": ("Для задачи требуется восстановление.", "Cortex направит проблему на исправление или запросит одно решение."),
     "question": ("Для продолжения нужно решение.", "Предоставьте запрошенное решение."),
     "error": ("Задача не продолжилась.", "Исправьте проблему и повторите попытку."),
 }
@@ -116,7 +116,7 @@ _LIFECYCLE_TRANSLATIONS = {
         "completion_pending": ("A completed result is ready for review before the task can continue.", "Review the completed result and continue when it is accepted."),
         "awaiting_plan_approval": ("The plan is ready for your review. Approval is recommended when its risks and questions are resolved.", "Review the plan, then approve it or request a specific change."),
         "completed": ("The task is complete and the verified result is ready.", "Review the verified result."),
-        "blocked": ("The task is blocked until the reported issue is resolved.", "Resolve the blocker, then resume the task."),
+        "blocked": ("The task needs automatic recovery for the recorded issue.", "Cortex will route the issue or ask for one concrete decision."),
         "needs_input": ("The task needs a clear decision before it can continue.", "Provide the requested decision or clarification."),
         "error": ("The task could not continue because an input or validation issue was found.", "Correct the reported issue and retry."),
     },
@@ -126,14 +126,14 @@ _LIFECYCLE_TRANSLATIONS = {
         "completion_pending": ("Результат готов и ожидает проверки.", "Проверьте результат и продолжите после подтверждения."),
         "awaiting_plan_approval": ("План готов к проверке. Рекомендуется утвердить его после проверки рисков и вопросов.", "Проверьте план и утвердите его либо укажите конкретное изменение."),
         "completed": ("Задача завершена, проверенный результат готов.", "Проверьте результат."),
-        "blocked": ("Задача заблокирована до устранения указанной проблемы.", "Устраните блокер и возобновите задачу."),
+        "blocked": ("Для задачи требуется автоматическое восстановление.", "Cortex направит проблему на исправление или запросит одно решение."),
         "needs_input": ("Для продолжения нужно ваше решение.", "Предоставьте запрошенное решение или уточнение."),
         "error": ("Задача не продолжилась из-за ошибки входных данных или проверки.", "Исправьте указанную проблему и повторите попытку."),
     },
 }
 _COMPACT_LIFECYCLE = {
-    "en": {"ready_to_spawn": ("Task started.", "Continue when ready."), "waiting_workers": ("Work is running.", "No action needed."), "completion_pending": ("Result ready for review.", "Review it to continue."), "awaiting_plan_approval": ("Plan ready for approval.", "Approve or request a change."), "completed": ("Task complete.", "Review the result."), "blocked": ("Task blocked.", "Resolve the blocker."), "needs_input": ("Decision needed.", "Provide the decision."), "error": ("Task paused by an error.", "Fix it and retry.")},
-    "ru": {"ready_to_spawn": ("Задача начата.", "Вернитесь после завершения."), "waiting_workers": ("Работа выполняется.", "Действий не требуется."), "completion_pending": ("Результат готов к проверке.", "Проверьте его."), "awaiting_plan_approval": ("План готов к утверждению.", "Утвердите или запросите изменение."), "completed": ("Задача завершена.", "Проверьте результат."), "blocked": ("Задача заблокирована.", "Устраните блокер."), "needs_input": ("Нужно решение.", "Предоставьте его."), "error": ("Задача приостановлена из-за ошибки.", "Исправьте и повторите.")},
+        "en": {"ready_to_spawn": ("Task started.", "Continue when ready."), "waiting_workers": ("Work is running.", "No action needed."), "completion_pending": ("Result ready for review.", "Review it to continue."), "awaiting_plan_approval": ("Plan ready for approval.", "Approve or request a change."), "completed": ("Task complete.", "Review the result."), "blocked": ("The task needs recovery.", "Cortex will route the issue or ask for one decision."), "needs_input": ("Decision needed.", "Provide the decision."), "error": ("Task paused by an error.", "Fix it and retry.")},
+    "ru": {"ready_to_spawn": ("Задача начата.", "Вернитесь после завершения."), "waiting_workers": ("Работа выполняется.", "Действий не требуется."), "completion_pending": ("Результат готов к проверке.", "Проверьте его."), "awaiting_plan_approval": ("План готов к утверждению.", "Утвердите или запросите изменение."), "completed": ("Задача завершена.", "Проверьте результат."), "blocked": ("Для задачи требуется восстановление.", "Cortex направит проблему на исправление или запросит одно решение."), "needs_input": ("Нужно решение.", "Предоставьте его."), "error": ("Задача приостановлена из-за ошибки.", "Исправьте и повторите.")},
 }
 
 

@@ -65,6 +65,7 @@ from cortex_runtime.mcp_api import (
     DEFAULT_MCP_AUDIENCE,
     MCP_AUDIENCES,
     PUBLIC_TOOL_DESCRIPTIONS,
+    _public_next_action,
     build_public_schemas,
     configure_internal_schemas,
     public_tools as build_public_tools,
@@ -7373,6 +7374,48 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
     return _record_gate(params)
 
 
+def _activate_closure_rework(
+    state: dict[str, Any],
+    *,
+    gate: str,
+    findings: list[dict[str, Any]],
+    source_result_refs: list[str],
+) -> str:
+    """Expose the gate policy's server-owned closure rework transition."""
+    from cortex_runtime.gate_transitions import _activate_closure_rework as _implementation
+
+    return _implementation(
+        state,
+        gate=gate,
+        findings=findings,
+        source_result_refs=source_result_refs,
+    )
+
+
+def _activate_closure_rework(
+    state: dict[str, Any],
+    *,
+    gate: str,
+    findings: list[dict[str, Any]],
+    source_result_refs: list[str],
+) -> str:
+    """Expose the gate policy's server-owned closure recovery to the engine.
+
+    Runtime modules are wired through the composition root.  Keeping this
+    narrow facade wrapper lets the orchestration engine invoke the same
+    canonical rework transition that ``record_gate`` uses without importing
+    the executable facade back from the runtime package.
+    """
+    from cortex_runtime.gate_transitions import _activate_closure_rework as _impl
+
+    return _impl(
+        state,
+        gate=gate,
+        findings=findings,
+        source_result_refs=source_result_refs,
+    )
+
+
 def _record_commit_gate_recovery(
     task_dir: Path,
     state: dict[str, Any],
@@ -7827,12 +7870,12 @@ ORCHESTRATION_PLAN_SCHEMA = "cortex/orchestration-plan/v1"
 ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
 ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
 PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v5"
-COORDINATOR_LOCK = (
-    "COORDINATOR LOCK: root is coordination-only. Never inspect, search, read, edit, build, test, or run the target project, "
-    "Cortex plugin source/cache, .codex state, or runtime internals. The public MCP schema and this response are authoritative. "
-    "Use only Cortex lifecycle, exact dispatches, waiting, result evaluation, user communication, and safe recovery. "
-    "All project operations belong to workers; failure or delay never authorizes direct project work."
-)
+# This prefix used to contain a visible ``COORDINATOR LOCK`` message.  That
+# leaked an internal routing guard into every public ``next_action`` and made
+# ordinary recoverable lifecycle work look like a Cortex blocker.  Keep the
+# coordinator-only constraint in the bundled skills and machine state; public
+# actions must contain only the concrete server-derived operation to perform.
+COORDINATOR_LOCK = ""
 
 
 def _request_diagnostic(path: str, message: str, expected: str | None = None) -> dict[str, Any]:
@@ -10315,6 +10358,10 @@ def _v3_response(
         include_result=include_result,
         start_replayed=start_replayed,
     )
+    # Lifecycle adapters for questions and approvals may replace the base
+    # action.  Sanitize at this final public boundary so persisted receipts
+    # from older plugin versions cannot leak the former internal lock text.
+    response["next_action"] = _public_next_action(response.get("next_action"))
     if not response.get("ok", False):
         response["attempt_budget_consumed"] = False
     return response
@@ -10332,6 +10379,7 @@ def _v3_compact_continue_replay(response: dict[str, Any]) -> dict[str, Any]:
         "repeat a worker dispatch from this replay. If the original response was lost before its native dispatches "
         "were invoked, call manage_orchestration with intent inspect once and invoke only still-awaiting dispatches."
     )
+    compact["next_action"] = _public_next_action(compact.get("next_action"))
     return compact
 
 
@@ -10375,15 +10423,18 @@ def _v3_consumed_continue_error(task_ref: str) -> dict[str, Any]:
         "continue_receipts_already_consumed",
         "the submitted canonical result receipts were already consumed for this task wave; "
         "Cortex will not replan or dispatch from them again",
-        outcome="blocked",
+        # This is a recoverable idempotency receipt, not a public lifecycle
+        # block.  The caller must inspect the same task and use the current
+        # server-derived continuation.
+        outcome="needs_input",
     )
     result["task_ref"] = task_ref
-    result["retryable"] = False
+    result["retryable"] = True
     result["recovery"] = "inspect_exact_task"
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} Do not retry continue_orchestration with changed future_waves, reason, "
-        "or reformatted results. Call manage_orchestration intent=inspect once with this exact task_ref "
-        "and use only the server-returned current step/results or pending dispatches."
+        f"{COORDINATOR_LOCK} The result receipts are already recorded. Call manage_orchestration with "
+        f"intent=inspect and task_ref={task_ref!r} once, then copy the server-returned current step/results "
+        "or pending dispatches into the next lifecycle call; do not resubmit the consumed receipts."
     )
     return result
 
@@ -12276,6 +12327,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     str(params.get("project_root") or ""),
                 )
                 if prompt_response is not None:
+                    prompt_response["next_action"] = _public_next_action(prompt_response.get("next_action"))
                     return prompt_response
         operation_context: dict[str, Any] = {}
         if intent == "question" and str((normalized_payload or {}).get("question_id") or "").startswith("batch-"):
@@ -12358,7 +12410,9 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             })
         response = _v3_response(old, task_ref, include_result=True)
         if intent == "question":
-            return _v3_question_response(response, state)
+            response = _v3_question_response(response, state)
+            response["next_action"] = _public_next_action(response.get("next_action"))
+            return response
         if intent == "plan_approval" and (old.get("result") or {}).get("decision") == "approved":
             response["approval_message"] = "Plan approved."
             response["next_action"] = (

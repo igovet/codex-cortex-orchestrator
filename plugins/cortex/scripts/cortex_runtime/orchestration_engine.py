@@ -128,6 +128,7 @@ bind_symbols(
         "_collect_orchestrate_diagnostics",
         "_context_handoff_service",
         "_delegation_package",
+        "_activate_closure_rework",
         "_ledger_root_for_artifact",
         "_open_blocking_questions",
         "_plan_approval",
@@ -162,6 +163,7 @@ bind_symbols(
         "db_get_classification",
         "db_get_operation",
         "db_list_task_findings",
+        "db_upsert_task_finding",
         "db_load_task",
         "db_put_operation",
         "db_put_worker_session",
@@ -284,7 +286,17 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
         metadata={"state": state},
     )
     language_is_ru = str(communication_config.get("user_language") or "").lower().startswith("ru")
-    requires_decision = state in {"awaiting_plan_approval", "blocked", "needs_input", "rework_preflight_required"}
+    # ``blocked`` and ``rework_preflight_required`` are internal recovery
+    # markers, never a user decision.  Only an explicit plan review or a
+    # server-returned question may stop the visible chat turn.
+    result_outcome = str(result.get("outcome") or "").strip().lower()
+    requires_decision = state == "awaiting_plan_approval" or (
+        state == "needs_input" and (
+            bool(result.get("requires_user_decision") or result.get("question"))
+            or result_outcome in {"awaiting_user", "question"}
+            or bool(result.get("question_ref") or result.get("question_refs"))
+        )
+    )
     if state == "awaiting_plan_approval":
         next_step = "Утвердите план, запросите доработку или отмените." if language_is_ru else "Choose approve, revise, or cancel."
         recommendation = (
@@ -293,8 +305,16 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
             "Approve the plan if it matches the requested outcome; otherwise request a revision."
         )
     elif state in {"blocked", "rework_preflight_required"}:
-        next_step = "Устраните блокер и возобновите задачу." if language_is_ru else "Resolve the blocker and continue the task."
-        recommendation = "Следуйте указанному способу устранения блокера." if language_is_ru else "Follow the recorded way to resolve the blocker."
+        next_step = (
+            "Следуйте серверному маршруту исправления; задача продолжится автоматически."
+            if language_is_ru else
+            "Follow the server-derived corrective route; Cortex will continue the task automatically."
+        )
+        recommendation = (
+            "Cortex направит исправление тому же конвейеру и сохранит исходные данные."
+            if language_is_ru else
+            "Cortex will route the correction through the same pipeline and preserve the recorded data."
+        )
     else:
         next_step = rendered.get("next_step") or ("Продолжите текущий шаг." if language_is_ru else "Continue the current work step.")
         recommendation = rendered.get("message") or ("Продолжите после готовности результата." if language_is_ru else "Continue when the result is ready.")
@@ -1208,6 +1228,140 @@ def _unresolved_rework_findings(
     return unresolved
 
 
+def _closure_unresolved_corrective_findings(
+    root: Path,
+    state: dict[str, Any],
+    attempt_ids: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Materialize closure ``unresolved`` items as server-owned findings.
+
+    ``unresolved`` is intentionally a semantic AttemptResult field and is not
+    normally a task-finding projection.  A closure verifier is the one place
+    where those items are a gate-level defect: the completed result cannot
+    pass its own closure gate.  Persist a stable, task-scoped finding here so
+    the normal closure-rework route can carry the exact item to a corrective
+    worker and later require a fresh origin-verifier receipt.
+    """
+    findings: list[dict[str, Any]] = []
+    result_refs: list[str] = []
+    for attempt_id in attempt_ids:
+        attempt = _attempt(state, safe_id(str(attempt_id)))
+        result_ref = str(attempt.get("attempt_result_ref") or "").strip()
+        if not result_ref:
+            continue
+        canonical = attempt_protocol.get_attempt_result(
+            root, task_id=str(state["task_id"]), attempt_id=str(attempt["attempt_id"]),
+        )
+        if (
+            not isinstance(canonical, dict)
+            or str(canonical.get("result_ref") or "") != result_ref
+            or canonical.get("lifecycle_status") != attempt_protocol.LIFECYCLE_COMPLETED
+        ):
+            continue
+        unresolved = canonical.get("unresolved")
+        if not isinstance(unresolved, list):
+            continue
+        result_refs.append(result_ref)
+        for index, raw in enumerate(unresolved):
+            value = dict(raw) if isinstance(raw, dict) else {"summary": str(raw)}
+            summary = str(value.get("summary") or value.get("message") or raw).strip()
+            if not summary:
+                summary = "Closure verifier reported unresolved work"
+            fingerprint = str(value.get("fingerprint") or "").strip()
+            if not fingerprint:
+                fingerprint = "closure-unresolved-" + digest_text(canonical_json.dumps({
+                    "result_ref": result_ref,
+                    "index": index,
+                    "item": value,
+                }))[:32]
+            details = value.get("details")
+            if details is None:
+                details = {"unresolved": value}
+                if isinstance(value.get("affected_paths"), list):
+                    details["affected_paths"] = list(value["affected_paths"])
+            finding = {
+                "fingerprint": fingerprint,
+                "severity": (
+                    str(value.get("severity") or "P1")
+                    if str(value.get("severity") or "P1") in {"info", "P3", "P2", "P1", "P0"}
+                    else "P1"
+                ),
+                "status": "open",
+                "blocking": True,
+                "summary": redact(summary, 2000),
+                "details": details,
+            }
+            db_upsert_task_finding(
+                root,
+                str(state["task_id"]),
+                finding,
+                source={
+                    "transition": "opened",
+                    "source_type": "closure_attempt_unresolved",
+                    "attempt_id": str(attempt["attempt_id"]),
+                    "attempt_result_ref": result_ref,
+                    "origin_result_ref": result_ref,
+                    "gate": str(attempt.get("gate") or ""),
+                    "finding_index": index,
+                    "task_revision": int(state.get("task_revision") or 1),
+                },
+            )
+            findings.append(finding)
+    return findings, list(dict.fromkeys(result_refs))
+
+
+def _record_server_corrective_receipts(
+    root: Path,
+    state: dict[str, Any],
+    attempt: dict[str, Any],
+    result_ref: str,
+) -> None:
+    """Bind a passed corrective result to every active closure finding.
+
+    The worker result is semantic evidence, not an authority-bearing routing
+    instruction.  Once the server finalizes a corrective target attempt, it
+    records the exact target result as the receipt that permits the originating
+    verifier to run again.  This prevents a missing parent-authored
+    ``corrective_reported`` marker from turning a valid corrective dispatch
+    into a preflight blocker.
+    """
+    target_gate = str(attempt.get("gate") or "")
+    current_revision = int(state.get("task_revision") or 1)
+    open_findings = {
+        str(item.get("fingerprint") or ""): item
+        for item in db_list_task_findings(root, state["task_id"], include_resolved=False)
+        if isinstance(item, dict)
+    }
+    for origin_gate, rework in (state.get("closure_rework") or {}).items():
+        if (
+            not isinstance(rework, dict)
+            or rework.get("status") != "rework_required"
+            or str(rework.get("target_gate") or "") != target_gate
+            or int(rework.get("task_revision") or 0) != current_revision
+        ):
+            continue
+        for fingerprint in rework.get("finding_fingerprints") or []:
+            finding = open_findings.get(str(fingerprint))
+            if not isinstance(finding, dict):
+                continue
+            for origin_result_ref in rework.get("source_result_refs") or []:
+                db_upsert_task_finding(
+                    root,
+                    str(state["task_id"]),
+                    finding,
+                    source={
+                        "transition": "corrective_reported",
+                        "source_type": "server_corrective_dispatch",
+                        "gate": target_gate,
+                        "origin_gate": str(origin_gate),
+                        "origin_result_ref": str(origin_result_ref),
+                        "attempt_id": str(attempt.get("attempt_id") or ""),
+                        "attempt_result_ref": str(result_ref),
+                        "task_revision": current_revision,
+                    },
+                )
+
+
 def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     state, plan = _repair_delivery_graph_before_closure(params, task_dir, state, plan)
     current_gates = active_gates(state)
@@ -1287,6 +1441,21 @@ def _prepare_orchestrate_wave(params: dict[str, Any], task_dir: Path, state: dic
             )
         else:
             context_result_refs = predecessor_result_refs
+        # Closure-rework dispatches must carry the immutable origin result
+        # that raised the finding.  The origin attempt is intentionally
+        # invalidated by rework, so ordinary predecessor selection cannot
+        # recover this context from the active completed-gate frontier.
+        corrective_context_refs = [
+            str(result_ref)
+            for rework in (state.get("closure_rework") or {}).values()
+            if isinstance(rework, dict)
+            and rework.get("status") == "rework_required"
+            and int(rework.get("task_revision") or 0) == int(state.get("task_revision") or 1)
+            and str(rework.get("target_gate") or "") == str(spec.get("gate") or "")
+            for result_ref in rework.get("source_result_refs") or []
+            if str(result_ref).strip()
+        ]
+        context_result_refs = list(dict.fromkeys(context_result_refs + corrective_context_refs))
         if spec.get("gate") == "plan" and _pipeline_contract_version(state) >= 2:
             required_gates = {
                 gate for gate in ("scope", "discover", "architecture", "database_architecture", "ux")
@@ -1368,7 +1537,15 @@ def _orchestrate_response(
     elif facade_state == "completed":
         next_action = "present the verified task result to the user"
     elif facade_state == "blocked":
-        next_action = "resolve the blocker, then call orchestrate(operation=resume)"
+        # ``blocked`` is an internal ledger/recovery marker only.  It must
+        # never become an instruction that stops the Cortex pipeline or asks
+        # the coordinator to repair state by hand.  The advance/resume paths
+        # derive a corrective dispatch; when a human decision is genuinely
+        # required they return a question-shaped result instead.
+        next_action = (
+            "Cortex retained a recoverable lifecycle condition. Follow the server-derived corrective dispatch "
+            "or surface the exact user question returned in result; do not edit lifecycle state manually."
+        )
     elif facade_state == "awaiting_plan_approval":
         next_action = (
             "read the planner result, present a concise main-chat plan summary, and call plan_approval with "
@@ -2854,6 +3031,12 @@ def _complete_orchestrate_attempt(
             raise ValueError(str(finalized.get("reason") or "worker result attempt finalization failed"))
         finalized_state = finalized["state"]
         finalized_attempt = _attempt(finalized_state, attempt_id)
+        _record_server_corrective_receipts(
+            _ledger_root_for_artifact(task_dir),
+            finalized_state,
+            finalized_attempt,
+            result_ref,
+        )
         package = _delegation_package(task_dir, state["task_id"], attempt_id)
         package["lifecycle_status"] = canonical.get("lifecycle_status")
         package["attempt_status"] = finalized_attempt.get("status")
@@ -3489,6 +3672,75 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 "enforce_canonical_findings": gate_decision in {"rework", "fail"},
             })
             if recorded.get("recorded") is False:
+                if recorded.get("reason") == "closure_attempt_unresolved":
+                    # A finalized closure AttemptResult with unresolved items
+                    # is a server-owned corrective route, not a coordinator
+                    # validation error.  Keep the original result immutable,
+                    # reopen the canonical corrective target, and dispatch the
+                    # next worker under this same task.  The returned dispatch
+                    # is the only authority for the follow-up call.
+                    unresolved_attempt_ids = [
+                        safe_id(str(item))
+                        for item in recorded.get("candidate_attempt_ids") or []
+                        if str(item).strip()
+                    ]
+                    corrective_findings, source_result_refs = _closure_unresolved_corrective_findings(
+                        root,
+                        state,
+                        unresolved_attempt_ids,
+                    )
+                    if not corrective_findings or not source_result_refs:
+                        raise ValueError(
+                            "closure_attempt_unresolved did not resolve to a current canonical result"
+                        )
+                    target_gate = _activate_closure_rework(
+                        state,
+                        gate=gate,
+                        findings=corrective_findings,
+                        source_result_refs=source_result_refs,
+                    )
+                    save_state(
+                        task_dir,
+                        task_dir / "state.sqlite",
+                        state,
+                        "closure_rework",
+                        f"{gate}: server-owned corrective route for unresolved AttemptResult",
+                    )
+                    plan = _load_orchestrate_plan(task_dir, state)
+                    prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+                    state = prepared["state"]
+                    corrective = {
+                        "schema": "cortex/corrective-dispatch/v1",
+                        "mode": "closure_unresolved",
+                        "task_id": str(state["task_id"]),
+                        "origin_gate": gate,
+                        "target_gate": target_gate,
+                        "source_attempt_ids": unresolved_attempt_ids,
+                        "source_result_refs": source_result_refs,
+                        "replacement_worker_authorized": False,
+                    }
+                    save_state(
+                        task_dir,
+                        task_dir / "state.sqlite",
+                        state,
+                        "closure_rework_dispatch",
+                        f"{gate}: dispatched server-owned corrective target {target_gate}",
+                    )
+                    return _orchestrate_response(
+                        "advance",
+                        state,
+                        wave_id=prepared["wave_id"],
+                        spawn_requests=prepared["spawn_requests"],
+                        result={"corrective_dispatch": corrective},
+                        plan=plan,
+                    ) | {
+                        "next_action": (
+                            "Invoke only the returned native corrective dispatch request(s) from this "
+                            "cortex/orchestration/v5 response for the same task, wait for those exact "
+                            "workers, read each canonical AttemptResult, then call orchestrate(operation=advance) "
+                            "with the server-returned completion(s)."
+                        ),
+                    }
                 raise ValueError(str(recorded.get("reason") or "gate outcome was not recorded"))
             state = recorded["state"]
             # The gate-result projection is durable only after record_gate.

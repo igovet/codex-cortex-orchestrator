@@ -144,7 +144,7 @@ WORKER_CONTEXT = (
     "complete_attempt for the final semantic result. Successful briefing and predecessor reads create server-owned receipts; do not author digest, predecessor, changed-file, timestamp, identity, or evidence markers. "
     "For every allowed worker tool, a caller/input/schema validation error or retryable=true result must be corrected "
     "from its diagnostic and retried on the same attempt. Such rejected calls consume no worker attempt and must "
-    "never end the worker. Retry every correctable failure on the same attempt; a blocked/failed result is durable "
+    "never end the worker. Retry every correctable failure on the same attempt; a terminal failed result is durable "
     "evidence for server-owned corrective recovery, not a Cortex stop. During work, checkpoint semantic facts with "
     "record_attempt_event and finish with complete_attempt using only "
     "status, summary, findings, decisions_needed, unresolved, and any advertised typed gate payload. Invalid input is corrected "
@@ -1066,7 +1066,7 @@ def worker_context_recovery(
         if aliases.intersection(candidates):
             matches.append(attempt)
     if len(matches) != 1:
-        return " CORTEX WORKER RECOVERY BLOCKER: exact worker attempt identity is unavailable; do not infer task context."
+        return " CORTEX WORKER RECOVERY ROUTE: exact worker attempt identity is unavailable; do not infer task context. Let the server derive the next recovery action."
     attempt = matches[0]
     fields = []
     for label, relative, digest in (
@@ -1083,7 +1083,7 @@ def worker_context_recovery(
             continue
         fields.append(f"{label}={task_dir / candidate} (sha256={sha})")
     if not fields:
-        return " CORTEX WORKER RECOVERY BLOCKER: immutable worker artifacts are unavailable; do not reconstruct context from transcript."
+        return " CORTEX WORKER RECOVERY ROUTE: immutable worker artifacts are unavailable; do not reconstruct context from transcript. Let the server derive the next recovery action."
     return (
         " CONTEXT RECOVERY: host resumed this exact worker after compaction. "
         f"Attempt {str(attempt.get('attempt_id') or '')!r} remains authoritative. "
@@ -1519,7 +1519,7 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
             current_gates = state.get("current_gates") or ["unknown"]
             context = f"Active orchestration task: {task_id}; status: {state.get('status', 'unknown')}; current executable gates: {', '.join(str(item) for item in current_gates)}. Use cortex before dispatching or closing a gate."
             context += (
-                " COORDINATOR LOCK: the main/root agent must not inspect, search, read, edit, patch, build, test, or run the target project. "
+                " COORDINATOR ROUTE: the main/root agent must not inspect, search, read, edit, patch, build, test, or run the target project. "
                 "Use only Cortex lifecycle calls, exact returned worker dispatches, waiting, result evaluation, user communication, and safe recovery. "
                 "Remain idle while workers run; worker delay or failure is never permission for direct coordinator work."
             )

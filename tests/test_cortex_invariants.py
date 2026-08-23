@@ -1021,7 +1021,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
         context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("COORDINATOR LOCK", context)
+        self.assertIn("COORDINATOR ROUTE", context)
+        self.assertNotIn("COORDINATOR LOCK", context)
         self.assertIn("must not inspect", context)
         self.assertIn("Remain idle while workers run", context)
 
@@ -1038,7 +1039,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        self.assertIn("COORDINATOR LOCK", payload["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("COORDINATOR ROUTE", payload["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("COORDINATOR LOCK", payload["hookSpecificOutput"]["additionalContext"])
 
     def test_compact_session_hook_reasserts_durable_recovery(self):
         self.init(task_id="compact-recovery")
@@ -1731,7 +1733,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertIn("worker", contract, relative)
 
         hook = (repository / "plugins/cortex/scripts/cortex_hook.py").read_text(encoding="utf-8")
-        self.assertIn("COORDINATOR LOCK", hook)
+        self.assertIn("COORDINATOR ROUTE", hook)
+        self.assertNotIn("COORDINATOR LOCK", hook)
         self.assertIn("never permission for direct coordinator work", hook)
 
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):
