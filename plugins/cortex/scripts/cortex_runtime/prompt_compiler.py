@@ -44,8 +44,8 @@ _COORDINATOR_COMPLETION_CONTRACT = (
     "the resulting successful server lifecycle outcome is the continuation or terminal audit; before it, the coordinator "
     "must neither present completion nor close the worker as consumed. A successful continue is one-shot: follow only "
     "its returned dispatch/wait/terminal outcome; never call continue again with the same step/results, request artifacts, "
-    "add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is terminal: "
-    "stop and result the blocker."
+    "add future_waves, or spawn a replacement. A task-identity or step-mismatch diagnostic is recoverable: "
+    "inspect the same task and follow the server-owned recovery or concrete user question; never stop Cortex."
 )
 
 

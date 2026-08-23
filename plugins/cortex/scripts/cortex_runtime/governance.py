@@ -677,31 +677,36 @@ def classify_governance(
         reasons.append("requested:required")
     if hits:
         reasons.extend(f"trigger:{key}" for key in sorted(hits))
+    policy_warnings: list[str] = []
+    safety_hits = sorted(set(hits) & HARD_TRIGGER_KEYS)
+    if mode == "off" and safety_hits:
+        raise GovernanceError(
+            "governance_mode=off violates safety boundary: " + ", ".join(safety_hits),
+            code="governance_safety_boundary",
+        )
     if mode == "off" and (complexity_value != "C1" or hits):
-        why = "C2/C3 requires governance" if complexity_value != "C1" else "risk trigger requires full governance"
-        raise GovernanceError(f"governance_mode=off is not permitted: {why}", code="governance_off_rejected")
+        why = "C2/C3 is conventionally governed" if complexity_value != "C1" else "risk triggers conventionally raise governance depth"
+        policy_warnings.append(f"governance_mode=off selected despite recommendation: {why}")
     if mode == "off":
         if not isinstance(structured, dict):
-            raise GovernanceError(
-                "governance_mode=off requires a complete boolean risk_triggers assessment",
-                code="governance_assessment_required",
+            normalized_assessment = {}
+            policy_warnings.append("governance_mode=off has no complete risk_triggers assessment")
+        else:
+            normalized_assessment = {_normalise_trigger_key(key): value for key, value in structured.items()}
+            missing_assessment = sorted(OFF_ASSESSMENT_KEYS - set(normalized_assessment))
+            invalid_assessment = sorted(
+                key for key in OFF_ASSESSMENT_KEYS
+                if key in normalized_assessment and type(normalized_assessment[key]) is not bool
             )
-        normalized_assessment = {_normalise_trigger_key(key): value for key, value in structured.items()}
-        missing_assessment = sorted(OFF_ASSESSMENT_KEYS - set(normalized_assessment))
-        invalid_assessment = sorted(
-            key for key in OFF_ASSESSMENT_KEYS
-            if key in normalized_assessment and type(normalized_assessment[key]) is not bool
-        )
-        if missing_assessment or invalid_assessment:
-            detail = []
-            if missing_assessment:
-                detail.append("missing " + ", ".join(missing_assessment))
-            if invalid_assessment:
-                detail.append("non-boolean " + ", ".join(invalid_assessment))
-            raise GovernanceError(
-                "governance_mode=off requires a complete boolean risk_triggers assessment: " + "; ".join(detail),
-                code="governance_assessment_required",
-            )
+            if missing_assessment or invalid_assessment:
+                detail = []
+                if missing_assessment:
+                    detail.append("missing " + ", ".join(missing_assessment))
+                if invalid_assessment:
+                    detail.append("non-boolean " + ", ".join(invalid_assessment))
+                policy_warnings.append(
+                    "governance_mode=off risk_triggers assessment is incomplete: " + "; ".join(detail)
+                )
 
     if mode == "required" or complexity_value == "C3" or hits:
         effective = "full"
@@ -709,6 +714,7 @@ def classify_governance(
         effective = "light"
     else:
         effective = "minimal"
+    assessment_mode = effective
     if mode == "off":
         effective = "minimal"
         reasons.append("requested:off")
@@ -728,16 +734,27 @@ def classify_governance(
     if mode == "off":
         snapshot["off_assessment"] = {
             key: normalized_assessment[key] for key in sorted(OFF_ASSESSMENT_KEYS)
+            if key in normalized_assessment
         }
     close_obligations = {
         "minimal": ["verification_evidence", "audit_receipt"],
         "light": ["policy_snapshot", "decision_assumption_risk_evidence", "process_reflection", "verification_evidence"],
         "full": ["acceptance_oracle_evidence", "risk_register", "falsification_strategy", "independent_governance_review", "retrospective", "verification_evidence", "audit_receipt"],
     }[effective]
+    recommended_mode = assessment_mode
     return {
         "schema": GOVERNANCE_SCHEMA,
         "requested_mode": mode,
         "effective_mode": effective,
+        # ``effective_mode`` remains the compatibility name for the server's
+        # assessment.  These explicit fields make authority unambiguous:
+        # Cortex recommends a depth, while the coordinator's requested mode
+        # remains the chosen route and is never vetoed by policy.
+        "recommended_mode": recommended_mode,
+        "chosen_mode": "minimal" if mode == "off" else recommended_mode,
+        "policy_warnings": policy_warnings,
+        "policy_advisory": bool(policy_warnings),
+        "recommended_next": "run_governance_review" if recommended_mode != effective else "continue_selected_pipeline",
         "complexity": complexity_value,
         "reasons": reasons,
         "trigger_evidence": trigger_evidence,
@@ -1259,7 +1276,19 @@ def _validate_close_evidence(
                     ).fetchone()
                     if linked is None:
                         raise GovernanceError("governance evidence record task is not linked to the initiative", code="artifact_scope_mismatch")
-        except GovernanceError:
+        except GovernanceError as exc:
+            # Missing/omitted evidence is a governance recommendation. A
+            # digest, scope, schema, or attestation failure is a trust-boundary
+            # violation and must remain fail-closed.
+            if exc.code in {
+                "artifact_integrity_failed",
+                "artifact_scope_mismatch",
+                "artifact_schema_invalid",
+                "artifact_type_mismatch",
+                "review_attestation_invalid",
+                "ledger_corrupt",
+            }:
+                raise
             missing.append(key)
             continue
         used_artifacts.add(artifact_ref)
@@ -1277,7 +1306,15 @@ def _validate_close_evidence(
                     metadata=metadata,
                     payload=payload,
                 )
-            except GovernanceError:
+            except GovernanceError as exc:
+                if exc.code in {
+                    "artifact_integrity_failed",
+                    "artifact_scope_mismatch",
+                    "artifact_schema_invalid",
+                    "review_attestation_invalid",
+                    "ledger_corrupt",
+                }:
+                    raise
                 missing.append(key)
     if missing:
         raise GovernanceError(
@@ -1323,22 +1360,54 @@ def transition_initiative(
         }
         if target != current and target not in allowed.get(current, set()):
             raise GovernanceError(f"initiative cannot transition from {current} to {target}", code="invalid_transition")
+        advisories: list[dict[str, Any]] = []
         if target in {"completed", "closed"}:
             unresolved = _unresolved_completion_dependencies(connection, ref)
             if unresolved:
-                raise GovernanceError(
-                    "initiative has unresolved blocks/requires dependencies: " + ", ".join(unresolved),
-                    code="dependency_unresolved",
-                )
+                advisories.append({
+                    "code": "dependency_unresolved",
+                    "severity": "warning",
+                    "message": "Initiative has unresolved blocks/requires dependencies: " + ", ".join(unresolved),
+                    "recommended_next": "dispatch_corrective_worker",
+                    "dependency_refs": unresolved,
+                })
             incomplete_tasks = _unresolved_linked_task_completions(connection, ref)
             if incomplete_tasks:
-                raise GovernanceError(
-                    "initiative completion requires terminal success for linked milestone/deliverable tasks: "
-                    + ", ".join(incomplete_tasks),
-                    code="linked_task_unresolved",
-                )
+                advisories.append({
+                    "code": "linked_task_unresolved",
+                    "severity": "warning",
+                    "message": "Linked milestone/deliverable work is not terminally successful: " + ", ".join(incomplete_tasks),
+                    "recommended_next": "dispatch_corrective_worker",
+                    "linked_tasks": incomplete_tasks,
+                })
+        if advisories:
+            # Do not attempt the forbidden terminal UPDATE: SQLite integrity
+            # triggers correctly reject unresolved linked work. The important
+            # distinction is that this is an executable advisory receipt, not
+            # a Cortex block or a user-facing question.
+            current_row = _initiative_row(row)
+            current_row.update({
+                "applied": False,
+                "advisories": advisories,
+                "recommended_next": "dispatch_corrective_worker",
+            })
+            return current_row
         if target == "closed":
-            _validate_close_evidence(connection, row, evidence_value)
+            try:
+                _validate_close_evidence(connection, row, evidence_value)
+            except GovernanceError as exc:
+                if exc.code != "close_evidence_required":
+                    raise
+                return _initiative_row(row) | {
+                    "applied": False,
+                    "advisories": [{
+                        "code": exc.code,
+                        "severity": "warning",
+                        "message": str(exc),
+                        "recommended_next": "dispatch_corrective_worker",
+                    }],
+                    "recommended_next": "dispatch_corrective_worker",
+                }
         now = _now()
         connection.execute("UPDATE initiatives SET status=?, revision=revision+1, updated_at=? WHERE initiative_ref=?", (target, now, ref))
         result = connection.execute("SELECT * FROM initiatives WHERE initiative_ref = ?", (ref,)).fetchone()

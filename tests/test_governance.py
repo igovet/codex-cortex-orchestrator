@@ -74,14 +74,15 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
             task={"multiple_repositories": True},
         )
         self.assertEqual(explicit_multi_scope["effective_mode"], "full")
-        with self.assertRaisesRegex(governance.GovernanceError, "governance_mode=off"):
-            governance.classify_governance(complexity="C2", requested_mode="off")
-        with self.assertRaisesRegex(governance.GovernanceError, "complete boolean"):
-            governance.classify_governance(
-                complexity="C1",
-                requested_mode="off",
-                objective="Perform a routine local maintenance adjustment.",
-            )
+        c2_off = governance.classify_governance(complexity="C2", requested_mode="off")
+        self.assertEqual(c2_off["effective_mode"], "minimal")
+        self.assertTrue(c2_off["policy_advisory"])
+        incomplete_off = governance.classify_governance(
+            complexity="C1",
+            requested_mode="off",
+            objective="Perform a routine local maintenance adjustment.",
+        )
+        self.assertTrue(incomplete_off["policy_advisory"])
         off = governance.classify_governance(
             complexity="C1",
             requested_mode="off",
@@ -121,8 +122,9 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
             governance.classify_governance(complexity="C3", requested_mode="auto")["effective_mode"],
             "full",
         )
-        with self.assertRaisesRegex(governance.GovernanceError, "governance_mode=off"):
-            governance.classify_governance(complexity="C3", requested_mode="off")
+        c3_off = governance.classify_governance(complexity="C3", requested_mode="off")
+        self.assertEqual(c3_off["effective_mode"], "minimal")
+        self.assertTrue(c3_off["policy_advisory"])
         self.assertEqual(
             governance.classify_governance(
                 complexity="C2", task={"risk_triggers": ["destructive"]}
@@ -159,16 +161,15 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         }
         ordinary = [{"wave_id": "wave-01", "delegations": [{"gate": "implementation", "agent": "general"}]}]
         waves = cortex._append_governance_waves(ordinary, task)
-        self.assertEqual([wave["delegations"][0]["gate"] for wave in waves], ["governance_activation", "implementation", "governance_close"])
-        self.assertEqual([wave["delegations"][0]["agent"] for wave in waves if wave["delegations"][0]["gate"].startswith("governance_")], ["code_reviewer", "code_reviewer"])
-        self.assertEqual(len(waves) - len(ordinary), 2)
+        self.assertEqual([wave["delegations"][0]["gate"] for wave in waves], ["implementation"])
+        self.assertEqual(len(waves), len(ordinary))
         with_close = cortex._append_governance_waves(
             ordinary + [{"wave_id": "wave-close", "delegations": [{"gate": "close", "agent": "build_verification"}]}],
             task,
         )
         self.assertEqual(
             [wave["delegations"][0]["gate"] for wave in with_close],
-            ["governance_activation", "implementation", "governance_close", "close"],
+            ["implementation", "close"],
         )
         reordered = cortex._append_governance_waves(
             [
@@ -181,13 +182,15 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         )
         self.assertEqual(
             [wave["delegations"][0]["gate"] for wave in reordered],
-            ["governance_activation", "implementation", "governance_close", "close"],
+            ["implementation", "governance_activation", "close", "governance_close"],
         )
-        with self.assertRaisesRegex(ValueError, "server-owned"):
+        self.assertEqual(
             cortex._append_governance_waves(
                 [{"wave_id": "bad", "delegations": [{"gate": "governance_activation", "agent": "general"}]}],
                 task,
-            )
+            )[0]["delegations"][0]["agent"],
+            "general",
+        )
 
     def test_activation_briefing_reviews_governance_boundary_not_future_delivery(self) -> None:
         project = Path(self.temp.name) / "activation-briefing"
@@ -210,7 +213,7 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         })
         self.assertTrue(started["ok"], started)
         activation = started["dispatches"][0]
-        self.assertEqual(activation["phase"], "governance_activation")
+        self.assertEqual(activation["phase"], "implementation")
         briefing = Path(activation["briefing_path"]).read_text(encoding="utf-8")
         assignment = json.loads(briefing.split("```json\n", 1)[1].split("\n```", 1)[0])
         governance_context = assignment["governance_context"]
@@ -222,12 +225,11 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         self.assertRegex(governance_context["policy_snapshot_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(
             governance_context["current_pipeline"],
-            ["governance_activation", "implementation", "documentation", "governance_close", "close"],
+            ["implementation", "documentation", "close"],
         )
-        self.assertNotIn("task_acceptance_criteria", assignment)
-        self.assertNotIn("task_verification", assignment)
-        self.assertIn("MUST NOT be reported as findings", briefing)
-        self.assertIn("Fail or request rework only for a defect in those activation inputs", briefing)
+        self.assertIn("task_acceptance_criteria", assignment)
+        self.assertIn("task_verification", assignment)
+        self.assertIn("Prompt volume targets are advisory worker guidance only", briefing)
         self.assertIn("ATTEMPT_COMPLETED attempt_result_ref=<generated id>", briefing)
         self.assertNotIn("ATTEMPT_COMPLETED result_ref=", briefing)
         route = [
@@ -263,7 +265,7 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         })
         self.assertTrue(started["ok"], started)
         activation = started["dispatches"][0]
-        self.assertEqual(activation["phase"], "governance_activation")
+        self.assertEqual(activation["phase"], "implementation")
         briefing = Path(activation["briefing_path"]).read_text(encoding="utf-8")
         self.assertIn("Prompt volume targets are advisory worker guidance only", briefing)
         route = [
@@ -438,15 +440,16 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
             )
 
         c2_off = start(Path(self.temp.name) / "c2-off", "Write a plain plan.", "C2", "off")
-        self.assertFalse(c2_off["ok"])
-        self.assertIn("governance_mode=off", c2_off["diagnostics"][0]["message"])
+        self.assertTrue(c2_off["ok"], c2_off)
+        self.assertTrue(c2_off["governance"]["policy_advisory"])
+        self.assertEqual(c2_off["governance"]["chosen_mode"], "minimal")
         c3 = start(Path(self.temp.name) / "c3", "Review a high-impact change.", "C3", "auto")
         self.assertTrue(c3["ok"], c3)
         self.assertEqual(c3["effective_mode"], "full")
         self.assertEqual(c3["governance"]["effective_mode"], "full")
         self.assertEqual(
             [wave["workers"][0]["phase"] for wave in c3["pipeline"]["waves"] if wave["workers"]],
-            ["governance_activation", "scope", "discover", "architecture", "plan", "implementation", "qa", "review", "documentation", "governance_close", "close"],
+            ["scope", "discover", "architecture", "plan", "implementation", "qa", "review", "documentation", "close"],
         )
         triggered = start(Path(self.temp.name) / "triggered", "Rotate an API key.", "C1", "auto")
         self.assertTrue(triggered["ok"], triggered)
@@ -481,15 +484,13 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         self.assertEqual(started["step"], 1)
         self.assertEqual(
             [wave["wave"] for wave in started["pipeline"]["waves"]],
-            [1, 2, 3, 4, 5],
+            [1, 2, 3],
         )
         self.assertEqual(
             [wave["workers"][0]["phase"] for wave in started["pipeline"]["waves"]],
             [
-                "governance_activation",
                 "implementation",
                 "documentation",
-                "governance_close",
                 "close",
             ],
         )
@@ -842,7 +843,10 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         evidence["independent_review"].update(
             {"reviewer_identity": "reviewer", "reviewer_role": "code_reviewer", "independent": True}
         )
-        with self.assertRaisesRegex(governance.GovernanceError, "close requires"):
+        # A cross-scope artifact is an objective integrity violation and
+        # remains fail-closed even though omitted governance evidence is only
+        # an advisory.
+        with self.assertRaisesRegex(governance.GovernanceError, "not linked to the initiative"):
             governance.transition_initiative(
                 self.root,
                 initiative_ref=target["initiative_ref"],
@@ -949,13 +953,14 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
                 content=json.dumps(body, sort_keys=True),
                 immutable=True,
             )
-        with self.assertRaisesRegex(governance.GovernanceError, "close requires"):
-            governance.transition_initiative(
+        missing = governance.transition_initiative(
                 self.root,
                 initiative_ref=initiative["initiative_ref"],
                 status="closed",
                 evidence={},
             )
+        self.assertFalse(missing["applied"])
+        self.assertTrue(any(item["code"] == "close_evidence_required" for item in missing["advisories"]))
 
         def proof(key: str) -> dict[str, str]:
             artifact = artifact_by_key[key]
@@ -969,7 +974,7 @@ class GovernanceAcceptanceTests(HostPrivateControlStoreTestMixin, unittest.TestC
         evidence["independent_review"].update(
             {"reviewer_identity": "reviewer-1"}
         )
-        with self.assertRaisesRegex(governance.GovernanceError, "close requires"):
+        with self.assertRaisesRegex(governance.GovernanceError, "independent review"):
             governance.transition_initiative(
                 self.root,
                 initiative_ref=initiative["initiative_ref"],

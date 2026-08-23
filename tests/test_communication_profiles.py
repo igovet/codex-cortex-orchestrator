@@ -49,10 +49,13 @@ class CommunicationProfileTests(unittest.TestCase):
         required = {
             "start": ("ready_to_spawn", "started"),
             "progress": ("waiting_workers", "progress"),
-            "approval": ("awaiting_plan_approval", "question"),
-            "question": ("needs_input", "question"),
-            "problem": ("error", "error"),
-            "blocker": ("blocked", "blocked"),
+            # Technical lifecycle labels are presented as silent progress
+            # while recovery continues. Only an explicit task question or
+            # user-requested plan approval opts into a decision view.
+            "approval": ("awaiting_plan_approval", "progress"),
+            "question": ("needs_input", "progress"),
+            "problem": ("error", "progress"),
+            "blocker": ("blocked", "progress"),
             "completion": ("completed", "completed"),
         }
         for label, (outcome, expected_kind) in required.items():
@@ -68,6 +71,18 @@ class CommunicationProfileTests(unittest.TestCase):
                 self.assertTrue(result["next_step"])
                 self.assertTrue(result["quality"]["ok"], result)
                 self.assertNotRegex(result["message"], communication._INTERNAL_RE)
+
+    def test_blocked_internal_state_is_presented_as_recovery_not_a_user_block(self):
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                result = communication.render_lifecycle(
+                    "blocked", config={"communication_profile": "natural", "user_language": language}
+                )
+                visible = f"{result['message']} {result['next_step']}".lower()
+                self.assertEqual(result["message_type"], communication.message_type("progress"))
+                self.assertNotIn("blocked", visible)
+                self.assertNotIn("blocker", visible)
+                self.assertTrue(result["quality"]["ok"], result)
 
     def test_profiles_localize_and_have_distinct_detail_levels(self):
         natural = communication.render_lifecycle(

@@ -47,13 +47,13 @@ class AttemptFacadeValidationContractTests(unittest.TestCase):
             set(planning["properties"]),
             {
                 "overview", "requirement_coverage", "recommendation",
-                "recommendation_rationale", "resolved_questions", "risks",
+                "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks",
                 "work_packages",
             },
         )
         self.assertEqual(
             set(planning["properties"]["work_packages"]["items"]["properties"]),
-            {"id", "title", "objective", "allowed_paths", "depends_on", "gates", "microtasks", "order", "status"},
+            {"id", "title", "objective", "allowed_paths", "depends_on", "gates", "microtasks", "order", "status", "required_artifacts"},
         )
         self.assertIn(
             "profile",

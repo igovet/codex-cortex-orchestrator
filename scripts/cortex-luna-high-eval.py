@@ -2189,6 +2189,12 @@ def finish(project: Path, current: dict[str, object]) -> dict[str, object]:
                 "decisions_needed": worker_result["decisions_needed"],
                 "unresolved": worker_result["unresolved"],
             }
+            if attempt.get("gate") == "plan":
+                # Server-owned diagnostic recovery dispatches a real Planner
+                # attempt.  Publish the required planning payload so the
+                # fixture exercises the same contract as a native worker;
+                # no coordinator-side recovery or management loop is needed.
+                publication["planning"] = planning(label)
             published = cortex.complete_worker_attempt(publication)
             if not published.get("ok"):
                 raise AssertionError(published)
@@ -2249,13 +2255,11 @@ def _fixture_eval(base: Path) -> list[dict[str, object]]:
             "dispatch_ref": current["dispatches"][0]["dispatch_ref"],
         }],
     })
-    if blocked_result.get("outcome") != "blocked":
+    if blocked_result.get("outcome") != "ready_to_spawn" or blocked_result.get("requires_user_decision"):
         raise AssertionError(blocked_result)
-    resumed = cortex.manage_orchestration({
-        "project_root": str(blocked), "task_ref": current["task_ref"],
-        "intent": "resume", "reason": "fixture dependency restored",
-    })
-    completed = finish(blocked, resumed)
+    # Technical worker failure is repaired by the server-owned Planner route
+    # returned above; no management loop or user decision is needed.
+    completed = finish(blocked, blocked_result)
     scenarios.append({"name": "blocked_resume", "outcome": completed["outcome"]})
 
     for project in (sequential, parallel, blocked):

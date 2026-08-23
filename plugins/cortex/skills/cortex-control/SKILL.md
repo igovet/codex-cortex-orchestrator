@@ -19,9 +19,10 @@ host filesystem read cannot open its exact briefing may call
 bootstrap. If a bounded response is incomplete, it may continue only with the
 returned opaque cursor until `complete=true`. Any worker-tool caller/input/schema
 diagnostic or `retryable=true` result is corrected and retried on the same
-attempt without consuming the recovery budget; it never ends the worker. Only
-an explicit `retryable=false`, `outcome=blocked`, or genuinely unavailable exact
-identity is terminal. A successor worker may also use `read_worker_result` with its exact attempt/profile only
+attempt without consuming the recovery budget; it never ends the worker. A
+blocked/failed result is terminal evidence for server-owned corrective
+recovery, not a Cortex stop. Only a genuinely unavailable exact identity after
+recovery is routed to a server-owned diagnostic worker. A successor worker may also use `read_worker_result` with its exact attempt/profile only
 for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
@@ -52,7 +53,7 @@ projection at process launch.
 | inactive | explicit orchestrator activation | call `start_orchestration` once | concise activation summary |
 | waiting_workers | wait timeout | wait again | silent |
 | waiting_workers | worker question | render the durable chat interaction and end the turn | one detailed final chat message with LLM recommendation |
-| active or blocked | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise update |
+| active or recovery-pending | user changes the current task | `manage_orchestration(intent="steer")` on the same task | concise update |
 | awaiting_plan_approval | approve | invoke only the returned next wave | approval update |
 | awaiting_plan_approval | cancel | make no lifecycle call | silent |
 | awaiting_plan_approval | non-empty custom response | invoke only the returned replacement Planner wave | revision update |
@@ -70,19 +71,44 @@ While the state is `waiting_workers`, the coordinator is completely silent:
 wait timeouts and unchanged worker state produce no heartbeat, progress note,
 or repeated explanation.
 A coordinator must not return a final answer while a durably bound worker is
-running. The bundled `Stop` hook blocks that early finalization and directs the
-same turn to wait only for the exact persisted child. The hook is a live-turn
-guard, not a synthetic wakeup: if a coordinator is already idle, resume it,
-call `manage_orchestration(intent="inspect")` once, and use only the returned
-active child, result, question, or recovery receipt.
+running, but no hook may block or silence a coordinator turn. The Stop hook is
+telemetry-only. If a coordinator is idle, call
+`manage_orchestration(intent="inspect")` once and consume the returned active
+child, result, question, or server-owned recovery receipt. A worker failure or
+malformed lifecycle payload is always routed to same-attempt correction or an
+automatic corrective dispatch; it must never stop Cortex itself.
 
-For plan approval, the coordinator must state its recommendation. When the
-plan covers the request, all material uncertainty is closed, and its gates
-have concrete verification, recommend **Approve**. Recommend **Revise** only
-when naming a specific material blocker, dependency, omitted requirement, or
-verification gap; recommend **Cancel** only when the user has requested
-cancellation or the task is no longer authorized. Never ask the user to
-choose between unlabeled internal states, and never treat silence as approval.
+### Technical recovery is never a Cortex stop
+
+`blocked`, `needs_input`, `validation_failed`, stale receipts, invalidated
+attempts, replay-registry drift, missing result projections, failed dispatches,
+and lifecycle inconsistencies are internal recovery signals. They are never a
+reason to end the coordinator turn, return a system blocker, or ask the user
+what Cortex should do. The coordinator must let the server repair durable
+state, preserve all canonical results, and emit the next corrective dispatch
+or same-attempt retry. Only a durable worker question or explicit plan-approval
+decision may stop the ordinary chat.
+
+For one lifecycle event use one operation path: read the canonical result,
+call `continue_orchestration` once with its server-derived continuation, and
+follow the returned dispatch, wait, or question. Do not chain
+`manage_orchestration` calls such as `inspect -> recover_inspect -> resume` to
+compensate for a technical error. `manage_orchestration` is an explicit
+maintenance/recovery surface, not a polling loop; at most one server-owned
+recovery intent may be used when the continuation receipt itself was lost,
+after which Cortex must repair and continue internally. Never return prose
+such as “internal state is contradictory”, “Cortex is blocked”, or “retry
+management”; record that fact in the JSONC audit event and route the task
+forward automatically.
+
+For plan approval, the planner supplies one canonical recommendation. Any
+material finding or uncertainty must already have a concrete
+`recommendation_actions[]` entry with `issue`, `action`, `plan_refs`, and
+`verification`; the user must not be asked to invent the correction. Render
+exactly four choices: approve with recommendations, approve without
+recommendations, revise, or cancel. The LLM may explain the planner's one
+recommendation, but must never replace it with a contradictory recommendation.
+Never treat silence as approval.
 
 ## Root coordinator lock
 
@@ -96,8 +122,10 @@ call Cortex, invoke the exact returned worker dispatches, wait, route questions,
 assess results, and communicate with the user. Every project operation must be
 delegated, including investigation after a plan and small or obvious edits. The
 root must remain idle while a worker runs. Worker failure, delay, unavailable
-dispatch, or incomplete evidence is a blocker or rework signal, never
-permission for the root to perform the work directly or inspect sources.
+dispatch, or incomplete evidence is a same-task recovery signal, never a
+Cortex system stop and never permission for the root to perform project work
+directly or inspect sources. If a condition requires a user choice, surface
+one concrete question and keep the task resumable.
 
 ## Schema-first tool calls
 
@@ -144,10 +172,13 @@ paths forbidden above.
    sole exception because Cortex supplies their exhaustive census contract.
    A `start_orchestration` result with `ok=false`, `task_created=false`, or no
    `task_ref` did not create a recoverable task: do not call `manage_orchestration`,
-   inspect, list, infer, or select another task. Stop and result its blocker.
+   inspect, list, infer, or select another task. Record the internal
+   reconciliation diagnostic and retry the originating lifecycle request once;
+   this is never a user-facing Cortex blocker.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
-   returns, and validates that plan and enforces documentation and close. An override uses only
+   returns that choice, validates executable shape, and records governance
+   recommendations without enforcing documentation or close conventions. An override uses only
    `waves: [{workers: [{phase, ...}]}]`. `phase` is required; optional fields
    are `profile`, `objective`, `strategy`, `paths`, `acceptance`, `verification`, `model`,
    `user_requested_model`, `effort`, `depends_on`, `context_files`, `visible`,
@@ -184,7 +215,8 @@ paths forbidden above.
    is durably bound. A host-level wait-any representation may omit an explicit
    target list only while Cortex has a bound running child; otherwise it is
    denied as an unspawned dispatch. If a native call is unavailable or fails,
-   stop with that blocker; otherwise wait only for bound children.
+   keep the task resumable and route the condition through recovery or one
+   concrete user question; otherwise wait only for bound children.
    A failed targeted wait is terminal only when the host explicitly proves the
    exact persisted child is unavailable. The lifecycle hook then records the
    same resultless-stop recovery state; inspect once and submit its exact
@@ -211,7 +243,7 @@ paths forbidden above.
    directory or ledger access. Values above the chunk bound are normalized and
    continued with the returned cursor. If it returns a caller/schema diagnostic
    or `retryable=true`, correct the named field and retry the same tool on this
-   attempt. Stop only for explicit `retryable=false` or `outcome=blocked`.
+   attempt. A blocked/failed result is durable evidence for server-owned corrective recovery, never a Cortex stop.
    After reviewing it, the worker relies on the server-owned briefing receipt;
    it does not author a digest or evidence marker.
    `complete_attempt` verifies the canonical receipt and current artifact state.
@@ -230,21 +262,23 @@ paths forbidden above.
    `read_worker_result`. While the wave is active, the coordinator is in
    `waiting_workers` with `output_policy="silent"`: repeated wait timeouts
    produce no heartbeat or status commentary. Visible output is limited to a
-   worker question, worker completion/failure, or a blocking error.
+   worker question, worker completion/failure, or a task-relevant question or
+   explicit safety/authorization boundary.
 
    Before any project operation or non-Cortex tool, bootstrap validation is
    mandatory. Validate the complete immutable briefing and every applicable
    acceptance/verification item, supplied predecessor result reference, and
-   required gate-evidence input is present and readable. If any required input
-   is missing, unreadable, incomplete, or mismatched, do not substitute it or
-   begin project work. Ask exactly one durable `worker_question(action="ask")`
-   that lists every missing input and why it is material, return
-   `QUESTION_RECORDED`, and remain idle. The coordinator renders that one
-   question, records the ordinary-chat answer, and resumes only the exact same
-   native worker with `followup_task`. The worker polls that question and
-   reruns the complete bootstrap validation before any project work. Stop only
-   when the question result is explicitly non-retryable or the exact worker
-   identity is unavailable.
+   required gate-evidence input is present and readable. If a Cortex-owned
+   input is missing, unreadable, incomplete, or mismatched, do not substitute
+   it or begin project work. Record every missing input as an internal
+   evidence finding and return `orchestrator_advice`; the coordinator routes
+   the exact server-derived corrective dispatch or another worker. Do not ask
+   the user, create a durable question, or remain idle for governance,
+   briefing, receipt, ledger, gate, or other Cortex evidence. A durable
+   `worker_question(action="ask")` is reserved for an explicit task
+   requirement, scope, acceptance, or external/destructive authorization
+   decision; only that question path resumes the same child with
+   `followup_task` and `poll`.
 
    Any worker may call `worker_question` when repository evidence cannot
    resolve a material user decision. Before pausing, it collects every
@@ -300,15 +334,15 @@ continuing. Never replace the worker or advance the wave for a question.
    An ordinary completed semantic result may use `unresolved` only for
    concrete material open items required by a successor handoff. Closure
    verifier gates (`review`, `governance_activation`, `governance_close`, and
-   `close`) that declare pass MUST use `unresolved=[]`; any concrete blocker
+   `close`) that declare pass MUST use `unresolved=[]`; any concrete unresolved finding
    keeps that closure outcome from passing. A blocked result may use
-   `unresolved` only for concrete material blockers or unanswered required
+   `unresolved` only for concrete material findings or unanswered required
    decisions. Residual risk, omitted/environment checks, retrospective notes,
    uncertainty, and placeholder `none` entries belong in `summary`, `claims`,
    or AttemptEvents and never in `unresolved`.
    Review, governance activation, governance close, and final close workers
    publish the same semantic AttemptResult as every other worker. Findings,
-   decisions, material blockers, verification claims, and changed paths
+   decisions, material findings, verification claims, and changed paths
    are represented by their documented AttemptResult fields and AttemptEvents;
    server observations and human/handoff projections are added by
    Cortex. A corrective worker may result a changed artifact but cannot resolve
@@ -360,7 +394,8 @@ continuing. Never replace the worker or advance the wave for a question.
 5. After all workers finish, read every ref with `read_worker_result`. A result
    is always rereadable and remains the sole machine-readable AttemptResult
    authority. Large results are returned as the complete immutable artifact
-   through the signed cursor; 32 KiB limits only each transport page. Never
+   through the signed cursor; any page size is caller-selected transport
+   pagination, never a backend content limit or truncation rule. Never
    guess, substitute, or browse a separate projection path. Then evaluate
    the results against the pipeline, then call `continue_orchestration` exactly
    once with `project_root`, the opaque `task_ref` and relative `step` from the
@@ -435,25 +470,29 @@ missing Markdown projection merely to render status. When its
 bounded server-returned recovery action; do not guess an attempt identity,
 repeat a dispatch, or treat the original inspect as permission to mutate state.
 
-### Required post-plan approval
+### Explicit user-requested post-plan approval
 
-`task.plan_approval` accepts `auto` or `required`; Cortex defaults to
-`required` for C2/C3 and `auto` for C1. The C1 auto policy does not require
-user confirmation. A required plan must be its own wave. Once that plan
-completes, the lifecycle result is `awaiting_plan_approval` with no successor
-dispatch and a machine-readable `plan_review` containing the objective, complete work
-packages and microtasks, paths, dependencies, verification, material risks,
-   `attempt_result_ref`, and `remaining_phases`. The
-coordinator reads the result, then calls
+`task.plan_approval` accepts `auto` or `required` and defaults to `auto` for
+every complexity. `required` is used only when the user explicitly requested
+post-plan approval; governance, Planner, risk, and review recommendations never
+request it on the user's behalf. A user-requested required plan must be its own
+wave. Once that plan completes, the lifecycle result is
+`awaiting_plan_approval` with no successor dispatch and a machine-readable
+`plan_review` containing the objective, complete work packages and microtasks,
+paths, dependencies, verification, material risks, `attempt_result_ref`, and
+`remaining_phases`. The coordinator reads the result, then calls
 `manage_orchestration(intent="plan_approval", payload={"decision":"prompt"})`.
 Cortex returns `cortex/chat-interaction/v1` with `user_view` and `internal`.
-Render only `user_view`: a 3–5 step human summary, one approve/revise/cancel
-question, the material risk (if any), and the explicit LLM recommendation.
+Render only `user_view`: a 3–5 step human summary, one four-way approval
+question (approve with recommendations, approve without recommendations,
+revise, or cancel), the concrete corrective actions, and the single planner
+recommendation.
 Do not expose work-package paths, dependencies, result/request IDs, or tool
 instructions. Do not call a UI, input, approval, or elicitation tool. End the
 turn and wait. Submit the user's next message with the exact `interaction_ref`
-as `request_id`: unambiguous approval uses `approve`, explicit cancellation uses
-`cancel`, and any requested change uses `revise` with the exact feedback text.
+as `request_id`: approval uses `approve_with_recommendations` or
+`approve_without_recommendations`, explicit cancellation uses `cancel`, and any
+requested change uses `revise` with the exact feedback text.
 Planner then reruns before another approval hold. Silence never approves. This gate is
 separate from `worker_question`: material questions are resolved through that
 lifecycle during planning rather than through a duplicate approval question.
@@ -548,11 +587,16 @@ Required-plan `plan_review` retains its derived path for approval review.
 `continue_orchestration` is a one-shot receipt for the exact current wave. On
 success, perform only the action authorized by that response: invoke its
 returned dispatches, wait for the exact persisted active workers, or stop on a
-terminal `completed`/`blocked` outcome after closing the consumed child. Never
-call `continue_orchestration` again with the same step/results, request
-artifacts, add `future_waves`, or spawn a replacement after that receipt. A
-`retryable=false` task-identity or relative-step diagnostic is terminal; result
-the blocker and do not retry, inspect broadly, or reconstruct a continuation.
+   terminal `completed` outcome after closing the consumed child. A terminal
+   worker `blocked`/`failed` outcome is server-owned recovery evidence: follow
+   the returned corrective dispatch for the orchestrator's chosen pipeline and
+   do not stop the Cortex task. A Planner is used only when that chosen
+   corrective pipeline includes one; the finding never forces a Planner wave.
+   Never call `continue_orchestration` again with the same step/results, request
+   artifacts, add `future_waves`, or spawn a replacement after that receipt. A
+   `retryable=false` task-identity or relative-step diagnostic is reconciled by
+   one server-owned inspect/recovery receipt; never expose it as a Cortex block
+   or ask the user to repair internal state.
 
 Normal requests never carry caller-generated submission, task, wave, attempt,
 principal, thread, host-tool, host-model, or host-effort fields. Internal IDs
@@ -590,47 +634,39 @@ include a concise `reason`; reason prose is audit-only and cannot authorize a
 recovery or release a liveness pause. Planner and explorer ownership recommendations are
 advisory routing evidence, not an automatic rewrite command. Prefer the
 narrowest supported profile and replace a stale route only after that explicit
-decision. `general` is a conservative fallback, not the preferred universal
-writer. The public facade infers rework when `future_waves` reintroduces a
-current or completed phase; the optional `rework` field is only a hint. A
-pending implementation phase cannot be silently omitted from a replacement:
-retain it and narrow its result dependencies instead. After an
-exhausted closure-rework budget, ordinary `resume` must not replay the same
-corrective wave. Resume with atomic recovery `payload.future_waves` beginning
-with one Planner wave; Cortex records the replan before returning a dispatch
-and restores every original delivery obligation—implementation, applicable QA,
-security/performance, review, documentation, and close—before requiring fresh
-plan approval. Before documentation or close dispatch, the runtime compares
-the accepted planning catalog with non-invalidated delivery attempts and
-repairs any missing graph instead of accepting documentation as implementation
-evidence. `replan_count` is audit history, not a task-wide quota; the retained
-`replan_limit` field is historical metadata and never blocks a new
-evidence-backed review/remediation cycle. The facade preflights approval,
-rework, and obligation retention before recording the current gate. A requested
-inactive gate is never silently substituted with the first active gate:
-`record_gate` returns the retryable, non-mutating `gate_mismatch` result with
-the requested gate and active-gate list so the coordinator can retry exactly
-the intended transition. A partial failure that left an active current gate
-without a live or pending
-dispatch may use the same Planner-first resume payload; active recovery is
-rejected while any worker is still addressable. Use
+   decision. `general` is a conservative fallback, not the preferred universal
+   writer. The public facade infers rework when `future_waves` reintroduces a
+   current or completed phase; the optional `rework` field is only a hint. A
+   pending implementation phase is retained as an evidence obligation, while
+   the coordinator may narrow dependencies or select another owner. After an
+   exhausted closure-rework cycle, ordinary `resume` records the condition and
+   returns corrective options; it does not impose a Planner wave or fresh plan
+   approval. Before documentation or close dispatch, the runtime reports any
+   missing graph as an advisory finding and the coordinator chooses the repair
+   owner. `replan_count` is audit history, not a task-wide quota; the retained
+   `replan_limit` field never stops a new evidence-backed review/remediation
+   cycle. The facade preflights request integrity before recording the current
+   gate. A requested inactive gate is never silently substituted with the first
+   active gate: `record_gate` returns the retryable, non-mutating `gate_mismatch`
+   result with the requested gate and active-gate list so the coordinator can
+   retry exactly the intended transition. A partial failure that left an active
+   current gate without a live or pending dispatch is returned as corrective
+   advice; the coordinator may choose a Planner or another owner. Use
 `manage_orchestration` for `inspect`, `recover_inspect`, `resume`,
 `deactivate`, `lane`, `resource`, or `question`; these intents do not belong
 in normal wave calls.
 Follow recoverable diagnostics and never fall back to private tools.
 
-A materially identical no-progress signature pauses autonomous correction only
-after the configured repeat limit, and only for the failed gate. Unpaused
-siblings in that same ordered parallel wave remain executable; a later wave
-cannot leapfrog the paused dependency. Findings and corrective routes from a
-different gate do not alter the failed gate's signature. Recovery must begin
-with one singleton Planner wave and materially change the failed pipeline,
-strategy, or verification contract. An infrastructure/environment pause may
-instead name a class-matched remediation in the Planner wave. If multiple
-gates are paused, `manage_orchestration(intent="resume")` names the intended
-gate with `payload.rework`; it releases no other paused gate. A partial
-baseline or current manifest is diagnostic evidence only and cannot authorize
-read-only mutation reconciliation, a handoff, or terminal close.
+A materially identical no-progress signature is durable routing evidence, not
+a pause or retry budget. Unpaused siblings remain executable and the
+coordinator may dispatch a corrective owner for the affected gate immediately.
+The response can recommend a materially different pipeline, strategy, or
+verification contract, but this recommendation never authorizes or forbids a
+future wave. Infrastructure/environment findings name a class-matched
+remediation. If multiple gates have findings, `manage_orchestration(intent="resume")`
+may name the intended gate with `payload.rework`; no other gate is implicitly
+released. A partial baseline or current manifest remains diagnostic evidence
+and is routed to the coordinator's chosen reconciliation or verification owner.
 
 The question intent accepts only the worker's exact `question_ref` on the
 normal path and resolves all durable identity internally. It returns a
@@ -686,6 +722,18 @@ phases can complete when deterministic intent preflight marks a short product
 surface request as underspecified. Ordinary chat is the only user decision
 surface: after the detailed question message the task must stop until the user
 answers. Silence never authorizes a default answer.
+
+The Question Firewall is the authoritative boundary for this surface. Only
+task requirement, scope, acceptance, product, or explicit
+external/destructive-authorization decisions may become a durable user
+question. Cortex policy, governance, gate, planner, retry, worker/profile,
+dispatch, ledger, evidence, receipt, lifecycle, and recovery conditions are
+never user questions. If `context.decision_scope` is supplied, it must name a
+task scope (`requirement`, `scope`, `acceptance`, `product`,
+`external_authorization`, or `destructive_authorization`) for a user pause;
+internal scopes route to the coordinator as `orchestrator_advice`. An advice
+response is recoverable and must be recorded and delegated without creating a
+question document or setting `requires_user_decision=true`.
 
 Project maintenance uses `manage_orchestration(intent="prune",
 payload={"confirmation":"PRUNE","older_than_days":7})` only after the user
@@ -826,7 +874,7 @@ run: disable bytecode and test/build caches and skip checks that require
 cleanup. Never create an artifact and then delete it to simulate read-only
 verification. State every unrun required check, environmental limitation, and
 remaining uncertainty plainly in summary/claims rather than `unresolved` unless
-it is a concrete blocker. Current source, tests, schemas, and executable
+   it is a concrete unresolved finding. Current source, tests, schemas, and executable
 configuration outrank generated documentation.
 
 ## Private tool-error diagnostics

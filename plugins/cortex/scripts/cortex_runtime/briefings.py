@@ -107,8 +107,10 @@ def host_spawn_bootstrap(
         "Never add prose to simulate a server receipt. Retry caller/schema errors; stop only nonretryable/blocked. "
         "Read exception: issued briefing "
         f"{str(briefing_path)!r}; digest mismatch blocks. "
-        "Before work validate briefing, acceptance/verification, predecessor refs, and gate evidence. If missing, ask one durable "
-        "root worker_question(all missing/why); exact followup→poll→revalidate. Stop only non-retryable/identity unavailable."
+        "Before work validate briefing, acceptance/verification, predecessor refs, and gate evidence. If a Cortex-owned "
+        "input is missing, record the exact evidence gap and return coordinator advice for a corrective dispatch; do not "
+        "ask the user or remain idle. Ask one durable worker_question only for an explicit task requirement, scope, "
+        "acceptance, or external/destructive authorization decision."
     )
 
 
@@ -179,18 +181,18 @@ def _governance_projection_instruction(package: Mapping[str, Any]) -> str:
     )
     if required:
         return (
-            "SERVER-OWNED GOVERNANCE PROJECTION: governance is required. Assignment has "
+            "SERVER-OWNED GOVERNANCE PROJECTION: governance evidence is available. Assignment has "
             "policy_snapshot/policy_snapshot_digest, manifest_ref/manifest_digest, "
             "current_pipeline, and effective_mode. Treat present values as final server "
             "evidence, verify digests, and do not ask the user to choose or reconfirm them."
         )
     return (
-        "SERVER-OWNED GOVERNANCE PROJECTION IS INCOMPLETE: governance is required, but "
-        "Assignment is missing a policy snapshot/digest, manifest ref/digest, or current "
-        "pipeline. Do not invent or infer the missing server fact; do not silently continue; "
-        "record one durable worker_question "
-        "for the exact missing server fact and why it blocks verification. Do not ask the "
-        "user to select a policy."
+        "SERVER-OWNED GOVERNANCE PROJECTION IS INCOMPLETE: Assignment is missing a "
+        "policy snapshot/digest, manifest ref/digest, or current pipeline. Do not invent or "
+        "infer the missing server fact. Record the exact evidence gap in findings/AttemptEvents "
+        "and return it to the coordinator for a server-derived corrective dispatch or another "
+        "governance worker. Do not ask the user, persist a worker question, or remain idle for "
+        "an internal governance condition."
     )
 
 
@@ -375,8 +377,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
                 "to choose among implementation, acceptance, risk, evidence, or closure alternatives; do not fabricate an answer. "
                 "Use the server-owned policy snapshot, autonomous scope, exact task contract, current source/tests, and supplied predecessor "
                 "AttemptResults as decision authority. If all close obligations are evidenced, complete this attempt with unresolved=[]. "
-                "If a required obligation cannot be verified, complete with status=blocked and put the concrete unverified obligation and "
-                "evidence gap in unresolved, recording the reason in findings or AttemptEvents. A new question is legal only when Assignment "
+                "If a required obligation cannot be verified, complete with status=failed and put the concrete unverified obligation and "
+                "evidence gap in findings or AttemptEvents so the coordinator can route a corrective owner; do not use a blocked "
+                "lifecycle state for an internal governance finding. A new question is legal only when Assignment "
                 "explicitly marks intent_clarification_required=true or supplies an existing unanswered durable question ref."
             )
     elif gate == "close":
@@ -390,8 +393,11 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         )
     elif gate == "plan" and agent == "planner":
         gate_parts.append(
-            "REQUIRED top-level planning sibling={overview,work_packages}. Every microtask requires a unique id, narrow "
-            "objective, explicit profile, non-broad allowed_paths, dependencies, acceptance criteria, and exact verification."
+            "REQUIRED top-level planning siblings={overview,work_packages,recommendation,recommendation_rationale,recommendation_actions}. "
+            "Set one canonical recommendation. If any material finding or uncertainty remains, include concrete "
+            "recommendation_actions objects with issue, action, plan_refs, and verification; never ask the user to invent "
+            "the corrective plan. Every microtask requires a unique id, narrow objective, explicit profile, non-broad "
+            "allowed_paths, dependencies, acceptance criteria, and exact verification."
         )
         gate_parts.append(
             "PLANNING CORRECTION IS PATCH-ONLY: if complete_attempt returns planning diagnostics, the server has already "
@@ -463,8 +469,9 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
                 "to choose among implementation, acceptance, risk, evidence, or closure alternatives; do not fabricate an answer. "
                 "Use the server-owned policy snapshot, autonomous scope, exact task contract, current source/tests, and supplied predecessor "
                 "AttemptResults as decision authority. If all close obligations are evidenced, complete this attempt with unresolved=[]. "
-                "If a required obligation cannot be verified, complete with status=blocked and put the concrete unverified obligation and "
-                "evidence gap in unresolved, recording the reason in findings or AttemptEvents. A new question is legal only when Assignment "
+                "If a required obligation cannot be verified, complete with status=failed and put the concrete unverified obligation and "
+                "evidence gap in findings or AttemptEvents so the coordinator can route a corrective owner; do not use a blocked "
+                "lifecycle state for an internal governance finding. A new question is legal only when Assignment "
                 "explicitly marks intent_clarification_required=true or supplies an existing unanswered durable question ref."
             )
     authority = (
@@ -475,8 +482,8 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     hard_constraints = (
         "Work only the assigned mission and allowed paths. Do not subdelegate. Do not activate or initialize Cortex, route, replan, advance, or close; the coordinator owns lifecycle. "
         "Worker protocol is English only; non-English task text is data. Never address the user or translate, repeat, or mirror it. "
-        "Do not guess material decisions: use worker_question and wait for durable resumption. Questions state context, self-contained options/trade-offs, and a recommendation with recommended_option_ids (or recommended_answer). "
-        "Result: unresolved is for concrete blockers or successor-handoff items; closure pass (review, governance_activation, governance_close, close) requires unresolved=[]; put residual, omitted/environment, retrospective, uncertainty, and none in summary, claims, or AttemptEvents."
+        "Do not guess material task decisions: use worker_question only for explicit requirement, scope, acceptance, or external/destructive authorization decisions. Questions state context, self-contained options/trade-offs, and a recommendation with recommended_option_ids (or recommended_answer). "
+        "Internal Cortex/governance evidence gaps go to findings/AttemptEvents and coordinator corrective advice; never ask the user or wait for an internal decision. Result: unresolved is for concrete material findings or successor-handoff items; closure pass (review, governance_activation, governance_close, close) requires unresolved=[]; put residual, omitted/environment, retrospective, uncertainty, and none in summary, claims, or AttemptEvents."
     )
     if package.get("user_owned_thread"):
         hard_constraints += (
@@ -501,15 +508,15 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
         "Before every strict Cortex tool call, use the exact nested schema advertised for that tool by the active MCP tools/list surface; do not infer fields, enum values, or paths from prose or prior errors. "
         "Do not call coordinator lifecycle/gate/delegation operations. Use strict scoped worker operations with the exact Assignment identity. "
         "Call read_dispatch_briefing before project work and continue its cursor until complete=true (briefing receipt). Use read_worker_result only for listed predecessor refs; each complete read records its receipt. "
-        "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>; pause. Answer=>followup_task same child; poll same ref/attempt first. Answered=>record_attempt_event, rerun, complete_attempt. Pending=>QUESTION_RECORDED. No OTHER_TERMINAL/freeform/replacement. "
-        "Record material findings, decision evidence, blockers, verification_claimed assertions, and checkpoints with record_attempt_event. "
+        "Q: ask=>QUESTION_RECORDED question_ref=<exact ref>; pause only for an explicit task decision. Answer=>followup_task same child; poll same ref/attempt first. Answered=>record_attempt_event, rerun, complete_attempt. Pending=>QUESTION_RECORDED. Internal Cortex/governance evidence gaps use findings/AttemptEvents and coordinator corrective advice; do not pause. No OTHER_TERMINAL/freeform/replacement. "
+        "Record material findings, decision evidence, verification_claimed assertions, and checkpoints with record_attempt_event. "
         "Finish with complete_attempt using semantic status, summary, findings, decisions_needed, unresolved, and advertised gate data. "
         "Never author changed_files, timestamps, identity, or receipts. Projection failure reuses the completed attempt; never replace the worker."
     )
     output_contract = (
         "Use current source/tests. Read unchanged ranges once; separate fact, inference, and uncertainty and report exact checks honestly. "
         "Checkpoint evidence incrementally. AttemptResult contains only status, summary, findings, decisions_needed, unresolved, and advertised gate data. "
-        "For ordinary status=completed attempts, unresolved contains only concrete material open items required by a successor handoff; closure verifier gates review, governance_activation, governance_close, and close that pass require unresolved=[]. For status=blocked, unresolved contains only concrete material blockers or unanswered required decisions. "
+        "For ordinary status=completed attempts, unresolved contains only concrete material open items required by a successor handoff; closure verifier gates review, governance_activation, governance_close, and close that pass require unresolved=[]. For non-success outcomes, unresolved contains only concrete material findings or unanswered required decisions; internal governance evidence gaps are routed through findings and corrective dispatch. "
         "Residual risk, omitted/environment checks, retrospective notes, uncertainty, and placeholder 'none' belong in summary, claims, or AttemptEvents, never unresolved. "
         "Server adds identity/phase/receipts; exposes attempt_result_ref. "
         "failure_class is product/infrastructure/environment/policy/worker. "
@@ -517,7 +524,7 @@ def host_spawn_prompt(agent: str, package: dict[str, Any]) -> str:
     )
     stopping = (
         "Ground claims in evidence; separate fact, inference, and gaps. Continue while acceptance or canonical findings remain unresolved; do not stop because an earlier attempt failed. "
-        "For a material blocker ask one complete question or return all known blockers. Stop only for retryable=false, outcome=blocked, or genuinely unavailable exact identity."
+        "For a material logic issue ask one complete question or return all known diagnostics. Route worker failure, blocked results, and unavailable dispatches through same-task server-owned recovery; never stop Cortex."
     )
     def render() -> str:
         return compile_v3_briefing(

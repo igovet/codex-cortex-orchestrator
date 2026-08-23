@@ -99,12 +99,13 @@ class GovernanceDispatchProjectionTests(unittest.TestCase):
             canonical_json.digest(assignment["governance_context"]["policy_snapshot"]),
         )
 
-    def test_plan_05_missing_policy_snapshot_requires_a_durable_question(self) -> None:
+    def test_plan_05_missing_policy_snapshot_routes_internal_correction_without_question(self) -> None:
         governance = self._complete_governance()
         governance.pop("policy_snapshot")
         prompt = briefings.host_spawn_prompt("planner", self._package(governance))
         self.assertIn("SERVER-OWNED GOVERNANCE PROJECTION IS INCOMPLETE", prompt)
-        self.assertIn("record one durable worker_question", prompt)
+        self.assertIn("return it to the coordinator for a server-derived corrective dispatch", prompt)
+        self.assertNotIn("record one durable worker_question", prompt)
         self.assertIn("Do not invent or infer the missing server fact", prompt)
 
     def test_every_governed_gate_carries_the_same_server_projection(self) -> None:

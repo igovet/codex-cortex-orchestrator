@@ -248,6 +248,105 @@ class RevisionAwareEpicAcceptanceTests(unittest.TestCase):
         self.assertNotIn("private-task-ref", str(response["user_view"]))
         self.assertEqual(response["internal"]["task_ref"], "private-task-ref")
 
+    def test_inspect_does_not_wait_when_only_terminal_results_remain(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "operation": "inspect",
+                "state": "waiting_workers",
+                "wave_id": "wave-12",
+                "result": {
+                    "context_handoff": {
+                        "active_workers": [],
+                        "pending_dispatches": [],
+                        "stopped_workers": [],
+                        "completed_results": [{
+                            "attempt_id": "attempt-12",
+                            "dispatch_ref": "dispatch-12",
+                            "attempt_result_ref": "attempt-result-12",
+                            "lifecycle_status": "blocked",
+                        }],
+                    },
+                },
+            },
+            "task-12",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertIn("read_worker_result", response["next_action"])
+        self.assertIn("terminal_continuation", response["next_action"])
+        self.assertNotIn("Wait only on these exact persisted native child ids", response["next_action"])
+
+    def test_public_boundary_does_not_turn_technical_needs_input_into_a_question(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "needs_input",
+                "wave_id": "wave-recovery",
+                "next_action": "call manage_orchestration with intent=inspect for the same task",
+                "result": {"outcome": "technical_recovery", "requires_user_decision": False},
+            },
+            "task-recovery",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertFalse(response["requires_user_decision"])
+        self.assertFalse(response["user_view"]["requires_user_decision"])
+        self.assertNotEqual(response["user_view"]["message_type"], "decision_required")
+        self.assertEqual(response["user_view"]["message_type"], "Progress update")
+        self.assertIn("manage_orchestration", response["next_action"])
+
+    def test_public_boundary_allows_only_explicit_question_to_pause_chat(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": True,
+                "state": "needs_input",
+                "wave_id": "wave-question",
+                "next_action": "surface the exact question and resume the same task",
+                "result": {
+                    "outcome": "awaiting_user",
+                    "question": "Which permitted option should be used?",
+                },
+            },
+            "task-question",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="LOCK",
+            include_result=True,
+        )
+        self.assertTrue(response["requires_user_decision"])
+        self.assertTrue(response["user_view"]["requires_user_decision"])
+        self.assertEqual(response["user_view"]["message_type"], "decision_required")
+
+    def test_public_error_keeps_technical_recovery_out_of_user_blocker(self) -> None:
+        response = mcp_api.v3_response(
+            {
+                "ok": False,
+                "state": "needs_input",
+                "code": "attempt_invalidated",
+                "next_action": {
+                    "operation": "manage_orchestration",
+                    "arguments": {"intent": "inspect"},
+                },
+                "result": {"outcome": "technical_recovery", "requires_user_decision": False},
+            },
+            "task-invalidated",
+            native_arguments=lambda request: {},
+            public_schema="cortex/test/v1",
+            coordinator_lock="COORDINATOR LOCK: internal only",
+            include_result=True,
+        )
+        self.assertFalse(response["requires_user_decision"])
+        self.assertFalse(response["user_view"]["requires_user_decision"])
+        self.assertNotEqual(response["user_view"]["message_type"], "decision_required")
+        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
+        self.assertNotIn("blocker", response["next_action"].lower())
+        self.assertIn("manage_orchestration", response["next_action"])
+
     def test_active_steer_preserves_task_ref_and_resumes_same_native_worker(self) -> None:
         started = self.start()
         _, state, attempt = self.confirm_running(started, host_agent_id="native.steer:01")

@@ -12,6 +12,13 @@ mention `$cortex:orchestrator`. In CLI use `$cortex:orchestrator` or `/skills`.
 Bare `/cortex` and `/normal` are textual shorthand, not registered native slash
 commands. Do not use obsolete prompt aliases.
 
+When Desktop supplies the selected route as the canonical Markdown link
+`[$cortex:orchestrator](.../skills/orchestrator/SKILL.md)` and the link is not
+present in the task body, preserve the activation in the first
+`start_orchestration` call with the top-level field
+`activation_marker: "$cortex:orchestrator"`. This is the only accepted marker;
+arbitrary links and other values are not activation.
+
 Never present a bare `/cortex` or `/normal` token as a required next step or
 ask the user to send it as a recovery command. Those tokens are not native
 host commands. If activation is needed, use the Skills picker to select
@@ -29,7 +36,11 @@ without asking for another activation.
 | `prune` | `prune` | Remove only completed host-private Cortex task state stale for at least seven days. |
 | `normal` | `normal` | Exit the active Cortex session. |
 
-Do not guess unknown arguments. Show help and ask the user to choose.
+Do not guess unknown arguments. Return a machine-readable route validation
+diagnostic with `path: "route"`, the received token, the expected enum
+`["empty", "help", "harvest", "harvest-refresh", "prune", "normal"]`, and
+one concrete correction. This is a route-input correction, not a task
+question; do not ask the user to make a Cortex recovery decision.
 
 The help route explains invocation, opt-in behavior, the host-private Cortex
 ledger, and the nine-operation public registry. The registry contains the five
@@ -85,8 +96,8 @@ removes only host-private Cortex state while preserving project source and docs.
 For exact `harvest` or `harvest-refresh`, read
 `../knowledge-harvest/SKILL.md` and its linked
 `references/feature-census.md` completely before calling Cortex. Those files
-define the mandatory inventory, coverage matrix, feature-page depth, and
-completeness gates. Do not substitute a generic documentation task.
+define the authoritative inventory, coverage matrix, feature-page depth, and
+completeness assessment. Do not substitute a generic documentation task.
 
 Both routes start with the canonical phases `scope`, `discover`, `architecture`,
 `plan`, `documentation`, `review`, and `close`. Planner Scope first publishes a
@@ -112,13 +123,14 @@ the entire scope of an incomplete baseline.
 `harvest-refresh` always rebuilds the inventory independently of existing
 feature docs. Its review worker performs a second source-to-doc coverage pass;
 zero unexplained unmapped surfaces and a no-change second documentation plan
-are required. Any gap triggers unbounded documentation rework until it is
-resolved or an explicit non-retryable blocker is recorded, rather than a
-successful close.
+are the recommended completion evidence. Any gap becomes a durable finding
+and a corrective writer/reviewer dispatch; the coordinator keeps the chosen
+pipeline moving until the evidence is resolved or the user must decide a task
+scope/acceptance issue.
 
-The coordinator must reject semantic results that lack inventory counts,
-domain/source coverage, mapping/exclusion evidence, and concrete coverage gaps.
-A
+The coordinator must route semantic results that lack inventory counts,
+domain/source coverage, mapping/exclusion evidence, and concrete coverage
+gaps to a corrective owner; this is an evidence finding, not a Cortex stop. A
 handful of top-level service summaries is not complete documentation when
 those services own distinct workflows, commands, state machines, integrations,
 configuration, failure behavior, or operational contracts.
@@ -143,8 +155,34 @@ operations, including follow-up inspection and implementation after a planning
 result, belong to a dispatched worker. The coordinator must remain idle while
 a worker is active. Never work in parallel with an active
 worker or substitute coordinator work for a missing, slow, failed, or blocked
-worker. If dispatch is unavailable, stop and result the blocker; do not fall
-back to direct project work.
+worker. If dispatch is unavailable, keep the task resumable and route the
+condition through server-owned recovery or one concrete task question; never
+stop Cortex or fall back to direct project work.
+
+Technical lifecycle failures are never user-facing blockers. Invalidated
+attempts, validation errors, stale receipts, replay-registry drift, failed
+dispatches, and contradictory internal projections must be recorded as JSONC
+recovery evidence and repaired by Cortex through the same attempt or a
+server-owned corrective dispatch. The coordinator must not answer that Cortex
+is blocked and must not loop through `manage_orchestration` repeatedly. For a
+completed worker result, read it once, call `continue_orchestration` once with
+the exact server continuation, and follow the returned dispatch or wait. Only
+a durable worker question or explicit plan approval can stop the ordinary
+chat.
+
+### Question Firewall
+
+The ordinary-chat question surface is reserved for the user's task. A worker
+may pause the chat only for requirement, scope, acceptance, product, or
+explicit external/destructive authorization decisions. When a question's
+`context.decision_scope` is available, use one of those task scopes (for
+example `requirement`, `scope`, `acceptance`, or
+`external_authorization`). Never ask the user to decide a Cortex policy,
+governance gate, planner/reapproval choice, retry, worker/profile, dispatch,
+ledger, receipt, evidence, lifecycle, or recovery issue. Those conditions are
+internal orchestration evidence: return the server's `orchestrator_advice`,
+record it, and choose or delegate the corrective action. Do not persist an
+internal question and do not expose it as a user blocker.
 
 ## Team intelligence and routing
 
@@ -212,16 +250,18 @@ Routing is evidence-driven:
    reason. Never restate or relabel an unchanged pipeline merely because a
    result completed. Context narrowing changes dependencies, not phase
    membership: Cortex rejects removal of a pending implementation obligation
-   and automatically infers rework when a replacement repeats a current or
+   and automatically records rework when a replacement repeats a current or
    completed phase. If an accepted implementation plan reaches documentation
    or close without implementation and its required QA/audit/review evidence,
-   Cortex restores a Planner-first full delivery graph before dispatch; never
-   substitute another documentation worker. Evidence-backed material replans
-   have no task-lifetime quota: `replan_count` is audit history and the prior
-   `replan_limit` field cannot terminate a progressing task. Cortex preflights
-   the complete replacement before mutating the current gate. If an older
-   failed replan left an active gate with no live or pending dispatch, recover
-   it with one Planner-first resume payload rather than creating a follow-up.
+   Cortex records the missing evidence and returns corrective owner options;
+   the coordinator may retain the current owner, add a specialist, or ask a
+   Planner to replan. Evidence-backed material replans have no task-lifetime
+   quota: `replan_count` is audit history and the prior `replan_limit` field
+   cannot terminate a progressing task. Cortex preflights the complete
+   replacement before mutating the current gate. If an older failed replan
+   left an active gate with no live or pending dispatch, repair it through the
+   chosen pipeline or a server-derived corrective dispatch; a Planner route is
+   advice, never a requirement.
 4. A profile may own only its declared automatic gate, or—when it is a manual
    workspace writer—the implementation gate. Do not assign a writer to plan,
    discovery, review, audit, or close work. Do not assign a read-only analyst
@@ -236,7 +276,9 @@ Routing is evidence-driven:
    Do not treat a planned dispatch, commentary, or an empty wait as proof that
    a worker exists. The native call must return a child id before saying it was
    sent; retain those exact ids and wait only on them. A missing or failed
-   native dispatch is a blocker, never permission to continue the wave.
+   native dispatch is internal recovery evidence: let Cortex derive one
+   corrective dispatch and never expose it as a blocker or continue the wave
+   from an unbound child.
 
 Multiple workers with the same profile are separate bounded instances. Keep
 their ownership, paths, dependencies, result refs, and native task identities

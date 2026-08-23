@@ -24,7 +24,7 @@ import sqlite3
 import stat
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1209,11 +1209,6 @@ def _v9_scope_key(initiative_ref: object, task_id: object) -> str:
     return "project:"
 
 
-def _v9_governance_upgrade_error(code: str) -> ValueError:
-    """Return a bounded, non-content diagnostic for an unsafe v9 upgrade."""
-    return ValueError(f"Cortex v9 governance migration blocked [{code}]; ledger maintenance is required")
-
-
 def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> None:
     """Reconcile only deterministic v9 conflicts before the v10 indexes exist.
 
@@ -1222,11 +1217,15 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
     predecessor.  v10 intentionally rejects both states.  Rather than leave
     a partially explained ``CREATE UNIQUE INDEX`` failure, this preflight
     deterministically linearises *only* affected scope/type groups using
-    created-at/record-ref order.  Missing scope links, dangling predecessors,
-    cross-scope predecessors, and cycles are ambiguous integrity failures and
-    fail closed before v10 applies.  The containing migration transaction
-    rolls every preparatory change back on such a failure.
+    created-at/record-ref order.  Historical v9 rows can also contain an
+    incomplete predecessor graph.  Those edges are detached at the smallest
+    deterministic boundary, retained as immutable audit metadata, and the
+    migration continues.  A malformed historical row must never strand the
+    current Cortex pipeline behind a raw migration error: the old edge is
+    preserved in the migration audit record and the canonical v10 graph is
+    made executable.
     """
+    anomalies: list[dict[str, str]] = []
     rows = [dict(row) for row in connection.execute(
         "SELECT record_ref,initiative_ref,task_id,record_type,revision,supersedes,created_at FROM governance_records ORDER BY created_at,record_ref"
     )]
@@ -1241,7 +1240,10 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             "SELECT 1 FROM initiative_task_links WHERE initiative_ref=? AND task_id=? LIMIT 1",
             (initiative, task),
         ).fetchone() is None:
-            raise _v9_governance_upgrade_error("v9_scope_link_missing")
+            anomalies.append({
+                "code": "v9_scope_link_missing",
+                "record_ref": str(row["record_ref"]),
+            })
         row["_scope_key"] = _v9_scope_key(initiative, task)
         groups.setdefault((str(row["_scope_key"]), str(row["record_type"])), []).append(row)
 
@@ -1261,27 +1263,73 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             if predecessor:
                 parent = by_ref.get(predecessor)
                 if parent is None:
-                    raise _v9_governance_upgrade_error("v9_supersedes_missing")
+                    anomalies.append({
+                        "code": "v9_supersedes_missing",
+                        "record_ref": str(row["record_ref"]),
+                        "supersedes": predecessor,
+                    })
+                    row["supersedes"] = None
+                    connection.execute(
+                        "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                        (row["record_ref"],),
+                    )
+                    predecessor = None
                 if (
-                    str(parent["record_type"]) != str(row["record_type"])
-                    or str(parent["_scope_key"]) != str(row["_scope_key"])
+                    parent is not None
+                    and (
+                        str(parent["record_type"]) != str(row["record_type"])
+                        or str(parent["_scope_key"]) != str(row["_scope_key"])
+                    )
                 ):
-                    raise _v9_governance_upgrade_error("v9_supersedes_scope_mismatch")
+                    anomalies.append({
+                        "code": "v9_supersedes_scope_mismatch",
+                        "record_ref": str(row["record_ref"]),
+                        "supersedes": predecessor,
+                    })
+                    row["supersedes"] = None
+                    connection.execute(
+                        "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                        (row["record_ref"],),
+                    )
+                    predecessor = None
             children.setdefault(predecessor, []).append(row)
         # A predecessor chain must already be acyclic.  A deterministic sort
         # cannot safely infer a meaning for a cyclic historical graph.
         for row in group_rows:
             visited: set[str] = set()
             current = row
+            previous: dict[str, Any] | None = None
             while True:
                 current_ref = str(current["record_ref"])
                 if current_ref in visited:
-                    raise _v9_governance_upgrade_error("v9_supersedes_cycle")
+                    # Detach the newest edge that closes the cycle.  This is
+                    # deterministic, preserves every record, and allows the
+                    # normal linearization below to retain an auditable root.
+                    if previous is not None and previous.get("supersedes"):
+                        anomalies.append({
+                            "code": "v9_supersedes_cycle",
+                            "record_ref": str(previous["record_ref"]),
+                            "supersedes": str(previous["supersedes"]),
+                        })
+                        previous["supersedes"] = None
+                        connection.execute(
+                            "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                            (previous["record_ref"],),
+                        )
+                    break
                 visited.add(current_ref)
                 parent_ref = str(current["supersedes"] or "") or None
                 if not parent_ref:
                     break
-                current = by_ref[parent_ref]
+                parent = by_ref.get(parent_ref)
+                if parent is None:
+                    break
+                previous = current
+                current = parent
+        # Rebuild the child map after non-canonical edges were detached.
+        children = {}
+        for row in group_rows:
+            children.setdefault(str(row["supersedes"] or "") or None, []).append(row)
         sibling_parents = [parent for parent, items in children.items() if parent is not None and len(items) > 1]
         if not duplicate_revisions and not sibling_parents:
             continue
@@ -1299,7 +1347,24 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
         for root in roots:
             visit(root)
         if len(ordered) != len(group_rows):
-            raise _v9_governance_upgrade_error("v9_supersedes_graph_incomplete")
+            # A malformed graph can leave a disconnected component without a
+            # root even after cycle repair.  Promote its oldest row to a root
+            # and retain the anomaly instead of aborting the whole database.
+            for item in sorted(
+                (candidate for candidate in group_rows if candidate not in ordered),
+                key=lambda value: (str(value["created_at"]), str(value["record_ref"])),
+            ):
+                anomalies.append({
+                    "code": "v9_supersedes_graph_incomplete",
+                    "record_ref": str(item["record_ref"]),
+                    "supersedes": str(item.get("supersedes") or ""),
+                })
+                item["supersedes"] = None
+                connection.execute(
+                    "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                    (item["record_ref"],),
+                )
+                visit(item)
         # Move every revision out of the old range before assigning its
         # canonical number, avoiding transient uniqueness conflicts for
         # non-null prior-release scopes.
@@ -1330,7 +1395,7 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             connection.execute("UPDATE governance_records SET supersedes=? WHERE record_ref=?", (predecessor, ref))
             if root_ref:
                 last_by_root[root_ref] = ref
-    if reconciled_groups:
+    if reconciled_groups or anomalies:
         connection.execute(
             "INSERT INTO ledger_meta(key,value) VALUES('governance_v10_reconciliation',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1339,6 +1404,7 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
                 "reconciled_scope_type_groups": reconciled_groups,
                 "duplicate_scope_revision_groups": duplicate_groups,
                 "sibling_successor_groups": sibling_groups,
+                "ambiguous_edges_detached": anomalies,
             }),),
         )
 
@@ -1837,39 +1903,139 @@ def migration_history(root: Path) -> list[dict[str, Any]]:
         )]
 
 
-def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, source: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Merge one closure finding, keyed by task and stable fingerprint."""
-    ensure_database(root)
+def _upsert_task_finding_connection(
+    connection: Any,
+    task_id: str,
+    finding: dict[str, Any],
+    *,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge one canonical finding using an existing transaction."""
     fingerprint = str(finding["fingerprint"])
     source = source or {}
     severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
-    with _connection(root, write=True) as connection:
-        row = connection.execute("SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?", (task_id, fingerprint)).fetchone()
-        now = _now()
-        evidence = []
-        if row:
-            try: evidence = json.loads(str(row["source_evidence_json"]))
-            except json.JSONDecodeError: evidence = []
-        if source and source not in evidence: evidence.append(source)
-        if row:
-            status = str(finding["status"])
-            if str(row["status"]) == "open" and status == "open":
-                # While a finding remains open, repeated reports may only
-                # retain or increase its severity/blocking state. Explicit
-                # resolved/waived reports are lifecycle transitions and keep
-                # their existing metadata contract below.
-                severity = max(
-                    (str(row["severity"]), str(finding["severity"])),
-                    key=lambda value: severity_rank[value],
-                )
-                blocking = bool(row["blocking"]) or bool(finding["blocking"])
-            else:
-                severity = finding["severity"]
-                blocking = bool(finding["blocking"])
-            connection.execute("UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?", (severity, status, int(blocking), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint))
+    row = connection.execute(
+        "SELECT * FROM task_findings WHERE task_id=? AND fingerprint=?",
+        (task_id, fingerprint),
+    ).fetchone()
+    now = _now()
+    evidence = []
+    if row:
+        try:
+            evidence = json.loads(str(row["source_evidence_json"]))
+        except json.JSONDecodeError:
+            evidence = []
+    if source and source not in evidence:
+        evidence.append(source)
+    if row:
+        status = str(finding["status"])
+        if str(row["status"]) == "open" and status == "open":
+            severity = max(
+                (str(row["severity"]), str(finding["severity"])),
+                key=lambda value: severity_rank[value],
+            )
+            blocking = bool(row["blocking"]) or bool(finding["blocking"])
         else:
-            connection.execute("INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]), finding["summary"], _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"), None, _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"), finding.get("waived_at"), finding.get("resolved_at"), now, now))
+            severity = finding["severity"]
+            blocking = bool(finding["blocking"])
+        connection.execute(
+            "UPDATE task_findings SET severity=?, status=?, blocking=?, summary=?, details=?, "
+            "next_action_json=?, source_evidence_json=?, waiver_reason=?, waived_by=?, waived_at=?, "
+            "resolved_at=?, updated_at=? WHERE task_id=? AND fingerprint=?",
+            (
+                severity, status, int(blocking), finding["summary"],
+                _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"),
+                _canonical_json(finding.get("next_action")) if isinstance(finding.get("next_action"), (dict, list)) else finding.get("next_action"),
+                _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"),
+                finding.get("waived_at"), finding.get("resolved_at"), now, task_id, fingerprint,
+            ),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO task_findings(task_id,fingerprint,severity,status,blocking,summary,details,"
+            "next_action_json,source_evidence_json,waiver_reason,waived_by,waived_at,resolved_at,"
+            "first_seen_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                task_id, fingerprint, finding["severity"], finding["status"], int(finding["blocking"]),
+                finding["summary"],
+                _canonical_json(finding.get("details")) if isinstance(finding.get("details"), (dict, list)) else finding.get("details"),
+                _canonical_json(finding.get("next_action")) if isinstance(finding.get("next_action"), (dict, list)) else finding.get("next_action"),
+                _canonical_json(evidence), finding.get("waiver_reason"), finding.get("waived_by"),
+                finding.get("waived_at"), finding.get("resolved_at"), now, now,
+            ),
+        )
     return finding | {"task_id": task_id, "source_evidence": evidence}
+
+
+def upsert_task_finding(root: Path, task_id: str, finding: dict[str, Any], *, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge one closure finding, keyed by task and stable fingerprint."""
+    ensure_database(root)
+    with _connection(root, write=True) as connection:
+        return _upsert_task_finding_connection(connection, task_id, finding, source=source)
+
+
+def materialize_attempt_findings(
+    connection: Any,
+    *,
+    task_id: str,
+    attempt_id: str,
+    result_ref: str,
+    gate: str | None,
+    findings: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Materialize AttemptResult findings in the completion transaction."""
+    materialized: list[dict[str, Any]] = []
+    severity_rank = {"info": 0, "P3": 1, "P2": 2, "P1": 3, "P0": 4}
+    for index, raw in enumerate(findings):
+        value = dict(raw) if isinstance(raw, Mapping) else {"details": raw}
+        fingerprint = str(value.get("fingerprint") or "").strip()
+        if not fingerprint:
+            identity = {
+                key: item for key, item in value.items()
+                if key not in {"source_evidence", "evidence", "evidence_refs"}
+            }
+            fingerprint = "finding-" + hashlib.sha256(
+                _canonical_json(identity).encode("utf-8")
+            ).hexdigest()[:32]
+        severity = str(value.get("severity") or "info").strip()
+        if severity not in severity_rank:
+            severity = "info"
+        status = str(value.get("status") or "open").strip().lower()
+        if status not in {"open", "resolved", "waived"}:
+            status = "open"
+        blocking_value = value.get("blocking")
+        blocking = bool(blocking_value) if blocking_value is not None else severity in {"P0", "P1"}
+        summary = str(value.get("summary") or value.get("message") or "AttemptResult finding").strip()
+        if not summary:
+            summary = "AttemptResult finding"
+        details = value.get("details")
+        if details is None:
+            details = {
+                key: item for key, item in value.items()
+                if key not in {
+                    "fingerprint", "severity", "status", "blocking", "summary", "message",
+                    "next_action", "waiver_reason", "waived_by", "waived_at", "resolved_at",
+                }
+            }
+        finding = {
+            "fingerprint": fingerprint, "severity": severity, "status": status,
+            "blocking": blocking, "summary": summary, "details": details,
+        }
+        for key in ("next_action", "waiver_reason", "waived_by", "waived_at", "resolved_at"):
+            if key in value:
+                finding[key] = value[key]
+        source = {
+            "source_type": "attempt_result", "attempt_id": attempt_id,
+            "attempt_result_ref": result_ref, "origin_result_ref": result_ref,
+            "finding_index": index,
+        }
+        if gate:
+            source["gate"] = gate
+        for key in ("evidence_ref", "evidence_refs", "source_ref", "source_evidence"):
+            if key in value:
+                source[key] = value[key]
+        materialized.append(_upsert_task_finding_connection(connection, task_id, finding, source=source))
+    return materialized
 
 
 def list_task_findings(root: Path, task_id: str, *, include_resolved: bool = True) -> list[dict[str, Any]]:
@@ -2541,6 +2707,7 @@ def read_artifact_range(
         raise ValueError("SQLite artifact is unavailable for the selected task")
     if byte_offset > metadata["byte_size"]:
         raise ValueError("SQLite artifact byte offset is invalid")
+    requested_byte_offset = byte_offset
     remaining_offset = byte_offset
     effective_max_bytes = max_bytes if max_bytes is not None else int(metadata["byte_size"]) - byte_offset
     budget = effective_max_bytes
@@ -2584,13 +2751,33 @@ def read_artifact_range(
     if total_bytes != int(metadata["byte_size"]) or content_digest.hexdigest() != str(metadata["digest_sha256"]):
         raise ValueError("SQLite artifact digest is invalid")
 
+    # Older briefing readers could issue a signed cursor in the middle of a
+    # UTF-8 scalar (for example, after slicing a page at byte 32000).  The
+    # cursor is still trusted for its task/artifact/digest scope, so rejecting
+    # it here would unnecessarily terminate an otherwise resumable worker.
+    # Rewind only to the beginning of that scalar.  This is lossless for a
+    # failed continuation and keeps the returned cursor on a canonical UTF-8
+    # boundary; tampered cursors are still rejected by cursor authentication
+    # before reaching this function.
+    normalized_byte_offset = byte_offset
+    if is_text and byte_offset < total_bytes:
+        combined = b"".join(chunks)
+        while normalized_byte_offset > 0 and normalized_byte_offset < len(combined):
+            if combined[normalized_byte_offset] & 0b11000000 != 0b10000000:
+                break
+            normalized_byte_offset -= 1
+        if normalized_byte_offset != byte_offset:
+            byte_offset = normalized_byte_offset
+            remaining_offset = normalized_byte_offset
+            if max_bytes is None:
+                effective_max_bytes = int(metadata["byte_size"]) - normalized_byte_offset
+            budget = effective_max_bytes
+
     for data in chunks:
         size = len(data)
         if remaining_offset >= size:
             remaining_offset -= size
             continue
-        if is_text and remaining_offset < size and data[remaining_offset] & 0b11000000 == 0b10000000:
-            raise ValueError("SQLite artifact byte offset does not align to a UTF-8 boundary")
         start = remaining_offset
         available = len(data) - start
         take = min(available, budget)
@@ -2621,6 +2808,8 @@ def read_artifact_range(
     result = {
         **metadata,
         "byte_offset": byte_offset,
+        "requested_byte_offset": requested_byte_offset,
+        "cursor_normalized": byte_offset != requested_byte_offset,
         "returned_bytes": delivered,
         "complete": next_offset >= metadata["byte_size"],
         "next_byte_offset": None if next_offset >= metadata["byte_size"] else next_offset,

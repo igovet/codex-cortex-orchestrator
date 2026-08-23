@@ -78,6 +78,34 @@ def _recoverable(
     }
 
 
+def _policy_advisory(
+    state: dict[str, Any],
+    revision_correction: dict[str, Any] | None,
+    *,
+    reason: str,
+    gate: str,
+    recommended_next: str,
+    warning: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Return a governance recommendation without vetoing the coordinator."""
+    return {
+        "advisory": True,
+        "policy_veto": False,
+        "requires_user_decision": False,
+        "severity": "warning",
+        "recoverable": False,
+        "recorded": True,
+        "reason": reason,
+        "gate": gate,
+        "warning": warning,
+        "recommended_next": recommended_next,
+        "revision_correction": revision_correction,
+        "state": state,
+        **extra,
+    }
+
+
 def _resolve_active_gate(
     state: dict[str, Any], params: dict[str, Any]
 ) -> tuple[str, str, dict[str, Any] | None]:
@@ -132,15 +160,23 @@ def _validate_skip(
     if gate == "close" or (gate == "documentation" and state.get("require_delegation")) or (
         governance.get("effective_mode") == "full" and gate in {"governance_activation", "governance_close"}
     ):
-        return _recoverable(
+        return _policy_advisory(
             state,
             revision_correction,
-            reason="mandatory_gate",
+            reason="governance_skip_recommended",
             gate=gate,
-            next_action="record_delegation",
+            recommended_next="record_delegation",
+            warning="The selected gate is conventionally recommended by governance, but the coordinator chose to skip it.",
         )
     if state.get("require_delegation") and not str(params.get("skip_reason", "")).strip():
-        raise ValueError("C2/C3 skipped gates require an explicit skip_reason")
+        return _policy_advisory(
+            state,
+            revision_correction,
+            reason="skip_reason_missing",
+            gate=gate,
+            recommended_next="record_delegation_if_needed",
+            warning="C2/C3 normally records a reason for a skipped gate; the transition remains executable.",
+        )
     return None
 
 
@@ -208,21 +244,21 @@ def _validate_pass_evidence(
     # delegated worker failed (the old branch below treated that as an
     # implicit pass).
     if not gate_evidence:
-        return [], {
-            "recorded": False,
-            "reason": "evidence_required",
-            "gate": gate,
-            "gate_correction": (
+        return gate_evidence, _policy_advisory(
+            state,
+            revision_correction,
+            reason="evidence_recommended",
+            gate=gate,
+            recommended_next="record_delegation" if not gate_attempts else "record_evidence",
+            warning="The gate has no positive evidence; the coordinator may continue, and the omission is recorded as a risk.",
+            gate_correction=(
                 {"requested": requested_gate, "used": gate}
                 if requested_gate != gate else None
             ),
-            "candidate_attempt_ids": [
+            candidate_attempt_ids=[
                 item["attempt_id"] for item in non_terminal_attempts + passed_attempts
             ],
-            "next_action": "record_delegation" if not gate_attempts else "record_evidence",
-            "revision_correction": revision_correction,
-            "state": state,
-        }
+        )
     if any(
         item.get("kind") == "command"
         and (item.get("exit_code") != 0 or not item.get("verified_execution"))
@@ -258,34 +294,53 @@ def _validate_pass_evidence(
     if gate in _CLOSURE_VERIFIER_GATES:
         unresolved = _attempts_with_unresolved_canonical_results(task_dir, passed_attempts)
         if unresolved:
-            return [], _recoverable(
+            return gate_evidence, _policy_advisory(
                 state,
                 revision_correction,
                 reason="closure_attempt_unresolved",
                 gate=gate,
-                next_action="rework_current_gate",
+                recommended_next="rework_current_gate",
+                warning="A closure result still reports unresolved work; the coordinator may continue, but should schedule corrective work.",
                 candidate_attempt_ids=unresolved,
             )
     if not state.get("require_delegation"):
         return gate_evidence, None
     if not gate_attempts:
         if gate == "documentation":
-            return [], _recoverable(
+            return gate_evidence, _policy_advisory(
                 state,
                 revision_correction,
                 reason="documentation_attempt_required",
                 gate=gate,
-                next_action="record_delegation",
+                recommended_next="record_delegation",
+                warning="Documentation evidence is recommended for this governance level.",
             )
-        raise ValueError("C2/C3 gates require at least one delegation attempt")
+        return gate_evidence, _policy_advisory(
+            state,
+            revision_correction,
+            reason="delegation_recommended",
+            gate=gate,
+            recommended_next="record_delegation",
+            warning="Delegation is recommended for C2/C3, but it is not a backend authorization requirement.",
+        )
     missing = [
         item["attempt_id"] for item in passed_attempts
         if not any(evidence.get("attempt_id") == item["attempt_id"] for evidence in gate_evidence)
     ]
     if missing:
         if gate == "documentation":
-            return [], _documentation_recovery(state, revision_correction, "documentation_evidence_required", gate, missing)
-        raise ValueError("every passed attempt needs linked evidence before the gate can pass: " + ", ".join(missing))
+            return gate_evidence, _policy_advisory(
+                state, revision_correction, reason="documentation_evidence_recommended", gate=gate,
+                recommended_next="record_evidence",
+                warning="Documentation evidence is recommended; the coordinator may continue.",
+                candidate_attempt_ids=missing,
+            )
+        return gate_evidence, _policy_advisory(
+            state, revision_correction, reason="attempt_evidence_recommended", gate=gate,
+            recommended_next="record_evidence",
+            warning="Some passed attempts have no linked evidence; the coordinator may continue with this risk recorded.",
+            candidate_attempt_ids=missing,
+        )
     missing_result_bindings = [
         item["attempt_id"] for item in passed_attempts
         if not any(
@@ -296,8 +351,18 @@ def _validate_pass_evidence(
     ]
     if missing_result_bindings:
         if gate == "documentation":
-            return [], _documentation_recovery(state, revision_correction, "documentation_attempt_result_required", gate, missing_result_bindings)
-        raise ValueError("every passed attempt needs evidence bound to its canonical attempt result before the gate can pass: " + ", ".join(missing_result_bindings))
+            return gate_evidence, _policy_advisory(
+                state, revision_correction, reason="documentation_result_evidence_recommended", gate=gate,
+                recommended_next="record_evidence",
+                warning="Documentation evidence should bind to its canonical result; the coordinator may continue.",
+                candidate_attempt_ids=missing_result_bindings,
+            )
+        return gate_evidence, _policy_advisory(
+            state, revision_correction, reason="canonical_result_evidence_recommended", gate=gate,
+            recommended_next="record_evidence",
+            warning="Some evidence is not bound to the canonical result; the coordinator may continue with this risk recorded.",
+            candidate_attempt_ids=missing_result_bindings,
+        )
     unvalidated_results = _attempts_missing_result_validation(task_dir, passed_attempts)
     if unvalidated_results:
         raise ValueError(
@@ -311,8 +376,18 @@ def _validate_pass_evidence(
     ]
     if unexplained:
         if gate == "documentation":
-            return [], _documentation_recovery(state, revision_correction, "documentation_evidence_required", gate, unexplained)
-        raise ValueError("every active delegated attempt needs linked evidence before the gate can pass: " + ", ".join(unexplained))
+            return gate_evidence, _policy_advisory(
+                state, revision_correction, reason="documentation_evidence_recommended", gate=gate,
+                recommended_next="record_evidence",
+                warning="Documentation evidence is recommended for active attempts; the coordinator may continue.",
+                candidate_attempt_ids=unexplained,
+            )
+        return gate_evidence, _policy_advisory(
+            state, revision_correction, reason="active_attempt_evidence_recommended", gate=gate,
+            recommended_next="record_evidence",
+            warning="Active delegated attempts lack linked evidence; the coordinator may continue and should reconcile them later.",
+            candidate_attempt_ids=unexplained,
+        )
     eligible_attempt_ids = {
         item["attempt_id"] for item in gate_attempts
         if item["attempt_id"] in evidence_attempt_ids
@@ -320,14 +395,17 @@ def _validate_pass_evidence(
     }
     if passed_attempts and not eligible_attempt_ids:
         if gate == "documentation":
-            return [], _documentation_recovery(
-                state,
-                revision_correction,
-                "documentation_evidence_required",
-                gate,
-                [item["attempt_id"] for item in passed_attempts],
+            return gate_evidence, _policy_advisory(
+                state, revision_correction, reason="documentation_evidence_recommended", gate=gate,
+                recommended_next="record_evidence",
+                warning="Documentation evidence is recommended before close; the coordinator may continue.",
+                candidate_attempt_ids=[item["attempt_id"] for item in passed_attempts],
             )
-        raise ValueError("a passed gate requires linked evidence for at least one delegated attempt")
+        return gate_evidence, _policy_advisory(
+            state, revision_correction, reason="delegated_evidence_recommended", gate=gate,
+            recommended_next="record_evidence",
+            warning="No delegated attempt is currently linked to evidence; the coordinator may continue.",
+        )
     current_attempt_evidence = [
         item for item in gate_evidence if item.get("attempt_id") in eligible_attempt_ids
     ]
@@ -338,12 +416,11 @@ def _validate_pass_evidence(
             if item.get("agent") == "technical_writer"
         }
         if not documentation or documentation.get("attempt_id") not in technical_writer_attempt_ids:
-            return [], _documentation_recovery(
-                state,
-                revision_correction,
-                "documentation_evidence_required",
-                gate,
-                [
+            return gate_evidence, _policy_advisory(
+                state, revision_correction, reason="documentation_receipt_recommended", gate=gate,
+                recommended_next="record_evidence",
+                warning="A documentation receipt is recommended; the coordinator may continue.",
+                candidate_attempt_ids=[
                     item["attempt_id"] for item in gate_attempts
                     if item.get("agent") == "technical_writer"
                 ],
@@ -358,47 +435,56 @@ def _validate_handoff_and_close(
     gate: str,
     outcome: str,
     current_attempt_evidence: list[dict[str, Any]],
-) -> None:
+) -> list[dict[str, Any]]:
+    advisories: list[dict[str, Any]] = []
     if outcome == "blocked" and state.get("require_handoff") and (
         not state.get("handoff_created") or state.get("handoff_gate") != gate
     ):
-        raise ValueError("C2/C3 pause requires a current-gate handoff")
+        advisories.append({
+            "reason": "handoff_recommended",
+            "warning": "A current-gate handoff is recommended for this pause; the coordinator may continue.",
+            "recommended_next": "record_handoff",
+        })
     if outcome != "passed" or gate != "close" or not state.get("require_handoff"):
-        return
+        return advisories
     if not state.get("handoff_created") or state.get("handoff_gate") != "close":
-        raise ValueError("C2/C3 close requires a final handoff")
+        advisories.append({"reason": "final_handoff_recommended", "warning": "A final handoff is recommended before close.", "recommended_next": "record_handoff"})
     if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
-        raise ValueError("C2/C3 close requires completed documentation decision evidence")
+        advisories.append({"reason": "documentation_decision_recommended", "warning": "Documentation decision evidence is recommended before close.", "recommended_next": "record_evidence"})
     if not state.get("reassessment_receipts"):
-        raise ValueError("C2/C3 close requires a recorded reassessment decision")
+        advisories.append({"reason": "reassessment_recommended", "warning": "A reassessment receipt is recommended before close.", "recommended_next": "record_reassessment"})
     if not any(
         item.get("kind") == "command" and item.get("verified_execution")
         and item.get("exit_code") == 0
         for item in current_attempt_evidence
     ):
-        raise ValueError("C2/C3 close requires successful server-observed command evidence")
+        advisories.append({"reason": "verification_recommended", "warning": "Server-observed verification evidence is recommended before close.", "recommended_next": "record_evidence"})
     manifest = state.get("final_manifest_receipt")
     if not manifest or not manifest.get("complete"):
-        raise ValueError("C2/C3 close requires a complete handoff file-manifest receipt")
+        advisories.append({"reason": "manifest_capture_incomplete", "warning": "The handoff manifest is partial or incomplete; dispatch a corrective manifest recapture.", "recommended_next": "dispatch_manifest_recapture"})
+        return advisories
     baseline_manifest = task_manifest_baseline(task_dir, state)
     baseline_partial = baseline_manifest.get("partial_manifest")
     if isinstance(baseline_partial, dict) and baseline_partial.get("partial"):
-        raise ValueError(
-            "C2/C3 close requires a complete baseline manifest; "
-            f"capture stopped at {baseline_partial.get('reason') or 'a configured limit'}"
-        )
+        advisories.append({
+            "reason": "baseline_manifest_capture_incomplete",
+            "warning": f"Baseline manifest capture was partial ({baseline_partial.get('reason') or 'capture limit'}); recapture it through a corrective worker.",
+            "recommended_next": "dispatch_manifest_recapture",
+        })
     current_manifest = capture_project_manifest(
         Path(load_task_definition(task_dir, state)["project_root"]),
         policy=baseline_manifest.get("policy"),
     )
     current_partial = current_manifest.get("partial_manifest")
     if isinstance(current_partial, dict) and current_partial.get("partial"):
-        raise ValueError(
-            "C2/C3 close requires a complete final manifest; "
-            f"capture stopped at {current_partial.get('reason') or 'a configured limit'}"
-        )
+        advisories.append({
+            "reason": "current_manifest_capture_incomplete",
+            "warning": f"Final manifest capture was partial ({current_partial.get('reason') or 'capture limit'}); recapture it through a corrective worker.",
+            "recommended_next": "dispatch_manifest_recapture",
+        })
     if current_manifest["digest"] != manifest.get("current_digest"):
         raise ValueError("project files changed after the final handoff; create a new complete handoff")
+    return advisories
 
 
 def _apply_transition(
@@ -428,7 +514,15 @@ def _apply_transition(
         if gate not in state["skipped_gates"]:
             state["skipped_gates"].append(gate)
     elif outcome == "blocked":
-        state["status"] = "blocked"
+        # A worker's blocked outcome is an observation for corrective routing,
+        # not permission for Cortex to stop the task. Only an explicit user
+        # stop decision may place a task in blocked status.
+        state.setdefault("policy_advice", []).append({
+            "code": "worker_blocked_observation",
+            "severity": "warning",
+            "message": f"Worker reported gate {gate} as blocked; dispatch corrective work or resolve the task question.",
+            "recommended_next": "dispatch_corrective_worker",
+        })
     else:
         for attempt in state["attempts"]:
             # A gate can fail after a worker submitted a syntactically valid
@@ -477,20 +571,24 @@ def _persist_transition(
     if completed:
         closed_receipt, _ = reconcile_manifest(task_dir, state, [])
         if not (closed_receipt.get("comparison") or {}).get("complete", False):
-            # A bounded/partial final capture cannot prove that the terminal
-            # file set is accounted for.  Keep the task out of completed
-            # state; the receipt remains available to the caller as bounded
-            # diagnostic evidence through the reconciliation path.
-            raise ValueError(
-                "cannot complete task with an incomplete final manifest; "
-                "recapture the project after the manifest limit is resolved"
-            )
-        closed_paths = list(closed_receipt["comparison"]["changed_paths"])
-        closed_receipt["observed_paths"] = closed_paths
-        closed_receipt["unaccounted_paths"] = []
-        closed_receipt["complete"] = True
-        state["closed_manifest_receipt"] = closed_receipt
-        state["manifest_snapshot_cleanup"] = {"status": "pending", "at": now()}
+            # A bounded/partial capture is a recoverable observation, not a
+            # Cortex policy veto. Keep the canonical receipt and continue the
+            # lifecycle with an explicit corrective-worker recommendation.
+            state.setdefault("policy_advice", []).append({
+                "code": "final_manifest_capture_incomplete",
+                "severity": "warning",
+                "message": "Final manifest capture is partial; dispatch corrective manifest recapture.",
+                "recommended_next": "dispatch_manifest_recapture",
+            })
+            state["status"] = "active"
+            completed = False
+        else:
+            closed_paths = list(closed_receipt["comparison"]["changed_paths"])
+            closed_receipt["observed_paths"] = closed_paths
+            closed_receipt["unaccounted_paths"] = []
+            closed_receipt["complete"] = True
+            state["closed_manifest_receipt"] = closed_receipt
+            state["manifest_snapshot_cleanup"] = {"status": "pending", "at": now()}
     save_state(
         task_dir,
         task_dir / "state.sqlite",
@@ -601,11 +699,10 @@ def _activate_closure_rework(
     """Make canonical closure debt an executable non-terminal rework chain.
 
     The current review/close attempt is deliberately not allowed to complete.
-    Reordering the canonical pipeline places the corrective target ahead of a
-    fresh originating verifier and every later close verifier, while ``rework``
-    invalidates all stale evidence and attempts from that target onward.  The
-    orchestration engine subsequently sees the target as the active wave and
-    reuses its canonical wave contract to prepare a new delegation.
+    The selected pipeline remains unchanged; ``rework`` invalidates stale
+    evidence and attempts from the corrective target onward.  The
+    orchestration engine subsequently sees the target as the first incomplete
+    wave and reuses its canonical wave contract to prepare a new delegation.
     """
     target_gate = _closure_rework_target(state, gate, findings)
     pipeline = list(state.get("current_pipeline", []))
@@ -623,21 +720,17 @@ def _activate_closure_rework(
             None,
         )
         pipeline.insert(pipeline.index(later) if later else len(pipeline), target_gate)
-    # Preserve the corrective target's position so the rework operation makes
-    # it the first incomplete gate. Move the originating closure gate and
-    # every later closure verifier to the tail; moving the target itself behind
-    # QA or documentation would leave the just-failed gate active and produce
-    # a false ``needs_input`` state.  The previous review/close-only list
-    # omitted governance_activation and governance_close, leaving a finding
-    # raised by one of those gates without the fresh origin rerun required for
-    # a server-bound resolution receipt.
+    # Rework resets evidence while preserving the orchestrator-selected route.
+    # The backend must not reorder closure or governance phases as a side
+    # effect of recording corrective work; active_gates will select the first
+    # incomplete gate in this unchanged route.
     closure_gates = {"review", "governance_activation", "governance_close", "close"}
     origin_index = pipeline.index(gate) if gate in pipeline else len(pipeline)
-    final_checks = [
+    rerun_gates = [
         item for index, item in enumerate(pipeline)
         if index >= origin_index and item in closure_gates
     ]
-    reordered = [item for item in pipeline if item not in final_checks] + final_checks
+    reordered = pipeline
     change = apply_pipeline_operations(
         state,
         pipeline=reordered,
@@ -667,7 +760,7 @@ def _activate_closure_rework(
         rework[gate] = {
             "status": "rework_required",
             "target_gate": target_gate,
-            "rerun_gates": list(final_checks),
+            "rerun_gates": rerun_gates,
             "finding_fingerprints": fingerprints,
             # Rework invalidates the review/close result that raised the
             # finding. Keep its immutable AttemptResult reference in durable
@@ -708,9 +801,10 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
         outcome = str(params["outcome"])
         if outcome not in _OUTCOMES:
             raise ValueError("outcome must be passed, failed, blocked, or skipped")
+        advisories: list[dict[str, Any]] = []
         skipped = _validate_skip(state, params, gate, outcome, revision_correction)
         if skipped is not None:
-            return skipped
+            advisories.append(skipped)
         inputs = _gate_inputs(task_dir, state, gate)
         current_attempt_evidence, recovery = _validate_pass_evidence(
             task_dir,
@@ -727,63 +821,49 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             passed_attempts=inputs[4],
         )
         if recovery is not None:
-            return recovery
+            if recovery.get("advisory"):
+                advisories.append(recovery)
+            else:
+                return recovery
         if outcome == "passed":
-            validate_governance_obligation_evidence(
-                state,
-                gate,
-                # Light-mode close obligations are intentionally accumulated
-                # across documentation/review/verification gates.  Full
-                # governance-close evidence is also safe to resolve from the
-                # complete immutable receipt set at this boundary.
-                None if gate == "close" else current_attempt_evidence,
-                artifact_root=root,
-            )
-        _validate_handoff_and_close(
+            # Governance obligations are advisory.  When evidence is supplied,
+            # still validate its immutable binding; a missing obligation is a
+            # recommendation, while a malformed artifact remains integrity
+            # evidence and is handled by the validator's hard error.
+            supplied_evidence = None if gate == "close" else current_attempt_evidence
+            if supplied_evidence:
+                try:
+                    validate_governance_obligation_evidence(
+                        state, gate, supplied_evidence, artifact_root=root,
+                    )
+                except ValueError as exc:
+                    if "requires typed governance obligation evidence" in str(exc):
+                        advisories.append({
+                            "reason": "governance_evidence_recommended",
+                            "warning": str(exc),
+                            "recommended_next": "record_evidence",
+                        })
+                    else:
+                        raise
+        advisories.extend(_validate_handoff_and_close(
             task_dir,
             state,
             gate=gate,
             outcome=outcome,
             current_attempt_evidence=current_attempt_evidence,
-        )
+        ))
         if outcome in {"passed", "failed"} and (
             gate in {"review", "governance_activation", "governance_close", "close"}
             or bool(params.get("enforce_canonical_findings"))
         ):
             blockers = db_task_findings_blockers(root, state["task_id"])
             if blockers:
-                actionable = blockers
-                source_result_refs = list(dict.fromkeys(
-                    str(result_ref)
-                    for attempt in inputs[4]
-                    for result_ref in [attempt.get("attempt_result_ref")]
-                    if str(result_ref).strip()
-                ))
-                target_gate = _activate_closure_rework(
-                    state,
-                    gate=gate,
-                    findings=actionable,
-                    source_result_refs=source_result_refs,
-                )
-                save_state(task_dir, task_dir / "state.sqlite", state, "gate_rework", f"{gate}: canonical gate blockers require rework")
-                # Returning a normal transition shape lets the v3 adapter
-                # finish the current wave bookkeeping and prepare the active
-                # remediation wave.  The gate itself is intentionally absent
-                # from completed_gates, so this is non-terminal rework rather
-                # than a worker-controlled pass.
-                return {
-                    "state": state,
-                    "revision_correction": revision_correction,
-                    "gate_rework": True,
-                    "closure_rework": gate in {
-                        "review", "governance_activation", "governance_close", "close",
-                    },
-                    "reason": "gate_blockers",
-                    "gate": gate,
-                    "target_gate": target_gate,
-                    "next_action": "resolve_findings_then_rerun_review_and_close",
-                    "blockers": actionable,
-                }
+                advisories.append({
+                    "reason": "canonical_findings_recommended",
+                    "warning": "Canonical findings remain open; the coordinator may continue, but should schedule corrective work.",
+                    "recommended_next": "resolve_findings_then_rerun_review_and_close",
+                    "blockers": blockers,
+                })
         completed, operations = _apply_transition(
             root,
             task_dir,
@@ -802,4 +882,11 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
             operations=operations,
             completed=completed,
         )
-        return {"state": state, "revision_correction": revision_correction}
+        result = {"state": state, "revision_correction": revision_correction}
+        if advisories:
+            result["advisories"] = advisories
+            result["recommended_next"] = [
+                item.get("recommended_next") for item in advisories
+                if item.get("recommended_next")
+            ]
+        return result

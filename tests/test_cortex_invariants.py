@@ -378,8 +378,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         pipeline = created["state"]["current_pipeline"]
         self.assertIn("documentation", pipeline)
         self.assertLess(pipeline.index("documentation"), pipeline.index("close"))
-        with self.assertRaisesRegex(ValueError, "retain documentation"):
-            control.update_pipeline({"task_id": "task", "principal": "owner", "expected_revision": created["state"]["revision"], "pipeline": [gate for gate in pipeline if gate != "documentation"]})
+        revised = control.update_pipeline({"task_id": "task", "principal": "owner", "expected_revision": created["state"]["revision"], "pipeline": [gate for gate in pipeline if gate != "documentation"]})
+        self.assertNotIn("documentation", revised["state"]["current_pipeline"])
 
 
     def test_global_claims_collide_across_tasks_and_lanes(self):
@@ -462,11 +462,24 @@ class OrchestrationInvariantTests(unittest.TestCase):
     def test_stop_reassessment_requires_current_handoff(self):
         state = self.init(complexity="C2")["state"]
         params = {"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "signals": ["blocked"], "intent": "stop", "decision": "stop", "reason": "external blocker"}
-        with self.assertRaisesRegex(ValueError, "requires a current-gate handoff"):
-            control.reassess_pipeline(params)
         handed = control.handoff({"task_id": "task", "principal": "owner", "expected_revision": state["revision"], "completed": ["investigation"], "files": [], "next_action": "wait"})
-        stopped = control.reassess_pipeline({**params, "expected_revision": handed["state"]["revision"]})
+        stopped = control.reassess_pipeline({**params, "expected_revision": handed["state"]["revision"], "origin": "user", "user_decision": True})
         self.assertEqual(stopped["state"]["status"], "blocked")
+
+    def test_internal_malformed_stop_reassessment_is_advisory_and_keeps_task_active(self):
+        state = self.init(complexity="C2")["state"]
+        result = control.reassess_pipeline({
+            "task_id": "task",
+            "principal": "owner",
+            "expected_revision": state["revision"],
+            "signals": ["transient worker transport failure"],
+            "intent": "stop",
+            "decision": "malformed",
+            "origin": "internal",
+        })
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["state"]["status"], "active")
+        self.assertEqual(result["advisory"]["code"], "task_stop_requires_user_decision")
 
     def test_materialization_preflight_prevents_partial_worktrees(self):
         repository = self.base / "preflight-repo"
@@ -549,7 +562,10 @@ class OrchestrationInvariantTests(unittest.TestCase):
             "intent_clarification_required": False, "intent_clarification_reason": None,
         }
         prompt = control.host_spawn_prompt("planner", package)
-        self.assertIn("REQUIRED top-level planning sibling={overview,work_packages}", prompt)
+        self.assertIn(
+            "REQUIRED top-level planning siblings={overview,work_packages,recommendation,recommendation_rationale,recommendation_actions}",
+            prompt,
+        )
 
     def test_installable_orchestrator_releases_completed_native_agent_slots(self):
         skill = (Path(__file__).parents[1] / "plugins/cortex/skills/cortex-control/SKILL.md").read_text(encoding="utf-8")
@@ -975,11 +991,11 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         output = json.loads(completed.stdout)["hookSpecificOutput"]
         self.assertEqual(output["hookEventName"], "PreToolUse")
-        self.assertEqual(output["permissionDecision"], "deny")
-        reason = output["permissionDecisionReason"]
-        self.assertIn("CORTEX DISPATCH FAILURE", reason)
-        self.assertIn("No worker was spawned", reason)
-        self.assertIn("Never retry an empty wait", reason)
+        self.assertNotIn("permissionDecision", output)
+        reason = output["additionalContext"]
+        self.assertIn("CORTEX DISPATCH ADVISORY", reason)
+        self.assertIn("no worker was spawned", reason)
+        self.assertIn("retry the lifecycle step", reason)
 
         bare_wait = {
             "hook_event_name": "PreToolUse",
@@ -1018,7 +1034,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
         context = payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("COORDINATOR LOCK", context)
+        self.assertIn("COORDINATOR ROUTE", context)
+        self.assertNotIn("COORDINATOR LOCK", context)
         self.assertIn("must not inspect", context)
         self.assertIn("Remain idle while workers run", context)
 
@@ -1035,7 +1052,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
         )
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-        self.assertIn("COORDINATOR LOCK", payload["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("COORDINATOR ROUTE", payload["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("COORDINATOR LOCK", payload["hookSpecificOutput"]["additionalContext"])
 
     def test_compact_session_hook_reasserts_durable_recovery(self):
         self.init(task_id="compact-recovery")
@@ -1524,7 +1542,9 @@ class OrchestrationInvariantTests(unittest.TestCase):
         prompt = control.host_spawn_prompt("code_reviewer", package)
         self.assertIn("AUTOMATIC FULL-GOVERNANCE DECISION POLICY", prompt)
         self.assertIn("Do not call worker_question", prompt)
-        self.assertIn("complete with status=blocked", prompt)
+        self.assertIn("complete with status=failed", prompt)
+        self.assertIn("coordinator can route a corrective owner", prompt)
+        self.assertNotIn("complete with status=blocked", prompt)
         self.assertIn("do not fabricate an answer", prompt)
         self.assertTrue(briefings._automatic_governance_close(package))
 
@@ -1728,7 +1748,8 @@ class OrchestrationInvariantTests(unittest.TestCase):
             self.assertIn("worker", contract, relative)
 
         hook = (repository / "plugins/cortex/scripts/cortex_hook.py").read_text(encoding="utf-8")
-        self.assertIn("COORDINATOR LOCK", hook)
+        self.assertIn("COORDINATOR ROUTE", hook)
+        self.assertNotIn("COORDINATOR LOCK", hook)
         self.assertIn("never permission for direct coordinator work", hook)
 
     def test_profile_contract_covers_every_gate_with_non_generic_briefings(self):

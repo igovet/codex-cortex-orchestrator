@@ -65,6 +65,7 @@ from cortex_runtime.mcp_api import (
     DEFAULT_MCP_AUDIENCE,
     MCP_AUDIENCES,
     PUBLIC_TOOL_DESCRIPTIONS,
+    _public_next_action,
     build_public_schemas,
     configure_internal_schemas,
     public_tools as build_public_tools,
@@ -164,6 +165,7 @@ QUESTION_SCHEMA = "cortex/question/v2"
 ACTIVATION_COMMAND = "/cortex"
 NORMAL_COMMAND = "/normal"
 SKILL_ROUTE_HINT = "select `cortex:orchestrator` in the Skills picker or mention `$cortex:orchestrator` in the main chat"
+DESKTOP_CORTEX_ACTIVATION_MARKER = "$cortex:orchestrator"
 PROFILE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "profiles.json"
 # Desktop inserts this local Markdown link when a user selects the Cortex
 # Orchestrator skill. It is host transport metadata, not user task content;
@@ -949,7 +951,19 @@ def canonicalize_desktop_cortex_request(value: object) -> str:
     untouched.
     """
     raw = str(value or "").strip()
-    return DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.sub("$cortex:orchestrator", raw)
+    return DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.sub(DESKTOP_CORTEX_ACTIVATION_MARKER, raw)
+
+
+def desktop_cortex_route_requested(value: object) -> bool:
+    """Recognize only Desktop's canonical Cortex skill-link wrapper.
+
+    The host normally records activation before the MCP call.  Desktop can,
+    however, deliver the selected skill as a Markdown link inside the exact
+    user request.  Keep that transport form equivalent to the bare route at
+    the plugin boundary, while leaving arbitrary Markdown/file links
+    fail-closed.
+    """
+    return bool(DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.search(str(value or "").strip()))
 
 
 def v3_task_slug(value: object) -> str:
@@ -3400,12 +3414,55 @@ def _planning_diag(message: str, *, path: str | None = None, code: str = "planni
     return item
 
 
+_REQUIRED_ARTIFACT_KINDS = {
+    "file", "test_suite", "fixture", "cli", "document", "report", "schema", "config", "other",
+}
+
+
+def _normalize_required_artifacts(value: Any, path: str, *, default_gate: str = "implementation") -> list[dict[str, Any]]:
+    """Validate and canonicalize the machine-readable deliverable manifest."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be an array")
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_path} must be an object")
+        allowed = {"path", "kind", "owner_gate", "verification"}
+        unknown = sorted(set(item) - allowed)
+        missing = sorted(allowed - set(item))
+        if unknown or missing:
+            details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + ([] if not missing else ["missing: " + ", ".join(missing)])
+            raise ValueError(f"{item_path} is invalid (" + "; ".join(details) + ")")
+        artifact_path = _safe_project_relative_path(item.get("path"))
+        kind = str(item.get("kind") or "").strip().lower()
+        if not kind:
+            raise ValueError(f"{item_path}.kind must be a non-empty string")
+        if kind not in _REQUIRED_ARTIFACT_KINDS:
+            raise ValueError(
+                f"{item_path}.kind must be one of: {', '.join(sorted(_REQUIRED_ARTIFACT_KINDS))}"
+            )
+        owner_gate = canonical_pipeline_gate(item.get("owner_gate") or default_gate)
+        if owner_gate not in AVAILABLE_GATES:
+            raise ValueError(f"{item_path}.owner_gate references unknown gate {owner_gate!r}")
+        verification = _planning_text(item.get("verification"), f"{item_path}.verification")
+        key = (artifact_path, owner_gate)
+        if key in seen:
+            raise ValueError(f"{item_path} duplicates required artifact {artifact_path!r} for gate {owner_gate!r}")
+        seen.add(key)
+        result.append({"path": artifact_path, "kind": kind, "owner_gate": owner_gate, "verification": verification})
+    return result
+
+
 def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
     """Collect independent shape errors without attempting cross-field checks."""
     diagnostics: list[dict[str, Any]] = []
     if not isinstance(value, dict):
         return [_planning_diag("planning must be an object", path="planning")]
-    allowed = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "resolved_questions", "risks"}
+    allowed = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks"}
     for key in sorted(set(value) - allowed):
         diagnostics.append(_planning_diag("unsupported planning field", path=f"planning.{key}"))
     for key in ("overview", "work_packages"):
@@ -3420,14 +3477,31 @@ def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
     for key in ("resolved_questions", "risks", "requirement_coverage"):
         if key in value and not isinstance(value[key], list):
             diagnostics.append(_planning_diag(f"planning {key} must be an array", path=f"planning.{key}"))
+    actions = value.get("recommendation_actions")
+    if actions is not None and (not isinstance(actions, list) or any(
+        not isinstance(item, dict) or not str(item.get("issue") or "").strip()
+        or not str(item.get("action") or "").strip()
+        or not isinstance(item.get("plan_refs", []), list)
+        or not str(item.get("verification") or "").strip()
+        for item in actions
+    )):
+        diagnostics.append(_planning_diag(
+            "planning recommendation_actions items require issue, action, plan_refs, and verification",
+            path="planning.recommendation_actions",
+        ))
+    if recommendation == "revise" and not actions:
+        diagnostics.append(_planning_diag(
+            "planning recommendation_actions is required when recommendation is revise",
+            path="planning.recommendation_actions",
+        ))
     packages = value.get("work_packages")
     if not isinstance(packages, list):
         return diagnostics
     if not packages:
         diagnostics.append(_planning_diag("planning work_packages must be a non-empty array", path="planning.work_packages"))
         return diagnostics
-    package_allowed = {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "microtasks"}
-    micro_allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification"}
+    package_allowed = {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "required_artifacts", "microtasks"}
+    micro_allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification", "required_artifacts"}
     for pi, package in enumerate(packages):
         p = f"planning.work_packages[{pi}]"
         if not isinstance(package, dict):
@@ -3451,9 +3525,11 @@ def _planning_base_diagnostics(value: Any) -> list[dict[str, Any]]:
             for key in ("id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"):
                 if key not in micro:
                     diagnostics.append(_planning_diag(f"planning microtask requires {key}", path=f"{m}.{key}"))
-            for key in ("acceptance_criteria", "verification", "allowed_paths", "depends_on", "gates"):
+            for key in ("acceptance_criteria", "verification", "allowed_paths", "depends_on", "gates", "required_artifacts"):
                 if key in micro and not isinstance(micro[key], list):
                     diagnostics.append(_planning_diag(f"planning microtask {key} must be an array", path=f"{m}.{key}"))
+        if "required_artifacts" in package and not isinstance(package["required_artifacts"], list):
+            diagnostics.append(_planning_diag("planning package required_artifacts must be an array", path=f"{p}.required_artifacts"))
     return diagnostics
 
 
@@ -3583,7 +3659,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         raise PlanningValidationError(base_diagnostics)
     allowed_top_level = {
         "overview", "work_packages", "requirement_coverage", "recommendation",
-        "recommendation_rationale", "resolved_questions", "risks",
+        "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks",
     }
     if not isinstance(value, dict) or not {"overview", "work_packages"}.issubset(value) or set(value) - allowed_top_level:
         raise ValueError("planning must contain overview and work_packages, with only documented traceability fields")
@@ -3592,6 +3668,19 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     if recommendation not in {"approve", "revise"}:
         raise ValueError("planning recommendation must be approve or revise")
     recommendation_rationale = str(value.get("recommendation_rationale") or "").strip()
+    recommendation_actions: list[dict[str, Any]] = []
+    for index, item in enumerate(value.get("recommendation_actions", []), 1):
+        if not isinstance(item, dict):
+            raise ValueError(f"planning recommendation_actions[{index - 1}] must be an object")
+        issue = _planning_text(item.get("issue"), f"planning.recommendation_actions[{index - 1}].issue")
+        action = _planning_text(item.get("action"), f"planning.recommendation_actions[{index - 1}].action")
+        verification = _planning_text(item.get("verification"), f"planning.recommendation_actions[{index - 1}].verification")
+        refs = item.get("plan_refs", [])
+        if not isinstance(refs, list) or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+            raise ValueError(f"planning recommendation_actions[{index - 1}].plan_refs must be an array of non-empty strings")
+        recommendation_actions.append({"issue": issue, "action": action, "plan_refs": list(dict.fromkeys(ref.strip() for ref in refs)), "verification": verification})
+    if recommendation == "revise" and not recommendation_actions:
+        raise ValueError("planning recommendation_actions is required when recommendation is revise")
     # Recommendation prose is canonical planning data. Prompt compactness is
     # advisory only; do not reject a valid rationale because of its byte size.
     raw_resolved_questions = value.get("resolved_questions", [])
@@ -3652,7 +3741,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     for index, raw_package in enumerate(raw_packages, 1):
         if not isinstance(raw_package, dict):
             raise ValueError(f"planning work_packages[{index - 1}] must be an object")
-        unknown = sorted(set(raw_package) - {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "microtasks"})
+        unknown = sorted(set(raw_package) - {"id", "title", "objective", "allowed_paths", "depends_on", "status", "order", "gates", "required_artifacts", "microtasks"})
         missing = sorted({"id", "title", "objective", "microtasks"} - set(raw_package))
         if unknown or missing:
             details = ([] if not unknown else ["unknown: " + ", ".join(unknown)]) + ([] if not missing else ["missing: " + ", ".join(missing)])
@@ -3668,7 +3757,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         for micro_index, raw_microtask in enumerate(raw_microtasks, 1):
             if not isinstance(raw_microtask, dict):
                 raise ValueError(f"planning package {package_id!r} microtask {micro_index} must be an object")
-            allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification"}
+            allowed = {"id", "title", "objective", "profile", "allowed_paths", "depends_on", "status", "order", "gates", "acceptance_criteria", "verification", "required_artifacts"}
             unknown_micro = sorted(set(raw_microtask) - allowed)
             missing_micro = sorted({"id", "title", "objective", "profile", "allowed_paths", "acceptance_criteria", "verification"} - set(raw_microtask))
             if unknown_micro or missing_micro:
@@ -3726,6 +3815,19 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 raise ValueError(
                     f"planning microtask {microtask_id!r} allowed_paths must be explicit and non-broad"
                 )
+            try:
+                microtask_artifacts = _normalize_required_artifacts(
+                    raw_microtask.get("required_artifacts"),
+                    f"planning.work_packages[{index - 1}].microtasks[{micro_index - 1}].required_artifacts",
+                    default_gate=(gates[0] if gates else "implementation"),
+                )
+            except ValueError as exc:
+                planning_diagnostics.append(_planning_diag(
+                    str(exc),
+                    path=f"planning.work_packages[{index - 1}].microtasks[{micro_index - 1}].required_artifacts",
+                    code="planning_artifacts_invalid",
+                ))
+                microtask_artifacts = []
             microtasks.append({
                 "id": microtask_id,
                 "title": _planning_text(raw_microtask.get("title"), "planning microtask title"),
@@ -3738,6 +3840,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 "depends_on": dependencies,
                 "acceptance_criteria": microtask_acceptance,
                 "verification": microtask_verification,
+                "required_artifacts": microtask_artifacts,
             })
         total_microtasks += len(microtasks)
         raw_dependencies = raw_package.get("depends_on", [])
@@ -3769,6 +3872,19 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
                 code="planning_gates_invalid",
             ))
             package_gates = sorted({gate for microtask in microtasks for gate in microtask.get("gates", [])}) or ["implementation"]
+        try:
+            package_artifacts = _normalize_required_artifacts(
+                raw_package.get("required_artifacts"),
+                f"planning.work_packages[{index - 1}].required_artifacts",
+                default_gate=(package_gates[0] if package_gates else "implementation"),
+            )
+        except ValueError as exc:
+            planning_diagnostics.append(_planning_diag(
+                str(exc),
+                path=f"planning.work_packages[{index - 1}].required_artifacts",
+                code="planning_artifacts_invalid",
+            ))
+            package_artifacts = []
         packages.append({
             "id": package_id,
             "title": _planning_text(raw_package.get("title"), "planning package title"),
@@ -3778,6 +3894,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
             "gates": package_gates,
             "allowed_paths": _planning_paths_list(raw_package.get("allowed_paths"), "planning package allowed_paths"),
             "depends_on": dependencies,
+            "required_artifacts": package_artifacts,
             "microtasks": microtasks,
         })
     _validate_planning_dependency_graph(
@@ -3794,6 +3911,15 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
     )
     valid_plan_refs = package_ids | microtask_ids
     coverage_diagnostics: list[dict[str, Any]] = []
+    for action_index, action in enumerate(recommendation_actions, 1):
+        unknown_refs = sorted(set(action["plan_refs"]) - valid_plan_refs)
+        if unknown_refs:
+            coverage_diagnostics.append(_planning_diag(
+                f"planning recommendation_actions[{action_index - 1}] references unknown plan items: "
+                + ", ".join(unknown_refs),
+                path=f"planning.recommendation_actions[{action_index - 1}].plan_refs",
+                code="planning_recommendation_action_invalid",
+            ))
     for coverage_index, item in enumerate(coverage, 1):
         unknown_refs = sorted(set(item["plan_refs"]) - valid_plan_refs)
         if unknown_refs:
@@ -3812,6 +3938,7 @@ def sanitize_planning_payload(value: Any, *, persisted: bool = False) -> dict[st
         "requirement_coverage": coverage,
         "recommendation": recommendation,
         "recommendation_rationale": recommendation_rationale,
+        "recommendation_actions": recommendation_actions,
         "resolved_questions": resolved_questions,
         "risks": risks,
     }
@@ -3843,6 +3970,8 @@ def _planning_overview_markdown(manifest: dict[str, Any]) -> str:
             lines.append(
                 f"- `{microtask['id']}`{profile} [{microtask.get('status', 'pending')}; order {microtask.get('order', 1)}; gates {', '.join(microtask.get('gates') or ['implementation'])}]: {microtask['title']}"
             )
+            for artifact in microtask.get("required_artifacts") or []:
+                lines.append(f"  - deliverable `{artifact['path']}` ({artifact['kind']}, {artifact['owner_gate']}): {artifact['verification']}")
         lines.append("")
     coverage = manifest.get("requirement_coverage") or []
     if coverage:
@@ -3890,6 +4019,7 @@ def _plan_tracker_document(
             "allowed_paths": list(package.get("allowed_paths") or []),
             "acceptance_criteria": [],
             "verification": [],
+            "required_artifacts": list(package.get("required_artifacts") or []),
             "package_id": package_id,
         })
         for microtask in package.get("microtasks", []):
@@ -3907,6 +4037,7 @@ def _plan_tracker_document(
                 "allowed_paths": list(microtask.get("allowed_paths") or package.get("allowed_paths") or []),
                 "acceptance_criteria": list(microtask.get("acceptance_criteria") or []),
                 "verification": list(microtask.get("verification") or []),
+                "required_artifacts": list(microtask.get("required_artifacts") or []),
                 "profile": microtask.get("profile"),
                 "package_id": package_id,
             })
@@ -3920,6 +4051,7 @@ def _plan_tracker_document(
         "task_revision": int(state.get("task_revision") or 1),
         "recommendation": manifest.get("recommendation", "approve"),
         "recommendation_rationale": manifest.get("recommendation_rationale", ""),
+        "recommendation_actions": list(manifest.get("recommendation_actions") or []),
         "requirement_coverage": list(manifest.get("requirement_coverage") or []),
         "resolved_questions": list(manifest.get("resolved_questions") or []),
         "risks": list(manifest.get("risks") or []),
@@ -3980,7 +4112,7 @@ def _planning_pointer_tokens(path: str) -> list[str]:
 def apply_planning_repair(draft: Mapping[str, Any], patches: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Apply restricted RFC6902-like patches to a rejected planning draft."""
     value = json.loads(json.dumps(draft.get("planning"), ensure_ascii=False))
-    allowed_roots = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "resolved_questions", "risks"}
+    allowed_roots = {"overview", "work_packages", "requirement_coverage", "recommendation", "recommendation_rationale", "recommendation_actions", "resolved_questions", "risks"}
     for patch in patches:
         if not isinstance(patch, Mapping) or patch.get("op") not in {"replace", "add", "remove"}:
             raise ValueError("planning patches support only replace, add, and remove")
@@ -4093,7 +4225,7 @@ def _sync_plan_tracker_document(task_dir: Path, state: dict[str, Any], *, event:
     active = set(active_gates(state))
     paused = {
         str(gate) for gate, value in (state.get("rework_pauses") or {}).items()
-        if isinstance(value, dict) and value.get("status") == "needs_user_decision"
+        if isinstance(value, dict) and value.get("status") == "planner_recovery_pending"
     }
     for item in tracker.get("items", []):
         if not isinstance(item, dict):
@@ -4179,6 +4311,7 @@ def materialize_planning_payload(
         "requirement_coverage": list(planning.get("requirement_coverage") or []),
         "recommendation": planning.get("recommendation", "approve"),
         "recommendation_rationale": planning.get("recommendation_rationale", ""),
+        "recommendation_actions": list(planning.get("recommendation_actions") or []),
         "resolved_questions": list(planning.get("resolved_questions") or []),
         "risks": list(planning.get("risks") or []),
         "created_at": now(),
@@ -4223,6 +4356,100 @@ def current_planning_manifest(task_dir: Path) -> dict[str, Any] | None:
     if value.get("schema") != PLANNING_SCHEMA:
         raise ValueError("planning manifest schema is not supported")
     return value
+
+
+def required_artifact_diagnostics(
+    project_root: Path,
+    task_dir: Path,
+    state: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Check declared deliverables before implementation/QA completion.
+
+    Planning artifacts are immutable and therefore the manifest is loaded from
+    the task ledger, while existence is checked only in the assigned project
+    workspace.  An undeclared plan remains valid; once a deliverable is
+    declared, a completed gate cannot silently claim success before it exists.
+    """
+    gate = canonical_pipeline_gate(attempt.get("gate") or "")
+    if gate not in {"implementation", "qa"}:
+        return []
+    try:
+        manifest = current_planning_manifest(task_dir)
+    except (ValueError, OSError):
+        # A direct facade unit harness may supply only the project root.  The
+        # artifact gate is additive and must not turn that bounded test seam
+        # into a synthetic task-corruption failure; real task worktrees always
+        # have an immutable Cortex ledger and continue through the checks below.
+        return []
+    if not isinstance(manifest, dict):
+        return []
+    required: list[dict[str, Any]] = []
+    for summary in manifest.get("work_packages") or []:
+        if not isinstance(summary, dict) or not summary.get("artifact_path"):
+            continue
+        try:
+            record, _ = read_immutable_json_artifact(
+                task_dir, str(state.get("task_id") or ""), str(summary["artifact_path"]), kinds={"planning_revision"},
+            )
+        except (ValueError, OSError):
+            continue
+        package = record.get("package") if isinstance(record, dict) else None
+        if not isinstance(package, dict):
+            continue
+        required.extend(item for item in package.get("required_artifacts") or [] if isinstance(item, dict))
+        for microtask in package.get("microtasks") or []:
+            if isinstance(microtask, dict):
+                required.extend(item for item in microtask.get("required_artifacts") or [] if isinstance(item, dict))
+    diagnostics: list[dict[str, Any]] = []
+    root = Path(project_root).resolve()
+    for index, artifact in enumerate(required):
+        owner_gate = canonical_pipeline_gate(artifact.get("owner_gate") or gate)
+        if owner_gate != gate:
+            continue
+        relative = str(artifact.get("path") or "").replace("\\", "/")
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            diagnostics.append({
+                "code": "required_artifact_invalid_path",
+                "phase": gate,
+                "path": f"$.required_artifacts[{index}].path",
+                "json_pointer": f"/required_artifacts/{index}/path",
+                "message": f"required artifact path escapes project workspace: {relative}",
+                "received": relative,
+                "expected": {"type": "string", "format": "project-relative-path"},
+                "field_schema": {"type": "string", "minLength": 1, "format": "project-relative-path"},
+                "fix": "Change the declared artifact path to a project-relative path and retry the same gate.",
+            })
+            continue
+        if not candidate.exists():
+            diagnostics.append({
+                "code": "required_artifact_missing",
+                "phase": gate,
+                "path": f"$.required_artifacts[{index}]",
+                "json_pointer": f"/required_artifacts/{index}",
+                "message": f"required artifact is missing: {relative}",
+                "received": {"path": relative, "kind": artifact.get("kind"), "owner_gate": owner_gate},
+                "expected": {
+                    "path": relative,
+                    "kind": artifact.get("kind"),
+                    "owner_gate": owner_gate,
+                    "verification": artifact.get("verification"),
+                    "exists": True,
+                },
+                "field_schema": {
+                    "type": "object", "required": ["path", "kind", "owner_gate", "verification"],
+                    "properties": {
+                        "path": {"type": "string", "format": "project-relative-path"},
+                        "kind": {"type": "string"}, "owner_gate": {"type": "string"},
+                        "verification": {"type": "string"},
+                    },
+                },
+                "fix": f"Create or restore {relative}, run {artifact.get('verification')}, then retry the same {gate} attempt.",
+            })
+    return diagnostics
 
 
 def current_plan_tracker(task_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -4861,7 +5088,7 @@ def active_gates(state: dict[str, Any]) -> list[str]:
     paused = {
         str(gate)
         for gate, pause in pauses.items()
-        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+        if isinstance(pause, dict) and pause.get("status") == "planner_recovery_pending"
     } if isinstance(pauses, dict) else set()
     groups = state.get("parallel_groups") or [[gate] for gate in state["current_pipeline"]]
     for group in groups:
@@ -4902,7 +5129,39 @@ def _plan_approval_is_pending(state: dict[str, Any]) -> bool:
     return (
         approval.get("policy") == "required"
         and approval.get("status") == "awaiting_user"
+        and bool(
+            approval.get("user_requested")
+            or state.get("plan_approval_user_requested")
+            or state.get("user_requested_plan_approval")
+        )
     )
+
+
+def _reconcile_legacy_plan_approval(state: dict[str, Any]) -> bool:
+    """Convert an internal legacy approval pause into an advisory record."""
+    approval = _plan_approval(state)
+    if approval.get("status") not in {"pending_plan", "awaiting_user"}:
+        return False
+    if approval.get("user_requested") or state.get("plan_approval_user_requested") or state.get("user_requested_plan_approval"):
+        return False
+    for key in (
+        "review", "plan_result_ref", "pending_basis", "approved_basis",
+        "requested_at", "approved_at", "request_id",
+    ):
+        approval.pop(key, None)
+    approval.update({"policy": "auto", "status": "not_required", "user_requested": False, "feedback": None})
+    state["plan_approval"] = approval
+    state["plan_approval_user_requested"] = False
+    advice = {
+        "code": "legacy_plan_approval_ignored",
+        "severity": "warning",
+        "message": "Ignored a legacy policy-generated plan approval pause; the orchestrator-selected pipeline continues.",
+        "recommended_next": "continue_selected_pipeline",
+    }
+    existing = state.setdefault("pipeline_advice", [])
+    if isinstance(existing, list) and advice not in existing:
+        existing.append(advice)
+    return True
 
 
 def normalize_parallel_groups(groups: Any, pipeline: list[str]) -> list[list[str]]:
@@ -5011,36 +5270,35 @@ def canonicalize_full_governance_pipeline(
     state: dict[str, Any],
     pipeline: list[Any],
 ) -> list[str]:
-    """Return the one executable ordering for a full-governance pipeline.
+    """Normalize the selected route without changing its executable choice.
 
-    Governance phases are server-owned lifecycle boundaries, rather than
-    coordinator-selected ordinary work.  Keeping that rule in one helper is
-    essential because normal starts, future-wave replacements, semantic
-    revisions, and corrective rework all eventually change the same pipeline.
-    In particular, a retained completed implementation must never be allowed
-    to precede a reintroduced activation review.
+    Full governance can recommend an activation/close envelope, but it is an
+    advisory assessment and not an authorization boundary.  This helper is
+    called by pipeline mutation paths, so returning a reordered route here
+    would silently replace the orchestrator's decision.  Record the canonical
+    recommendation for audit and always return the normalized input route.
     """
     current = normalize_pipeline(pipeline)
     governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
     if governance.get("effective_mode") != "full":
         return current
-    missing = set(GOVERNANCE_FULL_GATES) - set(current)
-    if missing:
-        raise ValueError(
-            "full governance pipelines must retain activation and close review gates"
-        )
-    if "close" not in current:
-        raise ValueError("full governance pipelines must retain the final close gate")
-
-    # Preserve the relative order of ordinary work, but make the server-owned
-    # envelope unambiguous.  This is deliberately a normalization rather than
-    # a late validation failure: replacement/revision requests are allowed to
-    # describe ordinary work, but cannot place lifecycle authority around it.
     ordinary = [
         gate for gate in current
         if gate not in {*GOVERNANCE_FULL_GATES, "close"}
     ]
-    return ["governance_activation", *ordinary, "governance_close", "close"]
+    recommended = ["governance_activation", *ordinary, "governance_close", "close"]
+    if current != recommended:
+        advice = {
+            "code": "governance_pipeline_recommendation",
+            "severity": "warning",
+            "message": "Full governance recommends activation and close boundaries; the orchestrator-selected pipeline remains authoritative.",
+            "recommended_pipeline": recommended,
+            "chosen_pipeline_unchanged": True,
+        }
+        existing = state.setdefault("pipeline_advice", [])
+        if isinstance(existing, list) and advice not in existing:
+            existing.append(advice)
+    return current
 
 
 def canonicalize_full_governance_parallel_groups(
@@ -5057,33 +5315,43 @@ def canonicalize_full_governance_parallel_groups(
         [gate for gate in group if gate not in {*GOVERNANCE_FULL_GATES, "close"}]
         for group in normalized
     ]
-    return [
-        ["governance_activation"],
-        *[group for group in ordinary_groups if group],
-        ["governance_close"],
-        ["close"],
-    ]
+    # Preserve the chosen parallel grouping.  A full-governance assessment
+    # may recommend singleton review boundaries, but it must not rewrite the
+    # orchestrator's executable choice.
+    return normalized
 
 
 def validate_pipeline_invariants(state: dict[str, Any], pipeline: list[str] | None = None) -> None:
     candidate = pipeline or state["current_pipeline"]
     governance = state.get("governance") if isinstance(state.get("governance"), dict) else {}
+    advice: list[dict[str, Any]] = []
     if governance.get("effective_mode") == "full":
-        missing_governance = set(GOVERNANCE_FULL_GATES) - set(candidate)
-        if missing_governance:
-            raise ValueError("full governance pipelines must retain activation and close review gates")
-        if "close" not in candidate:
-            raise ValueError("full governance pipelines must retain the final close gate")
-        if candidate[0] != "governance_activation":
-            raise ValueError("full governance activation must be the first pipeline gate")
-        if candidate[-2:] != ["governance_close", "close"]:
-            raise ValueError("full governance close must immediately precede the final close gate")
+        if set(GOVERNANCE_FULL_GATES) - set(candidate) or "close" not in candidate:
+            advice.append({
+                "code": "governance_envelope_recommended",
+                "severity": "warning",
+                "message": "Full governance activation and close phases are recommended, but the orchestrator selected a different executable route.",
+            })
+        elif candidate[0] != "governance_activation" or candidate[-2:] != ["governance_close", "close"]:
+            advice.append({
+                "code": "governance_order_recommended",
+                "severity": "warning",
+                "message": "Full governance review boundaries are recommended in canonical order; the orchestrator choice remains executable.",
+            })
     if state.get("require_handoff"):
         missing = {"documentation", "close"} - set(candidate)
-        if missing:
-            raise ValueError("C2/C3 pipelines must retain documentation and close gates")
-        if candidate.index("documentation") > candidate.index("close"):
-            raise ValueError("documentation must run before close")
+        if missing or ("documentation" in candidate and "close" in candidate and candidate.index("documentation") > candidate.index("close")):
+            advice.append({
+                "code": "documentation_close_recommended",
+                "severity": "warning",
+                "message": "Documentation before close is recommended for this governance level; the selected pipeline remains executable.",
+            })
+    if advice:
+        existing = state.setdefault("pipeline_advice", [])
+        if isinstance(existing, list):
+            for item in advice:
+                if item not in existing:
+                    existing.append(item)
     normalize_parallel_groups(state.get("parallel_groups"), candidate)
 
 
@@ -5343,10 +5611,32 @@ def validate_completion_invariants(
     governance_full = governance.get("effective_mode") == "full"
     if not state.get("require_handoff") and not governance_full:
         return
+    completion_advice = state.setdefault("completion_advice", [])
+
+    def advise(code: str, message: str, recommended_next: str) -> None:
+        item = {
+            "code": code,
+            "severity": "warning",
+            "message": message,
+            "recommended_next": recommended_next,
+        }
+        if isinstance(completion_advice, list) and item not in completion_advice:
+            completion_advice.append(item)
     attempts = [item for item in state.get("attempts", []) if not item.get("invalidated")]
     non_terminal = [item["attempt_id"] for item in attempts if item.get("status") not in TERMINAL_ATTEMPT_STATUSES]
     if non_terminal:
-        raise ValueError("governed completion requires every attempt to be terminal: " + ", ".join(non_terminal))
+        advise(
+            "completion_attempts_still_running",
+            "Completion encountered non-terminal worker attempts: " + ", ".join(non_terminal),
+            "continue_selected_pipeline",
+        )
+        # This is a lifecycle projection, not evidence corruption. Keep the
+        # task executable so the orchestration engine can consume the worker
+        # result or dispatch the bounded corrective retry. Integrity checks
+        # below still fail closed for mismatched/corrupt canonical results.
+        if state.get("status") in {"completed", "blocked", "needs_input"}:
+            state["status"] = "active"
+            state.pop("blocked_reason", None)
     evidence = [item for item in state.get("evidence", []) if not item.get("invalidated")]
     missing_evidence = [
         item["attempt_id"]
@@ -5355,7 +5645,11 @@ def validate_completion_invariants(
         if not any(record.get("attempt_id") == item["attempt_id"] for record in evidence)
     ]
     if missing_evidence:
-        raise ValueError("governed completion requires evidence for every attempt: " + ", ".join(missing_evidence))
+        advise(
+            "completion_evidence_recommended",
+            "Governed completion is missing evidence for: " + ", ".join(missing_evidence),
+            "record_evidence",
+        )
     missing_results = [
         item["attempt_id"]
         for item in attempts
@@ -5367,7 +5661,11 @@ def validate_completion_invariants(
         )
     ]
     if missing_results:
-        raise ValueError("governed completion requires canonical result-bound evidence for every attempt: " + ", ".join(missing_results))
+        advise(
+            "canonical_result_evidence_recommended",
+            "Governed completion evidence is not bound to canonical results for: " + ", ".join(missing_results),
+            "record_evidence",
+        )
     # An intermediate worker may truthfully complete its narrow assignment
     # while handing unresolved work to a successor.  Terminal acceptance must
     # not retroactively reject those ordinary results.  It does, however, need
@@ -5393,33 +5691,67 @@ def validate_completion_invariants(
             task_dir, closure_attempts
         )
         if unresolved_closure_attempts:
-            raise ValueError(
-                "closure_attempt_unresolved: " + ", ".join(unresolved_closure_attempts)
+            advise(
+                "closure_attempt_unresolved",
+                "A closure result still reports unresolved work: " + ", ".join(unresolved_closure_attempts),
+                "dispatch_corrective_worker",
             )
     if state.get("require_handoff"):
         if "documentation" not in state.get("completed_gates", []) or not state.get("documentation_receipt"):
-            raise ValueError("C2/C3 completion requires documentation decision evidence")
+            advise(
+                "documentation_decision_recommended",
+                "Documentation decision evidence is recommended before completion.",
+                "record_evidence",
+            )
         if "close" not in state.get("completed_gates", []):
-            raise ValueError("C2/C3 completion requires the close gate")
+            advise(
+                "close_gate_recommended",
+                "The close gate is recommended before completion.",
+                "record_gate",
+            )
         if not state.get("reassessment_receipts"):
-            raise ValueError("C2/C3 completion requires a reassessment receipt")
+            advise(
+                "reassessment_recommended",
+                "A reassessment receipt is recommended before completion.",
+                "record_reassessment",
+            )
         if not state.get("handoff_created") or state.get("handoff_gate") != "close":
-            raise ValueError("C2/C3 completion requires a final close handoff")
+            advise(
+                "final_handoff_recommended",
+                "A final close handoff is recommended before completion.",
+                "record_handoff",
+            )
     if governance_full:
         completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
         missing_governance = sorted(set(GOVERNANCE_FULL_GATES) - completed)
         if missing_governance:
-            raise ValueError("full governance completion requires activation and close review gates: " + ", ".join(missing_governance))
+            advise(
+                "governance_review_recommended",
+                "Full governance review phases were not run: " + ", ".join(missing_governance),
+                "record_gate",
+            )
     # Full and light governance obligations are enforced from actual evidence
     # receipts, not merely from the resolver's metadata list.
     if governance_full:
-        validate_governance_obligation_evidence(
-            state, "governance_close", evidence, artifact_root=artifact_root
-        )
+        try:
+            validate_governance_obligation_evidence(
+                state, "governance_close", evidence, artifact_root=artifact_root
+            )
+        except ValueError as exc:
+            if "requires typed governance obligation evidence" in str(exc):
+                advise("governance_evidence_recommended", str(exc), "record_evidence")
+            else:
+                raise
     elif governance.get("effective_mode") == "light":
-        validate_governance_obligation_evidence(
-            state, "close", evidence, artifact_root=artifact_root
-        )
+        try:
+            validate_governance_obligation_evidence(
+                state, "close", evidence, artifact_root=artifact_root
+            )
+        except ValueError as exc:
+            if "requires typed governance obligation evidence" in str(exc):
+                advise("governance_evidence_recommended", str(exc), "record_evidence")
+            else:
+                raise
 
 
 def lock_key(path: str) -> str:
@@ -5935,25 +6267,18 @@ def classify(params: dict[str, Any]) -> dict[str, Any]:
 
     def ensure_mandatory(gate: str, reason: str) -> None:
         if gate not in pipeline:
-            # Mandatory gates are enforcement corrections, not optional
-            # gates inferred from task signals. Keep them out of
-            # ``conditional_gates`` so the response clearly distinguishes
-            # the orchestrator's proposal from Cortex's audit invariants.
-            target = "close" if gate in {"documentation", "review"} else None
-            pipeline.insert(pipeline.index(target) if target in pipeline else len(pipeline), gate)
-            pipeline_corrections.append({"gate": gate, "reason": reason})
+            # Historical mandatory-gate insertion was a policy veto in
+            # disguise: it silently rewrote the orchestrator's chosen route.
+            # Keep the recommendation visible while preserving the choice.
+            pipeline_corrections.append({"gate": gate, "reason": reason, "advisory": True})
 
     if proposed_pipeline is not None:
         for gate in MANDATORY_PIPELINE_GATES[complexity]:
             ensure_mandatory(gate, f"mandatory {complexity} audit gate")
-        if pipeline.index("documentation") > pipeline.index("close"):
-            pipeline.remove("documentation")
-            pipeline.insert(pipeline.index("close"), "documentation")
-            pipeline_corrections.append({"gate": "documentation", "reason": "documentation must precede close"})
-        if pipeline[-1] != "close":
-            pipeline.remove("close")
-            pipeline.append("close")
-            pipeline_corrections.append({"gate": "close", "reason": "close must be the final gate"})
+        if "documentation" in pipeline and "close" in pipeline and pipeline.index("documentation") > pipeline.index("close"):
+            pipeline_corrections.append({"gate": "documentation", "reason": "documentation is recommended before close", "advisory": True})
+        if "close" in pipeline and pipeline[-1] != "close":
+            pipeline_corrections.append({"gate": "close", "reason": "close is recommended as the final gate", "advisory": True})
 
     if proposed_pipeline is None and has(
         "security", "auth", "permission", "secret", "privacy",
@@ -6078,10 +6403,9 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
                 normalized_requested_pipeline = None
             if normalized_requested_pipeline != pipeline:
                 pipeline_correction = {"requested": requested_pipeline, "used": pipeline, "source": "classification_receipt"}
-        if classification["complexity"] in {"C2", "C3"} and not {"documentation", "close"}.issubset(pipeline):
-            raise ValueError("C2/C3 pipelines must include documentation and close gates")
-        if classification["complexity"] in {"C2", "C3"} and pipeline.index("documentation") > pipeline.index("close"):
-            raise ValueError("documentation must run before close")
+        # Documentation/close are governance recommendations.  Preserve the
+        # coordinator-selected pipeline and expose the missing convention in
+        # the durable advisory projection instead of rejecting task creation.
         task_number, task_dir = allocate_task_directory(root, task_id)
         state_path = task_dir / "state.sqlite"
         thread_id = str(params.get("thread_id", "")).strip()
@@ -6097,6 +6421,18 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         plan_approval_policy = str(params.get("plan_approval") or "auto")
         if plan_approval_policy not in {"auto", "required"}:
             raise ValueError("plan_approval must be auto or required")
+        # ``plan_approval=required`` is a policy/configuration value, not
+        # proof that the user asked to pause for a review.  Only an explicit
+        # trusted ingress marker may be persisted as user intent.
+        trusted_plan_review_requested = any(
+            params.get(marker) is True
+            for marker in (
+                "plan_approval_user_requested",
+                "user_requested_plan_approval",
+                "plan_review_requested",
+                "explicit_plan_approval_requested",
+            )
+        )
         init_acceptance_criteria = normalize_init_text_list(params.get("acceptance_criteria"), "acceptance_criteria")
         init_scope = normalize_init_text_list(params.get("scope"), "scope")
         init_constraints = normalize_init_text_list(params.get("constraints"), "constraints")
@@ -6109,10 +6445,10 @@ def init_task(params: dict[str, Any]) -> dict[str, Any]:
         if not exact_user_request:
             raise ValueError("init_task requires the exact non-empty user request")
         exact_user_request_digest = digest_text(exact_user_request)
-        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "constraints": [redact(item, 1000) for item in init_constraints], "acceptance_criteria": [redact(item, 1000) for item in init_acceptance_criteria], "scope": [redact(item, 500) for item in init_scope], "allowed_paths": [redact(item, 500) for item in init_allowed_paths], "verification": [redact(item, 1000) for item in init_verification], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in init_pause_conditions], "plan_approval": plan_approval_policy, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
+        task = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "user_request": exact_user_request, "user_request_digest": exact_user_request_digest, "user_request_projection": redact(exact_user_request, 4000), "intent_clarification_required": bool(params.get("intent_clarification_required", False)), "intent_clarification_reason": redact(params.get("intent_clarification_reason", ""), 500) or None, "complexity": classification["complexity"], "base_pipeline": classification["base_pipeline"], "initial_pipeline": pipeline, "parallel_groups": parallel_groups, "requirements": receipt_requirements, "constraints": [redact(item, 1000) for item in init_constraints], "acceptance_criteria": [redact(item, 1000) for item in init_acceptance_criteria], "scope": [redact(item, 500) for item in init_scope], "allowed_paths": [redact(item, 500) for item in init_allowed_paths], "verification": [redact(item, 1000) for item in init_verification], "budget": redact(params.get("budget", ""), 500), "pause_conditions": [redact(item, 1000) for item in init_pause_conditions], "plan_approval": plan_approval_policy, "plan_approval_user_requested": trusted_plan_review_requested, "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "thread_id": redact(thread_id, 256), "principal": principal, "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "classification_id": classification_id, "project_root": baseline["project_root"], "initial_manifest_ref": baseline_ref, "tracker_policy": TRACKER_POLICY, "created_at": now()}
         if follow_up is not None:
             task["follow_up"] = sanitize_structured(follow_up)
-        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "not_required" if plan_approval_policy == "auto" else "pending_plan", "history": []}, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
+        state = {"schema": SCHEMA, "pipeline_contract_version": PIPELINE_CONTRACT_VERSION, "task_id": task_id, "task_number": task_number, "status": "active", "principal": principal, "thread_id": redact(thread_id, 256), "user_language": user_language, "communication_profile": select_communication_profile(params), "visible_thread_requested": visible_thread_requested, "internal_language": "en", "complexity": classification["complexity"], "initiative_ref": redact(params.get("initiative_ref", ""), 200) or None, "governance_mode": str(params.get("governance_mode") or "auto"), "governance": sanitize_structured(params.get("governance")) if isinstance(params.get("governance"), dict) else None, "current_pipeline": pipeline, "pipeline_obligations": list(pipeline), "parallel_groups": parallel_groups, "current_gates": active_gates({"current_pipeline": pipeline, "parallel_groups": parallel_groups, "completed_gates": [], "skipped_gates": []}), "completed_gates": [], "skipped_gates": [], "gates": {}, "attempts": [], "evidence": [], "locks": {}, "pipeline_changes": [], "adaptive_events": [], "recovery_events": [], "resume_events": [], "reassessment_receipts": [], "documentation_receipt": None, "manifest_receipts": [], "initial_manifest_ref": baseline_ref, "initial_manifest_digest": baseline["digest"], "manifest_snapshot_cleanup": {"status": "active", "at": now()}, "classification_receipt": classification_id, "handoff_created": False, "replan_count": 0, "replan_limit": int(params.get("replan_limit", 2)), "require_delegation": classification["complexity"] in {"C2", "C3"}, "require_handoff": classification["complexity"] in {"C2", "C3"}, "plan_approval": {"policy": plan_approval_policy, "status": "pending_plan" if trusted_plan_review_requested else "not_required", "user_requested": trusted_plan_review_requested, "history": []}, "plan_approval_user_requested": trusted_plan_review_requested, "coordinator": activation["coordinator"], "parent_project_operations": activation["parent_project_operations"], "worker_visibility": activation["worker_visibility"], "worker_return_route": activation["worker_return_route"], "revision": 0, "updated_at": now()}
         artifact_relative = str(task_dir.relative_to(root))
         db_create_task(root, task, state, artifact_relative)
         intent_artifact = store_immutable_artifact(
@@ -6609,6 +6945,29 @@ def finalize_attempt(params: dict[str, Any]) -> dict[str, Any]:
         status = str(params.get("status", "")).strip().lower()
         if status not in TERMINAL_ATTEMPT_STATUSES:
             raise ValueError("status must be passed, failed, blocked, cancelled, or superseded")
+        # Lifecycle recovery may have retired the mutable attempt after its
+        # canonical AttemptResult was already completed.  The immutable result
+        # is authoritative in this case: acknowledge the receipt idempotently
+        # without mutating the invalidated attempt projection.  Orchestration
+        # will reconcile its own projection and continue through the normal
+        # corrective/gate route.
+        if status == "passed" and attempt.get("invalidated"):
+            canonical = attempt_protocol.get_attempt_result(
+                root, task_id=state["task_id"], attempt_id=attempt_id,
+            )
+            if (
+                isinstance(canonical, dict)
+                and str(canonical.get("result_ref") or "") == str(attempt.get("attempt_result_ref") or "")
+                and canonical.get("lifecycle_status") == attempt_protocol.LIFECYCLE_COMPLETED
+            ):
+                return {
+                    "attempt_id": attempt_id,
+                    "status": status,
+                    "idempotent": True,
+                    "recovered_invalidated_attempt": True,
+                    "attempt_result_ref": canonical.get("result_ref"),
+                    "state": state,
+                }
         if status == "passed" and attempt.get("facade_managed"):
             missing_result = _attempts_missing_result_validation(task_dir, [attempt])
             if missing_result:
@@ -7160,6 +7519,48 @@ def record_gate(params: dict[str, Any]) -> dict[str, Any]:
     return _record_gate(params)
 
 
+def _activate_closure_rework(
+    state: dict[str, Any],
+    *,
+    gate: str,
+    findings: list[dict[str, Any]],
+    source_result_refs: list[str],
+) -> str:
+    """Expose the gate policy's server-owned closure rework transition."""
+    from cortex_runtime.gate_transitions import _activate_closure_rework as _implementation
+
+    return _implementation(
+        state,
+        gate=gate,
+        findings=findings,
+        source_result_refs=source_result_refs,
+    )
+
+
+def _activate_closure_rework(
+    state: dict[str, Any],
+    *,
+    gate: str,
+    findings: list[dict[str, Any]],
+    source_result_refs: list[str],
+) -> str:
+    """Expose the gate policy's server-owned closure recovery to the engine.
+
+    Runtime modules are wired through the composition root.  Keeping this
+    narrow facade wrapper lets the orchestration engine invoke the same
+    canonical rework transition that ``record_gate`` uses without importing
+    the executable facade back from the runtime package.
+    """
+    from cortex_runtime.gate_transitions import _activate_closure_rework as _impl
+
+    return _impl(
+        state,
+        gate=gate,
+        findings=findings,
+        source_result_refs=source_result_refs,
+    )
+
+
 def _record_commit_gate_recovery(
     task_dir: Path,
     state: dict[str, Any],
@@ -7200,10 +7601,24 @@ def _record_commit_gate_recovery(
     if len(events) > MAX_GATE_RECOVERY_EVENTS:
         del events[:-MAX_GATE_RECOVERY_EVENTS]
     if terminal:
-        state["status"] = "blocked"
-        state["blocked_gate"] = gate
-        state["blocked_reason"] = f"commit_gate recovery budget exhausted: {reason}"
-        next_action = "create_handoff_and_resume_after_gate_repair"
+        # Exhausting the fast-path retry budget is an internal adapter
+        # diagnostic, not a Cortex/user blocker.  Preserve the evidence and
+        # route the same task through the server-owned diagnostic recovery
+        # Planner on its next lifecycle advance.  Do not mark the task
+        # blocked, which previously stranded it behind a handoff-only path.
+        state.pop("blocked_gate", None)
+        state.pop("blocked_reason", None)
+        state["status"] = "active"
+        state["commit_gate_recovery"] = {
+            "schema": "cortex/recovery-contract/v1",
+            "status": "diagnostic_recovery_pending",
+            "gate": gate,
+            "mode": mode,
+            "failure_key": failure_key,
+            "replacement_worker_authorized": False,
+            "at": now(),
+        }
+        next_action = "server_owned_diagnostic_recovery_then_retry_commit_gate"
     elif "result binding" in reason.lower():
         next_action = "repair_result_binding_then_retry_commit_gate_once"
     else:
@@ -7225,10 +7640,11 @@ def commit_gate(params: dict[str, Any]) -> dict[str, Any]:
 
     Validation failures inside this private atomic adapter are returned as
     bounded recovery data instead of escaping as repeated MCP errors. After
-    three failures for the same gate/mode the adapter is durably blocked,
-    giving the coordinator a terminal handoff path. This limit is intentionally
-    unrelated to pipeline, QA, review, worker, finding-remediation, or closure
-    rework attempts.
+    three failures for the same gate/mode the adapter records a diagnostic
+    recovery receipt and leaves the task active for the server-owned Planner
+    route; it never creates a terminal Cortex block. This limit is
+    intentionally unrelated to pipeline, QA, review, worker,
+    finding-remediation, or closure rework attempts.
     """
     root = ledger_root(params)
     with state_lock(root):
@@ -7300,7 +7716,17 @@ def close_audit(params: dict[str, Any]) -> dict[str, Any]:
         # A transaction replay can arrive after the final gate was already
         # projected. Re-run the invariant against SQLite rather than treating
         # that projection as proof of durable worker completion.
+        prior_status = state.get("status")
+        prior_advice_count = len(state.get("completion_advice") or []) if isinstance(state.get("completion_advice"), list) else 0
         validate_completion_invariants(state, artifact_root=root)
+        if state.get("status") != prior_status or len(state.get("completion_advice") or []) != prior_advice_count:
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "completion_advisory",
+                "recorded lifecycle completion advice and retained the task as executable",
+            )
         result_refs = [
             safe_id(str(item.get("attempt_result_ref") or ""))
             for item in state.get("attempts", [])
@@ -7366,13 +7792,13 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         signals = [redact(item, 500) for item in params.get("signals", [])]
         decision = str(params.get("decision", "")).strip()
         reason = redact(params.get("reason", ""), 2000)
-        if state.get("require_delegation") and decision not in {"unchanged", "updated", "stop"}:
-            raise ValueError("C2/C3 reassessment requires decision unchanged, updated, or stop")
-        if state.get("require_delegation") and not reason:
-            raise ValueError("C2/C3 reassessment requires an explicit reason")
         intent = str(params.get("intent", "add_specialist"))
         if intent not in {"add_specialist", "resequence", "rework_gate", "stop"}:
             raise ValueError("intent must be add_specialist, resequence, rework_gate, or stop")
+        if state.get("require_delegation") and intent != "stop" and decision not in {"unchanged", "updated", "stop"}:
+            raise ValueError("C2/C3 reassessment requires decision unchanged, updated, or stop")
+        if state.get("require_delegation") and intent != "stop" and not reason:
+            raise ValueError("C2/C3 reassessment requires an explicit reason")
         # ``replan_count`` is lifetime audit data, not an execution budget.
         # Public material replans are already tied to durable worker evidence,
         # plan approval, idempotent operation receipts, and bounded per-gate /
@@ -7422,11 +7848,32 @@ def reassess_pipeline(params: dict[str, Any]) -> dict[str, Any]:
         receipt = {"at": now(), "decision": decision or ("updated" if params.get("apply") and (operations or (explicit_pipeline is not None and current != state["current_pipeline"]) or groups_changed) else "unchanged"), "reason": reason, "intent": intent, "signals": signals, "pipeline": current, "parallel_groups": current_groups, "operations": operations}
         result = {"applied": False, "intent": intent, "signals": signals, "pipeline_source": proposal["pipeline_source"], "current_pipeline": state["current_pipeline"], "current_parallel_groups": state.get("parallel_groups"), "suggested_pipeline": current, "suggested_parallel_groups": current_groups, "inferred_gates": proposal["conditional_gates"], "operations": operations, "receipt": receipt}
         if intent == "stop":
-            if state.get("require_delegation") and decision != "stop":
-                raise ValueError("stop intent requires decision=stop")
-            if state.get("require_handoff") and (not state.get("handoff_created") or state.get("handoff_gate") != primary_gate(state)):
-                raise ValueError("C2/C3 stop reassessment requires a current-gate handoff")
+            # Internal policy/recovery signals may recommend stopping or
+            # pausing a route, but they may not stop the Cortex task. A task
+            # stop is a user decision only; callers must opt in explicitly so
+            # an internal worker outcome cannot become a hidden blocker.
+            explicit_user_stop = (
+                decision == "stop"
+                and (
+                    params.get("user_decision") is True
+                    or params.get("origin") == "user"
+                    or params.get("user_requested_stop") is True
+                )
+            )
+            if not explicit_user_stop:
+                advice = {
+                    "code": "task_stop_requires_user_decision",
+                    "severity": "warning",
+                    "message": "Stop was proposed by orchestration policy, but the task remains executable until the user explicitly decides to stop.",
+                    "recommended_next": "dispatch_corrective_worker",
+                }
+                state.setdefault("pipeline_advice", []).append(advice)
+                state.setdefault("reassessment_receipts", []).append({**receipt, "advisory": advice})
+                save_state(task_dir, task_dir / "state.sqlite", state, "reassess_advisory", "internal stop recommendation recorded as advice")
+                result.update({"state": state, "advisory": advice})
+                return result
             state["status"] = "blocked"
+            state["user_stop_requested"] = True
             state["replan_count"] += 1
             state.setdefault("reassessment_receipts", []).append(receipt)
             save_state(task_dir, task_dir / "state.sqlite", state, "reassess", "pipeline stopped by policy")
@@ -7614,12 +8061,12 @@ ORCHESTRATION_PLAN_SCHEMA = "cortex/orchestration-plan/v1"
 ORCHESTRATE_OPERATIONS = {"start", "advance", "inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
 ORCHESTRATE_MUTATING_OPERATIONS = {"start", "advance", "resume", "deactivate", "lane", "resource", "question", "plan_approval"}
 PUBLIC_ORCHESTRATION_SCHEMA = "cortex/orchestration/v5"
-COORDINATOR_LOCK = (
-    "COORDINATOR LOCK: root is coordination-only. Never inspect, search, read, edit, build, test, or run the target project, "
-    "Cortex plugin source/cache, .codex state, or runtime internals. The public MCP schema and this response are authoritative. "
-    "Use only Cortex lifecycle, exact dispatches, waiting, result evaluation, user communication, and safe recovery. "
-    "All project operations belong to workers; failure or delay never authorizes direct project work."
-)
+# This prefix used to contain a visible ``COORDINATOR LOCK`` message.  That
+# leaked an internal routing guard into every public ``next_action`` and made
+# ordinary recoverable lifecycle work look like a Cortex blocker.  Keep the
+# coordinator-only constraint in the bundled skills and machine state; public
+# actions must contain only the concrete server-derived operation to perform.
+COORDINATOR_LOCK = ""
 
 
 def _request_diagnostic(path: str, message: str, expected: str | None = None) -> dict[str, Any]:
@@ -7735,7 +8182,7 @@ def _validation_contract(
             "type": "object",
             "required": ["intent", "project_root"],
             "properties": {
-                "intent": {"type": "string", "enum": ["inspect", "recover_inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts"]},
+                "intent": {"type": "string", "enum": ["inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "prune", "maintenance", "artifacts"]},
                 "project_root": {"type": "string", "format": "absolute-path"},
                 "task_ref": {"type": "string", "description": "the exact current Cortex task_ref"},
                 "reason": {"type": "string"},
@@ -7763,7 +8210,7 @@ def _validation_contract(
         }
         contract["request_schema"]["conditional_requirements"] = {
             "task_scoped_intents": {
-                "if": {"properties": {"intent": {"enum": ["inspect", "recover_inspect", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "artifacts"]}}},
+                "if": {"properties": {"intent": {"enum": ["inspect", "recover_inspect", "recover_blocked", "resume", "deactivate", "lane", "resource", "question", "plan_approval", "follow_up", "steer", "artifacts"]}}},
                 "then": {"required": ["task_ref"]},
                 "description": "prune and maintenance are project-scoped and omit task_ref",
             }
@@ -7906,7 +8353,7 @@ def _collect_orchestrate_diagnostics(params: dict[str, Any]) -> list[dict[str, A
     allowed_top_level = {
         "operation", "submission_id", "project_root", "principal", "thread_id",
         "task", "task_id", "wave_id", "waves", "host_capabilities", "completions", "payload",
-        "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate",
+        "gate_outcomes", "future_waves", "allow_rework", "reason", "rework_gate", "terminal_recovery",
     }
     for key in sorted(set(params) - allowed_top_level):
         diagnostics.append(_request_diagnostic(key, "unsupported orchestrate parameter", "a documented orchestrate parameter"))
@@ -8249,44 +8696,96 @@ def _v3_collect_fields(params: Any, allowed: set[str], *, operation: str) -> lis
 
 
 def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
-    """Turn a stale/foreign continuation into a terminal coordinator receipt.
+    """Turn a stale/foreign continuation into a resumable coordinator receipt.
 
     A coordinator that loses the response after a successful continuation may
     retry the old relative step.  Treating that diagnostic as an ordinary
     correctable input invites a model to repeat ``continue`` (and often to
     invent artifacts or replacement waves).  The active task is already
-    server-owned, so this class of error must be fail-closed: no retry, no
-    recovery payload, and no project operation.
+    server-owned, so this class of error is a server-reconciliation signal:
+    the coordinator performs one bounded inspection and follows the durable
+    receipt.  It is never a user decision and never authorizes a replacement.
     """
     result = dict(error)
-    result["outcome"] = "blocked"
-    result["retryable"] = False
+    result["outcome"] = "needs_input"
+    result["retryable"] = True
     result["stop_reason"] = reason
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} STOP. This continuation is stale or belongs to a different task state. "
-        "Do not call continue_orchestration again with this step/results, do not request artifacts, "
-        "do not add future_waves, and do not spawn a replacement worker. Result the blocker; only a "
-        "fresh server lifecycle response may authorize a later action."
+        "Cortex detected a stale continuation and will reconcile it from the durable ledger. "
+        "Do not replay the consumed step/results, add future_waves, or spawn a replacement. "
+        "If the caller must re-enter the lifecycle, call manage_orchestration exactly once "
+        "with intent=inspect for this same task_ref and follow the returned server-owned "
+        "receipt or exact task question."
     )
     return result
 
 
+def _v3_reconcile_stale_continue(params: dict[str, Any], error: dict[str, Any]) -> dict[str, Any]:
+    """Reconcile a stale continuation from durable state in one server read.
+
+    A lost/late coordinator receipt is an internal transport race, not a
+    caller decision.  The previous facade returned ``needs_input`` and made
+    the coordinator issue a second management call before it could see the
+    already-issued dispatch.  Rehydrate the current projection here and
+    return its server-owned next action directly.  If the projection contains
+    a real worker question, the normal question response remains the only
+    visible pause; all other states continue through the returned dispatch or
+    waiting receipt.
+    """
+    try:
+        resolved = _v3_resolve_task(params, require_task_ref=True)
+        if isinstance(resolved, dict):
+            return _v3_continue_stop(error, reason="stale_relative_step")
+        _, state, _, task_ref = resolved
+        common = {
+            "project_root": params["project_root"],
+            "principal": state.get("principal"),
+            "thread_id": state.get("thread_id"),
+            "task_id": state["task_id"],
+        }
+        snapshot = _orchestrate_inspect(common)
+        response = _v3_response(snapshot, task_ref, include_result=True)
+        response["recovery"] = {
+            "mode": "server_reconcile",
+            "source": "stale_relative_step",
+            "automatic": True,
+        }
+        response["retryable"] = True
+        response["requires_user_decision"] = bool(
+            response.get("requires_user_decision")
+            or (response.get("user_view") or {}).get("requires_user_decision")
+        )
+        if not response["requires_user_decision"]:
+            response["next_action"] = (
+                "Cortex reconciled the stale continuation from its durable ledger. "
+                "Invoke only the returned native dispatches, or wait for the exact "
+                "persisted workers; do not issue another lifecycle call or replay the old step."
+            )
+        return response
+    except Exception:
+        # The original diagnostic remains a retryable internal receipt if a
+        # concurrent state mutation prevents the bounded read.  It must still
+        # never be classified as a user decision or replacement authorization.
+        return _v3_continue_stop(error, reason="stale_relative_step")
+
+
 def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
-    """Return a terminal start result when no task was safely created.
+    """Return a resumable start result when no task was safely created.
 
     A registry instable happens before Cortex can reserve a task or
     return an opaque task reference.  Treating it as ordinary caller input led
     coordinators to call unscoped recovery, which could select an unrelated
     active task under the same project root.
     """
-    result = _v3_error("start_state_incompatible", message, outcome="blocked")
-    result["retryable"] = False
+    result = _v3_error("start_state_incompatible", message, outcome="needs_input")
+    result["retryable"] = True
     result["task_created"] = False
     result["recovery"] = "user_authorized_ledger_maintenance_required"
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} Cortex did not create a task and returned no task_ref. Do not call "
-        "manage_orchestration, continue_orchestration, read_worker_result, inspect, select another task, or "
-        "dispatch a worker. Stop and result that the project ledger requires user-authorized maintenance."
+        "Cortex did not create a task and returned no task_ref. Record this internal "
+        "reconciliation diagnostic, retry the same start_orchestration request once "
+        "after the server-owned ledger repair, and do not select another task or "
+        "dispatch a worker without a successful task_ref. This is not a user-facing block."
     )
     return result
 
@@ -8298,9 +8797,10 @@ def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
         f"{operation} requires the exact task_ref returned by a successful Cortex lifecycle response.",
     )
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} Do not inspect, list, infer, or select another task from this project root. "
-        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, stop and result "
-        "the blocker."
+        "Do not inspect, list, infer, or select another task from this project root. "
+        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, "
+        "record the internal diagnostic and retry the originating lifecycle request once so "
+        "Cortex can reconcile its durable receipt. Do not turn this technical correction into a user-facing block."
     )
     return result
 
@@ -8386,13 +8886,20 @@ def _operation_registry(root: Path) -> dict[str, Any]:
 
 
 def _write_operation_registry(root: Path, registry: dict[str, Any]) -> None:
-    """Persist only compact replay receipts in the canonical registry."""
+    """Persist compact replay receipts, repairing older projections in place.
+
+    A runtime upgrade may tighten the public projection (for example, by
+    replacing a stringified internal ``next_action`` mapping with a concrete
+    operation).  That is a representation migration, not a task failure.  A
+    stale receipt must be canonicalized before the next lifecycle write rather
+    than surfaced as a Cortex blocker or forcing repeated management calls.
+    """
     for record in registry.get("tasks", {}).values():
         last = record.get("last_continue") if isinstance(record, dict) else None
         if isinstance(last, dict) and isinstance(last.get("response"), dict):
             compact = _v3_compact_continue_replay(last["response"])
             if compact != last["response"]:
-                raise ValueError("operation registry contains a non-canonical dispatch replay")
+                last["response"] = compact
     registry["updated_at"] = now()
     db_put_global(root, "operation_registry", registry)
 
@@ -9505,7 +10012,7 @@ def _v3_task_candidates(params: dict[str, Any], *, include_completed: bool = Fal
         if loaded is None:
             continue
         _, state, task = loaded
-        if not include_completed and state.get("status") not in {"active", "blocked"}:
+        if not include_completed and state.get("status") not in {"active", "blocked", "needs_input"}:
             continue
         candidates.append({
             "task_id": task_id,
@@ -9562,9 +10069,16 @@ def _v3_complexity(value: object) -> str:
 
 
 def _v3_plan_approval(value: object, complexity: str) -> str:
-    """Normalize the post-plan review policy selected for a public task."""
+    """Normalize the post-plan review policy selected for a public task.
+
+    Governance complexity is an assessment and must never silently turn into
+    a user-interaction requirement.  A plan review is therefore automatic by
+    default for every complexity; only an explicit ``plan_approval=required``
+    request opts the task into a user approval step.
+    """
     if value in {None, ""}:
-        return "required" if complexity in {"C2", "C3"} else "auto"
+        del complexity
+        return "auto"
     raw = str(value).strip().lower().replace("-", "_").replace(" ", "_")
     policy = V3_PLAN_APPROVAL_ALIASES.get(raw)
     if policy:
@@ -9945,116 +10459,16 @@ def _v3_auto_waves(task: dict[str, Any]) -> list[dict[str, Any]]:
     ]
     return _append_governance_waves(waves, task)
 
-
 def _append_governance_waves(waves: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
-    """Add the bounded full-governance activation/close review waves.
+    """Keep the orchestrator-selected waves intact and record governance advice.
 
-    The resolver is the only authority that can request ``full``.  Once it
-    does, these two server-owned waves surround the ordinary user pipeline;
-    caller-supplied waves cannot silently omit either review.  Existing
-    governance phases are preserved for idempotent retries and explicit
-    coordinator plans.
+    Full governance is an assessment profile. It may recommend activation and
+    close review, but it never injects, reorders, or rejects the selected
+    pipeline. Any explicit governance workers supplied by the orchestrator are
+    normalized by the ordinary wave validator.
     """
-    governance = task.get("governance") if isinstance(task.get("governance"), dict) else {}
-    if governance.get("effective_mode") != "full":
-        return waves
-    governance_locations: dict[str, list[int]] = {
-        "governance_activation": [],
-        "governance_close": [],
-    }
-    for index, wave in enumerate(waves):
-        delegations = [item for item in (wave.get("delegations") or []) if isinstance(item, dict)]
-        governance_items = [
-            item for item in delegations
-            if str(item.get("gate") or "") in governance_locations
-        ]
-        if not governance_items:
-            continue
-        if len(governance_items) != 1 or len(delegations) != 1:
-            raise ValueError("server-owned governance review waves must contain exactly one delegation")
-        item = governance_items[0]
-        gate = str(item.get("gate") or "")
-        if str(item.get("agent") or "") != "code_reviewer":
-            raise ValueError(f"{gate} is server-owned by code_reviewer")
-        governance_locations[gate].append(index)
-    for gate, locations in governance_locations.items():
-        if len(locations) > 1:
-            raise ValueError(f"full governance may contain only one {gate} wave")
-
-    def governance_wave(gate: str, wave_id: str, position: str) -> dict[str, Any]:
-        return {
-            "wave_id": wave_id,
-            "delegations": [{
-                "gate": gate,
-                "agent": "code_reviewer",
-                "selection_reason": (
-                    "Full governance requires an independent code_reviewer-owned "
-                    f"{position} review before ordinary orchestration can proceed."
-                ),
-            }],
-        }
-
-    result = list(waves)
-    if not governance_locations["governance_activation"]:
-        result.insert(0, governance_wave("governance_activation", "governance-activation", "activation"))
-    else:
-        activation_index = governance_locations["governance_activation"][0]
-        if activation_index:
-            activation_wave = result.pop(activation_index)
-            result.insert(0, activation_wave)
-    if not governance_locations["governance_close"]:
-        close_index = next(
-            (
-                index
-                for index, wave in enumerate(result)
-                if any(
-                    isinstance(item, dict) and str(item.get("gate") or "") == "close"
-                    for item in (wave.get("delegations") or [])
-                )
-            ),
-            len(result),
-        )
-        result.insert(close_index, governance_wave("governance_close", "governance-close", "close"))
-    else:
-        close_index = next(
-            (
-                index
-                for index, wave in enumerate(result)
-                if any(
-                    isinstance(item, dict) and str(item.get("gate") or "") == "close"
-                    for item in (wave.get("delegations") or [])
-                )
-            ),
-            len(result),
-        )
-        governance_close_index = next(
-            (
-                index
-                for index, wave in enumerate(result)
-                if any(
-                    isinstance(item, dict) and str(item.get("gate") or "") == "governance_close"
-                    for item in (wave.get("delegations") or [])
-                )
-            ),
-            len(result),
-        )
-        if governance_close_index > close_index:
-            governance_close_wave = result.pop(governance_close_index)
-            result.insert(close_index, governance_close_wave)
-    if len(result) > len(waves) + 2:
-        raise ValueError("full governance may add at most two lifecycle waves")
-    # The public v5 facade uses the trailing ordinal in ``wave_id`` as the
-    # relative ``step`` accepted by ``continue_orchestration``.  Server-owned
-    # governance waves used to carry symbolic ids (``governance-activation``
-    # and ``governance-close``), which rendered as ``step=None`` and made the
-    # first governance result impossible to submit because the public adapter
-    # accepts integer steps only.  Re-number the complete server-resolved
-    # sequence after insertion/reordering so response rendering and continue
-    # validation share one unambiguous relative-step contract.
-    return [
-        {**wave, "wave_id": f"wave-{index:02d}"}
-        for index, wave in enumerate(result, 1)
-    ]
+    del task
+    return list(waves)
 
 
 def _v3_host_capabilities() -> dict[str, Any]:
@@ -10101,6 +10515,10 @@ def _v3_response(
         include_result=include_result,
         start_replayed=start_replayed,
     )
+    # Lifecycle adapters for questions and approvals may replace the base
+    # action.  Sanitize at this final public boundary so persisted receipts
+    # from older plugin versions cannot leak the former internal lock text.
+    response["next_action"] = _public_next_action(response.get("next_action"))
     if not response.get("ok", False):
         response["attempt_budget_consumed"] = False
     return response
@@ -10118,6 +10536,7 @@ def _v3_compact_continue_replay(response: dict[str, Any]) -> dict[str, Any]:
         "repeat a worker dispatch from this replay. If the original response was lost before its native dispatches "
         "were invoked, call manage_orchestration with intent inspect once and invoke only still-awaiting dispatches."
     )
+    compact["next_action"] = _public_next_action(compact.get("next_action"))
     return compact
 
 
@@ -10155,21 +10574,32 @@ def _v3_continue_receipt_digest(params: dict[str, Any]) -> str:
     })
 
 
-def _v3_consumed_continue_error(task_ref: str) -> dict[str, Any]:
-    """Return a deterministic, non-mutating stop for reused wave receipts."""
+def _v3_consumed_continue_error(task_ref: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a deterministic server-reconciliation receipt for reused receipts."""
     result = _v3_error(
         "continue_receipts_already_consumed",
         "the submitted canonical result receipts were already consumed for this task wave; "
         "Cortex will not replan or dispatch from them again",
-        outcome="blocked",
+        # This is a recoverable idempotency receipt, not a public lifecycle
+        # block.  Reconcile from the durable task rather than asking the
+        # coordinator to enter a manage/inspect loop.
+        outcome="needs_input",
     )
     result["task_ref"] = task_ref
-    result["retryable"] = False
+    result["retryable"] = True
     result["recovery"] = "inspect_exact_task"
+    if isinstance(params, dict):
+        reconciled = _v3_reconcile_stale_continue(params, result)
+        reconciled["task_ref"] = task_ref
+        reconciled["recovery"] = {
+            "mode": "server_reconcile",
+            "source": "consumed_continue_receipt",
+            "automatic": True,
+        }
+        return reconciled
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} Do not retry continue_orchestration with changed future_waves, reason, "
-        "or reformatted results. Call manage_orchestration intent=inspect once with this exact task_ref "
-        "and use only the server-returned current step/results or pending dispatches."
+        "Cortex recorded these result receipts already. Reconcile the same task from its durable ledger and "
+        "use only the returned current dispatches or continuation; do not resubmit the consumed receipts."
     )
     return result
 
@@ -10195,7 +10625,7 @@ def _v3_consumed_continue_replay(
         isinstance(item, dict) and item.get("receipt_digest") == receipt_digest
         for item in consumed
     ):
-        return _v3_consumed_continue_error(task_ref)
+        return _v3_consumed_continue_error(task_ref, params)
     return None
 
 
@@ -10233,7 +10663,7 @@ def _v3_start_reservation(
             # task. Two MCP processes can observe the digest after reservation
             # but before orchestrate() creates the task ledger; allocating a
             # second task here would split one idempotent start across sessions.
-            if loaded is None or loaded[1].get("status") in {"active", "blocked"}:
+            if loaded is None or loaded[1].get("status") in {"active", "blocked", "needs_input"}:
                 return (
                     task_id,
                     str(prior["task_ref"]),
@@ -10283,7 +10713,22 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
     """Start public Cortex orchestration without caller-managed lifecycle identifiers."""
     staged_authorization_task_id: str | None = None
     try:
-        envelope = _v3_collect_fields(params, {"project_root", "task", "waves", "_follow_up"}, operation="start_orchestration")
+        envelope = _v3_collect_fields(
+            params,
+            {"project_root", "activation_marker", "task", "waves", "_follow_up"},
+            operation="start_orchestration",
+        )
+        activation_marker = params.get("activation_marker") if isinstance(params, dict) else None
+        if activation_marker is not None and activation_marker != DESKTOP_CORTEX_ACTIVATION_MARKER:
+            envelope.append({
+                "code": "start_orchestration_validation_failed",
+                "phase": "preflight",
+                "path": "activation_marker",
+                "message": "must equal the canonical Cortex activation marker",
+                "received": {"type": type(activation_marker).__name__},
+                "expected": {"type": "string", "const": DESKTOP_CORTEX_ACTIVATION_MARKER},
+                "fix": "Set activation_marker to the exact value $cortex:orchestrator or omit it when host activation is already established.",
+            })
         raw_task_probe = params.get("task") if isinstance(params, dict) else None
         if not isinstance(raw_task_probe, dict):
             envelope.append({"code": "start_orchestration_validation_failed", "path": "task", "message": "task must be an object"})
@@ -10372,8 +10817,8 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         if envelope:
             return _v3_envelope_error("start_orchestration", envelope)
         selected_project_root = select_project_root(params)
-        if set(params) - {"project_root", "task", "waves", "_follow_up"}:
-            raise ValueError("start_orchestration accepts only project_root, task, and optional waves")
+        if set(params) - {"project_root", "activation_marker", "task", "waves", "_follow_up"}:
+            raise ValueError("start_orchestration accepts only project_root, activation_marker, task, and optional waves")
         raw_task = params.get("task")
         if not isinstance(raw_task, dict):
             raise ValueError("task must be an object containing the exact user_request")
@@ -10388,6 +10833,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         unknown_task = sorted(set(raw_task) - allowed_task)
         if unknown_task:
             raise ValueError("unsupported task fields: " + ", ".join(unknown_task))
+        desktop_route_requested = desktop_cortex_route_requested(raw_task.get("user_request"))
         user_request = canonicalize_desktop_cortex_request(raw_task.get("user_request"))
         if not user_request:
             raise ValueError(
@@ -10457,6 +10903,21 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
         if not replayed:
             staged_authorization_task_id = task_id
+        if desktop_route_requested or activation_marker == DESKTOP_CORTEX_ACTIVATION_MARKER:
+            # A Desktop skill selection can arrive as a canonical Markdown
+            # wrapper in the user request instead of a separate host route
+            # activation.  Establish the same scoped activation before the
+            # engine's first activation-gated operation.  The predicate is
+            # deliberately limited to the exact Cortex orchestrator link;
+            # arbitrary Markdown/file links never authorize this path.
+            activated = activate_orchestration({
+                "project_root": params["project_root"],
+                "principal": principal,
+                "thread_id": thread_id,
+                "user_command": ACTIVATION_COMMAND,
+            })
+            if not activated.get("active"):
+                raise ValueError("canonical Cortex skill-link activation did not become active")
         if replayed:
             # A linked corrective task may be replayed after the coordinator
             # intentionally deactivated its prior session while recovering a
@@ -10757,14 +11218,13 @@ def _governance_boundary_recheck(
     future_waves: Any = None,
     results: Any = None,
 ) -> dict[str, Any]:
-    """Re-resolve stated governance triggers before accepting a new plan.
+    """Re-resolve governance triggers as an advisory boundary assessment.
 
-    Governance is not a one-time start classification.  A coordinator can
-    introduce a security, migration, cross-session, or multi-repository
-    concern in a later result or replacement wave.  Such a promotion must be
-    visible at the boundary and cannot be smuggled through a light pipeline;
-    the caller must submit the replacement with the server-owned full review
-    waves.
+    Governance is not a one-time start classification. A later result may
+    recommend a deeper review, but that recommendation cannot replace the
+    orchestrator-selected pipeline or stop continuation. Objective integrity,
+    capability, authorization, and safety checks remain separate hard
+    boundaries.
     """
     current = state.get("governance") if isinstance(state.get("governance"), dict) else {}
     current_mode = str(current.get("effective_mode") or "minimal")
@@ -10820,10 +11280,24 @@ def _governance_boundary_recheck(
         initiative_ref=task.get("initiative_ref"),
     )
     if resolved.get("effective_mode") == "full" and current_mode != "full":
-        raise ValueError(
-            "new governance trigger detected at the continue boundary; submit a replacement pipeline with "
-            "server-owned governance_activation and governance_close waves"
-        )
+        advice = {
+            "code": "governance_boundary_recommendation",
+            "severity": "high",
+            "recommended_mode": "full",
+            "recommended_pipeline": list(
+                state.get("recommended_pipeline")
+                or state.get("chosen_pipeline")
+                or state.get("current_pipeline")
+                or []
+            ),
+            "message": "A later task signal recommends full governance review; the orchestrator-selected pipeline remains executable.",
+            "recommended_next": "review_governance_advice_and_continue_selected_pipeline",
+            "chosen_pipeline_unchanged": True,
+        }
+        existing = state.setdefault("orchestration_advice", [])
+        if isinstance(existing, list) and advice not in existing:
+            existing.append(advice)
+        return {**resolved, "advisory": advice}
     return resolved
 
 
@@ -10865,6 +11339,14 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         active_replay = _v3_active_replay(params, state["task_id"])
         if active_replay is not None:
             return active_replay
+        if _reconcile_legacy_plan_approval(state):
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "plan_approval_advisory",
+                "reconciled a legacy policy-generated approval pause before continuation",
+            )
         if _plan_approval_is_pending(state):
             raise ValueError(
                 "the completed plan is awaiting explicit user approval; use manage_orchestration "
@@ -10894,13 +11376,21 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             )
         if params.get("rework") and params.get("future_waves") is None:
             raise ValueError("rework=true requires explicit future_waves; Cortex never guesses a replacement pipeline")
-        _governance_boundary_recheck(
+        governance_assessment = _governance_boundary_recheck(
             params,
             task,
             state,
             future_waves=params.get("future_waves"),
             results=results,
         )
+        if isinstance(governance_assessment, dict) and isinstance(governance_assessment.get("advisory"), dict):
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "governance_advisory",
+                "recorded a governance recommendation without replacing the chosen pipeline",
+            )
         future_waves = (
             _v3_compact_waves(
                 params["future_waves"],
@@ -11030,7 +11520,16 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         response = _v3_response(
             old,
             task_ref,
-            include_result=old.get("state") == "awaiting_plan_approval",
+            include_result=(
+                old.get("state") == "awaiting_plan_approval"
+                or (
+                    isinstance(old.get("result"), dict)
+                    and (
+                        isinstance(old["result"].get("recovery"), dict)
+                        or bool(old["result"].get("requires_user_decision"))
+                    )
+                )
+            ),
         )
         if old.get("ok"):
             _v3_store_continue(params, state["task_id"], request_digest, response)
@@ -11051,7 +11550,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             pass
         error = _v3_error("continue_validation_failed", exc)
         if str(exc).startswith("continue step must match the active relative step"):
-            return _v3_continue_stop(error, reason="stale_relative_step")
+            return _v3_reconcile_stale_continue(params, error)
         if resolved_task_ref:
             error["task_ref"] = resolved_task_ref
         return error
@@ -11166,9 +11665,9 @@ def _v3_question_response(response: dict[str, Any], state: dict[str, Any]) -> di
             response["outcome"] = "question_answered_not_resumable"
             response["resume_reason"] = resume_reason
             response["next_action"] = (
-                f"{COORDINATOR_LOCK} The durable answer is not bound to a current active worker slot. Do not use "
-                "followup_task, spawn a replacement, or advance the wave from this response; inspect the exact task "
-                "state through Cortex before any recovery."
+                "The durable answer is not bound to a current active worker slot. Cortex records this lifecycle "
+                "diagnostic and derives the next server-owned recovery route; do not use followup_task, spawn a "
+                "replacement, or advance the wave from this response."
             )
             return response
         response["outcome"] = "question_answered"
@@ -11241,20 +11740,25 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
         "localized_prompt", "localized_title", "localized_approve", "localized_cancel",
         "localized_custom_label",
     }
-    unknown = sorted(set(payload) - {"decision", "feedback", "request_id", *localization_fields})
+    unknown = sorted(set(payload) - {"decision", "approval_mode", "feedback", "request_id", *localization_fields})
     if unknown:
         raise ValueError("unsupported plan_approval payload fields: " + ", ".join(unknown))
     raw = str(payload.get("decision") or "prompt").strip().lower().replace("-", "_").replace(" ", "_")
     decision = {
         "prompt": "prompt", "ask": "prompt", "review": "prompt",
         "approve": "approve", "approved": "approve", "accept": "approve",
+        "approve_with_recommendations": "approve_with_recommendations",
+        "approve_without_recommendations": "approve_without_recommendations",
         "cancel": "cancel", "canceled": "cancel", "cancelled": "cancel",
         "revise": "revise", "changes": "revise", "request_changes": "revise",
     }.get(raw)
     if not decision:
-        raise ValueError("plan_approval decision must be prompt, approve, cancel, or revise")
+        raise ValueError("plan_approval decision must be prompt, approve_with_recommendations, approve_without_recommendations, cancel, or revise")
     feedback = str(payload.get("feedback") or "").strip()
     request_id = str(payload.get("request_id") or "").strip()
+    approval_mode = str(payload.get("approval_mode") or "").strip().lower().replace("-", "_")
+    if approval_mode and approval_mode not in {"approve_with_recommendations", "approve_without_recommendations"}:
+        raise ValueError("plan_approval approval_mode must be approve_with_recommendations or approve_without_recommendations")
     if decision == "prompt" and (feedback or request_id):
         raise ValueError("plan_approval prompt does not accept feedback")
     if decision == "revise" and not feedback:
@@ -11262,7 +11766,8 @@ def _v3_plan_approval_payload(value: object) -> dict[str, Any]:
     if decision != "prompt" and any(str(payload.get(field) or "").strip() for field in localization_fields):
         raise ValueError("plan approval localization fields are accepted only with decision=prompt")
     normalized = {
-        "decision": decision,
+        "decision": "approve" if decision.startswith("approve_") else decision,
+        **({"approval_mode": decision} if decision.startswith("approve_") else ({"approval_mode": approval_mode or "approve_with_recommendations"} if decision == "approve" else {})),
         **({"feedback": feedback} if feedback else {}),
         **({"request_id": redact(request_id, 200)} if request_id else {}),
     }
@@ -11347,18 +11852,24 @@ def _v3_prompt_plan_approval(
     review = dict(approval.get("review") or {})
     prompt, title, approve_label, cancel_label, custom_label = _v3_plan_approval_copy(state, localization)
     request_id = str(approval.get("request_id") or _v3_plan_approval_request_id(state, approval))
-    material_concerns = [*(review.get("findings") or []), *(review.get("uncertainty") or [])]
     planner_recommendation = str(review.get("recommendation") or "approve").strip().lower()
-    recommended_decision = "revise" if material_concerns or planner_recommendation == "revise" else "approve"
+    recommendation_actions = list(review.get("recommendation_actions") or [])
+    # The planner owns the recommendation. Findings/uncertainty are not a
+    # second recommendation: when the planner supplied concrete corrective
+    # actions, the single coherent recommendation is approve-with-actions.
+    if recommendation_actions:
+        recommended_decision = "approve_with_recommendations"
+    elif planner_recommendation == "revise":
+        recommended_decision = "revise"
+    else:
+        recommended_decision = "approve_without_recommendations"
     recommendation_rationale = (
-        "Request revision because the current plan still records material findings or uncertainty that should be "
-        "resolved before implementation."
-        if material_concerns else
         str(
             review.get("recommendation_rationale")
             or (
-                "Request revision because the Planner marked the plan for revision even though no separate finding "
-                "or uncertainty was recorded."
+                "Approve with the planner's concrete corrective actions; each action is bound to plan items and verification."
+                if recommendation_actions else
+                "Request a planner revision because no concrete corrective action was supplied."
                 if planner_recommendation == "revise" else
                 "Approve because the reviewed plan defines executable work packages and verification without "
                 "recording an unresolved material concern."
@@ -11382,21 +11893,43 @@ def _v3_prompt_plan_approval(
             "resolved_questions": review.get("resolved_questions") or [],
             "tracker": review.get("plan_tracker"),
             "remaining_phases": review.get("remaining_phases") or [],
+            "recommendation": review.get("recommendation") or "approve",
+            "recommendation_rationale": review.get("recommendation_rationale") or "",
+            "recommendation_actions": recommendation_actions,
             "result_ref": review.get("result_ref"),
         },
         "choices": [
-            {"id": "approve", "label": approve_label, "meaning": "Approve this exact plan revision and continue with its implementation dispatches."},
+            {"id": "approve_with_recommendations", "label": "Утвердить с рекомендациями" if str(state.get("user_language") or "").lower().startswith("ru") else "Approve with recommendations", "meaning": "Approve the plan and require the concrete corrective actions in recommendation_actions."},
+            {"id": "approve_without_recommendations", "label": "Утвердить без рекомендаций" if str(state.get("user_language") or "").lower().startswith("ru") else "Approve without recommendations", "meaning": "Approve the plan without applying its advisory recommendations."},
             {"id": "revise", "label": custom_label, "meaning": "Describe the required changes; Cortex will preserve the exact text as Planner feedback and request a revised plan."},
             {"id": "cancel", "label": cancel_label, "meaning": "Keep the plan pending and stop until a later user message."},
         ],
         "actions": [
             {
-                "id": "approve",
+                "id": "approve_with_recommendations",
                 "arguments": {
                     "project_root": project_root,
                     "task_ref": task_ref,
                     "intent": "plan_approval",
-                    "payload": {"decision": "approve", "request_id": request_id},
+                    "payload": {"decision": "approve_with_recommendations", "request_id": request_id},
+                },
+            },
+            {
+                "id": "approve_without_recommendations",
+                "arguments": {
+                    "project_root": project_root,
+                    "task_ref": task_ref,
+                    "intent": "plan_approval",
+                    "payload": {"decision": "approve_without_recommendations", "request_id": request_id},
+                },
+            },
+            {
+                "id": "revise",
+                "arguments": {
+                    "project_root": project_root,
+                    "task_ref": task_ref,
+                    "intent": "plan_approval",
+                    "payload": {"decision": "revise", "request_id": request_id, "feedback": "<describe concrete plan changes>"},
                 },
             },
             {
@@ -11416,13 +11949,14 @@ def _v3_prompt_plan_approval(
         },
         "response_instructions": (
             "Reply in your next ordinary chat message with approval, cancellation, or the exact changes you want. "
+            "Use approve_with_recommendations or approve_without_recommendations for the two approval modes. "
             "Any substantive change request is treated as revise, not approval."
         ),
         "coordinator_contract": (
             "Use only interaction.user_view for the final ordinary user-language message. Never copy internal plan "
             "objects, paths, dependencies, result or request identifiers, dispatch instructions, or validation details "
             "into that message. Show its bounded summary, the single question, and the recommendation from "
-            "llm_recommendation; then wait for one unambiguous approve/revise/cancel response. Preserve requested "
+            "llm_recommendation; then wait for one unambiguous approve-with-recommendations, approve-without-recommendations, revise, or cancel response. Preserve requested "
             "changes verbatim as revise feedback and use the exact interaction_ref internally. End the turn immediately "
             "after presenting this user_view; do not continue orchestration in the same turn."
         ),
@@ -11435,19 +11969,25 @@ def _v3_prompt_plan_approval(
         "Запустить предусмотренные проверки." if is_ru else "Run the planned verification.",
         "Проверить результат и закрыть задачу." if is_ru else "Review the result and close the task.",
     ]
+    for action in (review.get("recommendation_actions") or [])[:5]:
+        if isinstance(action, dict):
+            public_steps.append(
+                (("Рекомендация: " + str(action.get("action") or "").strip()) if is_ru else
+                 ("Recommendation: " + str(action.get("action") or "").strip()))
+            )
+    action_count = len(review.get("recommendation_actions") or [])
     public_recommendation = (
-        "Рекомендация: доработать план — остаётся существенная неопределённость."
-        if recommended_decision == "revise" and is_ru else
-        "Рекомендация: утвердить план — существенные неопределённости закрыты и проверки конкретны."
-        if is_ru else
-        "Recommendation: revise — a material uncertainty remains."
-        if recommended_decision == "revise" else
-        "Recommendation: approve — material uncertainties are closed and verification is concrete."
+        ("Рекомендация планировщика: утвердить с рекомендациями — план содержит " + str(action_count) + " конкретных корректирующих действий." if is_ru else "Planner recommendation: approve with recommendations — the plan contains " + str(action_count) + " concrete corrective actions.")
+        if recommended_decision == "approve_with_recommendations" and action_count else
+        "Рекомендация: доработать план — планировщик не передал конкретные действия для исправления." if is_ru and recommended_decision == "revise" else
+        "Рекомендация: утвердить без рекомендаций — план готов к выполнению." if is_ru else
+        "Recommendation: revise — the planner did not provide concrete corrective actions." if recommended_decision == "revise" else
+        "Recommendation: approve without recommendations — the plan is ready for execution."
     )
     interaction["user_view"] = render_plan(
         str(review.get("summary") or review.get("objective") or ("Проверка плана" if is_ru else "Plan review")),
         public_steps,
-        question=("Утвердить план, запросить доработку или отменить?" if is_ru else "Approve the plan, request a revision, or cancel?"),
+        question=("Утвердить с рекомендациями, утвердить без рекомендаций, доработать или отменить?" if is_ru else "Approve with recommendations, approve without recommendations, request a revision, or cancel?"),
         recommendation=public_recommendation,
         config={
             "communication_profile": state.get("communication_profile") or "natural",
@@ -11461,14 +12001,14 @@ def _v3_prompt_plan_approval(
     recommendation_rendered = render(
         public_recommendation,
         kind="question",
-        next_step=("Утвердите план, запросите доработку или отмените." if is_ru else "Approve, revise, or cancel the plan."),
+        next_step=("Выберите утверждение с рекомендациями, без рекомендаций, доработку или отмену." if is_ru else "Choose approve with recommendations, approve without recommendations, revise, or cancel."),
         config=plan_config,
     )
     why_rendered = render(
         "Решение определяет, можно ли перейти к выполнению плана." if is_ru else
         "Your decision determines whether the plan can move to implementation.",
         kind="question",
-        next_step=("Утвердите план, запросите доработку или отмените." if is_ru else "Approve, revise, or cancel the plan."),
+        next_step=("Выберите утверждение с рекомендациями, без рекомендаций, доработку или отмену." if is_ru else "Choose approve with recommendations, approve without recommendations, revise, or cancel."),
         config=plan_config,
     )
     interaction["user_view"]["requires_user_decision"] = True
@@ -11762,15 +12302,27 @@ def _v3_active_steer(
             for item in active_attempts if (item.get("host_spawn") or {}).get("agent_id")
         ]
         plan = _load_orchestrate_plan(task_dir, state)
-        if governance_escalated or impact.get("required_gate_missing"):
-            replacement = _revision_replacement_waves(
-                plan,
-                impact,
-                task_definition,
-                full_governance=resolved_governance.get("effective_mode") == "full",
-            )
-            if replacement:
-                impact["replacement_waves"] = replacement
+        # Governance escalation and a revision whose preferred gate is absent
+        # are advisory findings.  They must never manufacture a replacement
+        # wave or rewrite the coordinator's chosen pipeline.  The old code
+        # called ``_revision_replacement_waves`` here, which silently injected
+        # policy/governance work behind the orchestrator's back and left the
+        # engine waiting for a route the coordinator had not selected.
+        if governance_escalated:
+            impact["pipeline_recommendation"] = {
+                "code": "governance_escalation_advisory",
+                "severity": "high",
+                "recommended_action": "review the governance recommendation and continue the chosen pipeline",
+                "chosen_pipeline_unchanged": True,
+            }
+        if impact.get("required_gate_missing"):
+            impact["pipeline_deviation"] = {
+                "code": "required_gate_missing_advisory",
+                "severity": "warning",
+                "gate": str(impact.get("earliest_affected_gate") or ""),
+                "recommended_action": "record the missing gate and let the orchestrator decide whether to revise the pipeline",
+                "chosen_pipeline_unchanged": True,
+            }
         plan_revision = None
         if impact.get("requires_plan_revision"):
             plan_revision = db_append_plan_revision(
@@ -11779,18 +12331,14 @@ def _v3_active_steer(
             )
         earliest_affected = str(impact.get("earliest_affected_gate") or "")
         active_gate = current_gates[0] if current_gates else ""
-        if earliest_affected and (
-            earliest_affected != active_gate
-            or governance_escalated
-            or impact.get("replacement_waves")
+        if earliest_affected and earliest_affected in (state.get("current_pipeline") or []) and (
+            earliest_affected != active_gate or not active_attempts
         ):
             # Preserve the same live worker for the user's steer.  The engine
-            # consumes this receipt after that worker AttemptResults and reopens the
-            # earliest affected gate before any downstream dispatch.  A
-            # governance escalation (or any server-built replacement) must
-            # remain durable even when the earliest affected gate is the
-            # active gate: that worker can finish before the boundary, but
-            # the replacement still has to insert its required waves.
+            # consumes this receipt after that worker AttemptResult and may
+            # reopen only an existing affected gate before downstream dispatch.
+            # Governance escalation never creates a server-owned replacement
+            # route; the coordinator remains free to keep its chosen pipeline.
             state["pending_revision_impact"] = {
                 **impact,
                 "task_revision": revision_number,
@@ -11890,6 +12438,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             "status": "inspect", "inspect": "inspect", "show": "inspect",
             "recover_inspect": "recover_inspect", "recover_lifecycle": "recover_inspect",
             "resume": "resume", "retry": "resume", "continue_blocked": "resume",
+            "recover_blocked": "recover_blocked", "recover_terminal": "recover_blocked",
             "deactivate": "deactivate", "normal": "deactivate", "stop_session": "deactivate",
             "lane": "lane", "resource": "resource", "question": "question",
             "plan_approval": "plan_approval", "approve_plan": "plan_approval", "plan_review": "plan_approval",
@@ -12011,6 +12560,7 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     str(params.get("project_root") or ""),
                 )
                 if prompt_response is not None:
+                    prompt_response["next_action"] = _public_next_action(prompt_response.get("next_action"))
                     return prompt_response
         operation_context: dict[str, Any] = {}
         if intent == "question" and str((normalized_payload or {}).get("question_id") or "").startswith("batch-"):
@@ -12027,9 +12577,19 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     "translation_required_for": sorted(batch.get("translation_required_for") or []),
                 }
         submission_id = safe_id("orchestration-manage-" + intent + "-" + digest_text(state["task_id"] + ":" + str(state.get("revision")) + ":" + json.dumps({**params, "payload": normalized_payload if normalized_payload is not None else params.get("payload"), **operation_context}, sort_keys=True, default=str))[:16])
-        if intent in {"resume", "deactivate"}:
+        if intent in {"resume", "recover_blocked", "deactivate"}:
             recovery: dict[str, Any] = {}
-            if intent == "resume" and params.get("payload") is not None:
+            if intent == "recover_blocked":
+                if params.get("payload") not in (None, {}):
+                    raise ValueError("recover_blocked is server-owned and accepts no payload; inspect the task and retry the exact intent")
+                old = orchestrate({
+                    **common,
+                    "operation": "resume",
+                    "submission_id": submission_id,
+                    "reason": params.get("reason") or "Server-derived corrective recovery for terminal worker result.",
+                    "terminal_recovery": True,
+                })
+            elif intent == "resume" and params.get("payload") is not None:
                 raw_recovery = params.get("payload")
                 if not isinstance(raw_recovery, dict):
                     raise ValueError("resume payload must be an object")
@@ -12057,13 +12617,20 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
                     if requested_rework not in AVAILABLE_GATES:
                         raise ValueError("resume recovery rework must name a supported gate")
                     recovery["rework_gate"] = requested_rework
-            old = orchestrate({
-                **common,
-                "operation": intent,
-                "submission_id": submission_id,
-                "reason": params.get("reason"),
-                **recovery,
-            })
+                old = orchestrate({
+                    **common,
+                    "operation": intent,
+                    "submission_id": submission_id,
+                    "reason": params.get("reason"),
+                    **recovery,
+                })
+            else:
+                old = orchestrate({
+                    **common,
+                    "operation": intent,
+                    "submission_id": submission_id,
+                    "reason": params.get("reason"),
+                })
         else:
             payload = normalized_payload if normalized_payload is not None else params.get("payload")
             if not isinstance(payload, dict):
@@ -12076,7 +12643,9 @@ def manage_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             })
         response = _v3_response(old, task_ref, include_result=True)
         if intent == "question":
-            return _v3_question_response(response, state)
+            response = _v3_question_response(response, state)
+            response["next_action"] = _public_next_action(response.get("next_action"))
+            return response
         if intent == "plan_approval" and (old.get("result") or {}).get("decision") == "approved":
             response["approval_message"] = "Plan approved."
             response["next_action"] = (
@@ -12641,7 +13210,7 @@ TOOLS = {
     "activate_orchestration": (activate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/cortex"}, "thread_id": {"type": "string", "minLength": 1}, "principal": {"type": "string", "minLength": 1}}, "required": ["user_command", "thread_id", "principal"]}),
     "deactivate_orchestration": (deactivate_orchestration, {"type": "object", "additionalProperties": False, "properties": {"user_command": {"type": "string", "const": "/normal"}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["user_command"]}),
     "get_activation_status": (activation_status, {"type": "object", "properties": {"thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": []}),
-    "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; Cortex appends only documentation and close when missing."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
+    "classify_task": (classify_task, {"type": "object", "properties": {"complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requirements": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full gate proposal selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Ordered executable waves selected by the orchestrator; gates in one wave may run concurrently."}, "thread_id": {"type": "string"}, "principal": {"type": "string"}}, "required": ["complexity"]}),
     "init_task": (init_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "user_request": {"type": "string", "description": "Exact user-authored task text."}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "classification_id": {"type": "string"}, "requirements": {"type": "array", "items": {"type": "string"}}, "acceptance_criteria": {"type": "array", "items": {"type": "string"}}, "scope": {"type": "array", "items": {"type": "string"}}, "allowed_paths": {"type": "array", "items": {"type": "string"}}, "verification": {"type": "array", "items": {"type": "string"}}, "budget": {"type": "string"}, "pause_conditions": {"type": "array", "items": {"type": "string"}}, "plan_approval": {"type": "string", "enum": ["auto", "required"]}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "thread_id": {"type": "string"}, "principal": {"type": "string"}, "user_language": {"type": "string"}, "replan_limit": {"type": "integer", "minimum": 0}}, "required": ["task_id", "user_request", "classification_id"]}),
     "get_task_status": (status, {"type": "object", "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}}, "required": ["task_id", "principal"]}),
     "resolve_dispatch_route": (resolve_dispatch_route, {"type": "object", "additionalProperties": False, "properties": {"agent": {"type": "string", "enum": sorted(AGENTS)}, "task_kind": {"type": "string"}, "risk": {"type": "string", "enum": ["low", "moderate", "high", "critical"]}, "complexity": {"type": "string", "enum": ["C1", "C2", "C3"]}, "requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS)}, "user_requested_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Exact model explicitly requested by the user; required for non-security Sol."}, "configured_default_model": {"type": "string", "enum": sorted(REQUESTABLE_MODELS), "description": "Host-configured agents.default_subagent_model used when native model is omitted."}, "available_models": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Exact model identifiers currently accepted by the native spawn_agent host tool."}, "requested_reasoning_effort": {"type": "string"}}, "required": ["agent", "task_kind", "risk"]}),
@@ -12661,7 +13230,7 @@ TOOLS = {
     "commit_gate": (commit_gate, {"type": "object", "additionalProperties": False, "properties": {"task_id": {"type": "string"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "gate": {"type": "string"}, "mode": {"type": "string", "enum": ["verification", "documentation"]}, "attempt_id": {"type": "string"}, "result_binding": {"type": "string"}, "summary": {"type": "string"}, "verification_id": {"type": "string", "enum": sorted(VERIFICATION_COMMANDS)}, "timeout_seconds": {"type": "integer"}, "decision": {"type": "string", "enum": ["updated", "not_applicable"]}, "justification": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}, "outcome": {"type": "string", "enum": ["passed", "failed", "blocked", "skipped"]}}, "required": ["task_id", "principal", "gate", "summary"]}),
     "resume_task": (resume_task, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "reason": {"type": "string"}}, "required": ["task_id", "expected_revision"]}),
     "update_pipeline": (update_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "pipeline": {"type": "array", "items": {"type": "string"}}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "operations": {"type": "array", "items": PIPELINE_OPERATION_SCHEMA}, "signals": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}}, "required": ["task_id", "expected_revision"]}),
-    "reassess_pipeline": (reassess_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full replacement selected by the orchestrator; documentation and close are enforced."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Executable waves selected by the orchestrator."}, "intent": {"type": "string", "enum": ["add_specialist", "resequence", "rework_gate", "stop"]}, "decision": {"type": "string", "enum": ["unchanged", "updated", "stop"]}, "gate": {"type": "string"}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}, "apply": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "signals"]}),
+    "reassess_pipeline": (reassess_pipeline, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "principal": {"type": "string"}, "thread_id": {"type": "string"}, "signals": {"type": "array", "items": {"type": "string"}}, "pipeline": {"type": "array", "items": {"type": "string"}, "description": "Full replacement selected by the orchestrator; documentation and close recommendations are advisory, and the chosen pipeline remains authoritative."}, "parallel_groups": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Executable waves selected by the orchestrator."}, "intent": {"type": "string", "enum": ["add_specialist", "resequence", "rework_gate", "stop"]}, "decision": {"type": "string", "enum": ["unchanged", "updated", "stop"]}, "gate": {"type": "string"}, "reason": {"type": "string"}, "allow_rework": {"type": "boolean"}, "apply": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "signals"]}),
     "acquire_lock": (acquire_lock, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "path": {"type": "string"}, "owner": {"type": "string"}, "gate": {"type": "string"}, "expires_at": {"type": "string"}, "advisory": {"type": "boolean"}}, "required": ["task_id", "expected_revision", "path", "owner"]}),
     "release_lock": (release_lock, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "path": {"type": "string"}, "owner": {"type": "string"}}, "required": ["task_id", "expected_revision", "path", "owner"]}),
     "create_handoff": (handoff, {"type": "object", "properties": {"task_id": {"type": "string"}, "expected_revision": {"type": "integer"}, "name": {"type": "string"}, "completed": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}, "decisions": {"type": "array", "items": {"type": "string"}}, "risks": {"type": "array", "items": {"type": "string"}}, "next_action": {"type": "string"}}, "required": ["task_id", "expected_revision"]}),

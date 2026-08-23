@@ -426,7 +426,10 @@ current session, and start a new one.
 
 Cortex exposes one explicit entry point with several routes. On Desktop,
 select **Skills → Cortex Orchestrator** or mention the skill in chat. In the
-CLI, use `$cortex:orchestrator` or `/skills`.
+CLI, use `$cortex:orchestrator` or `/skills`. If Desktop passes the selected
+route as its canonical Markdown skill link but the link is stripped from the
+task body, the coordinator preserves the selection in the first
+`start_orchestration` call with `activation_marker: "$cortex:orchestrator"`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
@@ -583,39 +586,38 @@ transitions.
 ```mermaid
 flowchart LR
     U["User goal"] --> R["Root coordinator"]
-    R --> M{"Governance resolver<br/>mode, complexity, and qualified triggers"}
+    R --> M{"Classification and advisory resolver<br/>complexity, governance, and qualified triggers"}
 
-    M -- "minimal or light" --> P["Resolved task pipeline"]
-    M -- "full" --> GA["governance_activation<br/>code_reviewer"]
-    GA --> P
+    M --> P["Orchestrator-chosen task pipeline"]
+    M -. "recommendations / findings" .-> A["Advisory record"]
 
     P --> W["Ordered worker waves"]
     W --> B["Canonical results and evidence"]
     B --> G{"Gate result"}
     G -- "rework" --> P
-    G -- "user decision" --> Q["Ordinary-chat user question"]
+    G -- "task question or explicit approval" --> Q["Ordinary-chat user question"]
     Q --> P
-    G -- "passed: minimal / light" --> C["Final close and handoff"]
-    G -- "passed: full" --> GC["governance_close<br/>code_reviewer"]
-    GC --> C
+    G -- "passed" --> C["Final close and handoff"]
 
     R <--> L[("Host-private SQLite ledger<br/>task v10 + governance v15")]
 ```
 
 ### Governance resolution
 
-Before dispatching the resolved pipeline, Cortex evaluates the requested
+Before dispatching the chosen pipeline, Cortex evaluates the requested
 governance mode, task complexity, and qualified risk or topology signals. The
 requested mode is `auto`, `required`, or `off`; the effective mode is
-`minimal`, `light`, or `full`.
+`minimal`, `light`, or `full`. This classification produces server-owned
+recommendations, findings, and evidence obligations. It does not replace or
+veto the pipeline selected by the orchestrator.
 
 | Request and context | Effective mode | Result |
 | --- | --- | --- |
-| `auto`, C1, and no qualified signal | `minimal` | Runs the resolved task pipeline with verification evidence and an audit receipt. |
-| `auto`, C2, and no qualified signal | `light` | Retains the resolved task pipeline and adds policy, decision/assumption/risk, process-reflection, and verification obligations at close. |
-| `auto` with C3 or a qualified signal | `full` | The server inserts independent governance review before ordinary work and immediately before final close. |
-| `required` at any complexity | `full` | The server applies the same full-governance lifecycle. |
-| `off` | `minimal` only for C1 with a complete Boolean assessment of every documented trigger; C2/C3 or any triggered risk is rejected. |
+| `auto`, C1, and no qualified signal | `minimal` | Recommends the chosen pipeline with verification evidence and an audit receipt. |
+| `auto`, C2, and no qualified signal | `light` | Recommends policy, decision/assumption/risk, process-reflection, and verification obligations; the orchestrator decides whether and where to execute them. |
+| `auto` with C3 or a qualified signal | `full` | Recommends independent governance review before ordinary work and before final close; the recommendation is recorded without changing the chosen route. |
+| `required` at any complexity | `full` | Records the full-governance recommendation and findings; it is not a server pipeline veto. |
+| `off` | `minimal` only for C1 with a complete Boolean assessment of every documented trigger; C2/C3 or any triggered risk is recorded as an advisory finding, while objective safety and authorization boundaries still apply. |
 
 Qualified signals include security, privacy, credentials or sensitive data,
 destructive work, migrations, external actions, public-contract,
@@ -623,14 +625,17 @@ authorization, or integrity work, and explicit multi-repository, linked-task,
 long-lived-lane, conflicting-resource, or multi-session topology. Counts
 alone do not raise the governance mode.
 
-In `full` mode, the server owns the two additional read-only review gates:
-`governance_activation` runs first, and `governance_close` runs immediately
-before final `close`. Both are assigned to `code_reviewer`; the server binds
-their evidence to immutable artifacts and result receipts. The close review
-also requires the matching linked task, result, and completed independent
-native reviewer session. The coordinator cannot omit either gate from a
-full-governance pipeline. For the record model, capability boundary, and
-integrity rules, see the [orchestration ledger documentation](docs/features/orchestration-ledger/index.md).
+In `full` mode, `governance_activation` and `governance_close` are available
+as read-only recommendations and evidence-producing gates. The orchestrator
+owns `chosen_pipeline`; Cortex exposes `recommended_pipeline`,
+`recommended_parallel_groups`, and `pipeline_advice` separately and records
+when the chosen route differs. Governance findings, missing evidence,
+planner/reapproval advice, and gate-order recommendations therefore trigger
+server-owned corrective dispatch or rework, not a policy stop or an automatic
+pipeline replacement. Only objective integrity, capability, authorization,
+and safety boundaries can reject an otherwise executable choice. For the
+record model, capability boundary, and integrity rules, see the
+[orchestration ledger documentation](docs/features/orchestration-ledger/index.md).
 
 ### The orchestration cycle
 
@@ -669,21 +674,18 @@ integrity rules, see the [orchestration ledger documentation](docs/features/orch
    only the first complete coordinator read after the matching native worker
    stop may publish the link. That same message summarizes what completed and
    what happens next; early reads and rereads remain link-free.
-7. **Fresh approvals and adaptive replanning.** Required approval is available
-   only after the final plan. The review records the plan revision, planner
-   result reference, verified-predecessor digest, and semantic future-pipeline
-   digest. A material future-wave change or any pipeline operation that reopens
-   `plan` preserves history,
-   resets approval to `pending_plan`, and requires a replacement Planner plus a
-   new approval. No-op and transport-only changes do not invalidate approval;
-   stale basis digests block dispatch with recoverable reapproval guidance. The
-   approval decision is a detailed `cortex/chat-interaction/v1` ordinary-chat
-   hold. The message summarizes the objective, work packages, paths,
-   dependencies, verification, risks, remaining phases, all
-   approve/revise/cancel outcomes, and the LLM-recommended response with its
-   rationale. The turn then ends. The next user message is bound to the opaque
-   request ID; revision text is preserved verbatim, cancellation stays pending,
-   and silence never implies approval.
+7. **Approval and adaptive replanning.** `plan_approval` defaults to `auto` at
+   every complexity. A visible plan-approval hold is allowed only when the
+   user explicitly requested plan approval; a legacy or policy-generated
+   reapproval signal is advisory and does not pause the task. When explicit
+   approval is requested, the review records the plan revision, planner result
+   reference, verified-predecessor digest, and semantic future-pipeline digest.
+   The approval decision is a detailed `cortex/chat-interaction/v1`
+   ordinary-chat hold with approve/revise/cancel outcomes; silence never
+   implies approval. Evidence-driven changes remain orchestrator-owned:
+   recommendations can add corrective work or rework, while the server keeps
+   the chosen route and prior history unless an objective hard boundary rejects
+   it.
 8. **Automatic documentation sync.** When completed work changes durable
    behavior, interfaces, architecture, commands, decisions, or ownership,
    Cortex dispatches a technical writer to update the affected project and
@@ -720,8 +722,11 @@ RUNNING → WORK_COMPLETED → FINALIZING → COMPLETED
 `WORK_COMPLETED` means the worker's semantic result is durable. `FINALIZING`
 represents server-owned result views, handoff compilation, and other server-owned
 infrastructure work. `COMPLETED` is reached only after required finalization
-passes. `BLOCKED` and `FAILED` are semantic worker outcomes; a missing file,
-transport error, or lost native acknowledgement does not invent either status.
+passes. `BLOCKED` and `FAILED` remain meaningful semantic worker outcomes, but
+technical lifecycle states (`blocked`, `needs_input`, validation failures,
+stale receipts, lost dispatches, and missing projections) are normalized into
+server-owned recovery and corrective work. A missing file, transport error, or
+lost native acknowledgement does not become a user-facing Cortex blocker.
 A serialization, view, or infrastructure failure after `WORK_COMPLETED` is
 retried against the same attempt and never creates a replacement worker.
 An active dispatched attempt without a finalized canonical result blocks gate
@@ -760,8 +765,10 @@ The `SubagentStop` hook binds the exact native child to its server-issued
 attempt. If a child stops before `WORK_COMPLETED`, recovery inspects that exact
 attempt and may request a semantic `FAILED` or `BLOCKED` close. Timeouts,
 generic transport errors, ambiguous multi-target failures, and unrelated child
-identities leave the active attempt unresolved; they do not authorize a
-replacement.
+identities are technical recovery evidence; the server derives a retry or
+corrective dispatch and does not expose a Cortex blocker or authorize an
+unrelated replacement. Only an objective integrity, capability, authorization,
+or safety failure can reject the selected route.
 
 If canonical state already contains `WORK_COMPLETED`, recovery chooses that
 same result and continues `FINALIZING`. The server retries projection,
@@ -798,6 +805,16 @@ The root coordinator projects one self-contained ordinary-chat question with
 outcome-based options and a recommendation, ends the turn, records the next
 user message, and resumes the same attempt. Silence never implies approval.
 
+The Question Firewall permits a user question only for task requirements,
+scope, acceptance/product decisions, or explicit external/destructive
+authorization. Governance, policy, planner, retry, worker/profile, dispatch,
+ledger, receipt, evidence, lifecycle, and recovery conditions remain internal
+`orchestrator_advice` and are repaired or delegated automatically. The
+Presentation Firewall applies the same rule to lifecycle output: internal
+`blocked`, `needs_input`, and `error` states are not rendered as requests for
+the user to fix Cortex. A plan question is an exception only when durable
+state proves that the user explicitly requested plan approval.
+
 ### 10.0.7 Prompt Contract v3 and dispatch authority
 
 Prompt Contract v3 is the sole stable prompt path. Static authority and worker
@@ -827,11 +844,12 @@ validation, and the affected focused tests pass.
 ### 10.0.7 governance, security, and verification
 
 Governance state, immutable artifacts, exact scope, revision chains, and
-authenticated lifecycle transitions are server-owned in schema v15. Required
-approval is bound to the final plan revision, verified predecessor result
-references, and a semantic future-pipeline digest. A material future-wave
-change reopens planning, preserves history, invalidates downstream approval,
-and requires a new plan and approval. No-op or infrastructure-only
+authenticated lifecycle transitions are server-owned in schema v15. Plan
+approval defaults to `auto`; when the user explicitly requests approval, it is
+bound to the final plan revision, verified predecessor result references, and
+a semantic future-pipeline digest. A material future-wave change preserves
+history and records fresh planning/review advice; it pauses only when that
+explicit approval contract is active. No-op or infrastructure-only
 finalization retries do not alter semantic approval.
 
 Cortex stores task state under the host-private content-addressed SQLite root.
@@ -1115,7 +1133,8 @@ does **not** install or update the user's plugin:
 
 ```bash
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_sequential
-# Prove C3 automatically activates and completes full governance.
+# Exercise the C3 route while preserving the orchestrator's chosen pipeline;
+# governance classification is advisory and must not force a review route.
 python3 scripts/cortex-luna-high-eval.py --live --scenario automatic_governance
 ```
 
