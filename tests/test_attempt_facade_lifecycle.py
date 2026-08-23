@@ -386,7 +386,7 @@ class AttemptFacadeLifecycleTests(unittest.TestCase):
         )
         self.assertIsNotNone(context)
         assert context is not None
-        self.assertIn("retry complete_attempt only for this same persisted attempt", context)
+        self.assertIn("Retry complete_attempt only for this same persisted attempt", context)
         self.assertIn("Do not submit status='failed'", context)
         self.assertIn("or spawn a replacement", context)
 

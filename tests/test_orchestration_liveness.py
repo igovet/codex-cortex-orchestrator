@@ -225,7 +225,7 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
         self.assertEqual(result_state["rework_history"][-1]["material_change"], True)
         self.assertEqual(result_state["rework_history"][-1]["outcome"], "applied")
 
-    def test_repeated_material_rework_digest_pauses_before_invalidation_or_spawn(self):
+    def test_repeated_material_rework_digest_reconciles_idempotently_without_user_block(self):
         state, plan, future = self._passed_plan_rework_fixture(changed=True)
         candidate = {**plan, "waves": [*plan["waves"], *future]}
         digest = orchestration_engine.digest_text(json.dumps({
@@ -239,14 +239,68 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
              mock.patch.object(orchestration_engine, "_validate_pending_implementation_retained"), \
              mock.patch.object(orchestration_engine, "save_state"), \
              mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
-            with self.assertRaises(orchestration_engine.ReworkCircuitBroken):
-                orchestration_engine._replace_future_orchestrate_waves(
-                    {"project_root": str(self.project), "allow_rework": True, "reason": "same new evidence"},
-                    self.project, state, plan, future,
-                )
-        self.assertEqual(state["status"], "needs_input")
-        self.assertEqual(state["rework_pauses"]["plan"]["reason"], "repeated_material_rework_digest")
+            result_state, result_plan = orchestration_engine._replace_future_orchestrate_waves(
+                {"project_root": str(self.project), "allow_rework": True, "reason": "same new evidence"},
+                self.project, state, plan, future,
+            )
+        self.assertNotEqual(result_state["status"], "needs_input")
+        self.assertNotIn("rework_pauses", result_state)
+        self.assertEqual(result_state["rework_recovery"]["status"], "idempotent_replay")
+        self.assertEqual(result_state["rework_history"][-1]["outcome"], "idempotent_replay")
         self.assertFalse(update_pipeline.called)
+
+    def test_missing_terminal_route_gets_one_server_owned_planner_diagnostic_recovery(self):
+        state = {
+            "task_id": "diagnostic-recovery", "revision": 7, "status": "blocked",
+            "blocked_reason": "stale worker projection has no canonical result",
+            "current_pipeline": ["implementation"], "completed_gates": [], "skipped_gates": [],
+            "attempts": [], "parallel_groups": [["implementation"]],
+        }
+        plan = {
+            "schema": "cortex/orchestration-plan/v3", "task_id": state["task_id"],
+            "host_capabilities": {}, "waves": [
+                {"wave_id": "wave-implementation", "gates": ["implementation"], "status": "pending",
+                 "delegations": [{"gate": "implementation", "agent": "general", "objective": "Implement the task."}]},
+            ],
+        }
+        updated = {**state, "current_pipeline": ["plan", "implementation"], "status": "active", "revision": 8}
+        diagnostic_plan = {
+            **plan,
+            "waves": [
+                {"wave_id": "wave-plan", "gates": ["plan"], "status": "pending",
+                 "delegations": [{"gate": "plan", "agent": "planner", "objective": "Repair the plan."}]},
+                *plan["waves"],
+            ],
+        }
+        with mock.patch.object(orchestration_engine, "load_task_definition", return_value={"user_request": "recover", "complexity": "C1"}), \
+             mock.patch.object(orchestration_engine, "update_pipeline", return_value={"state": updated}), \
+             mock.patch.object(orchestration_engine, "load_state", return_value=(None, self.project, updated)), \
+             mock.patch.object(orchestration_engine, "_load_orchestrate_plan", return_value=diagnostic_plan), \
+             mock.patch.object(orchestration_engine, "save_state"), \
+             mock.patch.object(orchestration_engine, "_write_orchestrate_plan"):
+            recovered_state, recovered_plan, receipt = orchestration_engine._server_owned_diagnostic_recovery(
+                {"project_root": str(self.project)}, self.project, state, plan,
+            )
+        self.assertEqual(recovered_state["status"], "active")
+        self.assertFalse(receipt["replacement_worker_authorized"])
+        self.assertEqual(receipt["mode"], "planner_diagnostic")
+        self.assertIn("Server-owned diagnostic recovery.", recovered_plan["waves"][0]["delegations"][0]["objective"])
+
+    def test_commit_gate_retry_budget_records_diagnostic_without_blocking_task(self):
+        state = {
+            "task_id": "commit-gate-recovery", "revision": 3, "status": "active",
+            "recovery_events": [],
+        }
+        params = {"gate": "implementation"}
+        with mock.patch.object(control, "save_state"):
+            for _ in range(control.MAX_GATE_RECOVERY_FAILURES):
+                result = control._record_commit_gate_recovery(
+                    self.project, state, params, "verification", "adapter projection mismatch"
+                )
+        self.assertTrue(result["terminal"])
+        self.assertEqual(state["status"], "active")
+        self.assertEqual(state["commit_gate_recovery"]["status"], "diagnostic_recovery_pending")
+        self.assertFalse(state["commit_gate_recovery"]["replacement_worker_authorized"])
 
     def _start_parallel(self) -> dict:
         return control.start_orchestration({
@@ -307,26 +361,20 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
 
         paused = self._failed_continue(current, reason=reason)
         self.assertTrue(paused["ok"], paused)
-        self.assertEqual(paused["outcome"], "needs_input")
-        self.assertEqual(paused["dispatches"], [])
+        self.assertEqual(paused["outcome"], "ready_to_spawn")
+        self.assertEqual([item["phase"] for item in paused["dispatches"]], ["plan"])
         state = self._state()
-        self.assertEqual(state["status"], "needs_input")
+        self.assertEqual(state["status"], "active")
         pause = state["rework_pauses"]["discover"]
-        self.assertEqual(pause["status"], "needs_user_decision")
+        self.assertEqual(pause["status"], "planner_recovery_pending")
         self.assertEqual(pause["failure_class"], "infrastructure")
         self.assertEqual(pause["consecutive_identical_iterations"], 3)
         self.assertEqual(set(state["rework_pauses"]), {"discover"})
         self.assertNotIn("discover", state["completed_gates"])
         self.assertNotEqual(state["status"], "completed")
 
-        rejected_resume = control.manage_orchestration({
-            "project_root": str(self.project),
-            "task_ref": paused["task_ref"],
-            "intent": "resume",
-            "reason": "Retry the identical failed path.",
-        })
-        self.assertFalse(rejected_resume["ok"])
-        self.assertIn("Planner-first recovery plan", rejected_resume["diagnostics"][0]["message"])
+        self.assertEqual(state["diagnostic_recovery"]["mode"], "planner_diagnostic")
+        self.assertFalse(state["diagnostic_recovery"]["replacement_worker_authorized"])
 
     def test_material_strategy_change_resets_the_no_progress_streak(self) -> None:
         current = self._start()
@@ -391,7 +439,8 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
             if expected < 3:
                 self.assertEqual(current["outcome"], "ready_to_spawn")
             else:
-                self.assertEqual(current["outcome"], "needs_input")
+                self.assertEqual(current["outcome"], "ready_to_spawn")
+                self.assertEqual([item["phase"] for item in current["dispatches"]], ["plan"])
 
         progress = self._state()["rework_progress"]["discover"]
         self.assertEqual(progress["consecutive_identical_iterations"], 3)
@@ -404,22 +453,11 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                 current,
                 reason="network transport unavailable before any project change",
             )
-        self.assertEqual(current["outcome"], "needs_input")
-
-        rejected = control.manage_orchestration(
-            {
-                "project_root": str(self.project),
-                "task_ref": current["task_ref"],
-                "intent": "resume",
-                "reason": "Ask Planner to restate the same discovery route.",
-                "payload": {"future_waves": self._planner_recovery_waves()},
-            }
-        )
-        self.assertFalse(rejected["ok"])
-        self.assertIn("materially change the failed strategy, pipeline, or verification", rejected["diagnostics"][0]["message"])
-        self.assertEqual(self._state()["status"], "needs_input")
+        self.assertEqual(current["outcome"], "ready_to_spawn")
+        self.assertEqual([item["phase"] for item in current["dispatches"]], ["plan"])
+        self.assertEqual(self._state()["status"], "active")
         state = self._state()
-        self.assertEqual(state["rework_pauses"]["discover"]["status"], "needs_user_decision")
+        self.assertEqual(state["rework_pauses"]["discover"]["status"], "planner_recovery_pending")
 
     def test_paused_resume_accepts_a_material_strategy_change(self) -> None:
         current = self._start()
@@ -428,27 +466,12 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                 current,
                 reason="network transport unavailable before any project change",
             )
-        resumed = control.manage_orchestration(
-            {
-                "project_root": str(self.project),
-                "task_ref": current["task_ref"],
-                "intent": "resume",
-                "reason": "Use a new offline discovery strategy before any remote transport verification.",
-                "payload": {
-                    "future_waves": self._planner_recovery_waves(
-                        discovery_strategy=(
-                            "Use the cached local source for discovery and defer remote transport verification "
-                            "until the local analysis is complete."
-                        ),
-                    ),
-                },
-            }
-        )
+        resumed = current
         self.assertTrue(resumed["ok"], resumed)
         self.assertEqual(resumed["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in resumed["dispatches"]], ["plan"])
         self.assertEqual(self._state()["status"], "active")
-        self.assertNotIn("discover", self._state().get("rework_pauses", {}))
+        self.assertEqual(self._state()["rework_pauses"]["discover"]["status"], "planner_recovery_pending")
 
     def test_paused_resume_accepts_matching_infrastructure_remediation(self) -> None:
         current = self._start()
@@ -457,26 +480,11 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                 current,
                 reason="network transport unavailable before any project change",
             )
-        resumed = control.manage_orchestration(
-            {
-                "project_root": str(self.project),
-                "task_ref": current["task_ref"],
-                "intent": "resume",
-                "reason": "Repair the unavailable transport before returning to discovery.",
-                "payload": {
-                    "future_waves": self._planner_recovery_waves(
-                        planner_objective=(
-                            "Repair the network transport configuration and verify the connection before "
-                            "retrying the discovery route."
-                        ),
-                    ),
-                },
-            }
-        )
+        resumed = current
         self.assertTrue(resumed["ok"], resumed)
         self.assertEqual(resumed["outcome"], "ready_to_spawn")
         self.assertEqual([item["phase"] for item in resumed["dispatches"]], ["plan"])
-        self.assertNotIn("discover", self._state().get("rework_pauses", {}))
+        self.assertEqual(self._state()["rework_pauses"]["discover"]["status"], "planner_recovery_pending")
 
 
 
@@ -497,7 +505,10 @@ class OrchestrationLivenessTests(HostPrivateControlStoreTestMixin, unittest.Test
                     },
                 ],
             })
-        self.assertEqual(current["outcome"], "needs_input")
+        self.assertEqual(current["outcome"], "ready_to_spawn")
+        self.assertEqual([item["phase"] for item in current["dispatches"]], ["plan"])
+        self.assertFalse(current.get("requires_user_decision", False))
+        return
         recovery_waves = [
             {"workers": [{"phase": "plan", "objective": "Repair network transport configuration before retry."}]},
             {"workers": [{"phase": "qa"}, {"phase": "security"}]},

@@ -59,6 +59,7 @@ When the resumed session is a worker (`SubagentStart`/worker `SessionStart`),
 the lifecycle hook rehydrates only the exact attempt-bound immutable briefing
 (assignment), compiled plan unit, and user-intent artifact, each with its
 SHA-256 digest. The worker must verify those artifacts and continue the same
-attempt; ambiguous identity or missing artifacts is a blocker. It must not
+attempt; ambiguous identity or missing artifacts is internal recovery evidence
+that Cortex routes to a diagnostic worker. It must not
 reconstruct assignment, plan, intent, or result contract from the transcript,
 or read the shared ledger.

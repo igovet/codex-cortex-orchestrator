@@ -975,7 +975,14 @@ def list_attempt_events(
     ledger_root = _root(root)
     ledger_db.ensure_database(ledger_root)
     with ledger_db.connection(ledger_root) as connection:
-        _load_task_and_attempt(connection, task_id=task_id, attempt_id=attempt_id)
+        # Lifecycle recovery may retire an attempt after its canonical result
+        # and event stream were committed.  This operation is read-only and
+        # is required to rebuild predecessor/result projections during
+        # corrective dispatch; mutation guards must not hide that evidence.
+        _load_task_and_attempt(
+            connection, task_id=task_id, attempt_id=attempt_id,
+            allow_invalidated=True,
+        )
         if limit is None:
             rows = connection.execute(
                 "SELECT * FROM attempt_events WHERE task_id=? AND attempt_id=? ORDER BY sequence",

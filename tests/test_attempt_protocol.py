@@ -232,6 +232,18 @@ class AttemptProtocolTests(unittest.TestCase):
         self.assertEqual(replay["result"]["result_ref"], completed["result_ref"])
         self.assertEqual(replay["result"]["lifecycle_status"], attempt_protocol.LIFECYCLE_COMPLETED)
 
+        # The immutable event stream remains readable while the mutable
+        # attempt projection is retired. Recovery needs this evidence to
+        # reconcile and continue; treating the read as a mutation would turn
+        # a technical race into a repeated coordinator blocker.
+        events = attempt_protocol.list_attempt_events(
+            self.root, task_id=self.task_id, attempt_id=self.attempt_id,
+        )
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["briefing_acknowledged", "work_completed", "finalizing", "completed"],
+        )
+
     def test_worker_progress_and_completion_are_rejected_before_briefing_receipt(self) -> None:
         """Implementation and documentation cannot mutate before briefing read."""
         for number, gate in enumerate(("implementation", "documentation"), 2):

@@ -42,11 +42,14 @@ class DispatchContextPreflightTests(HostPrivateControlStoreTestMixin, unittest.T
                 "current_pipeline": [],
             },
         )
-        self.assertEqual(response["state"], "blocked")
+        self.assertEqual(response["state"], "recovery_pending")
+        self.assertEqual(response["internal_ledger_state"], "blocked")
         self.assertIn("server-derived corrective dispatch", response["next_action"])
         self.assertNotIn("COORDINATOR LOCK", response["next_action"])
         self.assertNotIn("resolve the blocker", response["next_action"])
         self.assertNotIn("stop the task", response["next_action"])
+        self.assertFalse(response["user_view"]["requires_user_decision"])
+        self.assertNotIn("decision", str(response["user_view"]["message"]).lower())
 
     def test_advance_rejects_uncompilable_context_before_any_gate_or_attempt_mutation(self) -> None:
         """A compiler failure must retain the exact active source wave for retry.

@@ -153,7 +153,7 @@ DEFAULT_PUBLIC_TOOL_NAMES = tuple(dict.fromkeys(
 
 PUBLIC_TOOL_DESCRIPTIONS = {
     "start_orchestration": "Start a Cortex task from the exact user-authored request. Before the single call, every ordinary task needs non-empty task.acceptance_criteria and task.verification grounded in that request or verified authority; task.verification is the array of concrete authoritative checks, and verification_mode is not a task field. Use only fields advertised by this schema: unknown task fields are rejected before task creation. Ask the user if material intent is missing. Exact knowledge-harvest routes are the sole server-supplied exception. Cortex preserves the intent boundary and returns native dispatches with canonical profile, capability, access, and selection rationale.",
-    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is returned as a concrete user-facing correction, not an orchestrator deadlock.",
+    "continue_orchestration": "Verify continuation.task_id against the active task, then submit the server-derived continuation.step and continuation.results from read_worker_result verbatim for the active wave; never increment the step or substitute a projection_ref/formatted ref. Pass the exact task_ref returned by start_orchestration; Cortex never selects a task by project-wide fallback. Never submit an inline worker result body. A successful continue is a one-shot lifecycle receipt: if it returns dispatches, invoke only those exact dispatches; if a worker result is terminal non-success, Cortex records the error in the JSONC ledger and automatically derives one corrective owner/dispatch or a concrete user question—never a system block, wait loop, or replacement worker. If it returns waiting_workers, wait only for the exact persisted workers. Never call continue again with the same step/results, request artifacts, add future_waves, or spawn a replacement. A retryable=false task-identity or step-mismatch diagnostic is a server-owned reconciliation receipt; Cortex rehydrates the exact task and continues or surfaces only a real task question.",
     "manage_orchestration": "Inspect or recover one explicit task, create a linked corrective task for a completed source with intent=follow_up, prune stale tasks, run SQLite health/maintenance actions, surface one durable worker question at a time, or review a completed plan. Terminal worker failures are normally recovered automatically during continue_orchestration; intent=recover_blocked is an idempotent server-owned retry for a lost recovery response and accepts no coordinator-authored future_waves. intent=inspect is always read-only; when lifecycle recovery explicitly requires repair, use intent=recover_inspect and let Cortex derive the exact scope. Every task-scoped intent requires the exact task_ref returned by a successful lifecycle response. Question and plan-review responses include a localized user_view plus an internal receipt: render only user_view as the final ordinary assistant message, show one decision/question, visibly name the recommendation, and wait for the user's next message. Never call a UI/input/approval/elicitation tool or infer approval from silence. A successful durable question answer returns a server-derived resume_contract; copy its ref, attempt_id, profile, and poll_action verbatim when resuming the same existing worker, while retaining the original native target. Record the next message against the same interaction ref before resuming the exact worker or plan. Generic placeholders are rejected. When awaiting_translation, call the returned translation_request exactly; Cortex resolves all internal identity.",
     "worker_question": "Worker-only operation: persist one self-contained material question or atomic batch with concrete outcome-based options, finish into resumable idle, then poll its canonical answer after the coordinator resumes the same worker. After recording, return the ref plus a complete decision handoff with context, trade-offs, and recommendation; generic placeholder questions/options are rejected. Caller/schema diagnostics are corrected and retried on the same attempt without consuming its budget; only explicit non-retryable blockers end the worker.",
     "record_attempt_event": "Worker-only incremental semantic event operation. Persist a lossless finding, decision evidence, blocker, verification claim, or checkpoint on the current attempt. Cortex owns identity, timestamps, workspace observations, and read receipts; caller-correctable errors never consume or replace the attempt.",
@@ -1211,14 +1211,15 @@ def v3_response(
         )
         if isinstance(stopped_result_recovery, dict):
             next_action = (
-                "The stopped worker has no usable canonical AttemptResult. Keep the same task resumable: "
-                "call manage_orchestration with intent=inspect and then use the returned server-owned recovery "
-                "dispatch. Do not wait, respawn, replace the child, or edit ledger state."
+                "The stopped worker has no usable canonical AttemptResult. Cortex records this transport failure "
+                "and derives the server-owned corrective dispatch automatically. Use only the returned recovery "
+                "dispatch; do not wait, call manage_orchestration, respawn, replace the child, or edit ledger state."
             )
         else:
             next_action = (
-                "Cortex retained the condition as recoverable evidence. Call manage_orchestration with "
-                "intent=inspect for the same task, then follow its exact recovery or user question."
+                "Cortex retained the condition as recoverable evidence and will reconcile it through the "
+                "server-owned corrective route. Follow only the returned recovery or real task question; do not "
+                "call manage_orchestration, wait, respawn, or create a replacement worker."
             )
     elif outcome == "needs_input":
         user_question = (
@@ -1234,8 +1235,9 @@ def v3_response(
         else:
             next_action = (
                 str(old.get("next_action") or "").strip()
-                or "Call manage_orchestration with intent=inspect for the same task, then follow the returned "
-                "server-owned recovery action; do not wait, respawn, or create a replacement worker."
+                or "Cortex will reconcile this technical diagnostic from the durable task state and return the "
+                "server-owned recovery action; do not call manage_orchestration, wait, respawn, or create a "
+                "replacement worker."
             )
     else:
         next_action = (
@@ -1350,9 +1352,9 @@ def v3_response(
             )
         elif outcome == "waiting_workers" and not active_worker_ids and not pending_dispatches:
             next_action = (
-                f"{coordinator_lock} There are no active workers or pending dispatches. Do not wait or respawn. "
-                "Call manage_orchestration with intent=inspect/recover_inspect to obtain the durable lifecycle state "
-                "or an explicit recovery action."
+                "There are no active workers or pending dispatches. Cortex will reconcile the durable lifecycle "
+                "state and emit the next recovery dispatch; do not wait, call manage_orchestration, respawn, or "
+                "edit ledger state."
             )
         else:
             next_action = (

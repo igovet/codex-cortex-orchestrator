@@ -272,7 +272,19 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
     machine recovery instructions; ``internal`` is the explicit machine
     boundary for coordinators that want to avoid rendering those fields.
     """
-    state = str(response.get("state") or "needs_input")
+    raw_state = str(response.get("state") or "needs_input")
+    # ``blocked`` is a durable audit marker used while the server derives a
+    # corrective route.  It is never a public lifecycle state: exposing it
+    # makes coordinators treat an internal recovery transition as a hard stop.
+    # Preserve the raw marker only inside the machine-readable boundary.
+    state = "recovery_pending" if raw_state == "blocked" else raw_state
+    if raw_state == "blocked":
+        response = {**response, "state": state}
+        response.setdefault("internal", {})
+        response["internal"] = {
+            **(response.get("internal") if isinstance(response.get("internal"), dict) else {}),
+            "ledger_state": raw_state,
+        }
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     state_summary = response.get("state_summary") if isinstance(response.get("state_summary"), dict) else {}
     communication_config = {
@@ -280,8 +292,15 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
         "user_language": response.get("user_language") or state_summary.get("user_language") or "en",
     }
     rendered = render_lifecycle(
-        state,
-        ok=bool(response.get("ok", True)),
+        # ``recovery_pending`` is an internal progress checkpoint.  Render it
+        # through the ordinary active/progress copy so the user never sees a
+        # question-shaped fallback merely because the internal state name is
+        # not part of the presentation vocabulary.
+        "ready_to_spawn" if state == "recovery_pending" else state,
+        ok=(
+            bool(response.get("ok", True))
+            or state in {"recovery_pending", "rework_preflight_required"}
+        ),
         config=communication_config,
         metadata={"state": state},
     )
@@ -304,7 +323,7 @@ def _segregate_orchestration_output(response: dict[str, Any]) -> dict[str, Any]:
             if language_is_ru else
             "Approve the plan if it matches the requested outcome; otherwise request a revision."
         )
-    elif state in {"blocked", "rework_preflight_required"}:
+    elif state in {"recovery_pending", "blocked", "rework_preflight_required"}:
         next_step = (
             "Следуйте серверному маршруту исправления; задача продолжится автоматически."
             if language_is_ru else
@@ -1523,7 +1542,13 @@ def _orchestrate_response(
     result: dict[str, Any] | None = None,
     plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    facade_state = _orchestrate_state_name(state)
+    ledger_state = _orchestrate_state_name(state)
+    # A blocked ledger row is an internal recovery checkpoint, not a state in
+    # which the public Cortex pipeline may stop.  The advance/resume paths
+    # normally dispatch the corrective route before reaching this function;
+    # this normalization is the final safety net for stale projections and
+    # direct inspection/replay responses.
+    facade_state = "recovery_pending" if ledger_state == "blocked" else ledger_state
     if facade_state == "ready_to_spawn":
         next_action = "invoke every returned native spawn request, wait for the wave, then call orchestrate(operation=advance) once"
     elif facade_state == "waiting_workers":
@@ -1536,7 +1561,7 @@ def _orchestrate_response(
         )
     elif facade_state == "completed":
         next_action = "present the verified task result to the user"
-    elif facade_state == "blocked":
+    elif facade_state == "recovery_pending":
         # ``blocked`` is an internal ledger/recovery marker only.  It must
         # never become an instruction that stops the Cortex pipeline or asks
         # the coordinator to repair state by hand.  The advance/resume paths
@@ -1569,6 +1594,8 @@ def _orchestrate_response(
         "diagnostics": diagnostics or [],
         "next_action": next_action,
     }
+    if ledger_state == "blocked":
+        response["internal_ledger_state"] = ledger_state
     if facade_state == "waiting_workers":
         response.update({
             "output_policy": "silent",
@@ -1938,7 +1965,7 @@ def _validate_no_progress_recovery_plan(
     pause: dict[str, Any] | None = None,
 ) -> None:
     """Require a real recovery decision before releasing a paused retry loop."""
-    if not pause or pause.get("status") != "needs_user_decision":
+    if not pause or pause.get("status") != "planner_recovery_pending":
         return
     if not isinstance(future_waves, list) or not future_waves or not _is_singleton_recovery_planner(future_waves[0]):
         raise ValueError(
@@ -2702,7 +2729,7 @@ def _active_no_progress_pauses(state: dict[str, Any]) -> dict[str, dict[str, Any
     pauses = {
         str(gate): dict(pause)
         for gate, pause in raw.items()
-        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+        if isinstance(pause, dict) and pause.get("status") == "planner_recovery_pending"
         and str(gate).strip()
     } if isinstance(raw, dict) else {}
     return pauses
@@ -2713,7 +2740,7 @@ def _store_no_progress_pauses(state: dict[str, Any], pauses: dict[str, dict[str,
     active = {
         str(gate): dict(pause)
         for gate, pause in pauses.items()
-        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+        if isinstance(pause, dict) and pause.get("status") == "planner_recovery_pending"
     }
     if active:
         state["rework_pauses"] = active
@@ -2769,7 +2796,7 @@ def _record_corrective_progress(
         else "submit a materially different Planner-first recovery strategy"
     )
     return {
-        "status": "needs_user_decision",
+        "status": "planner_recovery_pending",
         "gate": gate,
         "consecutive_identical_iterations": consecutive,
         "repeat_limit": _NO_PROGRESS_REPEAT_LIMIT,
@@ -3296,27 +3323,44 @@ def _replace_future_orchestrate_waves(
     # enter this path because their gate is not in completed_set.
     if matching_history is not None:
         if matching_history.get("material_change"):
-            state["status"] = "needs_input"
-            state["blocked_reason"] = (
-                "the same material completed-gate rework was submitted again; "
-                "provide a new Planner-first change or explicit user decision"
-            )
-            state.setdefault("rework_pauses", {})
-            state["rework_pauses"][rework_gates[0] if len(rework_gates) == 1 else "completed_gate_rework"] = {
-                "status": "needs_input",
-                "reason": "repeated_material_rework_digest",
+            # This is an idempotent replay of a material rework that the
+            # server has already accepted.  It is not a user decision and it
+            # must not reopen the same gate or mint another worker.  Keep a
+            # durable reconciliation receipt; the already accepted
+            # Planner-first route remains the sole owner of any next dispatch.
+            state.pop("blocked_reason", None)
+            state.pop("rework_pauses", None)
+            state["status"] = "active" if state.get("status") in {"blocked", "needs_input"} else state.get("status", "active")
+            state.setdefault("rework_recovery", {})
+            state["rework_recovery"].update({
+                "schema": "cortex/recovery-contract/v1",
+                "mode": "planner_first",
+                "status": "idempotent_replay",
                 "request_digest": rework_request_digest,
-                "gate": rework_gates[0] if len(rework_gates) == 1 else None,
+                "rework_gates": list(rework_gates),
+                "replacement_worker_authorized": False,
                 "at": now(),
-            }
+            })
+            state.setdefault("rework_history", []).append({
+                "request_digest": rework_request_digest,
+                "rework_gates": list(rework_gates),
+                "semantic_future_pipeline_digest": new_semantic_digest,
+                "material_change": True,
+                "outcome": "idempotent_replay",
+                "at": now(),
+            })
+            state["rework_history"] = [
+                item for item in state["rework_history"][-32:]
+                if isinstance(item, dict)
+            ]
             save_state(
                 task_dir,
                 task_dir / "state.sqlite",
                 state,
-                "rework_circuit_breaker",
-                "paused repeated material completed-gate rework before invalidation",
+                "rework_reconciled",
+                "reconciled repeated material rework to the existing server-owned Planner route",
             )
-            raise ReworkCircuitBroken(state, rework_request_digest)
+            return state, plan
         raise ReworkRequestIdempotent(state, plan, rework_request_digest)
     if rework_request_digest and not semantic_changed:
         state.setdefault("rework_history", []).append({
@@ -3674,7 +3718,26 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 continue
             gate_attempts = [item for item in state.get("attempts", []) if item.get("gate") == gate and not item.get("invalidated")]
             statuses = {item.get("status") for item in gate_attempts}
-            default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
+            # A corrective attempt is a new authoritative observation for the
+            # gate.  Do not let a historical blocked/failed attempt keep
+            # winning the aggregate after the current worker has passed: that
+            # stranded the gate in a no-progress pause, re-entered diagnostic
+            # recovery, and returned no dispatch on the next turn.  For a
+            # parallel wave, any current non-success still wins; a prior
+            # attempt is otherwise historical evidence only.
+            current_gate_attempts = [
+                item for item in gate_attempts
+                if item.get("attempt_id") in completions_by_attempt
+            ]
+            current_statuses = {item.get("status") for item in current_gate_attempts}
+            if current_statuses:
+                default_outcome = (
+                    "blocked" if "blocked" in current_statuses
+                    else "failed" if current_statuses & {"failed", "cancelled", "superseded"}
+                    else "passed"
+                )
+            else:
+                default_outcome = "blocked" if "blocked" in statuses else "failed" if statuses & {"failed", "cancelled", "superseded"} else "passed"
             gate_decision = None
             unresolved_rework = _unresolved_rework_findings(root, state, gate)
             if gate_decision == "blocked":
@@ -3692,6 +3755,43 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                 # dispatches another worker with progressively higher effort.
                 default_outcome = "failed"
             outcome = str(gate_outcomes.get(gate, default_outcome))
+            if outcome == "passed" and current_gate_attempts:
+                # A worker may have reported a transient blocked/failed
+                # transport before the server-owned corrective attempt was
+                # dispatched.  Once the current attempt is accepted, retire
+                # only those old projections that have no canonical result.
+                # Keep their ledger/event evidence, but exclude them from the
+                # accepted-attempt audit so an incomplete transport receipt
+                # cannot strand an otherwise successful gate.
+                successful_current = {
+                    str(item.get("attempt_id") or "")
+                    for item in current_gate_attempts
+                    if item.get("status") == "passed"
+                }
+                superseded = False
+                for prior in gate_attempts:
+                    prior_id = str(prior.get("attempt_id") or "")
+                    if (
+                        prior_id
+                        and prior_id not in successful_current
+                        and prior.get("status") in {"blocked", "failed", "cancelled"}
+                        and not str(prior.get("attempt_result_ref") or "").strip()
+                    ):
+                        prior["status"] = "superseded"
+                        prior["lifecycle_status"] = "SUPERSEDED"
+                        prior["invalidated"] = True
+                        prior["invalidation_reason"] = "server_owned_corrective_attempt_passed"
+                        prior["superseded_by_attempt_id"] = sorted(successful_current)[0] if successful_current else None
+                        prior["superseded_at"] = now()
+                        superseded = True
+                if superseded:
+                    save_state(
+                        task_dir,
+                        task_dir / "state.sqlite",
+                        state,
+                        "corrective_attempt_reconciled",
+                        f"{gate}: retired incomplete prior transport after corrective pass",
+                    )
             failure_counts = state.setdefault("orchestrate_gate_failure_counts", {})
             failure_count_changed = False
             if outcome == "failed":
@@ -3853,15 +3953,16 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             # unpaused gate remains anywhere in the current pipeline.
             _store_no_progress_pauses(state, no_progress_pauses)
             if not active_gates(state):
-                # Exhausted identical retries are not a Cortex stop.  Keep
-                # the task resumable and ask for one concrete decision so the
-                # server can derive a materially new Planner-first route.
-                state["status"] = "needs_input"
+                # Exhausted identical retries are not a Cortex stop.  Mark
+                # the projection as internally recoverable; the blocked
+                # branch below immediately derives one Planner diagnostic
+                # route from the durable gate-scoped pause.
+                state["status"] = "blocked"
                 paused_gates = sorted(no_progress_pauses)
                 state["blocked_reason"] = (
-                    "automatic corrective dispatch paused all remaining executable gates: "
+                    "automatic corrective dispatch recorded repeated evidence for paused gate(s): "
                     + ", ".join(paused_gates)
-                    + "; choose whether to revise the recovery strategy or retry the intended paused gate"
+                    + "; server-owned Planner recovery is required"
                 )
             else:
                 state["status"] = "active"
@@ -3905,6 +4006,15 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
             recovery = _terminal_blocked_recovery(
                 params, task_dir, state, plan,
             )
+            if recovery is None:
+                # A stale/malformed projection may have no canonical terminal
+                # result to bind.  Treat it as an internal reconciliation
+                # defect and derive one Planner diagnostic route instead of
+                # exposing a technical user decision or leaving the task
+                # blocked.
+                recovery = _server_owned_diagnostic_recovery(
+                    params, task_dir, state, plan,
+                )
             if recovery is not None:
                 state, plan, recovery_receipt = recovery
                 if state.get("status") == "blocked":
@@ -3940,39 +4050,77 @@ def _orchestrate_advance(params: dict[str, Any], transaction_path: Path, transac
                     result={"recovery": recovery_receipt},
                     plan=plan,
                 )
-            # A logic-level condition without a legal server-owned route is a
-            # user decision, never an orchestrator deadlock.  Keep the task
-            # resumable and surface a concrete question-shaped diagnostic.
-            state["status"] = "needs_input"
-            state["blocked_reason"] = (
-                "Cortex could not derive a safe corrective owner for the terminal result; "
-                "user decision is required."
-            )
+            # The fallback is only reachable when the durable task has no
+            # recoverable gate frontier at all.  Keep this as an internal
+            # reconciliation receipt rather than manufacturing a user
+            # question or leaving Cortex in ``needs_input``.
+            state["status"] = "active"
+            state.pop("blocked_reason", None)
+            state["diagnostic_recovery"] = {
+                "schema": "cortex/recovery-contract/v1",
+                "status": "reconciliation_pending",
+                "mode": "planner_diagnostic",
+                "reason": "no recoverable gate frontier was present in the durable projection",
+                "replacement_worker_authorized": False,
+                "at": now(),
+            }
             save_state(
                 task_dir,
                 task_dir / "state.sqlite",
                 state,
-                "orchestration_question",
-                "terminal result requires an explicit user routing decision",
+                "diagnostic_recovery_pending",
+                "recorded an internal reconciliation receipt for a missing gate frontier",
             )
             return _orchestrate_response(
                 "advance", state, wave_id=requested_wave_id,
                 result={
-                    "requires_user_decision": True,
-                    "question": state["blocked_reason"],
+                    "recovery": dict(state["diagnostic_recovery"]),
                 },
                 plan=plan,
             )
         if state.get("status") == "needs_input" and state.get("blocked_reason"):
-            # No-progress circuit breakers ask for a concrete strategy choice;
-            # they do not terminate the Cortex task or require ledger repair.
+            # Older projections may retain a needs_input marker after a
+            # no-progress pause. Reconcile it through the same server-owned
+            # diagnostic Planner route instead of surfacing a technical
+            # question to the user.
+            state["status"] = "blocked"
+            recovery = _server_owned_diagnostic_recovery(params, task_dir, state, plan)
+            if recovery is not None:
+                state, plan, recovery_receipt = recovery
+                prepared = _prepare_orchestrate_wave(params, task_dir, state, plan)
+                state = prepared["state"]
+                state.setdefault("diagnostic_recovery", {})["status"] = "dispatched"
+                save_state(
+                    task_dir,
+                    task_dir / "state.sqlite",
+                    state,
+                    "diagnostic_recovery_dispatch",
+                    "dispatched server-owned Planner recovery for a stale needs_input projection",
+                )
+                return _orchestrate_response(
+                    "advance", state, wave_id=prepared["wave_id"],
+                    spawn_requests=prepared["spawn_requests"],
+                    result={"recovery": recovery_receipt}, plan=plan,
+                )
+            state["status"] = "active"
+            state.pop("blocked_reason", None)
+            state["diagnostic_recovery"] = {
+                "schema": "cortex/recovery-contract/v1",
+                "status": "reconciliation_pending",
+                "mode": "planner_diagnostic",
+                "replacement_worker_authorized": False,
+                "at": now(),
+            }
+            save_state(
+                task_dir,
+                task_dir / "state.sqlite",
+                state,
+                "diagnostic_recovery_pending",
+                "reconciled stale needs_input projection without user decision",
+            )
             return _orchestrate_response(
                 "advance", state, wave_id=requested_wave_id,
-                result={
-                    "requires_user_decision": True,
-                    "question": state["blocked_reason"],
-                },
-                plan=plan,
+                result={"recovery": dict(state["diagnostic_recovery"])}, plan=plan,
             )
         review = _hold_for_plan_approval(task_dir, state, plan)
         if review is not None:
@@ -4465,6 +4613,20 @@ def _terminal_blocked_recovery(
     """
     current = set(active_gates(state))
     if not current:
+        # Exhausted no-progress retries are represented as gate-scoped
+        # pauses, so they intentionally disappear from active_gates().  They
+        # are still a valid server-owned recovery target: reopen the earliest
+        # paused gate through Planner instead of surfacing a Cortex block.
+        pauses = state.get("rework_pauses")
+        if isinstance(pauses, dict):
+            current = {
+                str(gate)
+                for gate, pause in pauses.items()
+                if isinstance(pause, dict)
+                and pause.get("status") == "planner_recovery_pending"
+                and str(gate).strip()
+            }
+    if not current:
         return None
     root = _ledger_root_for_artifact(task_dir)
     existing = state.get("terminal_recovery") if isinstance(state.get("terminal_recovery"), dict) else None
@@ -4582,6 +4744,144 @@ def _terminal_blocked_recovery(
     }
     save_state(task_dir, task_dir / "state.sqlite", state, "terminal_recovery", "derived server-owned corrective Planner recovery")
     return state, plan, {**state["terminal_recovery"], "idempotent": False}
+
+
+def _server_owned_diagnostic_recovery(
+    params: dict[str, Any],
+    task_dir: Path,
+    state: dict[str, Any],
+    plan: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    """Create one idempotent Planner recovery when no terminal route exists.
+
+    A malformed/stale projection can leave a task in ``blocked`` without a
+    canonical terminal result that :func:`_terminal_blocked_recovery` can
+    bind.  That is an internal reconciliation defect, not a reason to expose
+    ``requires_user_decision`` or stop the pipeline.  Reopen the plan gate,
+    attach a bounded diagnostic objective, and let the normal server-owned
+    Planner dispatch repair the projection.  The recovery key makes retries
+    return the same receipt and never create a replacement worker.
+    """
+    current = set(active_gates(state))
+    if not current:
+        pauses = state.get("rework_pauses")
+        if isinstance(pauses, dict):
+            current = {
+                str(gate)
+                for gate, pause in pauses.items()
+                if isinstance(pause, dict)
+                and pause.get("status") == "planner_recovery_pending"
+                and str(gate).strip()
+            }
+    if not current:
+        # A partially written projection may also lose current_pipeline while
+        # the durable plan still contains pending gates.  Recover the
+        # unresolved plan frontier instead of exposing a technical question.
+        completed = set(state.get("completed_gates", [])) | set(state.get("skipped_gates", []))
+        current = {
+            str(gate)
+            for wave in plan.get("waves", [])
+            if isinstance(wave, dict)
+            for gate in wave.get("gates", [])
+            if str(gate).strip() and str(gate) not in completed
+        }
+    if not current:
+        return None
+    blocked_reason = str(state.get("blocked_reason") or "unresolved orchestration projection").strip()
+    recovery_key = digest_text(canonical_json.dumps({
+        "task_id": state.get("task_id"),
+        "current_gates": sorted(current),
+        "blocked_reason": blocked_reason,
+    }))
+    existing = state.get("diagnostic_recovery") if isinstance(state.get("diagnostic_recovery"), dict) else None
+    if (
+        existing
+        and str(existing.get("recovery_key") or "") == recovery_key
+        and str(existing.get("status") or "") in {"prepared", "dispatched"}
+    ):
+        return state, plan, {**existing, "idempotent": True}
+
+    task = load_task_definition(task_dir, state)
+    origin_gate = sorted(current)[0]
+    if "plan" in state.get("current_pipeline", []):
+        changed = update_pipeline({
+            **params,
+            "task_id": state["task_id"],
+            "expected_revision": state["revision"],
+            "operations": [{"op": "rework", "gate": "plan"}],
+            "allow_rework": True,
+            "reason": "Server-owned diagnostic recovery for an unresolved orchestration projection.",
+        })
+    else:
+        changed = update_pipeline({
+            **params,
+            "task_id": state["task_id"],
+            "expected_revision": state["revision"],
+            "operations": [{"op": "add", "gate": "plan", "before": origin_gate}],
+            "allow_rework": True,
+            "reason": "Server-owned diagnostic recovery for an unresolved orchestration projection.",
+        })
+    state = changed["state"]
+    _, task_dir, state = load_state(state["task_id"], params)
+    plan = _load_orchestrate_plan(task_dir, state)
+    plan_waves = [wave for wave in plan.get("waves", []) if "plan" in (wave.get("gates") or [])]
+    if not plan_waves:
+        numeric_wave_ids = [
+            int(match.group(1))
+            for wave in plan.get("waves", [])
+            if (match := re.search(r"(\d+)$", str(wave.get("wave_id") or "")))
+        ]
+        diagnostic_wave_id = f"wave-{(max(numeric_wave_ids, default=0) + 1):02d}"
+        generated, _ = _normalize_orchestrate_waves(
+            [{"wave_id": diagnostic_wave_id, "delegations": [{"gate": "plan", "agent": "planner"}]}],
+            task,
+            plan.get("host_capabilities") or {},
+            str(params["project_root"]),
+        )
+        plan["waves"] = [*generated, *plan.get("waves", [])]
+        _write_orchestrate_plan(task_dir, plan)
+        plan_waves = generated
+    planner_specs = [
+        spec for spec in plan_waves[0].get("delegations", [])
+        if str(spec.get("gate") or "") == "plan" and str(spec.get("agent") or "") == "planner"
+    ]
+    if not planner_specs:
+        raise ValueError("server diagnostic recovery plan wave has no Planner delegation")
+    instruction = (
+        "Server-owned diagnostic recovery. No user decision is required. Read the durable task state and all "
+        "available canonical results, identify the orchestration inconsistency, and produce the smallest valid "
+        "Planner-first continuation. Preserve every accepted result; do not replace workers. Internal diagnostic: "
+        + redact(blocked_reason, 1800)
+    )
+    for spec in planner_specs:
+        objective = str(spec.get("objective") or "").strip()
+        if "Server-owned diagnostic recovery." not in objective:
+            spec["objective"] = (objective + "\n\n" + instruction).strip()
+    plan["diagnostic_recovery"] = {
+        "schema": "cortex/recovery-contract/v1",
+        "recovery_key": recovery_key,
+        "mode": "planner_diagnostic",
+        "origin_gates": sorted(current),
+        "target_gate": "plan",
+        "target_wave_id": plan_waves[0].get("wave_id"),
+        "replacement_worker_authorized": False,
+    }
+    _write_orchestrate_plan(task_dir, plan)
+    state["diagnostic_recovery"] = {
+        **plan["diagnostic_recovery"],
+        "created_at": now(),
+        "status": "prepared",
+    }
+    state.pop("blocked_reason", None)
+    state["status"] = "active"
+    save_state(
+        task_dir,
+        task_dir / "state.sqlite",
+        state,
+        "diagnostic_recovery",
+        "derived one server-owned Planner diagnostic recovery for an unresolved orchestration projection",
+    )
+    return state, plan, {**state["diagnostic_recovery"], "idempotent": False}
 
 
 def _orchestrate_resume(params: dict[str, Any]) -> dict[str, Any]:
@@ -4995,15 +5295,21 @@ def orchestrate(params: dict[str, Any]) -> dict[str, Any]:
             next_operation=operation,
             task_id=task_id,
         )
-        error["state"] = "needs_input"
+        # Kept as a compatibility backstop for older callers that may still
+        # raise this exception.  Repeated material rework is now reconciled
+        # idempotently before this branch, but a stale process must not expose
+        # the legacy user-facing circuit breaker if it reaches here.
+        error["state"] = "error"
         error["rework"] = {
-            "outcome": "needs_input",
+            "outcome": "server_reconciled",
             "request_digest": exc.digest,
             "spawned": False,
+            "replacement_worker_authorized": False,
         }
         error["next_action"] = (
-            "submit a materially new Planner-first rework contract or provide an explicit user decision; "
-            "the repeated material digest was not dispatched"
+            "Cortex recorded the repeated material rework in its internal JSONC recovery log. "
+            "Do not ask the user to resolve a Cortex block, replay the same mutation, or spawn a replacement; "
+            "retry the same lifecycle operation once so the server-owned Planner recovery can be rehydrated."
         )
         if "transaction_path" in locals() and transaction_path is not None and transaction is not None:
             transaction.update({"status": "failed", "result": error, "updated_at": now(), "failed_at": now()})

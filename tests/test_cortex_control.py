@@ -757,7 +757,7 @@ class ControlPlaneTests(unittest.TestCase):
         )
         hook_payload = json.loads(failed_wait.stdout)
         context = hook_payload["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("CORTEX WAIT RECOVERY", context)
+        self.assertIn("Internal lifecycle receipt", context)
         self.assertIn("status='failed'", context)
         self.assertNotIn("agent_not_found", context)
 
@@ -4410,6 +4410,37 @@ class ControlPlaneTests(unittest.TestCase):
             control._v3_continue_context(altered, self.ledger, state, original["task_ref"])
         persisted = control._operation_registry(self.ledger)
         self.assertEqual(persisted["tasks"][state["task_id"]]["inflight_continue"]["digest"], digest)
+
+    def test_operation_registry_repairs_legacy_continue_replay_without_a_retry_loop(self):
+        """A stale replay receipt is migrated, never surfaced as a Cortex blocker.
+
+        Older runtimes persisted the private structured ``next_action`` in a
+        continue receipt.  A newer runtime must canonicalize that projection
+        during the next registry write, so one lifecycle retry can proceed
+        without a coordinator inspect/manage loop.
+        """
+        task_id = "legacy-replay-task"
+        registry = control._operation_registry(self.ledger)
+        registry["tasks"][task_id] = {
+            "last_continue": {
+                "response": {
+                    "schema": control.PUBLIC_ORCHESTRATION_SCHEMA,
+                    "ok": True,
+                    "task_ref": "task-legacy-replay",
+                    "dispatches": [{"dispatch_ref": "dispatch-old"}],
+                    "next_action": {"operation": "advance", "arguments": {"task_ref": "task-legacy-replay"}},
+                },
+            },
+        }
+
+        control._write_operation_registry(self.ledger, registry)
+
+        persisted = control._operation_registry(self.ledger)
+        response = persisted["tasks"][task_id]["last_continue"]["response"]
+        self.assertEqual(response["dispatches"], [])
+        self.assertIsInstance(response["next_action"], str)
+        self.assertNotIn("COORDINATOR LOCK", response["next_action"])
+        self.assertNotIn("'operation'", response["next_action"])
 
 
 

@@ -4212,7 +4212,7 @@ def _sync_plan_tracker_document(task_dir: Path, state: dict[str, Any], *, event:
     active = set(active_gates(state))
     paused = {
         str(gate) for gate, value in (state.get("rework_pauses") or {}).items()
-        if isinstance(value, dict) and value.get("status") == "needs_user_decision"
+        if isinstance(value, dict) and value.get("status") == "planner_recovery_pending"
     }
     for item in tracker.get("items", []):
         if not isinstance(item, dict):
@@ -5075,7 +5075,7 @@ def active_gates(state: dict[str, Any]) -> list[str]:
     paused = {
         str(gate)
         for gate, pause in pauses.items()
-        if isinstance(pause, dict) and pause.get("status") == "needs_user_decision"
+        if isinstance(pause, dict) and pause.get("status") == "planner_recovery_pending"
     } if isinstance(pauses, dict) else set()
     groups = state.get("parallel_groups") or [[gate] for gate in state["current_pipeline"]]
     for group in groups:
@@ -7479,10 +7479,24 @@ def _record_commit_gate_recovery(
     if len(events) > MAX_GATE_RECOVERY_EVENTS:
         del events[:-MAX_GATE_RECOVERY_EVENTS]
     if terminal:
-        state["status"] = "blocked"
-        state["blocked_gate"] = gate
-        state["blocked_reason"] = f"commit_gate recovery budget exhausted: {reason}"
-        next_action = "create_handoff_and_resume_after_gate_repair"
+        # Exhausting the fast-path retry budget is an internal adapter
+        # diagnostic, not a Cortex/user blocker.  Preserve the evidence and
+        # route the same task through the server-owned diagnostic recovery
+        # Planner on its next lifecycle advance.  Do not mark the task
+        # blocked, which previously stranded it behind a handoff-only path.
+        state.pop("blocked_gate", None)
+        state.pop("blocked_reason", None)
+        state["status"] = "active"
+        state["commit_gate_recovery"] = {
+            "schema": "cortex/recovery-contract/v1",
+            "status": "diagnostic_recovery_pending",
+            "gate": gate,
+            "mode": mode,
+            "failure_key": failure_key,
+            "replacement_worker_authorized": False,
+            "at": now(),
+        }
+        next_action = "server_owned_diagnostic_recovery_then_retry_commit_gate"
     elif "result binding" in reason.lower():
         next_action = "repair_result_binding_then_retry_commit_gate_once"
     else:
@@ -7504,10 +7518,11 @@ def commit_gate(params: dict[str, Any]) -> dict[str, Any]:
 
     Validation failures inside this private atomic adapter are returned as
     bounded recovery data instead of escaping as repeated MCP errors. After
-    three failures for the same gate/mode the adapter is durably blocked,
-    giving the coordinator a terminal handoff path. This limit is intentionally
-    unrelated to pipeline, QA, review, worker, finding-remediation, or closure
-    rework attempts.
+    three failures for the same gate/mode the adapter records a diagnostic
+    recovery receipt and leaves the task active for the server-owned Planner
+    route; it never creates a terminal Cortex block. This limit is
+    intentionally unrelated to pipeline, QA, review, worker,
+    finding-remediation, or closure rework attempts.
     """
     root = ledger_root(params)
     with state_lock(root):
@@ -8534,20 +8549,71 @@ def _v3_continue_stop(error: dict[str, Any], *, reason: str) -> dict[str, Any]:
     retry the old relative step.  Treating that diagnostic as an ordinary
     correctable input invites a model to repeat ``continue`` (and often to
     invent artifacts or replacement waves).  The active task is already
-    server-owned, so this class of error must be fail-closed: no retry, no
-    recovery payload, and no project operation.
+    server-owned, so this class of error is a server-reconciliation signal:
+    the coordinator performs one bounded inspection and follows the durable
+    receipt.  It is never a user decision and never authorizes a replacement.
     """
     result = dict(error)
     result["outcome"] = "needs_input"
     result["retryable"] = True
     result["stop_reason"] = reason
     result["next_action"] = (
-        "This continuation is stale or belongs to a different task state. "
-        "Do not replay the consumed step/results. Call manage_orchestration with "
-        "intent=inspect for the same task_ref, then follow the returned server-owned "
-        "recovery or exact user question. Do not add future_waves or spawn a replacement worker."
+        "Cortex detected a stale continuation and will reconcile it from the durable ledger. "
+        "Do not replay the consumed step/results, add future_waves, or spawn a replacement. "
+        "If the caller must re-enter the lifecycle, call manage_orchestration exactly once "
+        "with intent=inspect for this same task_ref and follow the returned server-owned "
+        "receipt or exact task question."
     )
     return result
+
+
+def _v3_reconcile_stale_continue(params: dict[str, Any], error: dict[str, Any]) -> dict[str, Any]:
+    """Reconcile a stale continuation from durable state in one server read.
+
+    A lost/late coordinator receipt is an internal transport race, not a
+    caller decision.  The previous facade returned ``needs_input`` and made
+    the coordinator issue a second management call before it could see the
+    already-issued dispatch.  Rehydrate the current projection here and
+    return its server-owned next action directly.  If the projection contains
+    a real worker question, the normal question response remains the only
+    visible pause; all other states continue through the returned dispatch or
+    waiting receipt.
+    """
+    try:
+        resolved = _v3_resolve_task(params, require_task_ref=True)
+        if isinstance(resolved, dict):
+            return _v3_continue_stop(error, reason="stale_relative_step")
+        _, state, _, task_ref = resolved
+        common = {
+            "project_root": params["project_root"],
+            "principal": state.get("principal"),
+            "thread_id": state.get("thread_id"),
+            "task_id": state["task_id"],
+        }
+        snapshot = _orchestrate_inspect(common)
+        response = _v3_response(snapshot, task_ref, include_result=True)
+        response["recovery"] = {
+            "mode": "server_reconcile",
+            "source": "stale_relative_step",
+            "automatic": True,
+        }
+        response["retryable"] = True
+        response["requires_user_decision"] = bool(
+            response.get("requires_user_decision")
+            or (response.get("user_view") or {}).get("requires_user_decision")
+        )
+        if not response["requires_user_decision"]:
+            response["next_action"] = (
+                "Cortex reconciled the stale continuation from its durable ledger. "
+                "Invoke only the returned native dispatches, or wait for the exact "
+                "persisted workers; do not issue another lifecycle call or replay the old step."
+            )
+        return response
+    except Exception:
+        # The original diagnostic remains a retryable internal receipt if a
+        # concurrent state mutation prevents the bounded read.  It must still
+        # never be classified as a user decision or replacement authorization.
+        return _v3_continue_stop(error, reason="stale_relative_step")
 
 
 def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
@@ -8563,10 +8629,10 @@ def _v3_start_state_blocked_error(message: object) -> dict[str, Any]:
     result["task_created"] = False
     result["recovery"] = "user_authorized_ledger_maintenance_required"
     result["next_action"] = (
-        "Cortex did not create a task and returned no task_ref. Surface the exact "
-        "diagnostic, obtain the required user decision or repair, then retry the "
-        "same start_orchestration request. Do not select another task or dispatch "
-        "a worker without a successful task_ref."
+        "Cortex did not create a task and returned no task_ref. Record this internal "
+        "reconciliation diagnostic, retry the same start_orchestration request once "
+        "after the server-owned ledger repair, and do not select another task or "
+        "dispatch a worker without a successful task_ref. This is not a user-facing block."
     )
     return result
 
@@ -8579,8 +8645,9 @@ def _v3_task_ref_required_error(operation: str) -> dict[str, Any]:
     )
     result["next_action"] = (
         "Do not inspect, list, infer, or select another task from this project root. "
-        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, surface the exact "
-        "diagnostic as a user decision and retry the originating lifecycle request."
+        "Use only the task_ref returned by the task being recovered; if no task_ref was returned, "
+        "record the internal diagnostic and retry the originating lifecycle request once so "
+        "Cortex can reconcile its durable receipt. Do not turn this technical correction into a user-facing block."
     )
     return result
 
@@ -8666,13 +8733,20 @@ def _operation_registry(root: Path) -> dict[str, Any]:
 
 
 def _write_operation_registry(root: Path, registry: dict[str, Any]) -> None:
-    """Persist only compact replay receipts in the canonical registry."""
+    """Persist compact replay receipts, repairing older projections in place.
+
+    A runtime upgrade may tighten the public projection (for example, by
+    replacing a stringified internal ``next_action`` mapping with a concrete
+    operation).  That is a representation migration, not a task failure.  A
+    stale receipt must be canonicalized before the next lifecycle write rather
+    than surfaced as a Cortex blocker or forcing repeated management calls.
+    """
     for record in registry.get("tasks", {}).values():
         last = record.get("last_continue") if isinstance(record, dict) else None
         if isinstance(last, dict) and isinstance(last.get("response"), dict):
             compact = _v3_compact_continue_replay(last["response"])
             if compact != last["response"]:
-                raise ValueError("operation registry contains a non-canonical dispatch replay")
+                last["response"] = compact
     registry["updated_at"] = now()
     db_put_global(root, "operation_registry", registry)
 
@@ -10440,24 +10514,32 @@ def _v3_continue_receipt_digest(params: dict[str, Any]) -> str:
     })
 
 
-def _v3_consumed_continue_error(task_ref: str) -> dict[str, Any]:
-    """Return a deterministic, non-mutating stop for reused wave receipts."""
+def _v3_consumed_continue_error(task_ref: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a deterministic server-reconciliation receipt for reused receipts."""
     result = _v3_error(
         "continue_receipts_already_consumed",
         "the submitted canonical result receipts were already consumed for this task wave; "
         "Cortex will not replan or dispatch from them again",
         # This is a recoverable idempotency receipt, not a public lifecycle
-        # block.  The caller must inspect the same task and use the current
-        # server-derived continuation.
+        # block.  Reconcile from the durable task rather than asking the
+        # coordinator to enter a manage/inspect loop.
         outcome="needs_input",
     )
     result["task_ref"] = task_ref
     result["retryable"] = True
     result["recovery"] = "inspect_exact_task"
+    if isinstance(params, dict):
+        reconciled = _v3_reconcile_stale_continue(params, result)
+        reconciled["task_ref"] = task_ref
+        reconciled["recovery"] = {
+            "mode": "server_reconcile",
+            "source": "consumed_continue_receipt",
+            "automatic": True,
+        }
+        return reconciled
     result["next_action"] = (
-        f"{COORDINATOR_LOCK} The result receipts are already recorded. Call manage_orchestration with "
-        f"intent=inspect and task_ref={task_ref!r} once, then copy the server-returned current step/results "
-        "or pending dispatches into the next lifecycle call; do not resubmit the consumed receipts."
+        "Cortex recorded these result receipts already. Reconcile the same task from its durable ledger and "
+        "use only the returned current dispatches or continuation; do not resubmit the consumed receipts."
     )
     return result
 
@@ -10483,7 +10565,7 @@ def _v3_consumed_continue_replay(
         isinstance(item, dict) and item.get("receipt_digest") == receipt_digest
         for item in consumed
     ):
-        return _v3_consumed_continue_error(task_ref)
+        return _v3_consumed_continue_error(task_ref, params)
     return None
 
 
@@ -11348,7 +11430,7 @@ def continue_orchestration(params: dict[str, Any]) -> dict[str, Any]:
             pass
         error = _v3_error("continue_validation_failed", exc)
         if str(exc).startswith("continue step must match the active relative step"):
-            return _v3_continue_stop(error, reason="stale_relative_step")
+            return _v3_reconcile_stale_continue(params, error)
         if resolved_task_ref:
             error["task_ref"] = resolved_task_ref
         return error
@@ -11463,9 +11545,9 @@ def _v3_question_response(response: dict[str, Any], state: dict[str, Any]) -> di
             response["outcome"] = "question_answered_not_resumable"
             response["resume_reason"] = resume_reason
             response["next_action"] = (
-                f"{COORDINATOR_LOCK} The durable answer is not bound to a current active worker slot. Do not use "
-                "followup_task, spawn a replacement, or advance the wave from this response; inspect the exact task "
-                "state through Cortex before any recovery."
+                "The durable answer is not bound to a current active worker slot. Cortex records this lifecycle "
+                "diagnostic and derives the next server-owned recovery route; do not use followup_task, spawn a "
+                "replacement, or advance the wave from this response."
             )
             return response
         response["outcome"] = "question_answered"

@@ -144,8 +144,19 @@ result, belong to a dispatched worker. The coordinator must remain idle while
 a worker is active. Never work in parallel with an active
 worker or substitute coordinator work for a missing, slow, failed, or blocked
 worker. If dispatch is unavailable, keep the task resumable and route the
-condition through server-owned recovery or one concrete user question; never
+condition through server-owned recovery or one concrete task question; never
 stop Cortex or fall back to direct project work.
+
+Technical lifecycle failures are never user-facing blockers. Invalidated
+attempts, validation errors, stale receipts, replay-registry drift, failed
+dispatches, and contradictory internal projections must be recorded as JSONC
+recovery evidence and repaired by Cortex through the same attempt or a
+server-owned corrective dispatch. The coordinator must not answer that Cortex
+is blocked and must not loop through `manage_orchestration` repeatedly. For a
+completed worker result, read it once, call `continue_orchestration` once with
+the exact server continuation, and follow the returned dispatch or wait. Only
+a durable worker question or explicit plan approval can stop the ordinary
+chat.
 
 ## Team intelligence and routing
 
@@ -237,7 +248,9 @@ Routing is evidence-driven:
    Do not treat a planned dispatch, commentary, or an empty wait as proof that
    a worker exists. The native call must return a child id before saying it was
    sent; retain those exact ids and wait only on them. A missing or failed
-   native dispatch is a blocker, never permission to continue the wave.
+   native dispatch is internal recovery evidence: let Cortex derive one
+   corrective dispatch and never expose it as a blocker or continue the wave
+   from an unbound child.
 
 Multiple workers with the same profile are separate bounded instances. Keep
 their ownership, paths, dependencies, result refs, and native task identities

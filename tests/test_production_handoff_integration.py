@@ -598,16 +598,21 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
         rejected = control.continue_orchestration(reused)
         rejected_again = control.continue_orchestration(reused)
         for response in (rejected, rejected_again):
-            self.assertFalse(response["ok"], response)
-            self.assertEqual(response["code"], "continue_receipts_already_consumed")
-            # Reusing a consumed receipt is a retryable idempotency correction,
-            # never a public Cortex block.
-            self.assertEqual(response["outcome"], "needs_input")
+            # Reusing a consumed receipt is reconciled directly from the
+            # durable task projection.  It must never become a public block
+            # or require a manage/inspect loop; the exact still-pending
+            # dispatch is returned idempotently.
+            self.assertTrue(response["ok"], response)
+            self.assertEqual(response["outcome"], "ready_to_spawn")
             self.assertEqual(response["task_ref"], started["task_ref"])
             self.assertTrue(response["retryable"])
-            self.assertEqual(response["dispatches"], [])
-            self.assertIn("manage_orchestration with intent=inspect", response["next_action"])
-        self.assertEqual(rejected["diagnostics"], rejected_again["diagnostics"])
+            self.assertEqual(
+                [item["dispatch_ref"] for item in response["dispatches"]],
+                [item["dispatch_ref"] for item in started["dispatches"]],
+            )
+            self.assertEqual(response["recovery"]["mode"], "server_reconcile")
+            self.assertEqual(response["recovery"]["source"], "consumed_continue_receipt")
+            self.assertNotIn("manage_orchestration", response["next_action"])
         self.assertEqual(rejected["next_action"], rejected_again["next_action"])
         self.assertEqual(self._task_state()[1], before_snapshot)
 
@@ -895,9 +900,9 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             "step": 4,
             "results": continuation["results"],
         })
-        self.assertFalse(wrong_step["ok"])
-        self.assertEqual(wrong_step["code"], "continue_validation_failed")
-        self.assertIn("active relative step 3", wrong_step["diagnostics"][0]["message"])
+        self.assertTrue(wrong_step["ok"], wrong_step)
+        self.assertEqual(wrong_step["recovery"]["mode"], "server_reconcile")
+        self.assertFalse(wrong_step.get("requires_user_decision", False))
         self.assertEqual(self._task_state()[1], before_wrong)
 
         wrong_projection = control.continue_orchestration({
@@ -926,12 +931,11 @@ class ProductionHandoffIntegrationTests(HostPrivateControlStoreTestMixin, unitte
             "results": continuation["results"],
             "reason": "stale retry after accepted continuation",
         })
-        self.assertFalse(stale["ok"], stale)
-        self.assertEqual(stale["code"], "continue_validation_failed")
-        self.assertTrue(stale["retryable"])
-        self.assertEqual(stale["stop_reason"], "stale_relative_step")
-        self.assertIn("manage_orchestration", stale["next_action"])
-        self.assertIn("Do not replay", stale["next_action"])
+        self.assertTrue(stale["ok"], stale)
+        self.assertEqual(stale["recovery"]["mode"], "server_reconcile")
+        self.assertFalse(stale.get("requires_user_decision", False))
+        self.assertNotIn("call manage_orchestration exactly once", stale.get("next_action", "").lower())
+        self.assertIn("do not issue another lifecycle call", stale.get("next_action", "").lower())
 
     def test_completed_child_recovery_set_survives_compaction_before_read(self) -> None:
         """A compacted coordinator can recover the exact data needed to continue.

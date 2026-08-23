@@ -1209,11 +1209,6 @@ def _v9_scope_key(initiative_ref: object, task_id: object) -> str:
     return "project:"
 
 
-def _v9_governance_upgrade_error(code: str) -> ValueError:
-    """Return a bounded, non-content diagnostic for an unsafe v9 upgrade."""
-    return ValueError(f"Cortex v9 governance migration blocked [{code}]; ledger maintenance is required")
-
-
 def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> None:
     """Reconcile only deterministic v9 conflicts before the v10 indexes exist.
 
@@ -1222,11 +1217,15 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
     predecessor.  v10 intentionally rejects both states.  Rather than leave
     a partially explained ``CREATE UNIQUE INDEX`` failure, this preflight
     deterministically linearises *only* affected scope/type groups using
-    created-at/record-ref order.  Missing scope links, dangling predecessors,
-    cross-scope predecessors, and cycles are ambiguous integrity failures and
-    fail closed before v10 applies.  The containing migration transaction
-    rolls every preparatory change back on such a failure.
+    created-at/record-ref order.  Historical v9 rows can also contain an
+    incomplete predecessor graph.  Those edges are detached at the smallest
+    deterministic boundary, retained as immutable audit metadata, and the
+    migration continues.  A malformed historical row must never strand the
+    current Cortex pipeline behind a raw migration error: the old edge is
+    preserved in the migration audit record and the canonical v10 graph is
+    made executable.
     """
+    anomalies: list[dict[str, str]] = []
     rows = [dict(row) for row in connection.execute(
         "SELECT record_ref,initiative_ref,task_id,record_type,revision,supersedes,created_at FROM governance_records ORDER BY created_at,record_ref"
     )]
@@ -1241,7 +1240,10 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             "SELECT 1 FROM initiative_task_links WHERE initiative_ref=? AND task_id=? LIMIT 1",
             (initiative, task),
         ).fetchone() is None:
-            raise _v9_governance_upgrade_error("v9_scope_link_missing")
+            anomalies.append({
+                "code": "v9_scope_link_missing",
+                "record_ref": str(row["record_ref"]),
+            })
         row["_scope_key"] = _v9_scope_key(initiative, task)
         groups.setdefault((str(row["_scope_key"]), str(row["record_type"])), []).append(row)
 
@@ -1261,27 +1263,73 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             if predecessor:
                 parent = by_ref.get(predecessor)
                 if parent is None:
-                    raise _v9_governance_upgrade_error("v9_supersedes_missing")
+                    anomalies.append({
+                        "code": "v9_supersedes_missing",
+                        "record_ref": str(row["record_ref"]),
+                        "supersedes": predecessor,
+                    })
+                    row["supersedes"] = None
+                    connection.execute(
+                        "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                        (row["record_ref"],),
+                    )
+                    predecessor = None
                 if (
-                    str(parent["record_type"]) != str(row["record_type"])
-                    or str(parent["_scope_key"]) != str(row["_scope_key"])
+                    parent is not None
+                    and (
+                        str(parent["record_type"]) != str(row["record_type"])
+                        or str(parent["_scope_key"]) != str(row["_scope_key"])
+                    )
                 ):
-                    raise _v9_governance_upgrade_error("v9_supersedes_scope_mismatch")
+                    anomalies.append({
+                        "code": "v9_supersedes_scope_mismatch",
+                        "record_ref": str(row["record_ref"]),
+                        "supersedes": predecessor,
+                    })
+                    row["supersedes"] = None
+                    connection.execute(
+                        "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                        (row["record_ref"],),
+                    )
+                    predecessor = None
             children.setdefault(predecessor, []).append(row)
         # A predecessor chain must already be acyclic.  A deterministic sort
         # cannot safely infer a meaning for a cyclic historical graph.
         for row in group_rows:
             visited: set[str] = set()
             current = row
+            previous: dict[str, Any] | None = None
             while True:
                 current_ref = str(current["record_ref"])
                 if current_ref in visited:
-                    raise _v9_governance_upgrade_error("v9_supersedes_cycle")
+                    # Detach the newest edge that closes the cycle.  This is
+                    # deterministic, preserves every record, and allows the
+                    # normal linearization below to retain an auditable root.
+                    if previous is not None and previous.get("supersedes"):
+                        anomalies.append({
+                            "code": "v9_supersedes_cycle",
+                            "record_ref": str(previous["record_ref"]),
+                            "supersedes": str(previous["supersedes"]),
+                        })
+                        previous["supersedes"] = None
+                        connection.execute(
+                            "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                            (previous["record_ref"],),
+                        )
+                    break
                 visited.add(current_ref)
                 parent_ref = str(current["supersedes"] or "") or None
                 if not parent_ref:
                     break
-                current = by_ref[parent_ref]
+                parent = by_ref.get(parent_ref)
+                if parent is None:
+                    break
+                previous = current
+                current = parent
+        # Rebuild the child map after non-canonical edges were detached.
+        children = {}
+        for row in group_rows:
+            children.setdefault(str(row["supersedes"] or "") or None, []).append(row)
         sibling_parents = [parent for parent, items in children.items() if parent is not None and len(items) > 1]
         if not duplicate_revisions and not sibling_parents:
             continue
@@ -1299,7 +1347,24 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
         for root in roots:
             visit(root)
         if len(ordered) != len(group_rows):
-            raise _v9_governance_upgrade_error("v9_supersedes_graph_incomplete")
+            # A malformed graph can leave a disconnected component without a
+            # root even after cycle repair.  Promote its oldest row to a root
+            # and retain the anomaly instead of aborting the whole database.
+            for item in sorted(
+                (candidate for candidate in group_rows if candidate not in ordered),
+                key=lambda value: (str(value["created_at"]), str(value["record_ref"])),
+            ):
+                anomalies.append({
+                    "code": "v9_supersedes_graph_incomplete",
+                    "record_ref": str(item["record_ref"]),
+                    "supersedes": str(item.get("supersedes") or ""),
+                })
+                item["supersedes"] = None
+                connection.execute(
+                    "UPDATE governance_records SET supersedes=NULL WHERE record_ref=?",
+                    (item["record_ref"],),
+                )
+                visit(item)
         # Move every revision out of the old range before assigning its
         # canonical number, avoiding transient uniqueness conflicts for
         # non-null prior-release scopes.
@@ -1330,7 +1395,7 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
             connection.execute("UPDATE governance_records SET supersedes=? WHERE record_ref=?", (predecessor, ref))
             if root_ref:
                 last_by_root[root_ref] = ref
-    if reconciled_groups:
+    if reconciled_groups or anomalies:
         connection.execute(
             "INSERT INTO ledger_meta(key,value) VALUES('governance_v10_reconciliation',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1339,6 +1404,7 @@ def _prepare_v9_governance_integrity_upgrade(connection: sqlite3.Connection) -> 
                 "reconciled_scope_type_groups": reconciled_groups,
                 "duplicate_scope_revision_groups": duplicate_groups,
                 "sibling_successor_groups": sibling_groups,
+                "ambiguous_edges_detached": anomalies,
             }),),
         )
 

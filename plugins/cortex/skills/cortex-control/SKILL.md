@@ -22,7 +22,7 @@ diagnostic or `retryable=true` result is corrected and retried on the same
 attempt without consuming the recovery budget; it never ends the worker. A
 blocked/failed result is terminal evidence for server-owned corrective
 recovery, not a Cortex stop. Only a genuinely unavailable exact identity after
-recovery is surfaced as a user decision. A successor worker may also use `read_worker_result` with its exact attempt/profile only
+recovery is routed to a server-owned diagnostic worker. A successor worker may also use `read_worker_result` with its exact attempt/profile only
 for predecessor refs explicitly supplied in its dispatch. Workers must not call lifecycle
 operations. The private component API and retired public `orchestrate` facade
 must never be called by a coordinator or worker. Cortex remains explicitly
@@ -77,6 +77,29 @@ telemetry-only. If a coordinator is idle, call
 child, result, question, or server-owned recovery receipt. A worker failure or
 malformed lifecycle payload is always routed to same-attempt correction or an
 automatic corrective dispatch; it must never stop Cortex itself.
+
+### Technical recovery is never a Cortex stop
+
+`blocked`, `needs_input`, `validation_failed`, stale receipts, invalidated
+attempts, replay-registry drift, missing result projections, failed dispatches,
+and lifecycle inconsistencies are internal recovery signals. They are never a
+reason to end the coordinator turn, return a system blocker, or ask the user
+what Cortex should do. The coordinator must let the server repair durable
+state, preserve all canonical results, and emit the next corrective dispatch
+or same-attempt retry. Only a durable worker question or explicit plan-approval
+decision may stop the ordinary chat.
+
+For one lifecycle event use one operation path: read the canonical result,
+call `continue_orchestration` once with its server-derived continuation, and
+follow the returned dispatch, wait, or question. Do not chain
+`manage_orchestration` calls such as `inspect -> recover_inspect -> resume` to
+compensate for a technical error. `manage_orchestration` is an explicit
+maintenance/recovery surface, not a polling loop; at most one server-owned
+recovery intent may be used when the continuation receipt itself was lost,
+after which Cortex must repair and continue internally. Never return prose
+such as “internal state is contradictory”, “Cortex is blocked”, or “retry
+management”; record that fact in the JSONC audit event and route the task
+forward automatically.
 
 For plan approval, the planner supplies one canonical recommendation. Any
 material finding or uncertainty must already have a concrete
@@ -149,7 +172,9 @@ paths forbidden above.
    sole exception because Cortex supplies their exhaustive census contract.
    A `start_orchestration` result with `ok=false`, `task_created=false`, or no
    `task_ref` did not create a recoverable task: do not call `manage_orchestration`,
-   inspect, list, infer, or select another task. Stop and result its blocker.
+   inspect, list, infer, or select another task. Record the internal
+   reconciliation diagnostic and retry the originating lifecycle request once;
+   this is never a user-facing Cortex blocker.
 2. The coordinator owns the pipeline decision. It may consciously accept the
    standard quality-preserving pipeline or supply `waves`; Cortex stores,
    returns, and validates that plan and enforces documentation and close. An override uses only
@@ -557,11 +582,14 @@ Required-plan `plan_review` retains its derived path for approval review.
 `continue_orchestration` is a one-shot receipt for the exact current wave. On
 success, perform only the action authorized by that response: invoke its
 returned dispatches, wait for the exact persisted active workers, or stop on a
-terminal `completed`/`blocked` outcome after closing the consumed child. Never
-call `continue_orchestration` again with the same step/results, request
-artifacts, add `future_waves`, or spawn a replacement after that receipt. A
-`retryable=false` task-identity or relative-step diagnostic is terminal; result
-the blocker and do not retry, inspect broadly, or reconstruct a continuation.
+   terminal `completed` outcome after closing the consumed child. A terminal
+   worker `blocked`/`failed` outcome is server-owned recovery evidence: follow
+   the returned corrective Planner dispatch and do not stop the Cortex task.
+   Never call `continue_orchestration` again with the same step/results, request
+   artifacts, add `future_waves`, or spawn a replacement after that receipt. A
+   `retryable=false` task-identity or relative-step diagnostic is reconciled by
+   one server-owned inspect/recovery receipt; never expose it as a Cortex block
+   or ask the user to repair internal state.
 
 Normal requests never carry caller-generated submission, task, wave, attempt,
 principal, thread, host-tool, host-model, or host-effort fields. Internal IDs

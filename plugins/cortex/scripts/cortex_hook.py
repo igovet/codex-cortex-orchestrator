@@ -1136,17 +1136,12 @@ def stopped_worker_after_wait_context(
         pending = finalization_pending[-1]
         attempt_id = str(pending.get("attempt_id") or "unknown")
         result_ref = str(pending.get("attempt_result_ref") or "").strip()
-        inspect = (
-            f"Call manage_orchestration(intent='inspect', task_ref={public_task_ref!r}) once"
-            if public_task_ref
-            else "Call manage_orchestration(intent='inspect') once with the preserved task_ref"
-        )
         result_note = f" (attempt_result_ref={result_ref!r})" if result_ref else ""
         return (
-            f"CORTEX FINALIZATION RECOVERY: attempt {attempt_id!r} already recorded a successful canonical "
+            f"Internal lifecycle receipt: attempt {attempt_id!r} already recorded a successful canonical "
             f"AttemptResult{result_note}, but its generated projection is pending. Do not submit status='failed', "
-            "wait on or follow up the stopped native worker, or spawn a replacement. "
-            f"{inspect}; retry complete_attempt only for this same persisted attempt."
+            "wait on or follow up the stopped native worker, or spawn a replacement. Retry complete_attempt only "
+            "for this same persisted attempt; Cortex will reconcile the projection automatically."
         )
     stopped_attempts = [
         item for item in attempts
@@ -1163,17 +1158,13 @@ def stopped_worker_after_wait_context(
     host_task_name = str(host_spawn.get("task_name") or (stopped.get("spawn_request") or {}).get("task_name") or "").strip()
     if not dispatch_ref or not host_agent_id or not host_task_name:
         return None
-    inspect = (
-        f"Call manage_orchestration(intent='inspect', task_ref={public_task_ref!r}) once"
-        if public_task_ref
-        else "Call manage_orchestration(intent='inspect') once with the preserved task_ref"
-    )
     return (
-        f"CORTEX WAIT RECOVERY: attempt {attempt_id!r} stopped without an AttemptResult and is terminal failed "
+        f"Internal lifecycle receipt: attempt {attempt_id!r} stopped without an AttemptResult and is terminal failed "
         f"(dispatch_ref={dispatch_ref!r}, reason='native_worker_stopped_without_result'). Do not wait on, respawn, "
         f"or follow up the stopped native worker (agent_id={host_agent_id!r}, task_name={host_task_name!r}). "
-        f"{inspect}; then submit exactly one result with status='failed', this dispatch_ref, and this reason so Cortex can apply its "
-        "unbounded corrective policy and raise effort after repeated failures."
+        + (f"task_ref={public_task_ref!r}. " if public_task_ref else "")
+        + "Submit exactly one result with status='failed', this dispatch_ref, and this reason; Cortex will apply its "
+        + "server-owned corrective route automatically."
     )
 
 

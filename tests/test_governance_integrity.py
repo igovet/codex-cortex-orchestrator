@@ -265,7 +265,7 @@ class GovernanceIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(governance.GovernanceError, "lifecycle authority is invalid"):
             governance.inspect_record(self.root, record["record_ref"])
 
-    def test_ambiguous_v9_successor_graph_fails_closed_before_v10(self) -> None:
+    def test_ambiguous_v9_successor_graph_is_reconciled_before_v10(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / ".codex" / "cortex"
             plan = ledger_db._migration_plan()
@@ -280,11 +280,15 @@ class GovernanceIntegrityTests(unittest.TestCase):
                     "INSERT INTO governance_records(record_ref,initiative_ref,task_id,record_type,revision,supersedes,status,content_json,content_digest,content_artifact_ref,approval_basis_json,created_by,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     ("record-v9-orphan", None, None, "decision", 2, "record-v9-parent", "active", "{}", "0" * 64, None, None, "coordinator", "2026-01-02T00:00:00+00:00", None),
                 )
-            with self.assertRaisesRegex(ValueError, r"v9_supersedes_scope_mismatch.*maintenance"):
-                ledger_db.ensure_database(root)
+            ledger_db.ensure_database(root)
             with sqlite3.connect(root / ledger_db.DATABASE_NAME) as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
-                self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 9)
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 15)
+                self.assertEqual(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 15)
+                audit = connection.execute(
+                    "SELECT value FROM ledger_meta WHERE key='governance_v10_reconciliation'"
+                ).fetchone()
+                self.assertIsNotNone(audit)
+                self.assertIn("v9_supersedes_scope_mismatch", str(audit[0]))
 
     def test_scope_link_and_linear_revision_constraints_are_enforced(self) -> None:
         self.add_task("task-1")
