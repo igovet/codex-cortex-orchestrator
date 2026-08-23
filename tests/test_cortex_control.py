@@ -3492,8 +3492,12 @@ class ControlPlaneTests(unittest.TestCase):
             "[$cortex:orchestrator](/opt/cortex-test/.codex/plugins/cache/cortex/cortex/4.0.0/skills/"
             "orchestrator/SKILL.md) создай лендинг"
         )
-        started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
+        self.assertTrue(control.desktop_cortex_route_requested(request))
+        self.assertFalse(control.desktop_cortex_route_requested("[file](/tmp/skills/orchestrator/SKILL.md) создай лендинг"))
+        with mock.patch.object(control, "activate_orchestration", wraps=control.activate_orchestration) as activate:
+            started = self.v3_start(request, waves=[{"workers": [{"phase": "plan"}]}])
         self.assertTrue(started["ok"])
+        self.assertTrue(any(call.args and call.args[0].get("user_command") == control.ACTIVATION_COMMAND for call in activate.call_args_list))
         task_dir = next((self.ledger / "tasks").iterdir())
         task = control.load_task_definition(task_dir)
         self.assertEqual(task["user_request"], "$cortex:orchestrator создай лендинг")

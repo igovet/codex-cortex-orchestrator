@@ -953,6 +953,18 @@ def canonicalize_desktop_cortex_request(value: object) -> str:
     return DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.sub("$cortex:orchestrator", raw)
 
 
+def desktop_cortex_route_requested(value: object) -> bool:
+    """Recognize only Desktop's canonical Cortex skill-link wrapper.
+
+    The host normally records activation before the MCP call.  Desktop can,
+    however, deliver the selected skill as a Markdown link inside the exact
+    user request.  Keep that transport form equivalent to the bare route at
+    the plugin boundary, while leaving arbitrary Markdown/file links
+    fail-closed.
+    """
+    return bool(DESKTOP_CORTEX_ORCHESTRATOR_LINK_RE.search(str(value or "").strip()))
+
+
 def v3_task_slug(value: object) -> str:
     """Build a concise durable-ID label without Desktop skill transport data."""
     canonical = canonicalize_desktop_cortex_request(value)
@@ -10805,6 +10817,7 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         unknown_task = sorted(set(raw_task) - allowed_task)
         if unknown_task:
             raise ValueError("unsupported task fields: " + ", ".join(unknown_task))
+        desktop_route_requested = desktop_cortex_route_requested(raw_task.get("user_request"))
         user_request = canonicalize_desktop_cortex_request(raw_task.get("user_request"))
         if not user_request:
             raise ValueError(
@@ -10874,6 +10887,21 @@ def start_orchestration(params: dict[str, Any]) -> dict[str, Any]:
         task_id, task_ref, principal, thread_id, submission_id, replayed = _v3_start_reservation(params, task)
         if not replayed:
             staged_authorization_task_id = task_id
+        if desktop_route_requested:
+            # A Desktop skill selection can arrive as a canonical Markdown
+            # wrapper in the user request instead of a separate host route
+            # activation.  Establish the same scoped activation before the
+            # engine's first activation-gated operation.  The predicate is
+            # deliberately limited to the exact Cortex orchestrator link;
+            # arbitrary Markdown/file links never authorize this path.
+            activated = activate_orchestration({
+                "project_root": params["project_root"],
+                "principal": principal,
+                "thread_id": thread_id,
+                "user_command": ACTIVATION_COMMAND,
+            })
+            if not activated.get("active"):
+                raise ValueError("canonical Cortex skill-link activation did not become active")
         if replayed:
             # A linked corrective task may be replayed after the coordinator
             # intentionally deactivated its prior session while recovering a
