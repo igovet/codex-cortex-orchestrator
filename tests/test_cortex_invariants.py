@@ -1227,6 +1227,33 @@ class OrchestrationInvariantTests(unittest.TestCase):
         self.assertEqual(lifecycle["agent_type"], "general")
         self.assertEqual(lifecycle["display_name"], "General Invariant")
 
+    def test_post_spawn_result_extracts_exact_child_identity_without_model_bearer(self):
+        task_name = "general_bounded_work_01_ab12cd34"
+        event = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "spawn_agent",
+            "tool_input": {"task_name": task_name},
+            "tool_response": {"result": {"agent_id": "native-child-42"}},
+        }
+        self.assertEqual(
+            cortex_hook._native_spawn_identity(event),
+            (task_name, "native-child-42", None),
+        )
+
+    def test_post_spawn_result_rejects_unscoped_or_malformed_identity(self):
+        self.assertIsNone(cortex_hook._native_spawn_identity({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "spawn_agent",
+            "tool_input": {"task_name": "not a server task"},
+            "tool_response": {"agent_id": "native-child-42"},
+        }))
+        self.assertIsNone(cortex_hook._native_spawn_identity({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "spawn_agent",
+            "tool_input": {"task_name": "general_bounded_work_01_ab12cd34"},
+            "tool_response": {"agent_id": "not valid/identity"},
+        }))
+
     def test_hook_hashes_thread_and_allowlists_telemetry_fields(self):
         created = self.init(task_id="hook-privacy")
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"

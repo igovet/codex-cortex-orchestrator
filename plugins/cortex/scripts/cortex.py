@@ -1016,12 +1016,18 @@ def _worker_binding_from_host_session() -> dict[str, str] | None:
         )
     }
     candidates = {value for value in candidates if value and SAFE_ID_RE.fullmatch(value)}
-    if not candidates:
-        return None
+    # Desktop's native child MCP process does not inherit the child id (and
+    # currently starts with the same stripped environment as the coordinator).
+    # The SubagentStart hook has nevertheless already durably confirmed the
+    # child.  Keep an adapter-neutral fallback for that hand-off: claim one
+    # freshly observed running session only when it is unambiguous.  Old rows
+    # are deliberately ignored so a restarted coordinator cannot attach to a
+    # historical worker, and ambiguity remains fail-closed.
     projects = _host_control_projects_for_lookup()
     if projects is None:
         return None
     matches: list[dict[str, str]] = []
+    now_utc = datetime.now(timezone.utc)
     try:
         project_dirs = sorted(projects.iterdir(), key=lambda item: item.name)
     except OSError:
@@ -1041,7 +1047,16 @@ def _worker_binding_from_host_session() -> dict[str, str] | None:
                         str(session.get("host_agent_id") or "").strip(),
                         str(session.get("host_task_name") or "").strip(),
                     }
-                    if not candidates.isdisjoint(identities):
+                    identity_match = bool(candidates and not candidates.isdisjoint(identities))
+                    try:
+                        last_seen = datetime.fromisoformat(str(session.get("last_seen_at") or "").replace("Z", "+00:00"))
+                        fresh = (now_utc - last_seen).total_seconds() <= 300
+                    except (TypeError, ValueError):
+                        fresh = False
+                    # With no host-provided identity, only a single fresh
+                    # server-observed worker may be claimed.  We collect all
+                    # such rows and reject ambiguity below.
+                    if identity_match or (not candidates and fresh):
                         loaded = _v3_task_state(project_dir, str(task_id))
                         if loaded is None:
                             continue
@@ -2711,9 +2726,13 @@ def bind_host_worker_from_hook(
     host_agent_id = str(host_agent_id_value or "").strip()
     if not HOST_AGENT_ID_RE.fullmatch(host_agent_id):
         return {"bound": False, "reason": "host_agent_id_invalid"}
+    # Native SubagentStart payloads are not required to include the model
+    # (Desktop omits it for configured-default routes).  An exact issued task
+    # name is already stronger identity than a model hint; infer the expected
+    # model only after the task-scoped dispatch match.  Generic ``default``
+    # events still require a model unless this task has exactly one pending
+    # dispatch, so ambiguity remains fail-closed.
     host_model = _v3_model(host_model_value)
-    if not host_model:
-        return {"bound": False, "reason": "host_model_unavailable"}
     root = ledger_root({"project_root": str(project)})
     bindings = _host_session_bindings(root)
     if bindings.get("tasks", {}).get(task_id) != parent_session_id:
@@ -2727,7 +2746,7 @@ def bind_host_worker_from_hook(
             item for item in state.get("attempts", [])
             if not item.get("invalidated")
             and item.get("status") == AWAITING_HOST_SPAWN
-            and str(item.get("expected_model") or item.get("selected_model") or "") == host_model
+            and (not host_model or str(item.get("expected_model") or item.get("selected_model") or "") == host_model)
         ]
         if len(matches) == 1:
             host_task_name = str((matches[0].get("spawn_request") or {}).get("task_name") or "")
@@ -2755,6 +2774,10 @@ def bind_host_worker_from_hook(
     if len(matches) != 1:
         return {"bound": False, "reason": "dispatch_identity_unavailable"}
     attempt = matches[0]
+    if not host_model:
+        host_model = _v3_model(attempt.get("expected_model") or attempt.get("selected_model"))
+    if not host_model:
+        return {"bound": False, "reason": "host_model_unavailable"}
     existing = attempt.get("host_spawn") or {}
     if attempt.get("status") == "running":
         if existing.get("agent_id") == host_agent_id and existing.get("task_name") == host_task_name:

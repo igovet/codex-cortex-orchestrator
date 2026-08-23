@@ -126,6 +126,63 @@ class WorkerIdentityTransportTests(unittest.TestCase):
                 else:
                     os.environ["CODEX_THREAD_ID"] = previous_thread
 
+    def test_native_host_session_resolves_one_fresh_child_without_host_ids(self) -> None:
+        """Desktop native children may start with no child identity env vars."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "project"
+            project.mkdir()
+            host_store = base / "host-store"
+            host_store.mkdir(mode=0o700)
+            previous_store = os.environ.get(cortex.HOST_CONTROL_STORE_ENV)
+            saved = {name: os.environ.get(name) for name in (
+                "CORTEX_WORKER_BINDING_JSON", "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_AGENT_ID", "CODEX_SUBAGENT_ID", "CODEX_TASK_ID",
+            )}
+            os.environ[cortex.HOST_CONTROL_STORE_ENV] = str(host_store)
+            try:
+                started = cortex.start_orchestration({
+                    "project_root": str(project),
+                    "task": {
+                        "user_request": "Exercise an identity-free native child handoff.",
+                        "acceptance_criteria": ["The child binding is recovered."],
+                        "verification": ["Run the focused transport test."],
+                        "complexity": "C1",
+                    },
+                    "waves": [{"workers": [{"phase": "discover"}]}],
+                })
+                self.assertTrue(started["ok"], started)
+                ledger = cortex.ledger_root_path({"project_root": str(project)})
+                task_id = next(iter(cortex.db_task_index(ledger)))
+                loaded = cortex._v3_task_state(ledger, task_id)
+                self.assertIsNotNone(loaded)
+                _task_dir, state, task = loaded
+                attempt = state["attempts"][0]
+                cortex.db_put_worker_session(ledger, {
+                    "task_id": task_id,
+                    "attempt_id": attempt["attempt_id"],
+                    "host_agent_id": "native-child-without-env",
+                    "host_task_name": attempt["spawn_request"]["task_name"],
+                    "host_tool": "spawn_agent",
+                    "status": "running",
+                })
+                for name in saved:
+                    os.environ.pop(name, None)
+                binding = cortex._worker_binding_from_host_session()
+                self.assertIsNotNone(binding)
+                self.assertEqual(binding["task_id"], task_id)
+                self.assertEqual(binding["attempt_id"], attempt["attempt_id"])
+            finally:
+                if previous_store is None:
+                    os.environ.pop(cortex.HOST_CONTROL_STORE_ENV, None)
+                else:
+                    os.environ[cortex.HOST_CONTROL_STORE_ENV] = previous_store
+                for name, value in saved.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
 
 if __name__ == "__main__":
     unittest.main()

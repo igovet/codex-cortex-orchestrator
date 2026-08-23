@@ -596,6 +596,49 @@ class ControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(wait_any.stdout.strip(), "{}")
 
+    def test_subagent_start_binds_exact_task_name_when_desktop_omits_model(self):
+        """Desktop configured-default launches may omit model from SubagentStart."""
+        hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_SESSION_ID": "", "CODEX_THREAD_ID": "", "CORTEX_ROOT": ""},
+            clear=False,
+        ):
+            started = self.v3_start(
+                "bind a desktop native child without a model hint",
+                waves=[{"workers": [{"phase": "discover"}]}],
+            )
+        task_dir = next((self.ledger / "tasks").iterdir())
+        state = control.load_task_state_for_artifact(task_dir)
+        attempt = state["attempts"][0]
+        parent_session = "desktop-parent-session"
+        self.assertTrue(
+            control.bind_host_session_from_hook(
+                str(self.project), started["task_ref"], parent_session,
+            )["bound"]
+        )
+        launched = subprocess.run(
+            [sys.executable, str(hook)],
+            input=json.dumps({
+                "hook_event_name": "SubagentStart",
+                "session_id": parent_session,
+                "agent_id": "native.DesktopChild:01",
+                "agent_type": attempt["spawn_request"]["task_name"],
+                # Desktop omits model for configured-default routes.
+                "cwd": str(self.project),
+            }),
+            text=True,
+            capture_output=True,
+            env={**os.environ, "CORTEX_PROJECT_ROOT": ""},
+            check=True,
+        )
+        self.assertIn("hookSpecificOutput", json.loads(launched.stdout))
+        after = control.load_task_state_for_artifact(task_dir)["attempts"][0]
+        self.assertEqual(after["status"], "running")
+        self.assertEqual(after["host_spawn"]["agent_id"], "native.DesktopChild:01")
+        sessions = control.db_list_worker_sessions(self.ledger, state["task_id"])
+        self.assertEqual(sessions[0]["status"], "running")
+
     def test_stop_hook_blocks_early_coordinator_final_while_worker_is_running(self):
         """A live child must keep the coordinator turn available to wait."""
         hook = Path(__file__).parents[1] / "plugins/cortex/scripts/cortex_hook.py"

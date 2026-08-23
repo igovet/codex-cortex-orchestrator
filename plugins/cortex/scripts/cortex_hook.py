@@ -869,6 +869,74 @@ def dispatch_required_context(event: dict) -> str | None:
     )
 
 
+def _native_spawn_identity(event: dict) -> tuple[str, str, str | None] | None:
+    """Extract the host-owned child identity from a completed native spawn.
+
+    Desktop and CLI do not expose the same lifecycle ordering: some hosts emit
+    ``SubagentStart`` before the child's first MCP process, while others only
+    make the child id available in the parent ``PostToolUse`` result.  The
+    latter must still be enough to bind the exact server-issued task name.  We
+    inspect only the structured host result and never accept a model-authored
+    id from Cortex payload text.
+    """
+    if (
+        str(event.get("hook_event_name")) != "PostToolUse"
+        or str(event.get("tool_name")) not in {"spawn_agent", "Agent"}
+    ):
+        return None
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    task_name = str(tool_input.get("task_name") or "").strip()
+    if not task_name or not SAFE_ID_RE.fullmatch(task_name):
+        return None
+    model = str(tool_input.get("model") or "").strip() or None
+    response = event.get("tool_response")
+    queue: list[object] = [response]
+    visited = 0
+    child_id = ""
+    while queue and visited < 64:
+        value = queue.pop(0)
+        visited += 1
+        if isinstance(value, dict):
+            for key in ("agent_id", "child_id", "thread_id", "threadId", "id"):
+                candidate = str(value.get(key) or "").strip()
+                if candidate and SAFE_ID_RE.fullmatch(candidate) and candidate != task_name:
+                    child_id = candidate
+                    break
+            if child_id:
+                model = model or str(value.get("model") or "").strip() or None
+                break
+            queue.extend(value.get(key) for key in ("result", "structuredContent", "content", "data") if key in value)
+        elif isinstance(value, list):
+            queue.extend(value[:8])
+        elif isinstance(value, str) and len(value) <= MAX_TOOL_RESPONSE_BYTES:
+            try:
+                queue.append(json.loads(value))
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return (task_name, child_id, model) if child_id else None
+
+
+def _expected_model_for_native_task(state: dict, task_name: str) -> str | None:
+    matches = [
+        item for item in state.get("attempts", [])
+        if isinstance(item, dict)
+        and not item.get("invalidated")
+        and str((item.get("spawn_request") or {}).get("task_name") or "") == task_name
+        and item.get("status") == "awaiting_host_spawn"
+    ]
+    if len(matches) != 1:
+        return None
+    attempt = matches[0]
+    return str(
+        attempt.get("expected_model")
+        or attempt.get("selected_model")
+        or (attempt.get("spawn_request") or {}).get("expected_model")
+        or ""
+    ).strip() or None
+
+
 def empty_agent_wait_reason(event: dict, state: dict | None = None) -> str | None:
     """Return a worker-only denial before waiting without a spawned child.
 
@@ -1323,7 +1391,14 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
             str(event.get("hook_event_name")) == "SubagentStart"
             and bind_host_worker_from_hook is not None
             and str(event.get("agent_id") or "").strip()
-            and str(event.get("model") or "").strip()
+            # Desktop's configured-default SubagentStart omits ``model``.
+            # An exact issued task name is sufficient for the server to
+            # derive the expected model; generic ``default`` remains
+            # model-disambiguated inside bind_host_worker_from_hook.
+            and (
+                str(event.get("model") or "").strip()
+                or (host_task_name and str(event.get("agent_type") or "").strip() != "default")
+            )
         ):
             try:
                 binding = bind_host_worker_from_hook(
@@ -1369,6 +1444,32 @@ def _run(event: dict, snapshot: sqlite3.Connection | None = None) -> None:
                     host_binding_blocker = ""
             except Exception:
                 host_binding_blocker = ""
+        # A native host may publish the child id only in the parent's spawn
+        # result and omit SubagentStart from the coordinator process.  Bind
+        # that exact server-issued task name here, before any worker MCP call
+        # can arrive without a session-derived identity.  This is a host
+        # observation, not a caller-authored capability or replacement route.
+        if (
+            str(event.get("hook_event_name")) == "PostToolUse"
+            and bind_host_worker_from_hook is not None
+        ):
+            native_spawn = _native_spawn_identity(event)
+            if native_spawn is not None:
+                spawn_task_name, spawn_agent_id, spawn_model = native_spawn
+                spawn_model = spawn_model or _expected_model_for_native_task(state, spawn_task_name)
+                if spawn_model:
+                    try:
+                        binding = bind_host_worker_from_hook(
+                            str(project), task_id, session_id, spawn_task_name,
+                            spawn_agent_id, spawn_model,
+                        )
+                        if binding.get("bound"):
+                            host_binding_blocker = ""
+                    except Exception:
+                        # The MCP server remains the authority; a hook write
+                        # failure is retried by the child's host-session
+                        # fallback and never becomes visible as a Cortex stop.
+                        pass
         if (
             str(event.get("hook_event_name")) == "SubagentStop"
             and finalize_host_worker_stop_from_hook is not None
